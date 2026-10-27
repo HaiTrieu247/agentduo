@@ -6831,7 +6831,7 @@ jobs:
 
 - [ ] **Step 5: Rewrite the docs**
 
-```markdown file=README.md
+````markdown file=README.md
 # agentduo
 
 Two coding agents, one loop: **Codex** plans and reviews, **Claude Code** critiques the plan and implements it. Your project's own tests are the referee. A live terminal UI shows what each agent is doing and what they hand each other.
@@ -7004,9 +7004,9 @@ npm run smoke:real   # REAL agents on a demo repo — costs money
 ## License
 
 MIT
-```
+````
 
-```markdown file=README.vi.md
+````markdown file=README.vi.md
 # agentduo (tiếng Việt)
 
 Hai agent lập trình chạy chung một vòng lặp. **Codex** lập kế hoạch và review. **Claude Code** phản biện kế hoạch rồi implement. Bộ test của chính dự án đóng vai trọng tài. Giao diện terminal hiển thị live từng hành động của mỗi agent và những gì hai agent chuyển cho nhau.
@@ -7088,7 +7088,7 @@ Trong terminal, agentduo hiện lý do kèm menu:
 | 130 | đã dừng (resume được) |
 
 Hỗ trợ macOS và Linux. Windows ở mức thử nghiệm.
-```
+````
 
 ```markdown file=AGENTS.md
 # AGENTS.md
