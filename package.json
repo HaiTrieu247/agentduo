@@ -4,6 +4,10 @@
   "description": "Two-agent development loop: Codex plans and reviews, Claude Code critiques and implements, with a live terminal UI.",
   "license": "MIT",
   "author": "Thinh Hai Trieu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HaiTrieu247/agentduo.git"
+  },
   "type": "module",
   "bin": {
     "agentduo": "dist/cli.js",
