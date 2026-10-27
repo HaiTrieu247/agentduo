@@ -1,0 +1,57 @@
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { loadConfig } from "../src/core/config.js";
+import { detectGates, initRepo, renderConfigYaml } from "../src/core/init.js";
+import { makeRepo } from "./helpers/repo.js";
+import { tempDir } from "./helpers/tmp.js";
+
+const dirs: Array<{ cleanup(): void }> = [];
+afterEach(() => {
+  while (dirs.length) dirs.pop()!.cleanup();
+});
+function tmp(): string {
+  const t = tempDir();
+  dirs.push(t);
+  return t.path;
+}
+
+describe("detectGates", () => {
+  it("finds package scripts and uses the project's package manager", () => {
+    const dir = tmp();
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "vitest run", lint: "eslint .", "type-check": "tsc" } }));
+    writeFileSync(join(dir, "pnpm-lock.yaml"), "");
+    expect(detectGates(dir).map((g) => [g.name, g.command])).toEqual([["test", "pnpm run test"], ["lint", "pnpm run lint"], ["typecheck", "pnpm run type-check"]]);
+  });
+
+  it("skips npm's placeholder test script", () => {
+    const dir = tmp();
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } }));
+    expect(detectGates(dir)).toEqual([]);
+  });
+
+  it("detects Python, Go, Rust and make", () => {
+    const dir = tmp();
+    for (const name of ["pyproject.toml", "go.mod", "Cargo.toml"]) writeFileSync(join(dir, name), "");
+    writeFileSync(join(dir, "Makefile"), "build:\n\techo build\ntest:\n\techo ok\n");
+    expect(detectGates(dir).map((g) => g.name)).toEqual(["pytest", "go-test", "cargo-test", "make-test"]);
+  });
+});
+
+describe("initRepo", () => {
+  it("writes a config that loads, ignores run data, and is idempotent", () => {
+    const parent = tmp();
+    const repo = makeRepo(parent, { ignoreRuns: false });
+    writeFileSync(join(repo, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
+    expect(initRepo(repo)).toMatchObject({ created: true, gitignoreUpdated: true });
+    expect(loadConfig({ repo, env: { XDG_CONFIG_HOME: join(parent, "xdg") } }).data.gates).toEqual([{ name: "test", command: "npm run test", required: true }]);
+    expect(initRepo(repo)).toMatchObject({ created: false, gitignoreUpdated: false });
+    expect(readFileSync(join(repo, ".gitignore"), "utf8").match(/\.agentduo\/runs\//g)).toHaveLength(1);
+  });
+
+  it("renders a valid placeholder when nothing is detected", () => {
+    const yaml = renderConfigYaml([]);
+    expect(yaml).toContain("gates: []");
+    expect(yaml).toContain("None were detected");
+  });
+});
