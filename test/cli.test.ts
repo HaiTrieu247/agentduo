@@ -4,6 +4,7 @@ import YAML from "yaml";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyColorPreference, isBackgroundFromPs, main, type CliIO } from "../src/cli.js";
 import { acquireWorkspaceLock, RunStore } from "../src/core/state.js";
+import { packageVersion } from "../src/paths.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
 import { testConfig, type ConfigOverrides } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
@@ -55,7 +56,7 @@ const happy = () => ({
 describe("cli", () => {
   it("prints the version", async () => {
     const r = await cli(["--version"]);
-    expect([r.code, r.out.trim()]).toEqual([0, "0.1.0"]);
+    expect([r.code, r.out.trim()]).toEqual([0, packageVersion()]);
   });
 
   it("runs a task in the current directory, on a dirty tree, with plain output", async () => {
@@ -64,7 +65,7 @@ describe("cli", () => {
     fake.setScenario(happy());
     const r = await cli(["Make app.txt fixed"]);
     expect(r.code, r.err).toBe(0);
-    for (const s of ["agentduo 0.1.0 · run", "▶ planner", "Codex → Claude  Plan v1", "Claude → Codex  approved", "✓ gate check", "[DONE]"]) expect(r.out).toContain(s);
+    for (const s of [`agentduo ${packageVersion()} · run`, "▶ planner", "Codex → Claude  Plan v1", "Claude → Codex  approved", "✓ gate check", "[DONE]"]) expect(r.out).toContain(s);
     expect((await cli(["list"])).out).toContain("DONE");
     expect((await cli(["status"])).out).toMatch(/Run \S+ — DONE/);
   });
