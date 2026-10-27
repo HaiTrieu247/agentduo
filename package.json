@@ -17,7 +17,7 @@
     "dist",
     "schemas",
     "README.md",
-    "README.vi.md",
+    "docs/README.vi.md",
     "LICENSE"
   ],
   "engines": {

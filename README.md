@@ -4,6 +4,8 @@ A channel between two coding agents. **Codex** plans and reviews; **Claude Code*
 
 agentduo adds no rules of its own: permissions, sandboxes and conventions come from each CLI's configuration and your repository's `AGENTS.md` / `CLAUDE.md`.
 
+Tiếng Việt: [docs/README.vi.md](docs/README.vi.md)
+
 ```text
 ● PLAN r1  Codex (planner)                                      32s · 33k tok
   │ exec  rg --files ✓
