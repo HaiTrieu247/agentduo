@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"01a17c13-e50d-7603-8538-a3f4ebfe421d"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll read `a.txt`, then run `ls`.\n"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'cat a.txt'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'cat a.txt'","aggregated_output":"hello\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc ls","aggregated_output":"a.txt\nschema.json\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"{\"answer\":\"hello\\n\",\"n\":2}"}}
+{"type":"turn.completed","usage":{"input_tokens":30210,"cached_input_tokens":14848,"cache_write_input_tokens":0,"output_tokens":85,"reasoning_output_tokens":0}}
