@@ -1,0 +1,45 @@
+import type { Activity, Message, Party, Phase, Role } from "../events.js";
+
+export const PIPELINE: Array<{ phase: Phase; label: string }> = [
+  { phase: "PLAN", label: "PLAN" },
+  { phase: "PLAN_REVIEW", label: "CRITIQUE" },
+  { phase: "PLAN_FINALIZE", label: "FINALIZE" },
+  { phase: "IMPLEMENT", label: "IMPLEMENT" },
+  { phase: "VERIFY", label: "VERIFY" },
+  { phase: "CODE_REVIEW", label: "REVIEW" },
+];
+export const IMPL_PHASES: Phase[] = ["IMPLEMENT", "VERIFY", "CODE_REVIEW"];
+export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+const PARTY_LABELS: Record<Party, string> = { codex: "Codex", claude: "Claude", gates: "Gates", human: "You", orchestrator: "agentduo" };
+const ROLE_LABELS: Record<Role, string> = {
+  planner: "planner", plan_reviewer: "plan critic", plan_finalizer: "plan sign-off", implementer: "implementer", code_reviewer: "code reviewer",
+};
+const STATUS_ICONS: Record<Activity["status"], string> = { running: "…", ok: "✓", error: "✗", denied: "⊘" };
+
+export const partyLabel = (p?: Party | string): string => (p ? PARTY_LABELS[p as Party] ?? p : "");
+export const roleLabel = (r?: Role): string => (r ? ROLE_LABELS[r] : "");
+export const statusIcon = (s: Activity["status"]): string => STATUS_ICONS[s];
+
+export function formatDuration(sec?: number): string {
+  if (sec === undefined) return "";
+  const s = Math.round(sec);
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
+}
+
+export function formatClock(sec: number): string {
+  const s = Math.max(0, Math.floor(sec));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+export const formatCost = (usd?: number | null): string => (usd ? `$${usd.toFixed(2)}` : "");
+export const formatTokens = (n?: number | null): string => (!n ? "" : n >= 1000 ? `${Math.round(n / 1000)}k tok` : `${n} tok`);
+export const usageText = (costUsd?: number | null, tokens?: number | null): string => [formatCost(costUsd), formatTokens(tokens)].filter(Boolean).join(" · ");
+
+export function activityText(a: Activity): string {
+  const diff = a.added !== undefined || a.removed !== undefined ? `  +${a.added ?? 0} −${a.removed ?? 0}` : "";
+  const exit = a.status === "error" && a.exitCode !== undefined ? ` (exit ${a.exitCode})` : "";
+  return `${a.label}${diff}${exit}${a.status === "denied" ? " denied" : ""}`;
+}
+
+export const messageHeadline = (m: Message): string => `${partyLabel(m.from)} → ${partyLabel(m.to)}  ${m.headline}`;
