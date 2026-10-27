@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 
 export interface RunOptions {
   cwd: string;
@@ -9,6 +9,10 @@ export interface RunOptions {
   env?: NodeJS.ProcessEnv;
   shell?: boolean;
   killGraceMs?: number;
+  /** Kill the process when it prints nothing (stdout or stderr) for this long; 0 or absent = off. */
+  idleTimeoutMs?: number;
+  /** Keep at most this many characters of each stream (the tail); line callbacks still see everything. */
+  maxBufferChars?: number;
 }
 
 export interface RunResult {
@@ -17,14 +21,20 @@ export interface RunResult {
   stderr: string;
   timedOut: boolean;
   aborted: boolean;
+  idle: boolean;
 }
+
+const DEFAULT_MAX_BUFFER_CHARS = 16 * 1024 * 1024;
 
 const isWindows = process.platform === "win32";
 const active = new Set<ChildProcess>();
 
 /** Kill every child started by runProcess (used on a second Ctrl-C). */
 export function killAllActive(): void {
-  for (const child of active) killTree(child, 0);
+  for (const child of active) {
+    if (isWindows && child.pid !== undefined) spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    else killTree(child, 0);
+  }
 }
 
 /** SIGTERM the child's process group, then SIGKILL it after graceMs. On Windows: taskkill /T /F. */
@@ -77,14 +87,28 @@ export function runProcess(cmd: string, args: string[], opts: RunOptions): Promi
     let pending = "";
     let timedOut = false;
     let aborted = false;
+    let idle = false;
     let settled = false;
+    const cap = opts.maxBufferChars ?? DEFAULT_MAX_BUFFER_CHARS;
+    const keepTail = (text: string) => (text.length > cap ? text.slice(-cap) : text);
+    let idleTimer: NodeJS.Timeout | undefined;
+    const touch = () => {
+      if (!opts.idleTimeoutMs) return;
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        idle = true;
+        killTree(child, opts.killGraceMs);
+      }, opts.idleTimeoutMs);
+    };
+    touch();
     const emitLine = (raw: string) => {
       const line = raw.replace(/\r$/, "");
       if (line && opts.onStdoutLine) opts.onStdoutLine(line);
     };
     child.stdout!.setEncoding("utf8");
     child.stdout!.on("data", (chunk: string) => {
-      stdout += chunk;
+      touch();
+      stdout = keepTail(stdout + chunk);
       if (!opts.onStdoutLine) return;
       pending += chunk;
       let idx: number;
@@ -95,7 +119,8 @@ export function runProcess(cmd: string, args: string[], opts: RunOptions): Promi
     });
     child.stderr!.setEncoding("utf8");
     child.stderr!.on("data", (chunk: string) => {
-      stderr += chunk;
+      touch();
+      stderr = keepTail(stderr + chunk);
     });
     child.stdin!.on("error", () => {
       // the child exited before reading all of its input
@@ -115,6 +140,7 @@ export function runProcess(cmd: string, args: string[], opts: RunOptions): Promi
     }
     const cleanup = () => {
       clearTimeout(timer);
+      if (idleTimer) clearTimeout(idleTimer);
       opts.signal?.removeEventListener("abort", onAbort);
       active.delete(child);
     };
@@ -131,7 +157,7 @@ export function runProcess(cmd: string, args: string[], opts: RunOptions): Promi
       pending = "";
       if (!settled) {
         settled = true;
-        resolvePromise({ code: timedOut || aborted ? null : code, stdout, stderr, timedOut, aborted });
+        resolvePromise({ code: timedOut || aborted || idle ? null : code, stdout, stderr, timedOut, aborted, idle });
       }
     });
   });

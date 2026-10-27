@@ -117,6 +117,21 @@ describe("parser robustness", () => {
   });
 });
 
+describe("token accounting", () => {
+  it("sums Claude message usage once per message", () => {
+    const p = new ClaudeParser("/repo");
+    const usage = { input_tokens: 10, cache_creation_input_tokens: 100, cache_read_input_tokens: 1000, output_tokens: 5 };
+    const events = feedAll(p, [
+      JSON.stringify({ type: "assistant", uuid: "a", message: { id: "m1", usage, content: [{ type: "text", text: "one" }] } }),
+      JSON.stringify({ type: "assistant", uuid: "b", message: { id: "m1", usage, content: [{ type: "text", text: "two" }] } }),
+      JSON.stringify({ type: "assistant", uuid: "c", message: { id: "m2", usage: { input_tokens: 1, output_tokens: 1 }, content: [] } }),
+    ]);
+    expect(p.usage().tokens).toBe(1117);
+    expect(events.filter((e) => e.type === "usage").map((e) => (e.type === "usage" ? e.tokens : 0))).toEqual([1115, 1117]);
+    expect(new CodexParser().usage()).toEqual({ tokens: undefined });
+  });
+});
+
 describe("extractJson", () => {
   it("handles fences and surrounding prose", () => {
     expect(extractJson('```json\n{"a": 1}\n```')).toEqual({ a: 1 });

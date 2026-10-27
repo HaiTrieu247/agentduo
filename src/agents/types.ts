@@ -25,6 +25,8 @@ export type ParsedEvent =
 /** Stateful translator from one CLI's stdout lines to activities. Must never throw. */
 export interface StreamParser {
   feed(line: string): ParsedEvent[];
+  /** Usage seen so far in the stream (also for attempts that never finished). */
+  usage(): { tokens?: number; costUsd?: number };
 }
 
 export interface BuildArgs {

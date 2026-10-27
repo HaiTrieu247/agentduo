@@ -25,6 +25,10 @@ export class CodexParser implements StreamParser {
   lastAgentMessage: string | null = null;
   error: string | null = null;
 
+  usage(): { tokens?: number } {
+    return { tokens: this.tokens || undefined };
+  }
+
   feed(line: string): ParsedEvent[] {
     let event: Record<string, unknown>;
     try {

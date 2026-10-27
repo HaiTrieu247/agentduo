@@ -79,6 +79,31 @@ describe("AgentRunner", () => {
     expect(r.error).toContain("timed out after 1s");
   });
 
+  it("gives every call its own log files and ignores a stale last message", async () => {
+    fake.setScenario({ planner: [{ output: plan() }, { noLastMessage: true, raw: "not json" }] });
+    const r = runner({ limits: { max_retries: 0 } });
+    expect((await r.call({ role: "planner", agentRole: "planner", prompt: prompt("planner"), schemaName: "plan", logPrefix: "010-plan-r1" })).ok).toBe(true);
+    const second = await r.call({ role: "planner", agentRole: "planner", prompt: prompt("planner"), schemaName: "plan", logPrefix: "010-plan-r1" });
+    expect(second.ok).toBe(false);
+    expect(existsSync(join(t.path, "logs", "010-plan-r1.a1.prompt.md"))).toBe(true);
+    expect(existsSync(join(t.path, "logs", "010-plan-r1-2.a1.prompt.md"))).toBe(true);
+  });
+
+  it("treats a silent agent as hung", async () => {
+    fake.setScenario({ planner: [{ output: plan(), sleep: 5000 }] });
+    const r = await runner({ limits: { max_retries: 0, agent_idle_timeout_sec: 1 } }).call({ role: "planner", agentRole: "planner", prompt: prompt("planner"), schemaName: "plan", logPrefix: "011" });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("codex produced no output for 1s");
+  });
+
+  it("counts Claude tokens, also for an interrupted attempt", async () => {
+    fake.setScenario({ implementer: [{ activities: [{ tool: "Read", input: { file_path: "x" } }], sleep: 5000, output: {} }] });
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 600);
+    const r = await runner().call({ role: "implementer", agentRole: "implementer", prompt: prompt("implementer"), schemaName: "implementation", logPrefix: "012", signal: controller.signal });
+    expect(r).toMatchObject({ interrupted: true, tokens: 15 });
+  });
+
   it("stops on abort", async () => {
     fake.setScenario({ planner: [{ output: plan(), sleep: 5000 }] });
     const controller = new AbortController();

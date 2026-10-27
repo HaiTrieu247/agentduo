@@ -16,6 +16,23 @@ type Block = Record<string, unknown> & { type?: unknown };
 export class ClaudeParser implements StreamParser {
   result: Record<string, any> | null = null;
   private readonly tools = new Map<string, Activity>();
+  private readonly messageTokens = new Map<string, number>();
+
+  usage(): { tokens?: number; costUsd?: number } {
+    const tokens = [...this.messageTokens.values()].reduce((a, b) => a + b, 0);
+    const cost = this.result?.total_cost_usd;
+    return { tokens: tokens || undefined, costUsd: typeof cost === "number" ? cost : undefined };
+  }
+
+  /** Assistant events repeat their message's usage once per content block; count each message once. */
+  private trackUsage(message: Record<string, any>): ParsedEvent[] {
+    const u = message?.usage;
+    if (!u || typeof u !== "object" || !message.id) return [];
+    const n = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"].reduce((sum, k) => sum + (Number(u[k]) || 0), 0);
+    if (this.messageTokens.get(String(message.id)) === n) return [];
+    this.messageTokens.set(String(message.id), n);
+    return [{ type: "usage", tokens: this.usage().tokens }];
+  }
 
   constructor(private readonly repo: string) {}
 
@@ -28,9 +45,9 @@ export class ClaudeParser implements StreamParser {
     }
     if (!event || typeof event !== "object" || Array.isArray(event)) return [];
     if (event.type === "result") return this.onResult(event);
+    const out: ParsedEvent[] = event.type === "assistant" ? this.trackUsage(event.message) : [];
     const content = event.message?.content;
-    if (!Array.isArray(content)) return [];
-    const out: ParsedEvent[] = [];
+    if (!Array.isArray(content)) return out;
     content.forEach((block: Block, i: number) => {
       if (!block || typeof block !== "object") return;
       if (event.type === "assistant") {
@@ -149,6 +166,7 @@ export class ClaudeBackend implements AgentBackend {
     if (!envelope) throw new AgentFailure(`claude did not return a result envelope: ${stdout.trim().slice(0, 300)}`);
     const meta: AgentMeta = {
       costUsd: typeof envelope.total_cost_usd === "number" ? envelope.total_cost_usd : undefined,
+      tokens: (parser as ClaudeParser).usage?.().tokens,
       sessionId: envelope.session_id, numTurns: envelope.num_turns,
       permissionDenials: Array.isArray(envelope.permission_denials) ? envelope.permission_denials : [],
     };

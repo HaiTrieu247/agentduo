@@ -1,4 +1,4 @@
-import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentRole, ConfigData } from "../core/config.js";
 import type { EventBus, Party, Role } from "../events.js";
@@ -44,7 +44,11 @@ export class AgentRunner {
     const agent: Party = backend.name;
     const attemptsAllowed = this.cfg.limits.max_retries + 1;
     const timeoutMs = this.cfg.limits.agent_timeout_sec * 1000;
+    const idleTimeoutMs = this.cfg.limits.agent_idle_timeout_sec * 1000;
     mkdirSync(this.logDir, { recursive: true });
+    // A step that re-runs (resume after an interrupt) keeps the earlier attempt's logs.
+    let prefix = o.logPrefix;
+    for (let n = 2; existsSync(join(this.logDir, `${prefix}.a1.prompt.md`)); n++) prefix = `${o.logPrefix}-${n}`;
     const started = Date.now();
     let cost = 0;
     let costSeen = false;
@@ -59,7 +63,7 @@ export class AgentRunner {
 
     for (let attempt = 1; attempt <= attemptsAllowed; attempt++) {
       if (attempt > 1) this.bus.emit({ type: "agent.retry", role: o.role, agent, attempt, max: attemptsAllowed, reason: lastError ?? "" });
-      const stem = join(this.logDir, `${o.logPrefix}.a${attempt}`);
+      const stem = join(this.logDir, `${prefix}.a${attempt}`);
       const prompt = lastError
         ? `${o.prompt}\n\n## Previous attempt was rejected by the orchestrator\n${lastError}\nReturn ONLY a JSON object that matches the required schema exactly.\n`
         : o.prompt;
@@ -73,6 +77,7 @@ export class AgentRunner {
         if (e instanceof BinaryNotFound) return finish(false, attempt, null, e.message);
         throw e;
       }
+      rmSync(lastMessageFile, { force: true }); // never let Codex's previous answer stand in for this one
       writeFileSync(`${stem}.prompt.md`, prompt);
       writeFileSync(`${stem}.cmd.json`, JSON.stringify([binary, ...args], null, 1));
       const eventsLog = createWriteStream(`${stem}.events.jsonl`);
@@ -82,7 +87,7 @@ export class AgentRunner {
       let run: RunResult;
       try {
         run = await runProcess(binary, args, {
-          cwd: this.repo, input: prompt, timeoutMs, signal: o.signal,
+          cwd: this.repo, input: prompt, timeoutMs, idleTimeoutMs, signal: o.signal,
           onStdoutLine: (line) => {
             eventsLog.write(`${line}\n`);
             let parsed: ReturnType<typeof parser.feed> = [];
@@ -107,9 +112,20 @@ export class AgentRunner {
       }
       await new Promise((r) => eventsLog.end(r));
       writeFileSync(`${stem}.stderr.txt`, run.stderr);
+      if (run.aborted || run.timedOut || run.idle) {
+        const seen = parser.usage().tokens;
+        if (seen) {
+          tokens += seen;
+          tokensSeen = true;
+        }
+      }
       if (run.aborted) return finish(false, attempt, null, "interrupted", true);
       if (run.timedOut) {
         lastError = `${backend.name} timed out after ${this.cfg.limits.agent_timeout_sec}s`;
+        continue;
+      }
+      if (run.idle) {
+        lastError = `${backend.name} produced no output for ${this.cfg.limits.agent_idle_timeout_sec}s`;
         continue;
       }
       let data: unknown = null;
