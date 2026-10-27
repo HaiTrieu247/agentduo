@@ -11,8 +11,19 @@ npm i -g agentduo
 cd my-project            # hoặc bất kỳ thư mục con nào: thư mục đó là workspace
 duo init                 # tạo .agentduo/config.yaml (mọi mục đều tuỳ chọn) và .agentduo/.gitignore
 duo doctor               # kiểm tra CLI và config, không gọi model
-duo "Thêm xác thực JWT với refresh token"
+duo                      # mở chat
 ```
+
+## Chat
+
+Gõ `duo` (hoặc `agentduo`) mà không kèm task trong một terminal, rồi chat như các CLI khác:
+- **Gõ một tin khi chưa có gì chạy** sẽ bắt đầu một việc. Mỗi việc mới đều được biết các việc trước trong phiên chat đã làm gì, và review của nó chỉ xét thay đổi của chính nó.
+- **Gõ trong lúc agent đang làm** thì tin đó thành ghi chú, được đưa vào mọi bước kể từ bước kế tiếp.
+- **Esc** dừng bước đang chạy. Gõ điều cần đổi rồi Enter, bước đó sẽ chạy lại kèm tin nhắn của bạn. Enter trống thì chạy lại như cũ, còn `/new` để bỏ qua nó.
+- **Prompt hỏi quyền và các quyết định** hiện ra thay cho ô nhập.
+- **Lệnh:** `/plan`, `/diff`, `/status`, `/resume` (chạy tiếp một run đang dừng hoặc đang chờ, kể cả từ phiên trước), `/new`, `/help`, `/quit`. Bấm Ctrl-C hai lần cũng thoát; run đang chạy sẽ dừng ở bước hiện tại và vẫn resume được.
+
+`duo "<task>"` vẫn chạy một việc rồi thoát; đây là cách dùng cho script và CI.
 
 Yêu cầu: Node.js ≥ 22.12, git, Codex CLI và Claude Code. Workspace phải nằm trong một git repo. Nếu chưa có, `duo init` sẽ hỏi có muốn `git init` không.
 
@@ -63,6 +74,7 @@ agentduo không chặn gì. Nó chỉ cảnh báo khi agent lập kế hoạch h
 
 | Lệnh | Tác dụng |
 |---|---|
+| `duo` | Mở [chat](#chat) (trong terminal) |
 | `duo "<task>"` | Tạo run mới (`--task-file`; task bắt đầu bằng `-` thì gõ `duo -- "-x …"`) |
 | `duo resume [id]` | Chạy tiếp với config lúc run bắt đầu (thêm `--reload-config` để dùng config hiện tại); `--decision resume\|revise\|abort [--note "..."]` để trả lời quyết định đang chờ |
 | `duo status`, `duo list` | Xem tiến độ |

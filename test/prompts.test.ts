@@ -30,6 +30,24 @@ describe("prompts", () => {
     }
   });
 
+  it("tells every agent what the earlier tasks of the conversation did, and stays quiet without any", () => {
+    const earlier = [{ task: "Add JWT auth", outcome: "done; files: src/auth.ts" }, { task: "Add refresh tokens", outcome: "stopped" }];
+    const withEarlier = { ...ctx, earlier };
+    const all = [
+      prompts.planner(withEarlier, 1, 1, null, null),
+      prompts.planReviewer(withEarlier, 1, 1, "# Plan", null),
+      prompts.planFinalizer(withEarlier, 1, 1, "# Plan", critique(true)),
+      prompts.implementer(withEarlier, 1, "# Plan", [], null, [], null),
+      prompts.codeReviewer(withEarlier, 1, "# Plan", "a".repeat(40), "b".repeat(40), [], "", "", false, [], impl()),
+    ];
+    for (const p of all) {
+      expect(p).toContain("## Earlier in this conversation");
+      expect(p).toContain("1. Add JWT auth — done; files: src/auth.ts");
+      expect(p).toContain("2. Add refresh tokens — stopped");
+    }
+    expect(prompts.planner(ctx, 1, 1, null, null)).not.toContain("Earlier in this conversation");
+  });
+
   it("planner v1 states the task, notes and the gates when there are any", () => {
     const p = prompts.planner(ctx, 1, 1, null, null);
     expect(p.startsWith("[orchestrator-role: planner]")).toBe(true);

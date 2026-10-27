@@ -131,6 +131,13 @@ export class Workflow {
     this.abort.abort();
   }
 
+  /** A note from the user while the run goes on: the prompts of every later step carry it (a running agent does not see it). */
+  addNote(note: string): void {
+    const st = this.state;
+    st.humanNotes.push({ at: nowIso(), phase: st.phase, note });
+    this.save();
+  }
+
   // ------------------------------------------------------------------ loop
   async run(): Promise<number> {
     const st = this.state;
@@ -225,7 +232,7 @@ export class Workflow {
 
   private ctx(): prompts.PromptContext {
     const st = this.state;
-    return { repo: this.o.repo, taskId: st.taskId, task: st.task, agents: this.o.cfg.agents, gates: this.o.cfg.gates, notes: st.humanNotes };
+    return { repo: this.o.repo, taskId: st.taskId, task: st.task, agents: this.o.cfg.agents, gates: this.o.cfg.gates, notes: st.humanNotes, earlier: st.earlier };
   }
 
   private party(role: AgentRole): Party {

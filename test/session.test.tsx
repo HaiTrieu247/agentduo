@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
 import { EventBus } from "../src/events.js";
+import { startChatInk } from "../src/ui/ink/chat-session.js";
 import { startInk } from "../src/ui/ink/session.js";
 
 class FakeStdout extends EventEmitter {
@@ -64,5 +65,71 @@ describe("startInk", () => {
     started = Date.now();
     await idle.close();
     expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+  });
+});
+
+class FakeStdin extends EventEmitter {
+  isTTY = true;
+  private data: string | null = null;
+  write(data: string): void {
+    this.data = data;
+    this.emit("readable");
+    this.emit("data", data);
+  }
+  read(): string | null {
+    const data = this.data;
+    this.data = null;
+    return data;
+  }
+  setEncoding(): void {}
+  setRawMode(): void {}
+  resume(): void {}
+  pause(): void {}
+  ref(): void {}
+  unref(): void {}
+}
+
+describe("startChatInk", () => {
+  const start = (onSubmit: (text: string) => void = noop, onEscape: () => void = noop) => {
+    const stdout = new FakeStdout();
+    const stdin = new FakeStdin();
+    const session = startChatInk({
+      bus: new EventBus(), version: "0.2.0", verbose: false, workspace: "/ws", onSubmit, onEscape, views: () => [], readView: async () => null,
+      stdout: stdout as unknown as NodeJS.WriteStream, stdin: stdin as unknown as NodeJS.ReadStream,
+    });
+    return { session, stdout, stdin };
+  };
+  const tick = () => new Promise((r) => setTimeout(r, 60));
+
+  it("echoes what you send, stops a running step on the first Ctrl-C and leaves on the second", async () => {
+    const sent: string[] = [];
+    let escapes = 0;
+    const { session, stdout, stdin } = start((text) => sent.push(text), () => { escapes += 1; });
+    await tick();
+    stdin.write("Add JWT auth");
+    await tick();
+    stdin.write("\r");
+    await tick();
+    expect(sent).toEqual(["Add JWT auth"]);
+    session.ui.setStatus("running");
+    let left = false;
+    void session.exited.then(() => { left = true; });
+    stdin.write("\u0003");
+    await tick();
+    expect([escapes, left]).toEqual([1, false]);
+    expect(stdout.output).toContain("Press Ctrl-C again to quit");
+    stdin.write("\u0003");
+    await tick();
+    expect(left).toBe(true);
+    await session.close();
+  });
+
+  it("treats Ctrl-C at a decision as \"decide later\"", async () => {
+    const { session, stdin } = start();
+    await tick();
+    const answer = session.decider.decide({ reason: "x", message: "m", fromPhase: "PLAN", resumePhase: "PLAN", details: [], at: "t" });
+    stdin.write("\u0003");
+    expect(await answer).toBe("defer");
+    await session.close();
   });
 });

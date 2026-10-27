@@ -356,6 +356,18 @@ describe("Workflow", () => {
     expect(readFileSync(join(runDirOf(sub), "report.md"), "utf8")).toContain("outside.txt");
   });
 
+  it("hands a note given while a step runs to every later step", async () => {
+    fake.setScenario({ ...happy(), planner: [{ sleep: 1500, output: plan() }] });
+    const { wf, bus } = newWorkflow(h, "Make app.txt fixed");
+    bus.on((e) => {
+      if (e.type === "phase.started" && e.phase === "PLAN") setTimeout(() => wf.addNote("keep app.txt short"), 300);
+    });
+    expect(await wf.run()).toBe(0);
+    expect(fake.calls("planner")[0]!.prompt).not.toContain("keep app.txt short");
+    for (const role of ["plan_reviewer", "implementer", "code_reviewer"]) expect(fake.calls(role)[0]!.prompt, role).toContain("keep app.txt short");
+    expect(stateOf(h).humanNotes).toMatchObject([{ phase: "PLAN", note: "keep app.txt short" }]);
+  });
+
   it("rejects decisions when none is pending", async () => {
     await start(happy());
     const { wf } = resumedWorkflow(h);

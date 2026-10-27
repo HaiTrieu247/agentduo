@@ -2,7 +2,7 @@ import type { AgentRole, Backend, GateConfig } from "./config.js";
 import { describeGates, type GateResult } from "./gates.js";
 import type { Approval, Critique, Finding, Implementation, Plan, Review } from "./outputs.js";
 import { findingsMarkdown, issuesMarkdown } from "./render.js";
-import type { HumanNote } from "./state.js";
+import type { EarlierTask, HumanNote } from "./state.js";
 
 export interface PromptContext {
   repo: string;
@@ -11,6 +11,7 @@ export interface PromptContext {
   agents: Record<AgentRole, Backend>;
   gates: GateConfig[];
   notes: HumanNote[];
+  earlier?: EarlierTask[];
 }
 
 export interface PlanFeedback {
@@ -51,6 +52,12 @@ function gateList(gates: GateConfig[]): string {
   return gates.map((g) => "- `" + g.command + "` (" + g.name + ", " + (g.required === false ? "optional" : "required") + ")").join("\n");
 }
 
+function earlier(list: EarlierTask[] = []): string {
+  if (!list.length) return "";
+  return "\n## Earlier in this conversation\nThe user gave these tasks before this one, in this workspace; their changes are already in the working tree.\n" +
+    list.map((t, i) => `${i + 1}. ${t.task} — ${t.outcome}`).join("\n") + "\n";
+}
+
 function notes(list: HumanNote[]): string {
   if (!list.length) return "";
   return "\n## Notes from the human operator (highest priority)\n" + list.map((n) => `- (${n.at}, during ${n.phase}) ${n.note}`).join("\n") + "\n";
@@ -74,6 +81,7 @@ export function planner(ctx: PromptContext, round: number, version: number, prev
     header("planner", "Planner / Architect", ctx),
     `- Planning round: ${round} · Producing plan version: v${version}\n`,
     "## Task\n" + ctx.task + "\n",
+    earlier(ctx.earlier),
     notes(ctx.notes),
     "## Your job\n" +
       "Study the repository and produce an implementation plan that the implementer can execute without further clarification.\n" +
@@ -105,6 +113,7 @@ export function planReviewer(ctx: PromptContext, round: number, version: number,
     header("plan_reviewer", "Plan Critic", ctx),
     `- Planning round: ${round} · Plan under review: v${version}\n`,
     "## Task\n" + ctx.task + "\n",
+    earlier(ctx.earlier),
     notes(ctx.notes),
     "## Plan under review\n" + planMd + "\n",
     "## Your job\n" +
@@ -136,6 +145,7 @@ export function planFinalizer(ctx: PromptContext, round: number, version: number
     header("plan_finalizer", "Planner / Architect (final plan sign-off)", ctx),
     `- Planning round: ${round} · Plan up for sign-off: v${version}\n`,
     "## Task\n" + ctx.task + "\n",
+    earlier(ctx.earlier),
     notes(ctx.notes),
     "## Plan\n" + planMd + "\n",
     "## The critic approved this version\n" + critique.summary + "\n\nRemaining suggestions:\n" + issuesMarkdown(critique.issues) + "\n",
@@ -154,6 +164,7 @@ export function implementer(ctx: PromptContext, round: number, planMd: string, f
     header("implementer", "Implementer", ctx),
     `- Implementation round: ${round}\n`,
     "## Task\n" + ctx.task + "\n",
+    earlier(ctx.earlier),
     notes(ctx.notes),
     "## Final approved plan\n" + planMd + "\n",
     "## How to work\n" +
@@ -195,6 +206,7 @@ export function codeReviewer(ctx: PromptContext, round: number, planMd: string, 
       "- Revision under review: `" + snapshot + "` (agentduo snapshot of the workspace)\n" +
       "- Base revision: `" + base + "`\n",
     "## Task\n" + ctx.task + "\n",
+    earlier(ctx.earlier),
     notes(ctx.notes),
     "## Final approved plan\n" + planMd + "\n",
     "## Quality gate results (run by agentduo on this revision)\n" + describeGates(gateResults) + "\n",

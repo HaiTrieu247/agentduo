@@ -46,10 +46,31 @@ npm i -g agentduo
 cd my-project            # or any subdirectory: that directory is the workspace
 duo init                 # .agentduo/config.yaml (everything optional) and .agentduo/.gitignore
 duo doctor               # checks the CLIs and config; no model calls
-duo "Add JWT authentication with refresh tokens"
+duo                      # opens the chat
 ```
 
 `agentduo` is the same command as `duo`. Use `agentduo` if another tool already owns the name `duo`.
+
+## Chat
+
+Run `duo` (or `agentduo`) without a task in a terminal and type, as in any chat CLI:
+
+```
+agentduo 0.2.0 · chat
+› Add JWT authentication with refresh tokens
+── run 20261027-101500-add-jwt-authentication ──
+  … Codex plans, Claude critiques, Claude implements, Codex reviews …
+✔ DONE the review approved; no quality gates configured.
+› Also cover token expiry with a test
+```
+
+- **A message when nothing runs** starts a task. Each new task is told what the earlier ones in the chat did, and its review covers only its own changes.
+- **A message while the agents work** is a note: every step from the next one on carries it.
+- **Esc** stops the current step. Type what should change and press Enter, and the step runs again with your message. Enter alone re-runs it as is; `/new` leaves it.
+- **Permission prompts and decisions** appear in place of the input line.
+- **Commands:** `/plan`, `/diff`, `/status`, `/resume` (continue a stopped or waiting run, also from an earlier session), `/new`, `/help`, `/quit`. Ctrl-C twice also quits; a running run stops at its current step and stays resumable.
+
+`duo "<task>"` still runs a single task and exits; that is the form for scripts and CI.
 
 ## The workspace
 
@@ -111,6 +132,7 @@ Nothing is ever committed or pushed by agentduo: review the changes with `git di
 
 | Command | What it does |
 |---|---|
+| `duo` | Open the [chat](#chat) (in a terminal) |
 | `duo "<task>"`, `duo run "<task>"` | Start a run (`--task-file F`; use `duo -- "-x …"` for a task that starts with `-`) |
 | `duo resume [id]` | Continue the latest (or given) run with the config it started with (`--reload-config` to use today's); `--decision resume\|revise\|abort [--note "..."]` answers a pending decision |
 | `duo status [id]`, `duo list` | Progress, history and where the files are |

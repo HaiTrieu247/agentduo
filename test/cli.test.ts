@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "
 import { join } from "node:path";
 import YAML from "yaml";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { applyColorPreference, isBackgroundFromPs, main, type CliIO } from "../src/cli.js";
+import { applyColorPreference, chatAvailable, isBackgroundFromPs, main, pinTerminalSize, type CliIO } from "../src/cli.js";
 import { acquireWorkspaceLock, RunStore } from "../src/core/state.js";
 import { packageVersion } from "../src/paths.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
@@ -149,7 +149,9 @@ describe("cli", () => {
   it("refuses bad starts before calling any agent", async () => {
     writeConfig(repo);
     fake.setScenario(happy());
-    expect((await cli([])).err).toContain("a task description is required");
+    const bare = await cli([]);
+    expect(bare.err).toContain("a task description is required");
+    expect(bare.err).toContain("in a terminal, `duo` alone opens a chat");
     const outside = join(t.path, "plain folder");
     mkdirSync(outside);
     const notGit = await cli(["Fix"], outside);
@@ -222,6 +224,31 @@ describe("cli", () => {
     const bad = await cli(["doctor"]);
     expect(bad.code).toBe(1);
     expect(bad.out).toContain("codex.bin must be a non-empty string");
+  });
+
+  it("opens the chat only for `duo` alone on an interactive terminal", () => {
+    const io = (over: Partial<CliIO> = {}): CliIO => ({ stdout: { write: () => true, isTTY: true }, stderr: { write: () => true }, stdin: { isTTY: true }, env: {}, cwd: repo, ...over });
+    expect(chatAvailable(io(), {})).toBe(true);
+    expect(chatAvailable(io(), { plain: true })).toBe(false);
+    expect(chatAvailable(io({ env: { CI: "true" } }), {})).toBe(false);
+    expect(chatAvailable(io({ stdin: {} }), {})).toBe(false);
+    expect(chatAvailable(io({ stdout: { write: () => true } }), {})).toBe(false);
+    expect(chatAvailable(io({ isBackground: () => true }), {})).toBe(false);
+  });
+
+  it("gives a terminal that reports no size a fixed one, so Ink never falls back to probing /dev/tty", () => {
+    const sized: NodeJS.ProcessEnv = {};
+    pinTerminalSize({ isTTY: true, columns: 120, rows: 40 }, sized);
+    expect(sized).toEqual({});
+    const zero: NodeJS.ProcessEnv = {};
+    pinTerminalSize({ isTTY: true, columns: 0, rows: 0 }, zero);
+    expect(zero).toEqual({ COLUMNS: "80", LINES: "24" });
+    const mine: NodeJS.ProcessEnv = { COLUMNS: "100", LINES: "30" };
+    pinTerminalSize({ isTTY: true, columns: 0, rows: 0 }, mine);
+    expect(mine).toEqual({ COLUMNS: "100", LINES: "30" });
+    const piped: NodeJS.ProcessEnv = {};
+    pinTerminalSize({}, piped);
+    expect(piped).toEqual({});
   });
 
   it("detects background runs and colour preferences", () => {

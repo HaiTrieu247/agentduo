@@ -3,6 +3,7 @@ import { render } from "ink-testing-library";
 import { describe, expect, it } from "vitest";
 import { EventBus, type Activity, type DuoEvent, type HistoryEntry, type PermissionAnswer, type PermissionRequest, type Phase, type Role } from "../src/events.js";
 import { App } from "../src/ui/ink/App.js";
+import { ChatApp, ChatChannel } from "../src/ui/ink/ChatApp.js";
 import { HumanReviewPrompt } from "../src/ui/ink/HumanReviewPrompt.js";
 import { PermissionPrompt } from "../src/ui/ink/PermissionPrompt.js";
 import { StepBlock } from "../src/ui/ink/StepBlock.js";
@@ -206,6 +207,77 @@ describe("Ink components", () => {
     app.stdin.write("\r");
     await wait();
     expect(given).toEqual([["p1", { decision: "once" }]]);
+    app.unmount();
+  });
+
+  it("chat: sends what you type on Enter, shows your lines and agentduo's, and Esc stops a running step", async () => {
+    const bus = new EventBus();
+    const channel = new ChatChannel();
+    const sent: string[] = [];
+    let escapes = 0;
+    let ctrlC = 0;
+    const app = render(<ChatApp bus={bus} channel={channel} version="0.2.0" workspace="/ws" verbose={false} onSubmit={(text) => sent.push(text)}
+      onEscape={() => { escapes += 1; }} onCtrlC={() => { ctrlC += 1; }} onDecision={noop} onPermission={noop} views={() => []} readView={async () => null} />);
+    await wait();
+    expect(app.lastFrame()).toContain("agentduo 0.2.0 · chat");
+    expect(app.lastFrame()).toContain("Type a task");
+    app.stdin.write("Add JWT auth");
+    await wait();
+    expect(app.lastFrame()).toContain("› Add JWT auth");
+    app.stdin.write("\r");
+    await wait();
+    expect(sent).toEqual(["Add JWT auth"]);
+    channel.user("Add JWT auth");
+    channel.status("running");
+    bus.emit({ type: "run.started", runId: "r1", task: "Add JWT auth", repo: "/ws", runDir: "/d" });
+    bus.emit(phase("PLAN", "planner", "codex"));
+    await wait();
+    const running = app.lastFrame()!;
+    for (const text of ["› Add JWT auth", "── run r1 ──", "Codex (planner)", "next step", "Esc stops"]) expect(running).toContain(text);
+    app.stdin.write("\u001B");
+    await wait();
+    expect(escapes).toBe(1);
+    channel.info("Stopped PLAN. Type what to change");
+    channel.status("paused");
+    await wait();
+    expect(app.lastFrame()).toContain("Stopped PLAN. Type what to change");
+    app.stdin.write("\u0003");
+    await wait();
+    expect(ctrlC).toBe(1);
+    app.unmount();
+  });
+
+  it("chat: a pasted line that ends with Enter is sent, and pasted line breaks stay in the message", async () => {
+    const sent: string[] = [];
+    const app = render(<ChatApp bus={new EventBus()} channel={new ChatChannel()} version="0.2.0" workspace="/ws" verbose={false} onSubmit={(text) => sent.push(text)}
+      onEscape={noop} onCtrlC={noop} onDecision={noop} onPermission={noop} views={() => []} readView={async () => null} />);
+    await wait();
+    app.stdin.write("Add JWT auth\r");
+    await wait();
+    app.stdin.write("line one\rline two");
+    await wait();
+    app.stdin.write("\r");
+    await wait();
+    expect(sent).toEqual(["Add JWT auth", "line one\nline two"]);
+    app.unmount();
+  });
+
+  it("chat: a permission prompt or a decision takes the place of the input line", async () => {
+    const bus = new EventBus();
+    const given: string[] = [];
+    const app = render(<ChatApp bus={bus} channel={new ChatChannel()} version="0.2.0" workspace="/ws" verbose={false} onSubmit={noop} onEscape={noop} onCtrlC={noop}
+      onDecision={noop} onPermission={(id) => given.push(id)} views={() => []} readView={async () => null} />);
+    bus.emit(requested(ask("p1")));
+    await wait();
+    expect(app.lastFrame()).toContain("asks to use Bash");
+    expect(app.lastFrame()).not.toContain("Type a task…"); // the input line's placeholder
+    app.stdin.write("\r");
+    await wait();
+    expect(given).toEqual(["p1"]);
+    bus.emit(answered("p1", { decision: "once" }));
+    bus.emit({ type: "human.required", runId: "r1", review });
+    await wait();
+    expect(app.lastFrame()).toContain("Your decision is needed");
     app.unmount();
   });
 

@@ -14,6 +14,12 @@ export interface HumanNote {
   note: string;
 }
 
+/** A task given earlier in the same chat, and how it ended; later runs are told about it. */
+export interface EarlierTask {
+  task: string;
+  outcome: string;
+}
+
 export interface RunState {
   version: number;
   taskId: string;
@@ -41,6 +47,8 @@ export interface RunState {
   warnings: string[];
   /** The directory the run works in; absent in runs created before v2. */
   workspace?: string;
+  /** Earlier tasks of the chat this run was started from (empty outside a chat). */
+  earlier?: EarlierTask[];
   costUsd: number;
   tokens: number;
   step: number;

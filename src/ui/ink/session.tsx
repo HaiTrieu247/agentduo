@@ -23,21 +23,12 @@ export interface InkSession {
   close(): Promise<void>;
 }
 
-/** Mount the live UI; its Decider resolves when the user answers the human-review prompt. */
-export function startInk(o: InkSessionOptions): InkSession {
-  const pending: { resolve?: (d: Decision | "defer") => void } = {};
-  const decider: Decider = {
-    decide: () => (o.interactive ? new Promise((resolve) => { pending.resolve = resolve; }) : Promise.resolve("defer")),
-  };
-  const onDecision = (d: Decision | "defer") => {
-    const resolve = pending.resolve;
-    pending.resolve = undefined;
-    resolve?.(d);
-  };
+/** Permission prompts answered from the UI: one pending answer per request; an aborted agent call denies. */
+export function permissionBroker(interactive: boolean): { permissions: PermissionDecider; answer(id: string, answer: PermissionAnswer): void } {
   const waiting = new Map<string, (answer: PermissionAnswer) => void>();
   const permissions: PermissionDecider = {
     askPermission: ({ request }, signal) => {
-      if (!o.interactive || signal?.aborted) return Promise.resolve({ decision: "deny" });
+      if (!interactive || signal?.aborted) return Promise.resolve({ decision: "deny" });
       return new Promise((resolve) => {
         const done = (answer: PermissionAnswer) => {
           waiting.delete(request.id);
@@ -50,7 +41,21 @@ export function startInk(o: InkSessionOptions): InkSession {
       });
     },
   };
-  const onPermission = (id: string, answer: PermissionAnswer) => waiting.get(id)?.(answer);
+  return { permissions, answer: (id, answer) => waiting.get(id)?.(answer) };
+}
+
+/** Mount the live UI; its Decider resolves when the user answers the human-review prompt. */
+export function startInk(o: InkSessionOptions): InkSession {
+  const pending: { resolve?: (d: Decision | "defer") => void } = {};
+  const decider: Decider = {
+    decide: () => (o.interactive ? new Promise((resolve) => { pending.resolve = resolve; }) : Promise.resolve("defer")),
+  };
+  const onDecision = (d: Decision | "defer") => {
+    const resolve = pending.resolve;
+    pending.resolve = undefined;
+    resolve?.(d);
+  };
+  const broker = permissionBroker(o.interactive);
   let settle: () => void = () => undefined;
   const settled = new Promise<void>((resolve) => {
     settle = resolve;
@@ -58,10 +63,10 @@ export function startInk(o: InkSessionOptions): InkSession {
   const options: RenderOptions = { exitOnCtrlC: false, patchConsole: false };
   if (o.stdout) options.stdout = o.stdout;
   if (o.stdin) options.stdin = o.stdin;
-  const instance = render(<App {...o} onDecision={onDecision} onPermission={onPermission} onSettled={() => settle()} />, options);
+  const instance = render(<App {...o} onDecision={onDecision} onPermission={broker.answer} onSettled={() => settle()} />, options);
   return {
     decider,
-    permissions,
+    permissions: broker.permissions,
     close: async () => {
       // Wait until the finish line has rendered; without a run.finished event (an error path) give up after a second.
       await Promise.race([settled, new Promise((resolve) => setTimeout(resolve, 1000))]);

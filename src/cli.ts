@@ -5,6 +5,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Command, CommanderError, Option } from "commander";
 import { killAllActive } from "./agents/process.js";
+import { Chat, newRun } from "./chat.js";
 import { resolveBinary } from "./agents/resolve.js";
 import { configFromSaved, ConfigError, defaultConfig, loadConfig, validateConfig, type ConfigData } from "./core/config.js";
 import { runDoctor } from "./core/doctor.js";
@@ -45,6 +46,22 @@ export function guardStream(stream: { on(event: "error", listener: (err: NodeJS.
 export function isBackgroundFromPs(out: string): boolean {
   const [pgid, tpgid] = out.trim().split(/\s+/).map(Number);
   return !!pgid && !!tpgid && tpgid > 0 && pgid !== tpgid;
+}
+
+/** `duo` alone opens the chat only where someone can type: an interactive terminal in the foreground, outside CI. */
+export function chatAvailable(io: CliIO, opts: { plain?: boolean }): boolean {
+  return !opts.plain && !!io.stdin.isTTY && !!io.stdout.isTTY && io.env.CI !== "true" && !io.isBackground?.();
+}
+
+/**
+ * A TTY that reports a 0×0 size (some pseudo-terminals) makes Ink ask terminal-size on every render, and on macOS
+ * terminal-size opens /dev/tty each time without closing it: thousands of leaked descriptors per run, until a
+ * spawn fails with EBADF. With COLUMNS/LINES set it answers from them instead.
+ */
+export function pinTerminalSize(stdout: { isTTY?: boolean; columns?: number; rows?: number }, env: NodeJS.ProcessEnv): void {
+  if (!stdout.isTTY || (stdout.columns && stdout.rows)) return;
+  env.COLUMNS ||= String(stdout.columns || 80);
+  env.LINES ||= String(stdout.rows || 24);
 }
 
 /** Ink's colour support reads FORCE_COLOR when it is first imported; set it before that import. */
@@ -220,6 +237,7 @@ async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, st
     if (terminal && io.ask) permissions = plainPermissionDecider(io.ask);
   } else {
     applyColorPreference(opts, io.env);
+    pinTerminalSize(io.stdout, io.env);
     const { startInk } = await import("./ui/ink/session.js");
     const session = startInk({
       bus, version, verbose: !!opts.verbose, interactive, onStop, onInterrupt,
@@ -296,17 +314,54 @@ async function runCommand(io: CliIO, words: string[], opts: RunOptions, explicit
     }
     task = `${task}\n\n${text}`.trim();
   }
-  if (!task) throw new CliExit(EXIT.ERROR, 'a task description is required, e.g. duo "Add JWT auth" (other commands: resume, status, list, doctor, init)');
+  if (!task) {
+    if (!explicit && !opts.taskFile && chatAvailable(io, opts)) return chatCommand(io, opts);
+    throw new CliExit(EXIT.ERROR, 'a task description is required, e.g. duo "Add JWT auth"; in a terminal, `duo` alone opens a chat (other commands: resume, status, list, doctor, init)');
+  }
   const env = await prepare(io, opts);
   requireRunnable(env, env.cfg, env.sources.join(", "), io);
   // Lock first: a start refused because another run is active must not leave a run behind or move LATEST.
   const release = lockWorkspace(env.runsDir);
   try {
-    const { store, state } = RunStore.create(env.runsDir, task, env.cfg.limits);
-    state.workspace = env.workspace;
-    store.saveState(state);
-    store.writeJson("config.json", env.cfg);
+    const { store, state } = newRun(env.runsDir, env.workspace, task, env.cfg);
     return await execute(io, env, env.cfg, store, state, opts);
+  } finally {
+    release();
+  }
+}
+
+/** `duo` alone: a chat session in this workspace, holding its lock until the user leaves. */
+async function chatCommand(io: CliIO, opts: CommonOptions): Promise<number> {
+  const env = await prepare(io, opts);
+  requireRunnable(env, env.cfg, env.sources.join(", "), io);
+  const release = lockWorkspace(env.runsDir);
+  try {
+    applyColorPreference(opts, io.env);
+    pinTerminalSize(io.stdout, io.env);
+    const { startChatInk } = await import("./ui/ink/chat-session.js");
+    const bus = new EventBus();
+    let chat: Chat | undefined;
+    const session = startChatInk({
+      bus, version: packageVersion(), verbose: !!opts.verbose, workspace: env.workspace,
+      onSubmit: (text) => void chat?.submit(text), onEscape: () => chat?.escape(),
+      views: () => {
+        const run = chat?.focused();
+        return run ? availableViews(run.store, run.state) : [];
+      },
+      readView: async (kind) => {
+        const run = chat?.focused();
+        return run ? readView(kind, run.store, run.state, env.git) : null;
+      },
+      stdout: io.stdout as NodeJS.WriteStream, stdin: io.stdin as NodeJS.ReadStream,
+    });
+    chat = new Chat({ cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, bus, decider: session.decider, permissions: session.permissions, ui: session.ui });
+    const offSignal = io.onSignal?.(() => session.ui.exit());
+    await chat.greet();
+    await session.exited;
+    await chat.stop(); // a running run stops at its current step and stays resumable
+    offSignal?.();
+    await session.close();
+    return EXIT.DONE;
   } finally {
     release();
   }

@@ -17,11 +17,14 @@ export interface StepView {
 }
 
 type StaticContent =
-  | { kind: "header"; runId: string; repo: string; version: string }
+  | { kind: "header"; runId: string; repo: string; version: string; chat?: boolean }
+  /** Chat mode: what the user typed, and agentduo's own lines (command output, hints). */
+  | { kind: "user"; text: string }
+  | { kind: "info"; text: string }
   | { kind: "step"; step: StepView }
   | { kind: "note"; text: string }
   | { kind: "artifact"; title: string; body: string }
-  | { kind: "finish"; phase: string; runId: string; reportPath: string; summary?: string }
+  | { kind: "finish"; phase: string; runId: string; reportPath: string; summary?: string; chat?: boolean }
   | { kind: "review"; review: HumanReview }
   | { kind: "permission"; agent: Party; role: Role; label: string; rules: string[]; answer: PermissionAnswer };
 export type StaticItem = { id: string } & StaticContent;
@@ -42,19 +45,24 @@ export interface ViewState {
   verbose: boolean;
   stopping: boolean;
   seq: number;
+  /** One chat session hosts many runs: one header, a separator per run, chat-style finish lines. */
+  chat: boolean;
 }
 
 export type ViewAction =
   | { type: "event"; event: DuoEvent; now: number }
   | { type: "toggleVerbose" }
   | { type: "stopping" }
-  | { type: "artifact"; title: string; body: string };
+  | { type: "artifact"; title: string; body: string }
+  | { type: "chat"; kind: "user" | "info"; text: string };
 
-export function initialView(version: string, verbose = false): ViewState {
-  return {
+export function initialView(version: string, verbose = false, chat?: { workspace: string }): ViewState {
+  const s: ViewState = {
     version, items: [], current: null, planning: { round: 1, limit: 0 }, impl: { round: 0, limit: 0 }, reached: [],
     totals: { costUsd: 0, tokens: 0 }, live: { costUsd: 0, tokens: 0 }, humanReview: null, permissions: [], finished: null, verbose, stopping: false, seq: 0,
+    chat: !!chat,
   };
+  return chat ? push(s, { kind: "header", runId: "", repo: chat.workspace, version, chat: true }) : s;
 }
 
 function push(s: ViewState, item: StaticContent): ViewState {
@@ -85,6 +93,8 @@ export function reduce(s: ViewState, action: ViewAction): ViewState {
       return { ...s, stopping: true };
     case "artifact":
       return push(s, { kind: "artifact", title: action.title, body: action.body });
+    case "chat":
+      return push(s, { kind: action.kind, text: action.text });
     case "event":
       return onEvent(s, action.event, action.now);
   }
@@ -93,7 +103,8 @@ export function reduce(s: ViewState, action: ViewAction): ViewState {
 function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
   switch (e.type) {
     case "run.started": {
-      const next = { ...s, finished: null, stopping: false };
+      const next = { ...s, finished: null, stopping: false, reached: s.chat ? [] : s.reached };
+      if (s.chat) return push(next, { kind: "info", text: `── run ${e.runId} ──` });
       return s.items.some((i) => i.kind === "header") ? next : push(next, { kind: "header", runId: e.runId, repo: e.repo, version: s.version });
     }
     case "phase.started":
@@ -139,7 +150,7 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
       // A deferred decision (non-interactive, or "Decide later") keeps the reason in scrollback.
       const withReview = e.phase === "HUMAN_REVIEW" && s.humanReview ? push(s, { kind: "review", review: s.humanReview }) : s;
       return {
-        ...push(withReview, { kind: "finish", phase: e.phase, runId: e.runId, reportPath: e.reportPath, summary: e.summary }),
+        ...push(withReview, { kind: "finish", phase: e.phase, runId: e.runId, reportPath: e.reportPath, summary: e.summary, chat: s.chat }),
         finished: { phase: e.phase, reportPath: e.reportPath, exitCode: e.exitCode }, current: null, humanReview: null, permissions: [],
       };
     }

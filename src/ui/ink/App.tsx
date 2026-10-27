@@ -24,15 +24,29 @@ export interface AppProps {
   onSettled?(): void;
 }
 
-function StaticItemView({ item }: { item: StaticItem }) {
+export function StaticItemView({ item }: { item: StaticItem }) {
   switch (item.kind) {
     case "header":
-      return (
+      return item.chat ? (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text bold>{`agentduo ${item.version} · chat`}</Text>
+          <Text dimColor>{item.repo}</Text>
+          <Text dimColor>Type a task and press Enter. /help lists the commands.</Text>
+        </Box>
+      ) : (
         <Box flexDirection="column" marginBottom={1}>
           <Text bold>{`agentduo ${item.version} · run ${item.runId}`}</Text>
           <Text dimColor>{item.repo}</Text>
         </Box>
       );
+    case "user":
+      return (
+        <Box marginTop={1}>
+          <Text bold wrap="wrap">{`› ${item.text}`}</Text>
+        </Box>
+      );
+    case "info":
+      return <Text dimColor wrap="wrap">{item.text}</Text>;
     case "step":
       return <StepBlock step={item.step} />;
     case "note":
@@ -45,7 +59,7 @@ function StaticItemView({ item }: { item: StaticItem }) {
         </Box>
       );
     case "finish":
-      return <FinishLine phase={item.phase} runId={item.runId} reportPath={item.reportPath} summary={item.summary} />;
+      return <FinishLine phase={item.phase} runId={item.runId} reportPath={item.reportPath} summary={item.summary} chat={item.chat} />;
     case "permission":
       return (
         <Text dimColor wrap="truncate-end">
@@ -66,9 +80,11 @@ function StaticItemView({ item }: { item: StaticItem }) {
   }
 }
 
-function FinishLine({ phase, runId, reportPath, summary }: { phase: string; runId: string; reportPath: string; summary?: string }) {
+function FinishLine({ phase, runId, reportPath, summary, chat }: { phase: string; runId: string; reportPath: string; summary?: string; chat?: boolean }) {
   if (phase === "DONE") return <Text><Text color="green" bold>✔ DONE</Text>{` ${summary ?? "finished"}. Report: ${reportPath}`}</Text>;
   if (phase === "ABORTED") return <Text><Text color="yellow" bold>Aborted.</Text>{` Report: ${reportPath}`}</Text>;
+  // In a chat the next steps are typed, not shell commands; the chat says which.
+  if (chat) return <Text color="yellow" bold>{phase === "INTERRUPTED" ? "■ Stopped." : "Waiting for your decision."}</Text>;
   if (phase === "INTERRUPTED") return <Text><Text color="yellow" bold>Stopped.</Text>{` Resume with: duo resume ${runId}`}</Text>;
   return (
     <Text>
