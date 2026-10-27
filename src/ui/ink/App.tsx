@@ -16,6 +16,8 @@ export interface AppProps {
   onDecision(d: Decision | "defer"): void;
   views(): ViewKind[];
   readView(kind: ViewKind): Promise<string | null>;
+  /** Called once the finish line has been rendered, so the session can unmount without losing it. */
+  onSettled?(): void;
 }
 
 function StaticItemView({ item }: { item: StaticItem }) {
@@ -40,6 +42,16 @@ function StaticItemView({ item }: { item: StaticItem }) {
       );
     case "finish":
       return <FinishLine phase={item.phase} runId={item.runId} reportPath={item.reportPath} />;
+    case "review":
+      return (
+        <Box flexDirection="column">
+          <Text color="yellow" bold wrap="truncate-end">{`⚠ Your decision is needed: ${item.review.reason}`}</Text>
+          <Text wrap="wrap">{item.review.message}</Text>
+          {item.review.details.slice(0, 8).map((d, i) => (
+            <Text key={i} dimColor wrap="truncate-end">{`  - ${d}`}</Text>
+          ))}
+        </Box>
+      );
   }
 }
 
@@ -69,8 +81,14 @@ export function App(p: AppProps) {
 
   // Raw mode swallows SIGINT, so Ctrl-C arrives as input.
   useInput((input, key) => {
-    if (key.ctrl && input === "c") p.onInterrupt();
+    if (!(key.ctrl && input === "c")) return;
+    // At the decision prompt nothing is running, so Ctrl-C means "decide later".
+    if (view.humanReview) p.onDecision("defer");
+    else p.onInterrupt();
   }, { isActive: p.interactive });
+  useEffect(() => {
+    if (view.finished) p.onSettled?.();
+  }, [view.finished]);
   useInput((input, key) => {
     if (key.ctrl || key.meta) return;
     if (input === "v") dispatch({ type: "toggleVerbose" });

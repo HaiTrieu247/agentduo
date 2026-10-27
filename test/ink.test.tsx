@@ -54,6 +54,21 @@ describe("view reducer", () => {
   });
 });
 
+describe("view reducer additions", () => {
+  it("shows retries as activities and keeps the review details when a decision is deferred", () => {
+    const s = play([
+      phase("PLAN", "planner", "codex"),
+      { type: "agent.retry", role: "planner", agent: "codex", attempt: 2, max: 2, reason: "output is not valid JSON\nmore" },
+    ]);
+    expect(s.current!.activities.map((a) => a.label)).toEqual(["↻ retry 2/2: output is not valid JSON"]);
+    const deferred = play([
+      { type: "human.required", runId: "r1", review },
+      { type: "run.finished", runId: "r1", phase: "HUMAN_REVIEW", reportPath: "/r", exitCode: 2 },
+    ]);
+    expect(deferred.items.map((i) => i.kind)).toEqual(["review", "finish"]);
+  });
+});
+
 describe("Ink components", () => {
   it("renders a finished step block", () => {
     const s = play([
@@ -169,6 +184,44 @@ describe("Ink components", () => {
       await wait();
     }
     expect(decisions).toEqual(["defer"]);
+  });
+
+  it("prints the review reason and details when nobody can answer", async () => {
+    const bus = new EventBus();
+    const app = render(<App bus={bus} version="0.1.0" verbose={false} interactive={false} onStop={noop} onInterrupt={noop} onDecision={noop} views={() => []} readView={async () => null} />);
+    bus.emit({ type: "human.required", runId: "r1", review });
+    bus.emit({ type: "run.finished", runId: "r1", phase: "HUMAN_REVIEW", reportPath: "/r", exitCode: 2 });
+    await wait();
+    const output = app.frames.join("\n");
+    for (const s of ["max_review_rounds", "not approved after 5 rounds", "F3 [high] src/auth.ts:42", "duo resume r1 --decision"]) expect(output).toContain(s);
+    app.unmount();
+  });
+
+  it("treats Ctrl-C at the decision prompt as 'decide later'", async () => {
+    const decisions: unknown[] = [];
+    let interrupts = 0;
+    const bus = new EventBus();
+    const app = render(<App bus={bus} version="0.1.0" verbose={false} interactive onStop={noop} onInterrupt={() => { interrupts += 1; }}
+      onDecision={(d) => decisions.push(d)} views={() => []} readView={async () => null} />);
+    bus.emit({ type: "human.required", runId: "r1", review });
+    await wait();
+    app.stdin.write("\u0003");
+    await wait();
+    expect([decisions, interrupts]).toEqual([["defer"], 0]);
+    app.unmount();
+  });
+
+  it("reports when the finish line has rendered", async () => {
+    let settled = 0;
+    const bus = new EventBus();
+    const app = render(<App bus={bus} version="0.1.0" verbose={false} interactive={false} onStop={noop} onInterrupt={noop} onDecision={noop}
+      views={() => []} readView={async () => null} onSettled={() => { settled += 1; }} />);
+    await wait();
+    expect(settled).toBe(0);
+    bus.emit({ type: "run.finished", runId: "r1", phase: "DONE", reportPath: "/r", exitCode: 0 });
+    await wait();
+    expect(settled).toBe(1);
+    app.unmount();
   });
 
   it("handles q when interactive", async () => {

@@ -17,7 +17,8 @@ export interface PlainOptions {
 export const deferDecider: Decider = { decide: async () => "defer" };
 
 const CODES = { dim: 2, bold: 1, red: 31, green: 32, yellow: 33, cyan: 36 } as const;
-const INDENT = " ".repeat(36);
+const AGENT_WIDTH = 12; // fits "orchestrator"
+const INDENT = " ".repeat(8 + 2 + AGENT_WIDTH + 1 + 16 + 1);
 
 export function attachPlainRenderer(bus: EventBus, out: TextSink, o: PlainOptions): () => void {
   const paint = (c: keyof typeof CODES, s: string) => (o.color ? `\u001b[${CODES[c]}m${s}\u001b[0m` : s);
@@ -29,7 +30,7 @@ export function attachPlainRenderer(bus: EventBus, out: TextSink, o: PlainOption
     return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
   };
   const line = (text: string, agent = ctx.agent, where = ctx.where) => {
-    out.write(`${paint("dim", clock())}  ${agent.padEnd(8)} ${where.padEnd(16)} ${text}\n`);
+    out.write(`${paint("dim", clock())}  ${agent.padEnd(AGENT_WIDTH)} ${where.padEnd(16)} ${text}\n`);
   };
 
   return bus.on((e: DuoEvent) => {

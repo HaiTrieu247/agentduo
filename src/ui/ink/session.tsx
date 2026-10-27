@@ -32,15 +32,19 @@ export function startInk(o: InkSessionOptions): InkSession {
     pending.resolve = undefined;
     resolve?.(d);
   };
+  let settle: () => void = () => undefined;
+  const settled = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
   const options: RenderOptions = { exitOnCtrlC: false, patchConsole: false };
   if (o.stdout) options.stdout = o.stdout;
   if (o.stdin) options.stdin = o.stdin;
-  const instance = render(<App {...o} onDecision={onDecision} />, options);
+  const instance = render(<App {...o} onDecision={onDecision} onSettled={() => settle()} />, options);
   return {
     decider,
     close: async () => {
-      // Events emitted just before close (run.finished) are still pending in React; let them commit first.
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Wait until the finish line has rendered; without a run.finished event (an error path) give up after a second.
+      await Promise.race([settled, new Promise((resolve) => setTimeout(resolve, 1000))]);
       instance.unmount();
       await instance.waitUntilExit().catch(() => undefined);
     },

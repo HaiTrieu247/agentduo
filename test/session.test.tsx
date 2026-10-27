@@ -30,4 +30,22 @@ describe("startInk", () => {
     expect(stdout.output).toContain("DONE");
     expect(stdout.output).toContain("/r/report.md");
   });
+  it("closes promptly after the finish line, and within a second without one", async () => {
+    const bus = new EventBus();
+    const session = startInk({
+      bus, version: "0.1.0", verbose: false, interactive: false, onStop: noop, onInterrupt: noop,
+      views: () => [], readView: async () => null, stdout: new FakeStdout() as unknown as NodeJS.WriteStream,
+    });
+    bus.emit({ type: "run.finished", runId: "r1", phase: "DONE", reportPath: "/r", exitCode: 0 });
+    let started = Date.now();
+    await session.close();
+    expect(Date.now() - started).toBeLessThan(500);
+    const idle = startInk({
+      bus: new EventBus(), version: "0.1.0", verbose: false, interactive: false, onStop: noop, onInterrupt: noop,
+      views: () => [], readView: async () => null, stdout: new FakeStdout() as unknown as NodeJS.WriteStream,
+    });
+    started = Date.now();
+    await idle.close();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+  });
 });

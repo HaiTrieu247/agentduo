@@ -20,7 +20,8 @@ type StaticContent =
   | { kind: "step"; step: StepView }
   | { kind: "note"; text: string }
   | { kind: "artifact"; title: string; body: string }
-  | { kind: "finish"; phase: string; runId: string; reportPath: string };
+  | { kind: "finish"; phase: string; runId: string; reportPath: string }
+  | { kind: "review"; review: HumanReview };
 export type StaticItem = { id: string } & StaticContent;
 
 export interface ViewState {
@@ -98,6 +99,8 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
       };
     case "agent.activity":
       return withActivity(s, e.activity);
+    case "agent.retry":
+      return withActivity(s, { id: `retry-${e.role}-${e.attempt}`, kind: "other", label: `↻ retry ${e.attempt}/${e.max}: ${e.reason.split("\n")[0]}`, status: "error" });
     case "agent.usage":
       return { ...s, live: { costUsd: e.costUsd ?? s.live.costUsd, tokens: e.tokens ?? s.live.tokens } };
     case "gate.started":
@@ -121,11 +124,14 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
       return push(s, { kind: "note", text: e.text });
     case "human.required":
       return { ...s, humanReview: e.review, current: null };
-    case "run.finished":
+    case "run.finished": {
+      // A deferred decision (non-interactive, or "Decide later") keeps the reason in scrollback.
+      const withReview = e.phase === "HUMAN_REVIEW" && s.humanReview ? push(s, { kind: "review", review: s.humanReview }) : s;
       return {
-        ...push(s, { kind: "finish", phase: e.phase, runId: e.runId, reportPath: e.reportPath }),
+        ...push(withReview, { kind: "finish", phase: e.phase, runId: e.runId, reportPath: e.reportPath }),
         finished: { phase: e.phase, reportPath: e.reportPath, exitCode: e.exitCode }, current: null, humanReview: null,
       };
+    }
     default:
       return s;
   }
