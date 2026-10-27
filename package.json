@@ -1,0 +1,38 @@
+{
+  "name": "agentduo",
+  "version": "0.1.0",
+  "description": "Two-agent development loop: Codex plans and reviews, Claude Code critiques and implements, with a live terminal UI.",
+  "license": "MIT",
+  "author": "Thinh Hai Trieu",
+  "type": "module",
+  "bin": {
+    "agentduo": "dist/cli.js",
+    "duo": "dist/cli.js"
+  },
+  "files": ["dist", "schemas", "README.md", "README.vi.md", "LICENSE"],
+  "engines": { "node": ">=22.12" },
+  "keywords": ["codex", "claude", "claude-code", "ai-agents", "multi-agent", "code-review", "cli"],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc -p .",
+    "test": "vitest run",
+    "test:pack": "node scripts/pack-smoke.mjs",
+    "smoke:real": "npm run build && node scripts/smoke-real.mjs",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "commander": "^15.0.0",
+    "ink": "^8.0.0",
+    "react": "^19.3.1",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "ink-testing-library": "^4.0.0",
+    "tsup": "^9.0.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}
