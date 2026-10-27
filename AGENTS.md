@@ -20,4 +20,5 @@ A prompt that starts with `[orchestrator-role: <role>]` comes from agentduo. Its
 - Agent output schemas (`schemas/`) must stay OpenAI-strict: every property is listed in `required`, and `additionalProperties` is `false`. Express an optional field as a nullable type. `test/schema.test.ts` enforces this, because Codex `--output-schema` rejects anything else.
 - CLI flags and stream formats were verified against codex-cli 0.164 and Claude Code 2.1.31x. After a CLI upgrade, run `duo doctor` and the parser tests.
 - `git add` fails when an `:(exclude)` pathspec names an already-ignored path, so `Git.pathspec` drops ignored excludes.
+- Claude's stream reports each message's `usage` as the message starts, so its output tokens are far too low. The final token count comes from the result envelope's `usage`; the streamed count is only a fallback for attempts that never finished.
 - Claude's `--permission-prompts none` must stay. Without it a non-interactive run can hang on a permission prompt that nobody answers.

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { isAbsolute, join, relative } from "node:path";
+import { isAbsolute, join, posix, relative } from "node:path";
 import { runProcess } from "../agents/process.js";
 import { resolveBinary } from "../agents/resolve.js";
 import { loadSchema, SCHEMA_NAMES, strictProblems } from "../agents/schema.js";
@@ -18,6 +18,9 @@ const PROTOCOL_FLAGS = {
   claude: { args: ["--help"], flags: ["--output-format", "--verbose", "--json-schema", "--permission-prompts"] },
 } as const;
 const EDIT_PERMISSION_FLAGS = ["--permission-mode", "--allowedTools", "--allowed-tools", "--dangerously-skip-permissions"];
+const CODEX_WRITE_FLAGS = ["--sandbox", "-s", "--full-auto", "--dangerously-bypass-approvals-and-sandbox"];
+/** "--permission-mode=acceptEdits" counts like "--permission-mode acceptEdits". */
+const flagName = (arg: string) => arg.split("=")[0]!;
 
 async function probe(bin: string, args: readonly string[], cwd: string): Promise<{ ok: boolean; out: string }> {
   try {
@@ -67,9 +70,15 @@ export async function runDoctor(o: { dir: string; cfg: ConfigData; sources: stri
   }
   if (o.cfg.agents.implementer === "claude") {
     const args = [...o.cfg.claude.args, ...(o.cfg.claude.role_args.implementer ?? [])];
-    if (!args.some((a) => EDIT_PERMISSION_FLAGS.includes(a))) {
+    if (!args.some((a) => EDIT_PERMISSION_FLAGS.includes(flagName(a)))) {
       add(false, 'implementer edits rely on your Claude Code permission settings (e.g. permissions.defaultMode "acceptEdits"); ' +
         "without them every edit is denied in non-interactive mode", false);
+    }
+  } else {
+    const args = [...o.cfg.codex.args, ...(o.cfg.codex.role_args.implementer ?? [])];
+    if (!args.some((a, i) => CODEX_WRITE_FLAGS.includes(flagName(a)) || (a === "-c" && /^sandbox_mode\s*=/.test(args[i + 1] ?? "")))) {
+      add(false, "implementer edits rely on your Codex sandbox settings (sandbox_mode in ~/.codex/config.toml, or " +
+        "codex.role_args.implementer: [--sandbox, workspace-write]); codex exec is read-only unless configured otherwise", false);
     }
   }
   for (const gate of o.cfg.gates) {
@@ -78,10 +87,12 @@ export async function runDoctor(o: { dir: string; cfg: ConfigData; sources: stri
     add(found, `gate '${gate.name}': ${gate.command}${found ? "" : ` — '${exe}' not found`}`, false);
   }
   if (isRepo) {
-    const rel = relative(o.dir, o.runsDir);
-    if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
-      const shown = rel.split("\\").join("/");
-      add(await git.isIgnored(shown), `${shown}/ is git-ignored`, false);
+    // Run data anywhere in the repository would show up in `git status` and in the outside-workspace warnings.
+    // Resolved through the workspace prefix rather than the toplevel, which git reports with symlinks resolved.
+    const shown = relative(o.dir, o.runsDir).split("\\").join("/");
+    const inRepo = posix.normalize(posix.join(await git.prefix(), shown));
+    if (shown && !isAbsolute(shown) && inRepo !== "." && !inRepo.startsWith("..")) {
+      add(true, (await git.isIgnored(shown)) ? `${shown}/ is git-ignored` : `${shown}/ gets its own .gitignore on the first run`, false);
     }
   }
   return checks;

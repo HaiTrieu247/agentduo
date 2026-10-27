@@ -22,8 +22,11 @@ describe("render", () => {
     st.humanReview = { reason: "max_review_rounds", message: "not approved after 5 rounds", fromPhase: "CODE_REVIEW", resumePhase: "IMPLEMENT", details: [], at: "now" };
     st.history.push({ step: 1, phase: "PLAN", round: 1, agent: "Codex", status: "plan created", summary: "v1", kind: "info", at: "now", artifact: null });
     st.lastImplementation = { round: 1, summary: "x", status: "completed", permissionDenials: [{ tool_name: "Bash", tool_input: { command: "curl x" } }] };
+    st.base = { commit: "a".repeat(40), tree: "t".repeat(40), head: null, branch: null };
+    st.lastSnapshot = { commit: "b".repeat(40), tree: "u".repeat(40) };
     const md = reportMarkdown(st, " app.txt | 1 +\n", review(false, [finding("F3")]), critique(false, [issue("C1")]), "/runs/run-1");
-    for (const s of ["# agentduo report — run-1", "**Status:** HUMAN_REVIEW — max_review_rounds", "1. `PLAN` r1 **Codex** — plan created: v1", "## Diff stat", "[review high] `F3`", "[permission denied] Bash", "duo resume run-1 --decision resume|revise|abort"]) {
+    for (const s of ["# agentduo report — run-1", "**Status:** HUMAN_REVIEW — max_review_rounds", "1. `PLAN` r1 **Codex** — plan created: v1", "## Diff stat", "[review high] `F3`", "[permission denied] Bash", "duo resume run-1 --decision resume|revise|abort",
+      `git diff ${"a".repeat(12)} ${"b".repeat(12)} -- .`]) {
       expect(md).toContain(s);
     }
   });

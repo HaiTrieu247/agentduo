@@ -41,6 +41,15 @@ describe("ClaudeBackend", () => {
     }
     expect((failure as AgentFailure).meta.costUsd).toBe(0.7);
     expect(() => backend.finalize(new ClaudeParser("/ws"), "garbage", "")).toThrow("did not return a result envelope");
+    const r = new ClaudeParser("/ws");
+    r.feed(JSON.stringify({ type: "assistant", message: { id: "m1", usage: { input_tokens: 10, output_tokens: 5 }, content: [] } }));
+    let crashed: unknown;
+    try {
+      backend.finalize(r, "garbage", "");
+    } catch (e) {
+      crashed = e;
+    }
+    expect((crashed as AgentFailure).meta.tokens).toBe(15);
   });
 });
 

@@ -75,7 +75,28 @@ describe("Git", () => {
     expect(await g.diffStat(base.commit, snap.commit)).toContain("a.txt");
     expect(await g.diff(base.commit, snap.commit)).not.toContain("outside.txt");
     const wholeAfter = await g.worktreeTree([], ":/");
-    expect(await g.outsideChanges(wholeBefore, wholeAfter)).toEqual([["A", "outside.txt"]]);
+    expect(await g.outsideChanges(wholeBefore, wholeAfter)).toEqual([["A", "../outside.txt"]]);
+  });
+
+  it("snapshots a subdirectory while a path elsewhere in the repository is unmerged", async () => {
+    const { repo } = newRepo();
+    mkdirSync(join(repo, "pkg"));
+    writeFileSync(join(repo, "pkg", "a.txt"), "a\n");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", "pkg");
+    git(repo, "checkout", "-q", "-b", "other");
+    writeFileSync(join(repo, "README.md"), "other\n");
+    git(repo, "commit", "-q", "-am", "other");
+    git(repo, "checkout", "-q", "main");
+    writeFileSync(join(repo, "README.md"), "main\n");
+    git(repo, "commit", "-q", "-am", "main");
+    expect(() => git(repo, "merge", "-q", "other")).toThrow();
+    expect(git(repo, "ls-files", "-u")).toContain("README.md");
+    const g = new Git(join(repo, "pkg"));
+    const base = await g.snapshot();
+    writeFileSync(join(repo, "pkg", "a.txt"), "a2\n");
+    expect(await g.nameStatus(base.tree, (await g.snapshot()).tree)).toEqual([["M", "a.txt"]]);
+    expect(git(repo, "ls-files", "-u")).toContain("README.md");
   });
 
   it("knows HEAD, branch and whether a path is a repo or ignored", async () => {

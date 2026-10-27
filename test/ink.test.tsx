@@ -119,7 +119,8 @@ describe("Ink components", () => {
 
   it("ends with a line that says how the run finished and what to do next", async () => {
     const cases: Array<[DuoEvent, string[]]> = [
-      [{ type: "run.finished", runId: "r1", phase: "DONE", reportPath: "/runs/r1/report.md", exitCode: 0 }, ["DONE", "/runs/r1/report.md"]],
+      [{ type: "run.finished", runId: "r1", phase: "DONE", reportPath: "/runs/r1/report.md", exitCode: 0, summary: "the review approved; no quality gates configured" },
+        ["DONE the review approved; no quality gates configured. Report: /runs/r1/report.md"]],
       [{ type: "run.finished", runId: "r1", phase: "INTERRUPTED", reportPath: "/x", exitCode: 130 }, ["Stopped", "duo resume r1"]],
       [{ type: "run.finished", runId: "r1", phase: "HUMAN_REVIEW", reportPath: "/x", exitCode: 2 }, ["duo resume r1 --decision resume|revise|abort"]],
       [{ type: "run.finished", runId: "r1", phase: "ABORTED", reportPath: "/x", exitCode: 3 }, ["Aborted"]],

@@ -39,6 +39,8 @@ export interface RunState {
   humanNotes: HumanNote[];
   /** Notable things the run saw but did not act on (files changed outside the workspace, permission denials…). */
   warnings: string[];
+  /** The directory the run works in; absent in runs created before v2. */
+  workspace?: string;
   costUsd: number;
   tokens: number;
   step: number;
@@ -94,9 +96,16 @@ function acquireLock(path: string, busy: (pid: number) => string): void {
   }
 }
 
+/** Creates the runs dir with a `.gitignore` of `*`, so run data stays out of git (and out of snapshots) wherever it lives. */
+export function ensureRunsDir(runsDir: string): void {
+  mkdirSync(runsDir, { recursive: true });
+  const ignore = join(runsDir, ".gitignore");
+  if (!existsSync(ignore)) writeFileSync(ignore, "*\n");
+}
+
 /** One active run per workspace: concurrent runs in one directory would review each other's edits. */
 export function acquireWorkspaceLock(runsDir: string): () => void {
-  mkdirSync(runsDir, { recursive: true });
+  ensureRunsDir(runsDir);
   const path = join(runsDir, ".lock");
   acquireLock(path, (pid) => `another agentduo run is active in this workspace (pid ${pid}); wait for it to finish or stop it first`);
   return () => {

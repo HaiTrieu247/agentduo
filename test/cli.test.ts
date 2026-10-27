@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import YAML from "yaml";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyColorPreference, isBackgroundFromPs, main, type CliIO } from "../src/cli.js";
-import { RunStore } from "../src/core/state.js";
+import { acquireWorkspaceLock, RunStore } from "../src/core/state.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
 import { testConfig, type ConfigOverrides } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
@@ -85,6 +85,66 @@ describe("cli", () => {
     expect(existsSync(join(repo, ".agentduo", "runs"))).toBe(false);
   });
 
+  it("accepts the common options before a subcommand too", async () => {
+    const init = await cli(["--dir", repo, "init"], t.path);
+    expect(init.code, init.err).toBe(0);
+    expect(existsSync(join(repo, ".agentduo", "config.yaml"))).toBe(true);
+    expect(existsSync(join(t.path, ".agentduo"))).toBe(false);
+    expect((await cli(["--dir", repo, "list"], t.path)).out).toContain(`no runs in ${join(repo, ".agentduo", "runs")}`);
+  });
+
+  it("falls back to the default runs dir when paths.runs_dir is empty", async () => {
+    mkdirSync(join(repo, ".agentduo"), { recursive: true });
+    writeFileSync(join(repo, ".agentduo", "config.yaml"), "paths:\n  runs_dir:\n");
+    expect((await cli(["list"])).out).toContain(`no runs in ${join(repo, ".agentduo", "runs")}`);
+    expect((await cli(["Fix"])).err).toContain("paths.runs_dir must be a non-empty string");
+  });
+
+  it("keeps run data out of git even without duo init", async () => {
+    const other = makeRepo(join(t.path, "bare"), { ignoreRuns: false });
+    writeConfig(other);
+    git(other, "add", "-A");
+    git(other, "commit", "-q", "-m", "config");
+    fake.setScenario(happy());
+    const r = await cli(["Make app.txt fixed"], other);
+    expect(r.code, r.err).toBe(0);
+    expect(git(other, "status", "--porcelain", "-uall")).toBe("?? app.txt");
+  });
+
+  it("leaves no run behind when another run holds the workspace", async () => {
+    writeConfig(repo, { limits: { max_review_rounds: 1 } });
+    fake.setScenario({ ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }] });
+    expect((await cli(["Make app.txt fixed"])).code).toBe(2);
+    const runsDir = join(repo, ".agentduo", "runs");
+    const latest = readFileSync(join(runsDir, "LATEST"), "utf8");
+    const store = RunStore.open(runsDir);
+    const saved = readFileSync(store.path("config.json"), "utf8");
+    const release = acquireWorkspaceLock(runsDir);
+    try {
+      const busy = await cli(["Another task"]);
+      expect([busy.code, busy.err.includes("another agentduo run is active")]).toEqual([1, true]);
+      writeConfig(repo, { limits: { max_review_rounds: 3 } });
+      expect((await cli(["resume", "--reload-config", "--decision", "resume"])).code).toBe(1);
+    } finally {
+      release();
+    }
+    expect(RunStore.list(runsDir)).toHaveLength(1);
+    expect(readFileSync(join(runsDir, "LATEST"), "utf8")).toBe(latest);
+    expect(readFileSync(store.path("config.json"), "utf8")).toBe(saved);
+  });
+
+  it("refuses to resume a run from another workspace", async () => {
+    const shared = join(t.path, "shared-runs");
+    writeConfig(repo, { limits: { max_review_rounds: 1 }, paths: { runs_dir: shared } });
+    fake.setScenario({ ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }] });
+    expect((await cli(["Make app.txt fixed"])).code).toBe(2);
+    const ws = join(repo, "pkg");
+    mkdirSync(ws);
+    writeConfig(ws, { paths: { runs_dir: shared } });
+    const r = await cli(["resume", "--decision", "abort"], ws);
+    expect([r.code, r.err.includes(`belongs to the workspace ${repo}`)]).toEqual([1, true]);
+  });
+
   it("refuses bad starts before calling any agent", async () => {
     writeConfig(repo);
     fake.setScenario(happy());
@@ -98,6 +158,8 @@ describe("cli", () => {
     expect((await cli(["stauts"])).err).toContain("did you mean 'status'");
     writeConfig(repo, { codex: { bin: join(t.path, "missing") } });
     expect((await cli(["Fix"])).err).toContain("CLI not found: codex");
+    writeFileSync(join(t.path, "a-file"), "x\n");
+    expect((await cli(["Fix", "--dir", join(t.path, "a-file")])).err).toContain("not a directory");
     expect(fake.calls()).toEqual([]);
   });
 
@@ -122,6 +184,11 @@ describe("cli", () => {
     writeFileSync(store.path("config.json"), JSON.stringify(testConfig(fake, { limits: { max_review_rounds: 1 } })));
     writeConfig(repo, { codex: { bin: join(t.path, "missing") } });
     expect((await cli(["resume", "--decision", "resume"])).code).toBe(2);
+    writeFileSync(store.path("config.json"), JSON.stringify(testConfig(fake, { codex: { bin: join(t.path, "missing") } })));
+    writeConfig(repo, { limits: { max_review_rounds: 1 } });
+    const stale = await cli(["resume", "--decision", "resume"]);
+    expect([stale.err.includes("CLI not found: codex"), stale.err.includes("--reload-config")]).toEqual([true, true]);
+    writeFileSync(store.path("config.json"), JSON.stringify(testConfig(fake, { limits: { max_review_rounds: 1 } })));
     expect((await cli(["resume", "--note", "x"])).err).toContain("--note is only accepted together with --decision");
     unlinkSync(store.path("config.json"));
     writeConfig(repo, { limits: { max_review_rounds: 1 } });
@@ -174,7 +241,9 @@ describe("cli", () => {
   it("uses the plain renderer when running in the background", async () => {
     writeConfig(repo);
     fake.setScenario(happy());
-    const r = await cli(["Make app.txt fixed"], repo, { stdout: { write: () => true, isTTY: true }, isBackground: () => true });
+    let shown = "";
+    const r = await cli(["Make app.txt fixed"], repo, { stdout: { write: (s: string) => { shown += s; }, isTTY: true }, isBackground: () => true });
     expect(r.code).toBe(0);
+    expect(shown).toContain("[DONE]");
   });
 });

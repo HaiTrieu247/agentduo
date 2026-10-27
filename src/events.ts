@@ -66,7 +66,8 @@ export type DuoEvent =
   | { type: "step.completed"; entry: HistoryEntry; durationSec: number; costUsd?: number; tokens?: number }
   | { type: "warning"; text: string }
   | { type: "human.required"; runId: string; review: HumanReview }
-  | { type: "run.finished"; runId: string; phase: "DONE" | "ABORTED" | "HUMAN_REVIEW" | "INTERRUPTED"; reportPath: string; exitCode: number };
+  /** `summary` says, on DONE, what the run actually checked ("quality gates passed and the review approved"). */
+  | { type: "run.finished"; runId: string; phase: "DONE" | "ABORTED" | "HUMAN_REVIEW" | "INTERRUPTED"; reportPath: string; exitCode: number; summary?: string };
 
 export interface Decision {
   decision: "resume" | "revise" | "abort";

@@ -18,6 +18,7 @@ const RESUME_HINTS: Record<string, string> = {
   critical_finding: "start another fix round",
   gates_failing: "start another fix round",
   implementer_blocked: "re-run this implementation round",
+  // Reasons only agentduo 0.1 runs can be waiting on; kept so those runs can still be resumed from the prompt.
   dirty_worktree: "re-run this implementation round",
   guard_violation: "accept the changes and run the gates",
 };

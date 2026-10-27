@@ -1,4 +1,4 @@
-import { chmodSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runDoctor } from "../src/core/doctor.js";
@@ -28,9 +28,35 @@ describe("runDoctor", () => {
     cfg.claude.role_args = { implementer: ["--permission-mode", "acceptEdits"] };
     const quiet = await runDoctor({ dir: repo, cfg, sources: [], runsDir: join(repo, ".agentduo", "runs") });
     expect(quiet.map((c) => c.message).join("\n")).not.toContain("implementer edits rely on");
+    cfg.claude.role_args = { implementer: ["--permission-mode=acceptEdits"] };
+    const equals = await runDoctor({ dir: repo, cfg, sources: [], runsDir: join(repo, ".agentduo", "runs") });
+    expect(equals.map((c) => c.message).join("\n")).not.toContain("implementer edits rely on");
   });
 
-  it("reports missing CLIs, missing flags and config errors, and skips the ignore check outside the workspace", async () => {
+  it("notes where a Codex implementer's write access comes from", async () => {
+    const t = tempDir();
+    dirs.push(t);
+    const repo = makeRepo(t.path);
+    const cfg = testConfig(new FakeClis(t.path));
+    cfg.agents.implementer = "codex";
+    const text = (await runDoctor({ dir: repo, cfg, sources: [], runsDir: join(repo, ".agentduo", "runs") })).map((c) => c.message).join("\n");
+    expect(text).toContain("implementer edits rely on your Codex sandbox settings");
+    expect(text).not.toContain("Claude Code permission settings");
+    cfg.codex.role_args = { implementer: ["--sandbox", "workspace-write"] };
+    const quiet = (await runDoctor({ dir: repo, cfg, sources: [], runsDir: join(repo, ".agentduo", "runs") })).map((c) => c.message).join("\n");
+    expect(quiet).not.toContain("implementer edits rely on");
+  });
+
+  it("checks a runs dir anywhere in the repository, which agentduo ignores itself", async () => {
+    const t = tempDir();
+    dirs.push(t);
+    const repo = makeRepo(t.path, { ignoreRuns: false });
+    mkdirSync(join(repo, "pkg"));
+    const checks = await runDoctor({ dir: join(repo, "pkg"), cfg: testConfig(new FakeClis(t.path)), sources: [], runsDir: join(repo, "shared-runs") });
+    expect(checks.find((c) => c.message.startsWith("../shared-runs/"))).toMatchObject({ ok: true, message: "../shared-runs/ gets its own .gitignore on the first run" });
+  });
+
+  it("reports missing CLIs, missing flags and config errors, and skips the ignore check outside the repository", async () => {
     const t = tempDir();
     dirs.push(t);
     const repo = makeRepo(t.path);

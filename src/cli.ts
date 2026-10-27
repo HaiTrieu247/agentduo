@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -109,21 +109,44 @@ function expandHome(path: string, env: NodeJS.ProcessEnv): string {
 async function prepare(io: CliIO, opts: CommonOptions): Promise<Env> {
   const workspace = resolve(io.cwd, opts.dir ?? ".");
   if (!existsSync(workspace)) throw new CliExit(EXIT.ERROR, `no such directory: ${workspace}`);
+  if (!statSync(workspace).isDirectory()) throw new CliExit(EXIT.ERROR, `not a directory: ${workspace}`);
   const git = new Git(workspace);
   const isRepo = await git.isRepo();
   const loaded = loadConfig({ dir: workspace, configPath: opts.config ? resolve(io.cwd, opts.config) : undefined, env: io.env, validate: false });
   for (const warning of loaded.warnings) io.stderr.write(`warning: ${warning}\n`);
-  const runs = expandHome(String(loaded.data.paths.runs_dir), io.env);
+  // An unusable runs_dir is rejected by validateConfig before a run; status and list fall back to the default.
+  const configured = loaded.data.paths?.runs_dir;
+  const runs = expandHome(typeof configured === "string" && configured ? configured : defaultConfig().paths.runs_dir, io.env);
   const runsDir = isAbsolute(runs) ? runs : join(workspace, runs);
   return { workspace, isRepo, git, cfg: loaded.data, sources: loaded.sources, runsDir };
 }
 
-function requireRunnable(env: Env, cfg: ConfigData, source: string, io: CliIO): void {
+/** A resumed run keeps the config it started with, so a fix made in config.yaml needs --reload-config. */
+const SAVED_CONFIG_HINT = "this run uses the config it started with; pass --reload-config to apply changes to config.yaml";
+
+function requireRunnable(env: Env, cfg: ConfigData, source: string, io: CliIO, saved = false): void {
   if (!env.isRepo) throw new CliExit(EXIT.ERROR, `${env.workspace} is not inside a git repository (run 'git init' here, or 'duo init' to be asked)`);
   validateConfig(cfg, source || undefined);
   const missing = (["codex", "claude"] as const).filter((b) => Object.values(cfg.agents).includes(b) && !resolveBinary(cfg[b].bin, b, io.env));
   if (missing.length) {
-    throw new CliExit(EXIT.ERROR, `CLI not found: ${missing.join(", ")}. Install it or set '<backend>.bin' in the config; run 'duo doctor' for details.`);
+    throw new CliExit(EXIT.ERROR, `CLI not found: ${missing.join(", ")}. Install it or set '<backend>.bin' in the config${saved ? ` (${SAVED_CONFIG_HINT})` : ""}; run 'duo doctor' for details.`);
+  }
+}
+
+function lockWorkspace(runsDir: string): () => void {
+  try {
+    return acquireWorkspaceLock(runsDir);
+  } catch (e) {
+    if (e instanceof LockError) throw new CliExit(EXIT.ERROR, e.message);
+    throw e;
+  }
+}
+
+function samePath(a: string, b: string): boolean {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return resolve(a) === resolve(b);
   }
 }
 
@@ -160,7 +183,14 @@ async function readView(kind: ViewKind, store: RunStore, st: RunState, git: Git)
   }
 }
 
+/** Runs the workflow; the caller holds the workspace lock. */
 async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, state: RunState, opts: CommonOptions, decision?: Decision): Promise<number> {
+  try {
+    store.lock();
+  } catch (e) {
+    if (e instanceof LockError) throw new CliExit(EXIT.ERROR, e.message);
+    throw e;
+  }
   const bus = new EventBus();
   // A backgrounded process that touches the terminal's raw mode gets stopped by the shell, so it renders plain.
   const plain = !!opts.plain || io.env.CI === "true" || !io.stdout.isTTY || !!io.isBackground?.();
@@ -197,26 +227,33 @@ async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, st
   }
   workflow = new Workflow({ cfg, repo: env.workspace, store, state, bus, decider });
   const offSignal = io.onSignal?.(onInterrupt);
-  let locked = false;
-  let releaseWorkspace: (() => void) | undefined;
   try {
-    releaseWorkspace = acquireWorkspaceLock(env.runsDir);
-    store.lock();
-    locked = true;
     if (decision) await workflow.applyDecision(decision.decision, decision.note);
     return await workflow.run();
   } catch (e) {
-    if (e instanceof LockError || e instanceof DecisionError) throw new CliExit(EXIT.ERROR, e.message);
+    if (e instanceof DecisionError) throw new CliExit(EXIT.ERROR, e.message);
     throw e;
   } finally {
-    if (locked) store.unlock();
-    releaseWorkspace?.();
+    store.unlock();
     offSignal?.();
     await closeUi();
   }
 }
 
 const COMMANDS = ["run", "resume", "status", "list", "doctor", "init"];
+const COMMON_KEYS = ["dir", "config", "plain", "verbose", "color"] as const;
+
+/** With positional options, `duo --dir X list` parses --dir as the root's option; give it to the subcommand unless it set its own. */
+function withGlobals<T extends CommonOptions>(cmd: Command): T {
+  const opts = { ...cmd.opts() } as Record<string, unknown>;
+  const root = cmd.parent;
+  if (root) {
+    for (const key of COMMON_KEYS) {
+      if (root.getOptionValueSource(key) === "cli" && cmd.getOptionValueSource(key) !== "cli") opts[key] = root.getOptionValue(key);
+    }
+  }
+  return opts as T;
+}
 
 function editDistance(a: string, b: string): number {
   const row = Array.from({ length: b.length + 1 }, (_, i) => i);
@@ -256,9 +293,17 @@ async function runCommand(io: CliIO, words: string[], opts: RunOptions, explicit
   if (!task) throw new CliExit(EXIT.ERROR, 'a task description is required, e.g. duo "Add JWT auth" (other commands: resume, status, list, doctor, init)');
   const env = await prepare(io, opts);
   requireRunnable(env, env.cfg, env.sources.join(", "), io);
-  const { store, state } = RunStore.create(env.runsDir, task, env.cfg.limits);
-  store.writeJson("config.json", env.cfg);
-  return execute(io, env, env.cfg, store, state, opts);
+  // Lock first: a start refused because another run is active must not leave a run behind or move LATEST.
+  const release = lockWorkspace(env.runsDir);
+  try {
+    const { store, state } = RunStore.create(env.runsDir, task, env.cfg.limits);
+    state.workspace = env.workspace;
+    store.saveState(state);
+    store.writeJson("config.json", env.cfg);
+    return await execute(io, env, env.cfg, store, state, opts);
+  } finally {
+    release();
+  }
 }
 
 async function resumeCommand(io: CliIO, runId: string | undefined, opts: ResumeOptions): Promise<number> {
@@ -266,12 +311,23 @@ async function resumeCommand(io: CliIO, runId: string | undefined, opts: ResumeO
   const env = await prepare(io, opts);
   if (!env.isRepo) requireRunnable(env, env.cfg, "", io);
   const store = openStore(env.runsDir, runId);
-  // A run keeps the config it started with, unless asked to pick up the current one.
-  const useSaved = !opts.reloadConfig && store.exists("config.json");
-  const cfg = useSaved ? configFromSaved(store.readJson("config.json")) : env.cfg;
-  requireRunnable(env, cfg, useSaved ? store.path("config.json") : env.sources.join(", "), io);
-  if (!useSaved) store.writeJson("config.json", cfg);
-  return execute(io, env, cfg, store, store.loadState(), opts, opts.decision ? { decision: opts.decision, note: opts.note } : undefined);
+  const state = store.loadState();
+  // A shared runs_dir can hold runs of other workspaces; running their agents here would edit the wrong tree.
+  if (state.workspace && !samePath(state.workspace, env.workspace)) {
+    throw new CliExit(EXIT.ERROR, `run ${state.taskId} belongs to the workspace ${state.workspace}; resume it from there (or pass --dir)`);
+  }
+  const release = lockWorkspace(env.runsDir);
+  try {
+    // A run keeps the config it started with, unless asked to pick up the current one.
+    const useSaved = !opts.reloadConfig && store.exists("config.json");
+    const cfg = useSaved ? configFromSaved(store.readJson("config.json")) : env.cfg;
+    requireRunnable(env, cfg, useSaved ? store.path("config.json") : env.sources.join(", "), io, useSaved);
+    if (!useSaved) store.writeJson("config.json", cfg);
+    state.workspace ??= env.workspace;
+    return await execute(io, env, cfg, store, state, opts, opts.decision ? { decision: opts.decision, note: opts.note } : undefined);
+  } finally {
+    release();
+  }
 }
 
 async function statusCommand(io: CliIO, runId: string | undefined, opts: CommonOptions): Promise<number> {
@@ -377,31 +433,31 @@ export async function main(argv: string[], io: CliIO = processIO()): Promise<num
       exitCode = await runCommand(io, words, opts);
     });
   common(program.command("run").description("start a new run").argument("<task...>").option("--task-file <file>", "read the task description from a file"))
-    .action(async (words: string[], opts: RunOptions) => {
-      exitCode = await runCommand(io, words, opts, true);
+    .action(async (words: string[], _opts: RunOptions, cmd: Command) => {
+      exitCode = await runCommand(io, words, withGlobals<RunOptions>(cmd), true);
     });
   common(program.command("resume").description("continue a run (default: the latest), optionally answering a pending decision").argument("[runId]")
     .addOption(new Option("--decision <decision>", "answer a run waiting in HUMAN_REVIEW").choices(["resume", "revise", "abort"]))
     .option("--note <text>", "instruction for the agents, recorded with the decision")
     .option("--reload-config", "use the current config instead of the one the run started with"))
-    .action(async (runId: string | undefined, opts: ResumeOptions) => {
-      exitCode = await resumeCommand(io, runId, opts);
+    .action(async (runId: string | undefined, _opts: ResumeOptions, cmd: Command) => {
+      exitCode = await resumeCommand(io, runId, withGlobals<ResumeOptions>(cmd));
     });
   common(program.command("status").description("show a run's state").argument("[runId]"))
-    .action(async (runId: string | undefined, opts: CommonOptions) => {
-      exitCode = await statusCommand(io, runId, opts);
+    .action(async (runId: string | undefined, _opts: CommonOptions, cmd: Command) => {
+      exitCode = await statusCommand(io, runId, withGlobals(cmd));
     });
   common(program.command("list").description("list runs in this workspace"))
-    .action(async (opts: CommonOptions) => {
-      exitCode = await listCommand(io, opts);
+    .action(async (_opts: CommonOptions, cmd: Command) => {
+      exitCode = await listCommand(io, withGlobals(cmd));
     });
   common(program.command("doctor").description("check CLIs, config and workspace (no agent calls)"))
-    .action(async (opts: CommonOptions) => {
-      exitCode = await doctorCommand(io, opts);
+    .action(async (_opts: CommonOptions, cmd: Command) => {
+      exitCode = await doctorCommand(io, withGlobals(cmd));
     });
   common(program.command("init").description("create .agentduo/config.yaml (and offer git init)"))
-    .action(async (opts: CommonOptions) => {
-      exitCode = await initCommand(io, opts);
+    .action(async (_opts: CommonOptions, cmd: Command) => {
+      exitCode = await initCommand(io, withGlobals(cmd));
     });
 
   try {

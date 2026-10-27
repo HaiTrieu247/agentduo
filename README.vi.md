@@ -23,14 +23,20 @@ Yêu cầu: Node.js ≥ 22.12, git, Codex CLI và Claude Code. Workspace phải 
 - `.agentduo/` nằm ở đó;
 - diff gửi cho reviewer chỉ gồm thay đổi trong thư mục đó.
 
-Nếu agent sửa file ngoài workspace (trong cùng repo), agentduo cảnh báo trên màn hình và trong report, nhưng không dừng run.
+Nếu agent sửa file ngoài workspace (trong cùng repo), agentduo cảnh báo trên màn hình và trong report, với đường dẫn tính từ workspace (`../shared/x.ts`), nhưng không dừng run.
+
+Thư mục runs có `.gitignore` riêng, nên dữ liệu run không lọt vào `git status` hay commit, kể cả khi bạn chưa chạy `duo init`.
 
 ## Quyền
 
 agentduo chỉ truyền các flag giao thức. Với Claude, nó có thêm `--permission-prompts none`, flag này không cấp quyền gì.
 
-- **Claude Code** lấy quyền từ settings của bạn. Khi chạy không tương tác, Claude chỉ sửa được file nếu settings cho phép, ví dụ `"permissions": { "defaultMode": "acceptEdits" }`.
-- **Codex** lấy quyền từ `~/.codex/config.toml`.
+- **Claude Code** lấy quyền từ settings của bạn. Khi chạy không tương tác, Claude chỉ dùng được tool mà settings cho phép:
+  - `"permissions": { "defaultMode": "acceptEdits" }` cho phép sửa file, nhưng không cho chạy lệnh;
+  - muốn chạy lệnh thì thêm allow rule, ví dụ `"permissions": { "allow": ["Bash(npm test:*)"] }`. Khi không có gate, implementer tự chạy test của dự án, nên hãy cho phép các lệnh đó.
+
+  Lần gọi tool nào bị từ chối sẽ hiện `⊘ denied`, kèm một cảnh báo ghi rõ tên tool.
+- **Codex** lấy quyền từ `~/.codex/config.toml`. Theo mặc định `codex exec` chỉ được đọc. Nếu Codex làm implementer, nó cần `sandbox_mode = "workspace-write"` hoặc `codex.role_args.implementer: [--sandbox, workspace-write]`.
 - **Muốn đặt riêng cho từng vai trò** khi chạy qua agentduo, dùng `role_args`:
 
 ```yaml
@@ -57,6 +63,14 @@ Giao diện:
 - **Trong terminal:** giao diện live. Phím `v` bật/tắt chi tiết, `q` dừng sau bước hiện tại, `Ctrl-C` dừng ngay. Tại menu quyết định, `Ctrl-C` nghĩa là "Để sau".
 - **Log dạng dòng:** khi có `--plain`, khi chạy trong CI, khi stdout không phải TTY, hoặc khi chạy nền (`duo … &`).
 
+Mọi lệnh đều nhận `--dir`, `--config`, `--plain`, `-v` và `--no-color`, đặt trước hay sau tên lệnh đều được.
+
+## Gộp config
+
+Thứ tự gộp là: mặc định, rồi `~/.config/agentduo/config.yaml`, rồi `.agentduo/config.yaml` của workspace (hoặc `--config`). Nguồn sau thắng nguồn trước.
+- **Mapping** được gộp theo từng khoá, và `role_args` được gộp theo từng vai trò.
+- **List** (`args`, `gates`, `blocking_severities`) thay hẳn giá trị trước. Ví dụ, `claude.args: [--strict-mcp-config]` sẽ bỏ mất `--no-session-persistence` mặc định nếu bạn không ghi lại nó.
+
 ## Quality gates
 
 Gate là tuỳ chọn. Mặc định không có gate: Claude tự chạy test theo config của nó, và run DONE khi Codex approve. Nếu bạn khai báo `gates`, agentduo chạy chúng sau mỗi vòng implement và chuyển kết quả cho Codex. `duo init` gợi ý sẵn các gate tìm được, dưới dạng comment.
@@ -73,7 +87,12 @@ Gate là tuỳ chọn. Mặc định không có gate: Claude tự chạy test th
 
 ## Xử lý sự cố
 
-- **Mọi lần sửa file đều bị từ chối:** cho phép sửa trong settings của Claude Code, hoặc thêm `claude.role_args.implementer: [--permission-mode, acceptEdits]`.
+- **Tool bị từ chối:** cảnh báo sẽ ghi tên tool.
+  - Sửa file (`Edit`, `Write`): đặt `permissions.defaultMode` thành `"acceptEdits"` trong settings của Claude Code, hoặc thêm `claude.role_args.implementer: [--permission-mode, acceptEdits]`.
+  - Chạy lệnh (`Bash`): thêm allow rule, ví dụ `"Bash(npm test:*)"`.
+  - Nếu Codex làm implementer, xem mục **Codex** ở phần [Quyền](#quyền).
+- **Sửa `config.yaml` rồi `duo resume` mà không có tác dụng:** run giữ config lúc nó bắt đầu. Dùng `duo resume --reload-config` để áp dụng config mới. Thay đổi trong settings của Claude Code hay Codex thì không cần lệnh này.
+- **Task bắt đầu bằng `-`** bị hiểu nhầm là option. Đặt `--` trước nó: `duo -- "-x bị lỗi"`.
 - **Terminal hiển thị lạ sau khi agentduo bị `kill -9`:** gõ `reset`.
 - **Giảm chi phí:** đặt `claude.args: [--strict-mcp-config, --no-session-persistence]` để agentduo không nạp các MCP server của bạn.
 - **Windows** ở mức thử nghiệm.

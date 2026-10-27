@@ -57,7 +57,7 @@ duo "Add JWT authentication with refresh tokens"
 - `.agentduo/` (config and runs) lives there;
 - the diff sent to the reviewer only contains changes inside it.
 
-If an agent changes files outside the workspace (elsewhere in the same repository), agentduo warns on screen and in the report, but does not stop the run.
+If an agent changes files outside the workspace (elsewhere in the same repository), agentduo warns on screen and in the report, with paths relative to the workspace (`../shared/x.ts`), but does not stop the run.
 
 ## Permissions and scope
 
@@ -65,15 +65,18 @@ agentduo passes only the flags its protocol needs: streaming JSON, the output sc
 
 What each agent may do is up to its own configuration:
 
-- **Claude Code**: your settings (`~/.claude/settings.json`, `.claude/settings.json`). In non-interactive mode Claude can only edit files if your settings allow it. One way is `"permissions": { "defaultMode": "acceptEdits" }`; another is allow rules. Denied tool calls appear as `⊘ denied`, together with a hint.
-- **Codex**: `~/.codex/config.toml` (for example `sandbox_mode`).
+- **Claude Code**: your settings (`~/.claude/settings.json`, `.claude/settings.json`). In non-interactive mode Claude can only use a tool that your settings allow:
+  - `"permissions": { "defaultMode": "acceptEdits" }` allows edits, but not commands;
+  - allow rules allow commands, for example `"permissions": { "allow": ["Bash(npm test:*)"] }`. Without gates the implementer runs the project's checks itself, so allow those commands.
+
+  Denied tool calls appear as `⊘ denied`, followed by a warning that names the tools.
+- **Codex**: `~/.codex/config.toml` (for example `sandbox_mode`). `codex exec` is read-only unless configured otherwise, so a Codex implementer needs `sandbox_mode = "workspace-write"` or `codex.role_args.implementer: [--sandbox, workspace-write]`.
 - **Per role, only for agentduo runs**, add flags in `.agentduo/config.yaml`:
 
 ```yaml
 claude:
   role_args:
     implementer: [--permission-mode, acceptEdits]
-    plan_reviewer: [--permission-mode, plan]
 codex:
   role_args:
     code_reviewer: [--sandbox, read-only]
@@ -95,7 +98,7 @@ Nothing is ever committed or pushed by agentduo: review the changes with `git di
 | `duo doctor` | Check the CLIs and config without calling models |
 | `duo init` | Create `.agentduo/config.yaml` and `.agentduo/.gitignore`, and offer `git init` |
 
-Every command also takes `--dir PATH`, `--config PATH`, `--plain`, `-v/--verbose` and `--no-color`. The UI switches to plain timestamped lines with `--plain`, in CI, when stdout is not a terminal, or when the process runs in the background (`duo … &`).
+Every command also takes `--dir PATH`, `--config PATH`, `--plain`, `-v/--verbose` and `--no-color`, before or after the command name. The UI switches to plain timestamped lines with `--plain`, in CI, when stdout is not a terminal, or when the process runs in the background (`duo … &`).
 
 ## When a run needs you
 
@@ -114,6 +117,9 @@ In a terminal, agentduo shows the reason and a menu: Resume, Revise (with a note
 ## Configuration
 
 Settings are merged in this order, later sources winning: built-in defaults, then `~/.config/agentduo/config.yaml` (or `$XDG_CONFIG_HOME/agentduo/` or `%APPDATA%\agentduo\` on Windows), then `<workspace>/.agentduo/config.yaml` or `--config`. A misspelled key produces a warning. A value of the wrong type produces an error that names the file.
+
+- **Mappings** are merged key by key, and `role_args` role by role.
+- **Lists** (`args`, `gates`, `blocking_severities`) replace the earlier value. `claude.args: [--strict-mcp-config]` therefore drops the default `--no-session-persistence` unless you list it too.
 
 ```yaml
 agents: { planner: codex, plan_reviewer: claude, implementer: claude, code_reviewer: codex }
@@ -138,6 +144,8 @@ Everything about a run lives in `.agentduo/runs/<run-id>/`:
 - the plans, the critiques, and every agent's JSON (with task id, round, timestamp, git SHA and plan version);
 - `logs/`: the prompt, the command line, the raw event stream and stderr of every CLI call.
 
+The runs directory carries its own `.gitignore`, so run data stays out of `git status` and out of commits, even without `duo init`.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -150,7 +158,12 @@ Everything about a run lives in `.agentduo/runs/<run-id>/`:
 
 ## Troubleshooting
 
-- **Every edit is denied.** Allow edits in your Claude Code settings, or add `claude.role_args.implementer: [--permission-mode, acceptEdits]`.
+- **Tool calls are denied.** The warning names the tools.
+  - Edits (`Edit`, `Write`): set `permissions.defaultMode` to `"acceptEdits"` in your Claude Code settings, or add `claude.role_args.implementer: [--permission-mode, acceptEdits]`.
+  - Commands (`Bash`): add allow rules such as `"Bash(npm test:*)"`.
+  - With a Codex implementer, see **Codex** under [Permissions and scope](#permissions-and-scope).
+- **A config change has no effect on `duo resume`.** A run keeps the config it started with. Use `duo resume --reload-config` to apply your `config.yaml` changes. Changes to Claude Code or Codex settings apply without it.
+- **A task that starts with `-`** is read as an option. Put `--` before it: `duo -- "-x is broken"`.
 - **The terminal behaves oddly after agentduo was killed with `kill -9`.** Run `reset`. A SIGKILL gives no process a chance to restore the terminal.
 - **Costs.** `claude.args: [--strict-mcp-config, --no-session-persistence]` skips loading your MCP servers for agentduo runs, which makes each call noticeably cheaper. `claude.max_budget_usd` caps the cost of each call.
 - **Windows** is experimental and not covered by CI.

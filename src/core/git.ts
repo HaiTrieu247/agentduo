@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 
 export class GitError extends Error {
   override name = "GitError";
@@ -100,11 +100,11 @@ export class Git {
     try {
       // Seeding from the real index keeps its stat data, so `git add -A` only rehashes files that changed.
       const real = join((await this.run(["rev-parse", "--absolute-git-dir"])).stdout.trim(), "index");
-      if (existsSync(real)) {
-        await copyFile(real, index);
-      } else {
+      if (existsSync(real)) await copyFile(real, index);
+      // An unmerged path outside the scope would survive `git add` and make write-tree fail, so start from HEAD then.
+      if (!existsSync(real) || (await this.run(["ls-files", "-u", "--", ":/"], { env })).stdout) {
         const head = await this.head();
-        if (head) await this.run(["read-tree", head], { env });
+        await this.run(head ? ["read-tree", head] : ["read-tree", "--empty"], { env });
       }
       await this.run(["add", "-A", ...(await this.pathspec(exclude, scope))], { env });
       return (await this.run(["write-tree"], { env })).stdout.trim();
@@ -121,14 +121,23 @@ export class Git {
     return { commit, tree };
   }
 
+  /** The snapshot a ref points at, or null when the ref does not exist. */
+  async readRef(ref: string): Promise<Snapshot | null> {
+    const commit = (await this.run(["rev-parse", "--verify", "-q", `${ref}^{commit}`], { check: false })).stdout.trim();
+    if (!commit) return null;
+    return { commit, tree: (await this.run(["rev-parse", `${commit}^{tree}`])).stdout.trim() };
+  }
+
   /** Changes inside the workspace, with paths relative to it. */
   async nameStatus(a: string, b: string): Promise<Change[]> {
     return parseNameStatusZ((await this.run(["diff", "--no-renames", "--relative", "--name-status", "-z", a, b, "--", "."])).stdout);
   }
 
-  /** Changes outside the workspace, with paths relative to the repository root. */
+  /** Changes outside the workspace, with paths relative to it ("../shared/x.ts"). */
   async outsideChanges(a: string, b: string): Promise<Change[]> {
-    return parseNameStatusZ((await this.run(["diff", "--no-renames", "--name-status", "-z", a, b, "--", ":/", ":(exclude)."])).stdout);
+    const prefix = await this.prefix();
+    const changes = parseNameStatusZ((await this.run(["diff", "--no-renames", "--name-status", "-z", a, b, "--", ":/", ":(exclude)."])).stdout);
+    return changes.map(([status, path]) => [status, posix.relative(prefix, path)]);
   }
 
   async diff(a: string, b: string): Promise<string> {

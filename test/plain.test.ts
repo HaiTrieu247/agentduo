@@ -16,7 +16,7 @@ const EVENTS: DuoEvent[] = [
   { type: "gate.completed", name: "tests", command: "npm test", passed: false, exitCode: 1 },
   { type: "warning", text: "something odd" },
   { type: "human.required", runId: "run-1", review },
-  { type: "run.finished", runId: "run-1", phase: "DONE", reportPath: "/r/report.md", exitCode: 0 },
+  { type: "run.finished", runId: "run-1", phase: "DONE", reportPath: "/r/report.md", exitCode: 0, summary: "the review approved; no quality gates configured" },
 ];
 
 function render(verbose: boolean, color = false): string {
@@ -34,7 +34,8 @@ describe("plain renderer", () => {
     expect(text.split("\n")).toContain(`${" ".repeat(40)}- [high] C1 problem`);
     for (const s of ["agentduo 0.1.0 · run run-1", "✓ exec  cat README.md", "↻ retry 2/2: output is not valid JSON", "Codex → Claude  Plan v1",
       "- [high] C1 problem", "● plan created: v1 (32s · 1k tok)", "✗ gate tests (exit 1)", "warning: something odd",
-      "⚠ HUMAN_REVIEW needed (max_review_rounds): not approved", "    - F1 bad", "duo resume run-1 --decision resume|revise|abort", "[DONE]"]) {
+      "⚠ HUMAN_REVIEW needed (max_review_rounds): not approved", "    - F1 bad", "duo resume run-1 --decision resume|revise|abort",
+      "[DONE] the review approved; no quality gates configured. Report: /r/report.md"]) {
       expect(text).toContain(s);
     }
     expect(text).not.toContain("thinking");

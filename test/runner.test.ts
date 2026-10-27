@@ -99,7 +99,10 @@ describe("AgentRunner", () => {
   it("counts Claude tokens, also for an interrupted attempt", async () => {
     fake.setScenario({ implementer: [{ activities: [{ tool: "Read", input: { file_path: "x" } }], sleep: 5000, output: {} }] });
     const controller = new AbortController();
-    setTimeout(() => controller.abort(), 600);
+    // Abort once the usage has streamed in; a fixed delay races the agent's startup on a busy machine.
+    bus.on((e) => {
+      if (e.type === "agent.usage" && e.tokens) controller.abort();
+    });
     const r = await runner().call({ role: "implementer", agentRole: "implementer", prompt: prompt("implementer"), schemaName: "implementation", logPrefix: "012", signal: controller.signal });
     expect(r).toMatchObject({ interrupted: true, tokens: 15 });
   });

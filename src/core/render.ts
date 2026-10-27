@@ -64,7 +64,7 @@ export function reportMarkdown(st: RunState, diffStat: string, lastReview: Revie
     "- **Run directory:** `" + runDir + "`",
   ];
   if (st.base && st.lastSnapshot) {
-    lines.push("- **Diff:** `git diff " + st.base.commit.slice(0, 12) + " " + st.lastSnapshot.commit.slice(0, 12) + "` (changes are left uncommitted in your working tree)");
+    lines.push("- **Diff:** `git diff " + st.base.commit.slice(0, 12) + " " + st.lastSnapshot.commit.slice(0, 12) + " -- .` (run it in the workspace; changes are left uncommitted in your working tree)");
   }
   lines.push("\n## Timeline");
   for (const h of st.history) lines.push(`${h.step}. \`${h.phase}\` r${h.round} **${h.agent}** — ${h.status}: ${h.summary}`);

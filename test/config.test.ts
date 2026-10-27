@@ -57,6 +57,13 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ dir: badArgs.dir, env: badArgs.env })).toThrow("claude.role_args.implementer must be a list of strings");
   });
 
+  it("merges role_args from several files role by role", () => {
+    const { dir, env } = setup("claude:\n  role_args:\n    plan_reviewer: [--model, haiku]\n", "claude:\n  role_args:\n    implementer: [--permission-mode, acceptEdits]\n");
+    expect(loadConfig({ dir, env }).data.claude.role_args).toEqual({
+      implementer: ["--permission-mode", "acceptEdits"], plan_reviewer: ["--model", "haiku"],
+    });
+  });
+
   it("keeps defaults when a section or list is present but empty", () => {
     const { dir, env } = setup("codex:\nclaude:\n  args:\ngates:\n");
     const { data } = loadConfig({ dir, env });

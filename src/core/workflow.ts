@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve } from "node:path";
 import { AgentRunner, type AgentResult } from "../agents/runner.js";
 import type { SchemaName } from "../agents/schema.js";
+import type { PermissionDenial } from "../agents/types.js";
 import type { Decider, DuoEvent, EventBus, HistoryEntry, Message, Party, Phase, Role } from "../events.js";
-import type { AgentRole, ConfigData } from "./config.js";
+import type { AgentRole, Backend, ConfigData } from "./config.js";
 import { GatesInterrupted, requiredPassed, runGates, type GateResult } from "./gates.js";
 import { Git, type Change } from "./git.js";
 import type { Approval, Critique, Finding, Implementation, Issue, Plan, Review } from "./outputs.js";
@@ -29,6 +30,24 @@ const ROLE_NAMES: Record<Role, string> = {
 };
 const SEVERITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 const MAX_WARNINGS = 50;
+
+const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+
+/** Names what was denied and where to allow it; edits and other tools are allowed in different ways. */
+export function denialHint(backend: Backend, denials: PermissionDenial[]): string {
+  const counts = new Map<string, number>();
+  for (const d of denials) counts.set(d.tool_name || "unknown tool", (counts.get(d.tool_name || "unknown tool") ?? 0) + 1);
+  const tools = [...counts].map(([name, n]) => (n > 1 ? `${name} ×${n}` : name)).join(", ");
+  const head = `${backend === "claude" ? "Claude" : "Codex"} was denied ${denials.length} tool call(s) (${tools})`;
+  const reload = "a resumed run picks up config changes only with --reload-config";
+  if (backend !== "claude") return `${head}; allow them in your Codex configuration or via codex.role_args.implementer (${reload})`;
+  const names = [...counts.keys()];
+  const others = names.filter((n) => !EDIT_TOOLS.has(n));
+  const ways: string[] = [];
+  if (names.some((n) => EDIT_TOOLS.has(n))) ways.push('permissions.defaultMode "acceptEdits" for edits');
+  if (others.length) ways.push(`permissions.allow rules for ${others.join(", ")}${others.includes("Bash") ? ' (e.g. "Bash(npm test:*)")' : ""}`);
+  return `${head}; allow them in your Claude Code settings (${ways.join("; ")}) or via claude.role_args.implementer (${reload})`;
+}
 
 class Interrupted extends Error {}
 
@@ -164,8 +183,18 @@ export class Workflow {
     if (phase !== "INTERRUPTED") this.state.inProgress = null;
     this.save();
     const reportPath = await this.writeReport();
-    this.emit({ type: "run.finished", runId: this.state.taskId, phase, reportPath, exitCode });
+    this.emit({ type: "run.finished", runId: this.state.taskId, phase, reportPath, exitCode, ...(phase === "DONE" ? { summary: this.doneSummary() } : {}) });
     return exitCode;
+  }
+
+  /** What DONE rests on: with no gates or with approval not required, "quality gates passed and the review approved" would overclaim. */
+  private doneSummary(): string {
+    const { cfg, store } = this.o;
+    const approved = store.exists("review.json") && store.readJson<{ output: Review }>("review.json").output.approved;
+    const review = approved ? "the review approved" : "the review did not approve (require_codex_approval is off)";
+    if (!cfg.gates.length) return `${review}; no quality gates configured`;
+    const gates = requiredPassed(this.state.lastGates ?? []) ? "quality gates passed" : "required gates failing (require_tests_pass is off)";
+    return `${gates} and ${review}`;
   }
 
   // --------------------------------------------------------------- helpers
@@ -177,7 +206,14 @@ export class Workflow {
   private warn(text: string): void {
     const st = this.state;
     st.warnings ??= [];
-    if (st.warnings.length < MAX_WARNINGS) st.warnings.push(text);
+    if (st.warnings.length < MAX_WARNINGS - 1) {
+      st.warnings.push(text);
+    } else {
+      // The last slot counts what did not fit; every warning still reaches the screen.
+      const counted = st.warnings.length === MAX_WARNINGS ? /^… (\d+) more/.exec(st.warnings[MAX_WARNINGS - 1]!) : null;
+      const dropped = st.warnings.length === MAX_WARNINGS ? (counted ? Number(counted[1]) : 1) : 0;
+      st.warnings[MAX_WARNINGS - 1] = `… ${dropped + 1} more warning(s) not stored`;
+    }
     this.emit({ type: "warning", text });
   }
 
@@ -460,7 +496,9 @@ export class Workflow {
       st.implRound = Math.max(st.implRound, 1);
     }
     const k = st.implRound;
-    const pre = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}-pre`), `agentduo ${st.taskId}: before implementation round ${k}`);
+    // A round re-run after an error or interrupt keeps its first starting point, so its record covers every attempt.
+    const preRef = this.ref(`impl-r${k}-pre`);
+    const pre = (await this.git.readRef(preRef)) ?? await this.git.snapshot(this.snapshotExclude, preRef, `agentduo ${st.taskId}: before implementation round ${k}`);
     const beforeOutside = await this.outsideTree();
     const review = store.exists("review.json") ? store.readJson<{ output: Review }>("review.json").output : null;
     const failed = k > 1 ? (st.lastGates ?? []).filter((g) => !g.passed) : [];
@@ -485,11 +523,7 @@ export class Workflow {
       pre_snapshot: pre.commit, snapshot: post.commit, changes: changes.map(([status, path]) => ({ status, path })), unanswered_findings: missing,
     }));
     st.lastImplementation = { round: k, summary: report?.summary ?? null, status: report?.status ?? null, permissionDenials: denials };
-    if (denials.length) {
-      this.warn(cfg.agents.implementer === "claude"
-        ? `Claude was denied ${denials.length} tool call(s); allow them in your Claude Code settings (e.g. permissions.defaultMode "acceptEdits" or allow rules) or via claude.role_args.implementer`
-        : `Codex was denied ${denials.length} tool call(s); allow them in your Codex configuration or via codex.role_args.implementer`);
-    }
+    if (denials.length) this.warn(denialHint(cfg.agents.implementer, denials));
     if (!res.ok || !report) {
       this.escalate("agent_error", `implementer (${res.backend}) failed after ${res.attempts} attempt(s): ${res.error}`, "IMPLEMENT");
       return;

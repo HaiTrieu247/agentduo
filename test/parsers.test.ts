@@ -130,6 +130,18 @@ describe("token accounting", () => {
     expect(events.filter((e) => e.type === "usage").map((e) => (e.type === "usage" ? e.tokens : 0))).toEqual([1115, 1117]);
     expect(new CodexParser().usage()).toEqual({ tokens: undefined });
   });
+
+  it("takes Claude's final count from the result envelope, since the stream reports output tokens only as each message starts", () => {
+    const p = new ClaudeParser("/repo");
+    const lines = fixture("claude-implement-stream.jsonl");
+    const isResult = (l: string) => JSON.parse(l).type === "result";
+    feedAll(p, lines.filter((l) => !isResult(l)));
+    expect(p.usage().tokens).toBe(218334);
+    const events = feedAll(p, lines.filter(isResult));
+    expect(p.usage().tokens).toBe(220122);
+    expect(events.at(-1)).toMatchObject({ type: "usage", tokens: 220122 });
+    expect(p.result?.permission_denials).toHaveLength(2);
+  });
 });
 
 describe("extractJson", () => {

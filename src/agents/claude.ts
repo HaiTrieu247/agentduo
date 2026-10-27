@@ -13,13 +13,19 @@ const countLines = (text: unknown): number =>
 
 type Block = Record<string, unknown> & { type?: unknown };
 
+const USAGE_FIELDS = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"];
+const sumUsage = (u: Record<string, unknown>) => USAGE_FIELDS.reduce((sum, k) => sum + (Number(u[k]) || 0), 0);
+
 export class ClaudeParser implements StreamParser {
   result: Record<string, any> | null = null;
   private readonly tools = new Map<string, Activity>();
   private readonly messageTokens = new Map<string, number>();
 
+  /** The result envelope's total; the streamed per-message usage undercounts output (it is reported as each message starts). */
+  private resultTokens: number | undefined;
+
   usage(): { tokens?: number; costUsd?: number } {
-    const tokens = [...this.messageTokens.values()].reduce((a, b) => a + b, 0);
+    const tokens = this.resultTokens ?? [...this.messageTokens.values()].reduce((a, b) => a + b, 0);
     const cost = this.result?.total_cost_usd;
     return { tokens: tokens || undefined, costUsd: typeof cost === "number" ? cost : undefined };
   }
@@ -28,7 +34,7 @@ export class ClaudeParser implements StreamParser {
   private trackUsage(message: Record<string, any>): ParsedEvent[] {
     const u = message?.usage;
     if (!u || typeof u !== "object" || !message.id) return [];
-    const n = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"].reduce((sum, k) => sum + (Number(u[k]) || 0), 0);
+    const n = sumUsage(u);
     if (this.messageTokens.get(String(message.id)) === n) return [];
     this.messageTokens.set(String(message.id), n);
     return [{ type: "usage", tokens: this.usage().tokens }];
@@ -82,7 +88,14 @@ export class ClaudeParser implements StreamParser {
         out.push({ type: "activity", activity: { ...activity } });
       }
     }
-    if (typeof event.total_cost_usd === "number") out.push({ type: "usage", costUsd: event.total_cost_usd });
+    if (event.usage && typeof event.usage === "object") this.resultTokens = sumUsage(event.usage) || undefined;
+    if (typeof event.total_cost_usd === "number" || this.resultTokens) {
+      out.push({
+        type: "usage",
+        ...(typeof event.total_cost_usd === "number" ? { costUsd: event.total_cost_usd } : {}),
+        ...(this.resultTokens ? { tokens: this.resultTokens } : {}),
+      });
+    }
     return out;
   }
 
@@ -163,7 +176,8 @@ export class ClaudeBackend implements AgentBackend {
         // handled below
       }
     }
-    if (!envelope) throw new AgentFailure(`claude did not return a result envelope: ${stdout.trim().slice(0, 300)}`);
+    // Without an envelope (a crash), the streamed usage is all we know of what the attempt cost.
+    if (!envelope) throw new AgentFailure(`claude did not return a result envelope: ${stdout.trim().slice(0, 300)}`, { tokens: (parser as ClaudeParser).usage?.().tokens });
     const meta: AgentMeta = {
       costUsd: typeof envelope.total_cost_usd === "number" ? envelope.total_cost_usd : undefined,
       tokens: (parser as ClaudeParser).usage?.().tokens,

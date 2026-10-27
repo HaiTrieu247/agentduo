@@ -36,7 +36,7 @@ export function attachPlainRenderer(bus: EventBus, out: TextSink, o: PlainOption
   return bus.on((e: DuoEvent) => {
     switch (e.type) {
       case "run.started":
-        out.write(`${paint("bold", `agentduo ${o.version} · run ${e.runId}`)}\n  repo: ${e.repo}\n  run dir: ${e.runDir}\n`);
+        out.write(`${paint("bold", `agentduo ${o.version} · run ${e.runId}`)}\n  workspace: ${e.repo}\n  run dir: ${e.runDir}\n`);
         break;
       case "phase.started":
         ctx = { agent: e.agent ?? "", where: `${e.phase} r${e.round}` };
@@ -82,7 +82,7 @@ export function attachPlainRenderer(bus: EventBus, out: TextSink, o: PlainOption
         break;
       }
       case "run.finished":
-        if (e.phase === "DONE") out.write(`${paint("green", "[DONE] quality gates passed and the review approved.")} Report: ${e.reportPath}\n`);
+        if (e.phase === "DONE") out.write(`${paint("green", `[DONE] ${e.summary ?? "finished"}.`)} Report: ${e.reportPath}\n`);
         else if (e.phase === "ABORTED") out.write(`${paint("yellow", "run aborted.")} Report: ${e.reportPath}\n`);
         else if (e.phase === "INTERRUPTED") out.write(`${paint("yellow", "stopped.")} Resume with: ${cmd} resume ${e.runId}\n`);
         else out.write(`  Report: ${e.reportPath}\n`);

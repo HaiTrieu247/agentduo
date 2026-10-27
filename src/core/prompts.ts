@@ -88,7 +88,9 @@ export function planner(ctx: PromptContext, round: number, version: number, prev
   if (!previousPlan) {
     out.push("\nThis is the first version: return `feedback_resolution` as an empty list.\n");
   } else {
-    out.push(`\n## Previous plan (v${version - 1}) as JSON\n` + "```json\n" + JSON.stringify(previousPlan, null, 2) + "\n```\n");
+    const json = JSON.stringify(previousPlan, null, 2);
+    const fence = fenceFor(json);
+    out.push(`\n## Previous plan (v${version - 1}) as JSON\n${fence}json\n${json}\n${fence}\n`);
     out.push(feedbackSection(feedback));
     out.push("\nRevise the plan to address the feedback. In `feedback_resolution`, add one entry per issue id " +
       "above with decision `accepted`, `partially_accepted` or `disputed` and a rationale. Dispute only " +
@@ -185,6 +187,8 @@ export function codeReviewer(ctx: PromptContext, round: number, planMd: string, 
   diffStat: string, diff: string, truncated: boolean, previousFindings: Finding[], implReport: Implementation): string {
   const tests = implReport.tests_run.map((t) => "- `" + t.command + "` passed=" + t.passed + " " + t.notes).join("\n") || "_(none)_";
   const fence = fenceFor(diff);
+  const stat = diffStat.trimEnd() || "(no changes)";
+  const statFence = fenceFor(stat);
   const out = [
     header("code_reviewer", "Code Reviewer", ctx),
     `- Review round: ${round}\n` +
@@ -195,7 +199,7 @@ export function codeReviewer(ctx: PromptContext, round: number, planMd: string, 
     "## Final approved plan\n" + planMd + "\n",
     "## Quality gate results (run by agentduo on this revision)\n" + describeGates(gateResults) + "\n",
     "## Implementer's report\n" + implReport.summary + "\n\nTests the implementer says it ran:\n" + tests + "\n",
-    "## Diff stat (base → revision)\n```\n" + (diffStat.trimEnd() || "(no changes)") + "\n```\n",
+    "## Diff stat (base → revision)\n" + statFence + "\n" + stat + "\n" + statFence + "\n",
     "## Diff" + (truncated ? " (TRUNCATED: run `git diff " + base + " " + snapshot + " -- .` for the full diff)" : "") + "\n" +
       fence + "diff\n" + diff + "\n" + fence + "\n",
   ];

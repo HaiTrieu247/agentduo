@@ -41,7 +41,7 @@ function StaticItemView({ item }: { item: StaticItem }) {
         </Box>
       );
     case "finish":
-      return <FinishLine phase={item.phase} runId={item.runId} reportPath={item.reportPath} />;
+      return <FinishLine phase={item.phase} runId={item.runId} reportPath={item.reportPath} summary={item.summary} />;
     case "review":
       return (
         <Box flexDirection="column">
@@ -55,8 +55,8 @@ function StaticItemView({ item }: { item: StaticItem }) {
   }
 }
 
-function FinishLine({ phase, runId, reportPath }: { phase: string; runId: string; reportPath: string }) {
-  if (phase === "DONE") return <Text><Text color="green" bold>✔ DONE</Text>{` quality gates passed and the review approved. Report: ${reportPath}`}</Text>;
+function FinishLine({ phase, runId, reportPath, summary }: { phase: string; runId: string; reportPath: string; summary?: string }) {
+  if (phase === "DONE") return <Text><Text color="green" bold>✔ DONE</Text>{` ${summary ?? "finished"}. Report: ${reportPath}`}</Text>;
   if (phase === "ABORTED") return <Text><Text color="yellow" bold>Aborted.</Text>{` Report: ${reportPath}`}</Text>;
   if (phase === "INTERRUPTED") return <Text><Text color="yellow" bold>Stopped.</Text>{` Resume with: duo resume ${runId}`}</Text>;
   return (

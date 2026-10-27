@@ -109,7 +109,8 @@ function mergeInto(base: Record<string, unknown>, override: Record<string, unkno
     const current = base[key];
     if ((isPlainObject(current) || Array.isArray(current)) && (value === null || value === undefined)) continue; // "codex:" / "gates:" with no body keep the defaults
     if (OPEN_MAPPINGS.has(path)) {
-      out[key] = value;
+      // Merged per role, so a user-level implementer entry survives a workspace plan_reviewer entry.
+      out[key] = isPlainObject(current) && isPlainObject(value) ? { ...current, ...value } : value;
       continue;
     }
     if (isPlainObject(current)) {

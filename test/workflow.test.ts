@@ -43,6 +43,14 @@ const messages = (): Message[] => h.events.flatMap((e) => (e.type === "message" 
 const readRun = (name: string) => readFileSync(join(runDirOf(h), name), "utf8");
 
 describe("Workflow", () => {
+  it("says on DONE which checks passed", async () => {
+    expect(await start(happy())).toBe(0);
+    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "quality gates passed and the review approved" });
+    h.events.length = 0;
+    expect(await start({ ...happy(), code_reviewer: [{ output: review(false) }] }, { quality_gates: { require_codex_approval: false } })).toBe(0);
+    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "quality gates passed and the review did not approve (require_codex_approval is off)" });
+  });
+
   it("debates the plan, fixes gate failures and review findings, then reaches DONE", async () => {
     const code = await start({
       planner: [{ output: plan("v1") }, { output: plan("v2", { feedback_resolution: [{ issue_id: "C1", decision: "accepted", rationale: "ok" }] }) }],
@@ -262,6 +270,7 @@ describe("Workflow", () => {
     expect(st.history.map((x) => x.phase)).not.toContain("VERIFY");
     expect(messages().some((m) => m.kind === "gates")).toBe(false);
     expect(fake.calls("implementer")[0]!.prompt).toContain("Run the project's checks yourself");
+    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", phase: "DONE", summary: "the review approved; no quality gates configured" });
   });
 
   it("clears stale gate results when re-planning", async () => {
@@ -275,8 +284,35 @@ describe("Workflow", () => {
 
   it("surfaces permission denials with a configuration hint", async () => {
     expect(await start({ ...happy(), implementer: [{ write: { "app.txt": "fixed\n" }, denials: [{ tool_name: "Edit", tool_use_id: "t0" }], output: impl() }] })).toBe(0);
-    const hint = h.events.find((e) => e.type === "warning" && e.text.includes("was denied 1 tool call(s)"));
+    const hint = h.events.find((e) => e.type === "warning" && e.text.includes("was denied 1 tool call(s) (Edit)"));
     expect(hint && hint.type === "warning" && hint.text).toContain('permissions.defaultMode "acceptEdits"');
+    expect(hint && hint.type === "warning" && hint.text).toContain("--reload-config");
+  });
+
+  it("names denied tools other than edits and points at allow rules", async () => {
+    const denials = [{ tool_name: "Bash", tool_use_id: "t0" }, { tool_name: "Bash", tool_use_id: "t1" }];
+    expect(await start({ ...happy(), implementer: [{ write: { "app.txt": "fixed\n" }, denials, output: impl() }] })).toBe(0);
+    const hint = h.events.find((e) => e.type === "warning" && e.text.includes("was denied 2 tool call(s)"));
+    const text = hint && hint.type === "warning" ? hint.text : "";
+    expect(text).toContain("(Bash ×2)");
+    expect(text).toContain('permissions.allow rules for Bash (e.g. "Bash(npm test:*)")');
+    expect(text).not.toContain("acceptEdits");
+  });
+
+  it("keeps a round's starting snapshot when the round is re-run", async () => {
+    const scenario = { ...happy(), implementer: [{ write: { "half.txt": "1\n" }, raw: "not json" }, { raw: "not json" }, { write: { "app.txt": "fixed\n" }, output: impl() }] };
+    expect(await start(scenario)).toBe(2);
+    expect(stateOf(h).humanReview?.reason).toBe("agent_error");
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    const record = JSON.parse(readRun("implementation.r1.json"));
+    expect(record.changes.map((c: { path: string }) => c.path).sort()).toEqual(["app.txt", "half.txt"]);
+  });
+
+  it("caps stored warnings and says how many were dropped", () => {
+    const wf = newWorkflow(h, "Make app.txt fixed").wf as unknown as { warn(text: string): void; state: { warnings: string[] } };
+    for (let i = 0; i < 55; i++) wf.warn(`w${i}`);
+    expect(wf.state.warnings).toHaveLength(50);
+    expect(wf.state.warnings.slice(-2)).toEqual(["w48", "… 6 more warning(s) not stored"]);
   });
 
   it("works in a subdirectory workspace and warns about changes outside it", async () => {

@@ -45,6 +45,13 @@ describe("prompts", () => {
     for (const s of ["## Previous plan (v1) as JSON", "Old plan", "`C1` [high] missing migration", "add a migration step", "one entry per issue id"]) expect(p).toContain(s);
   });
 
+  it("fences the previous plan and the diff stat by their content", () => {
+    const fenced = { ...plan("Old plan"), summary: "run ```npm test``` first" };
+    expect(prompts.planner(ctx, 2, 2, fenced, null)).toContain("````json\n");
+    const p = prompts.codeReviewer(ctx, 1, "# Plan", "a".repeat(40), "b".repeat(40), [], " ```weird``` | 1 +", "", false, [], impl());
+    expect(p).toContain("## Diff stat (base → revision)\n````\n");
+  });
+
   it("plan reviewer and finalizer see the plan and previous issues", () => {
     const r = prompts.planReviewer(ctx, 2, 2, "# Plan v2", critique(false, [issue("C1")]));
     expect(r).toContain("[orchestrator-role: plan_reviewer]");
