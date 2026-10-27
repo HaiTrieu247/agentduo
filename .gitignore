@@ -1,7 +1,5 @@
-__pycache__/
-*.pyc
-.DS_Store
 node_modules/
 dist/
 *.tgz
+.DS_Store
 .agentduo/runs/

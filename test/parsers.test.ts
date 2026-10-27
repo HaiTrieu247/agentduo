@@ -44,6 +44,8 @@ describe("CodexParser", () => {
     expect(unwrapShell("/bin/zsh -lc ls")).toBe("ls");
     expect(unwrapShell("bash -lc 'echo '\\''hi'\\'''")).toBe("echo 'hi'");
     expect(unwrapShell("git status")).toBe("git status");
+    expect(unwrapShell(`/bin/zsh -lc "pwd && rg --files -g 'AGENTS.md'"`)).toBe("pwd && rg --files -g 'AGENTS.md'");
+    expect(unwrapShell('/bin/zsh -lc "echo \\"hi\\" \\$HOME"')).toBe('echo "hi" $HOME');
   });
 });
 

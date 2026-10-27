@@ -35,7 +35,7 @@ Người dùng cài một lần (`npm i -g agentduo`) rồi chạy được tron
 
 | Vấn đề | Quyết định |
 |---|---|
-| Ngôn ngữ / runtime | Viết lại bằng TypeScript (strict, ESM) trên Node ≥ 20, build bằng `tsup` |
+| Ngôn ngữ / runtime | Viết lại bằng TypeScript (strict, ESM) trên Node ≥ 22.12 (Node 20 đã EOL từ 04/2026; Ink 8 và commander 15 yêu cầu Node 22), build bằng `tsup` |
 | UI | Ink + React: log giữ trong scrollback (`<Static>`) cộng một vùng live ở đáy. Có renderer plain cho môi trường không phải TTY |
 | Dependency runtime | `ink`, `react`, `commander`, `yaml`, `ajv` (không thêm gì khác nếu chưa được đồng ý) |
 | Tên | Package `agentduo`; binary `agentduo` và alias `duo` |
@@ -269,7 +269,7 @@ Những lỗi chỉ ảnh hưởng tới hiển thị (stream hỏng, loại s�
 
 `duo doctor` kiểm tra:
 
-- Node ≥ 20 và git;
+- Node ≥ 22.12 và git;
 - repo và config hợp lệ, 5 schema đều strict;
 - binary của từng backend, version, và các flag `--json`, `--output-schema`, `--sandbox`, `--output-last-message`, `--cd` (Codex) cùng `--output-format`, `--verbose`, `--json-schema`, `--permission-mode`, `--permission-prompts`, `--tools`, `--allowedTools`, `--disallowedTools` (Claude);
 - executable của từng gate;
@@ -279,7 +279,7 @@ Doctor không gọi model.
 
 ## 9. Kiểm thử
 
-Dùng vitest. Lệnh `npm test` chạy toàn bộ những gì dưới đây, trừ smoke test thật.
+Dùng vitest. Lệnh `npm test` chạy unit, e2e và UI; smoke test đóng gói chạy riêng bằng `npm run test:pack` (cần mạng); smoke test thật chạy bằng `npm run smoke:real`.
 
 - **Unit, port từ bản Python:** merge và validate config (gồm các cấu hình không an toàn và cảnh báo khoá lạ); tính strict của schema và lỗi validate; glob của protected path; `checkChanges`; snapshot git, cả khi `runs/` bị ignore lẫn không bị ignore; dựng lệnh cho từng backend; parse kết quả (fence, JSON lẫn trong text, envelope lỗi vẫn giữ chi phí); resolve binary bản đi kèm extension IDE, chọn version cao nhất.
 - **Parse stream:** fixture lấy từ stream thật của codex-cli 0.164 và Claude Code 2.1.311, lưu ở `test/fixtures/*.jsonl`, đối chiếu với chuỗi `Activity` mong đợi. Thêm trường hợp dòng hỏng và loại sự kiện lạ.
@@ -303,7 +303,7 @@ Dùng vitest. Lệnh `npm test` chạy toàn bộ những gì dưới đây, tr�
 - **UI:** dùng `ink-testing-library`, kiểm tra frame có StepBlock (activity, message), LiveFooter (pipeline, spinner, chi phí) và luồng chọn menu của HumanReviewPrompt. Renderer plain được kiểm tra bằng golden output.
 - **Đóng gói:** `npm pack`, cài vào một prefix tạm, rồi chạy `duo --version` và `duo doctor --repo <tmp repo>`.
 - **Thật (thủ công, tốn phí):** `npm run smoke:real` tạo repo demo `calc.py` và chạy với CLI thật tới DONE.
-- **CI:** `.github/workflows/ci.yml` chạy typecheck, test và smoke test pack trên `ubuntu-latest` và `macos-latest`, Node 20 và 22.
+- **CI:** `.github/workflows/ci.yml` chạy typecheck, test và smoke test pack trên `ubuntu-latest` và `macos-latest`, Node 22 và 24.
 
 ## 10. Phát hành và thay thế bản Python
 

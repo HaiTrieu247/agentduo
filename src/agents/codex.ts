@@ -12,6 +12,8 @@ import {
 export function unwrapShell(command: string): string {
   const quoted = /^\S*?(?:ba|z)?sh -lc '([\s\S]*)'$/.exec(command);
   if (quoted) return quoted[1]!.replace(/'\\''/g, "'");
+  const doubleQuoted = /^\S*?(?:ba|z)?sh -lc "([\s\S]*)"$/.exec(command);
+  if (doubleQuoted) return doubleQuoted[1]!.replace(/\\(["\\$`])/g, "$1");
   const bare = /^\S*?(?:ba|z)?sh -lc (.+)$/.exec(command);
   return bare ? bare[1]! : command;
 }

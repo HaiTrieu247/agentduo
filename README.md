@@ -1,179 +1,173 @@
-# Multi-Agent Orchestrator: Codex lập kế hoạch/review, Claude Code implement
+# agentduo
 
-Hiện thực của [docs/codex_claude_multi_agent_plan.md](docs/codex_claude_multi_agent_plan.md). Một Python orchestrator (chỉ dùng stdlib) điều phối hai vòng lặp qua **Codex CLI** và **Claude Code CLI**:
-
-1. **Planning & Debate:** Codex tạo plan → Claude phản biện → Codex sửa plan → … → Codex chốt plan cuối.
-2. **Implementation & Review:** Claude implement → orchestrator tự chạy quality gates → Codex review diff và kết quả gates → Claude sửa → … → `DONE`.
-
-Mọi phản hồi của agent đều là JSON, được kiểm tra theo schema. Khi vượt số vòng, khi vi phạm an toàn hoặc khi agent lỗi, run dừng ở `HUMAN_REVIEW` và chờ bạn quyết định.
-
-## Yêu cầu
-
-- Python ≥ 3.9 và git. Repo đích phải là git repository.
-- [Codex CLI](https://developers.openai.com/codex/cli/): `npm install -g @openai/codex && codex login`
-- [Claude Code CLI](https://code.claude.com/docs/en/cli-reference): nếu `claude` không có trong `PATH`, orchestrator tự tìm bản đi kèm extension VS Code (`~/.vscode/extensions/anthropic.claude-code-*/resources/native-binary/claude`). Cũng có thể đặt `claude.bin` trong config.
-
-## Cài vào một dự án
-
-```bash
-cp -R .orchestrator /path/to/my-project/
-cd /path/to/my-project
-echo ".orchestrator/runs/" >> .gitignore
-# Sửa .orchestrator/config.yaml: khai báo lệnh test/lint/typecheck của dự án trong `gates`
-python3 .orchestrator/orchestrator.py --doctor
-```
-
-Không muốn copy thì có thể chạy từ chỗ khác: `python3 /path/to/.orchestrator/orchestrator.py --repo /path/to/my-project ...`. Config được tìm theo thứ tự: `--config`, rồi `<repo>/.orchestrator/config.yaml`, rồi config đi kèm script.
-
-`--doctor` kiểm tra Python, git, config, schema, sự có mặt và các flag cần thiết của hai CLI, lệnh gate, trạng thái working tree, và việc `runs/` đã được git-ignore. Lệnh này không gọi agent nên không tốn chi phí.
-
-## Sử dụng
-
-```bash
-# Tạo run mới (working tree phải sạch, hoặc thêm --allow-dirty)
-python3 .orchestrator/orchestrator.py "Implement JWT authentication with refresh tokens"
-python3 .orchestrator/orchestrator.py --task-file task.md
-
-# Theo dõi
-python3 .orchestrator/orchestrator.py --status [RUN_ID]
-python3 .orchestrator/orchestrator.py --list
-
-# Tiếp tục run bị ngắt (Ctrl-C, mất mạng…) từ pha cuối cùng chưa xong
-python3 .orchestrator/orchestrator.py --resume [RUN_ID]
-
-# Trả lời một run đang ở HUMAN_REVIEW
-python3 .orchestrator/orchestrator.py --resume --decision resume --note "Chấp nhận C2, tiếp tục"
-python3 .orchestrator/orchestrator.py --resume --decision revise --note "Bỏ phần cache, giữ API cũ"
-python3 .orchestrator/orchestrator.py --resume --decision abort
-```
-
-Output mẫu (chạy với fake agents trong test):
+Two coding agents, one loop: **Codex** plans and reviews, **Claude Code** critiques the plan and implements it. Your project's own tests are the referee. A live terminal UI shows what each agent is doing and what they hand each other.
 
 ```text
-[01] PLAN r1          Codex   plan created: v1 'JWT auth' (6 steps, 5 acceptance criteria, 3 risks)
-[02] PLAN_REVIEW r1   Claude  changes requested: 2 issue(s), 1 blocking
-[03] PLAN r2          Codex   plan revised: v2 'JWT auth' (7 steps, 5 acceptance criteria, 4 risks)
-[04] PLAN_REVIEW r2   Claude  approved: 0 issue(s), 0 blocking
-[05] PLAN_FINALIZE r2 Codex   plan finalized: v2: ...
-[06] IMPLEMENT r1     Claude  completed: 4 file(s) changed; ...
-[07] VERIFY r1        gates   passed: tests PASS
-[08] CODE_REVIEW r1   Codex   changes requested: 1 finding(s), 1 blocking
-[09] IMPLEMENT r2     Claude  completed: 1 file(s) changed; ...
-[10] VERIFY r2        gates   passed: tests PASS
-[11] CODE_REVIEW r2   Codex   approved: 0 finding(s), 0 blocking
-[DONE] quality gates passed and the review approved. Report: .orchestrator/runs/<id>/report.md
+● PLAN r1  Codex (planner)                                      32s · 33k tok
+  │ exec  rg --files ✓
+  │ exec  cat src/calc.ts ✓
+  └ Codex → Claude  Plan v1 "Add subtraction" · 3 steps · 6 criteria · 1 risks
+
+● PLAN_REVIEW r1  Claude (plan critic)                          48s · $0.17
+  │ Read  src/calc.ts ✓
+  └ Claude → Codex  approved · 2 suggestion(s)
+      [low] C1 add a negative-number test
+──────────────────────────────────────────────────────────────────────────────
+ PLAN ✓ › CRITIQUE ✓ › FINALIZE ✓ › IMPLEMENT ● r1 › VERIFY › REVIEW    plan 1/4 · impl 1/5
+ ⠋ Claude (implementer) · 0:21
+   │ Edit  src/calc.ts  +4 −0 ✓
+   │ Bash  npm test ⠋
+ $0.33 · 67k tok                  [v] details  [q] stop after this step  [ctrl-c] stop now
 ```
 
-Orchestrator **không bao giờ commit hay push**. Thay đổi được để lại chưa commit trong working tree; bạn xem `report.md` và `git diff`, rồi tự commit.
+## How it works
 
-Exit code: `0` DONE, `2` chờ HUMAN_REVIEW, `3` ABORTED, `1` lỗi cấu hình/môi trường, `130` bị ngắt.
+1. **Plan and debate.** Codex writes a plan: goals, scope, steps, acceptance criteria and risks. Claude checks that the plan is feasible in your codebase. Codex revises it until Claude approves, then signs off on the final plan.
+2. **Implement and review.** Claude implements the plan. agentduo runs your quality gates (tests, lint, typecheck) itself. Codex reviews the diff and the gate results, and Claude fixes the findings, round after round, until the run reaches `DONE`.
 
-## State machine
+The agents never talk to each other directly. agentduo relays schema-validated JSON between them, and agreement between agents is never accepted as proof. `DONE` requires all three:
+- Codex approves;
+- every required gate passes;
+- no blocking finding is left.
 
-```text
-PLAN → PLAN_REVIEW ─(approved)→ PLAN_FINALIZE ─(approved)→ IMPLEMENT → VERIFY → CODE_REVIEW → DONE
-  ↑        │ changes requested       │ changes requested       ↑          │ gates fail      │ changes requested
-  └────────┴─────────────────────────┘                         └──────────┴─────────────────┘
-Mọi pha → HUMAN_REVIEW khi: vượt số vòng, guard vi phạm, agent lỗi/blocked, finding critical, gates fail liên tiếp
+When a limit is reached, a safety rule is broken or an agent fails, the run pauses in `HUMAN_REVIEW` and asks you what to do.
+
+## Requirements
+
+- Node.js ≥ 22.12 and git. The target project must be a git repository.
+- [Codex CLI](https://developers.openai.com/codex/cli/): run `npm i -g @openai/codex`, then `codex login`.
+- [Claude Code](https://code.claude.com/docs/en/overview): the `claude` command. If Claude Code is installed only through the VS Code, Cursor or Windsurf extension, agentduo finds the bundled binary.
+
+Both agents run under your own accounts. agentduo does not call model APIs itself.
+
+## Install
+
+```bash
+npm i -g agentduo
 ```
 
-- `VERIFY` là pha orchestrator tự chạy `gates`. Khi gate required fail, run quay thẳng lại `IMPLEMENT` mà không tốn lượt review của Codex (`review_on_gate_failure: false`).
-- Một plan/review chỉ được coi là **approved** khi `approved == true`, `status == "approved"`, và không còn issue nào thuộc `blocking_severities` (mặc định `critical`, `high`). Nếu `approved` và `status` mâu thuẫn, output bị coi là không hợp lệ và được retry.
-- `DONE` cần cả ba điều kiện: Codex approve (`require_codex_approval`), mọi gate required đạt (`require_tests_pass`), và không còn finding blocking. Hai agent đồng ý với nhau thôi thì chưa đủ.
+## Quick start
 
-### Quyết định ở HUMAN_REVIEW
+```bash
+cd my-project
+duo init      # writes .agentduo/config.yaml with detected gates and git-ignores .agentduo/runs/
+duo doctor    # checks CLIs, flags, config and gates; makes no model calls
+duo "Add JWT authentication with refresh tokens"
+```
 
-| Lý do (`reason`) | `--decision resume` làm gì |
+`agentduo` is the same command as `duo`. Use `agentduo` if another tool on your machine already owns the name `duo`.
+
+## Commands
+
+| Command | What it does |
 |---|---|
-| `max_planning_rounds` | Chấp nhận plan mới nhất làm plan cuối (ghi rõ là do người duyệt), rồi implement |
-| `plan_ready` (khi `pause_before_implement: true`) | Bắt đầu implement |
-| `max_review_rounds`, `critical_finding`, `gates_failing` | Mở vòng sửa mới và nới giới hạn số vòng |
-| `implementer_blocked`, `dirty_worktree` | Chạy lại vòng implement hiện tại (thêm `--allow-dirty` nếu cần) |
-| `guard_violation` | Chấp nhận thay đổi sau khi bạn đã kiểm tra, rồi chạy gates |
-| `readonly_violation`, `agent_error`, `orchestrator_error` | Chạy lại đúng pha bị lỗi (với `readonly_violation`, hãy revert thay đổi trước) |
+| `duo "<task>"`, `duo run "<task>"` | Start a run (`--task-file F`, `--allow-dirty`) |
+| `duo resume [id]` | Continue the latest (or given) run; `--decision resume\|revise\|abort [--note "..."]` answers a pending decision |
+| `duo status [id]`, `duo list` | Show progress, history and where the files are |
+| `duo doctor` | Check the environment without calling models |
+| `duo init` | Create `.agentduo/config.yaml` |
 
-`revise` luôn quay về `PLAN` với `--note` làm feedback. `abort` kết thúc run. Mọi `--note` được đưa vào prompt của các lượt sau với độ ưu tiên cao nhất.
+Every command also takes `--repo PATH`, `--config PATH`, `--plain`, `-v/--verbose` and `--no-color`.
 
-## Mô hình an toàn
+Output is the live UI in a terminal. It switches to plain timestamped lines with `--plain`, when `CI=true`, or when stdout is not a TTY.
 
-Quyền được áp ở **mức công cụ**, không chỉ nằm trong prompt. Sau đó orchestrator còn **tự kiểm chứng** độc lập:
+agentduo **never commits or pushes**. Changes stay uncommitted in your working tree, so review them with `git diff` and commit them yourself.
 
-| Vai trò | Lệnh | Giới hạn ở mức CLI |
+## When a run needs you
+
+In an interactive terminal, agentduo shows the reason and a menu. You can resume, revise with a note, view the final plan, the last review, the plan feedback or the diff stat, abort, or decide later. In plain mode the run exits with code 2, and you answer with `duo resume --decision …`.
+
+| Reason | What `resume` does |
+|---|---|
+| `max_planning_rounds` | Implements the latest plan, recorded as accepted by you |
+| `plan_ready` (with `safety.pause_before_implement`) | Starts implementing |
+| `max_review_rounds`, `critical_finding`, `gates_failing` | Starts another fix round |
+| `implementer_blocked`, `dirty_worktree` | Re-runs the implementation round (add `--allow-dirty` if needed) |
+| `guard_violation` | Accepts the changes after your inspection and runs the gates |
+| `readonly_violation`, `agent_error`, `orchestrator_error` | Re-runs the failed step |
+
+`revise` always goes back to planning with your note. `abort` ends the run. Notes are added to every later prompt as top-priority instructions.
+
+## Configuration
+
+Settings are merged in this order, later sources winning: built-in defaults, then `~/.config/agentduo/config.yaml` (or `$XDG_CONFIG_HOME/agentduo/` or `%APPDATA%\agentduo\` on Windows), then `<repo>/.agentduo/config.yaml` or `--config`, then CLI flags. A misspelled key produces a warning. An unsafe configuration is rejected, for example one where the implementer is not Claude, a reviewer can write, or no gate is required.
+
+```yaml
+gates:                        # run by agentduo after every implementation round
+  - name: tests
+    command: "npm test"
+    required: true
+limits:
+  max_planning_rounds: 4
+  max_review_rounds: 5
+  agent_timeout_sec: 1800
+safety:
+  pause_before_implement: false
+  protected_paths: [".agentduo/**", ".env", ".env.*", "**/*.pem", "**/*.key", "**/secrets/**", ".github/workflows/**"]
+codex:
+  model: null                 # e.g. a cheaper model
+claude:
+  model: null
+  max_budget_usd: null        # per call
+```
+
+## Safety model
+
+Permissions are enforced by the CLIs themselves, not only stated in prompts:
+
+| Role | Invocation | Limits |
 |---|---|---|
-| Codex planner / reviewer | `codex exec --sandbox read-only --output-schema … -` | Sandbox read-only |
-| Claude plan critic | `claude -p --tools Read,Grep,Glob --permission-mode dontAsk --permission-prompts none --json-schema …` | Chỉ có tool đọc |
-| Claude implementer | `claude -p --permission-mode acceptEdits --permission-prompts none --allowedTools … --disallowedTools …` | Sửa file và chạy một số lệnh trong allowlist; `git commit/push/reset`, `rm -rf`, `curl` và WebFetch bị chặn; mọi thứ khác bị từ chối tự động |
+| Codex planner / reviewer | `codex exec --json --sandbox read-only --output-schema …` | read-only sandbox |
+| Claude plan critic | `claude -p --output-format stream-json --tools Read,Grep,Glob --permission-mode dontAsk --permission-prompts none` | read tools only |
+| Claude implementer | `claude -p … --permission-mode acceptEdits --allowedTools … --disallowedTools …` | edits files and runs allowlisted commands (your gates, read-only git); `git commit/push/reset`, `rm -rf`, `curl` and web access are denied |
 
-Orchestrator tự kiểm chứng như sau:
+agentduo also checks independently:
 
-- **Snapshot git cho mỗi vòng.** Toàn bộ working tree (kể cả file untracked) được ghi thành commit qua một index tạm. Index, HEAD và branch của bạn không bị đụng tới. Các commit này được ghim tại `refs/orchestrator/<run>/{base,impl-rN-pre,impl-rN}`, nên reviewer review đúng một git SHA (`reviewed_commit` phải khớp, nếu không thì retry), và bạn luôn khôi phục được trạng thái trước mỗi vòng.
-- **Bước read-only** được hash tree trước và sau. Nếu có bất kỳ thay đổi nào, hoặc HEAD/branch bị dịch chuyển, run chuyển sang `readonly_violation`.
-- **Sau khi implement**, orchestrator kiểm tra: HEAD/branch không đổi (Claude không được commit), không đụng `protected_paths` (`.env`, `*.pem`, `.github/workflows/**`, `.orchestrator/**`…), và số file bị xoá không vượt `max_deleted_files`.
-- Mặc định orchestrator từ chối chạy khi working tree có thay đổi chưa commit, để không ghi đè lên việc dở dang của bạn.
-- Giới hạn timeout cho mỗi agent và mỗi gate (kill cả process group), số lần retry, số vòng, số lần gates fail liên tiếp, và `claude.max_budget_usd` cho mỗi lần gọi.
+- It snapshots the whole working tree into `refs/agentduo/<run>/…` through a temporary index, leaving your index, HEAD and branch untouched. Every review therefore targets an exact SHA, and the state before every round can be restored.
+- It hashes the working tree before and after each read-only step. Any change, or any movement of HEAD or the branch, stops the run.
+- After each implementation round it checks that HEAD and the branch did not move (no commits), that no protected path changed, and that the number of deleted files stays within a limit.
+- It refuses to start on uncommitted changes unless you pass `--allow-dirty`.
 
-## Cấu hình
+## Run files
 
-Xem [.orchestrator/config.yaml](.orchestrator/config.yaml). Các khoá đều có giá trị mặc định trong [orch/config.py](.orchestrator/orch/config.py); khoá viết sai tên sẽ sinh cảnh báo. Config sai về mặt an toàn sẽ bị từ chối ngay từ đầu, ví dụ: implementer không phải Claude, reviewer có quyền ghi, hoặc `require_tests_pass: true` mà không khai báo gate nào.
+Everything about a run lives in `.agentduo/runs/<run-id>/`:
 
-PyYAML được dùng nếu đã cài. Nếu không, orchestrator dùng một parser YAML tối giản, hỗ trợ mapping, list, list of mapping, flow list, chuỗi có quote, số, bool và null.
+- `state.json`: rewritten after every step, which makes a run resumable;
+- `report.md`: timeline, gate results, diff stat, unresolved issues, cost;
+- `plan.vN.md`, `plan.final.md` and `plan-feedback.md`;
+- the per-round JSON from every agent, wrapped with task id, round, timestamp, git SHA and plan version;
+- `gates/` logs;
+- `logs/`: for every CLI call, the prompt, the command line, the raw event stream and stderr.
 
-## Artifacts của một run
+## Exit codes
 
-Mỗi run nằm ở `.orchestrator/runs/<run-id>/`. Đây là cấu trúc trong mục 4 của kế hoạch, nhưng tách theo từng run để có thể resume và giữ lịch sử:
+| Code | Meaning |
+|---|---|
+| 0 | done |
+| 1 | config or environment error |
+| 2 | waiting for your decision |
+| 3 | aborted |
+| 130 | stopped (resumable) |
 
-```text
-state.json            trạng thái đầy đủ, ghi atomic sau mỗi bước (để resume)
-events.jsonl          nhật ký sự kiện
-plan.md               plan mới nhất · plan.vN.{json,md} từng phiên bản · plan.final.md bản đã chốt (kèm sha256)
-plan-feedback.md      toàn bộ phản biện và quyết định chốt, theo vòng
-critique.rN.json      phản biện của Claude    · approval.rN.json  quyết định chốt của Codex
-implementation.rN.json báo cáo của Claude + danh sách file đổi + snapshot SHA + vi phạm guard
-gates.rN.json, gates/ kết quả và log của quality gates
-review.json           review mới nhất · review.rN.json từng vòng
-report.md             báo cáo cuối: timeline, gates, diff stat, vấn đề chưa giải quyết, chi phí Claude
-logs/NNN-<pha>-rN.aK.{prompt.md,cmd.json,stdout.txt,stderr.txt,output.json}   mỗi lần gọi CLI
-```
+## Platforms
 
-Mỗi file JSON của agent được bọc trong một envelope gồm `task_id`, `role`, `agent`, `round`, `timestamp`, `git_sha`, `plan_version`, `attempts`, `duration_sec` và `cost_usd`, nhờ đó không review nhầm trạng thái cũ.
+macOS and Linux are supported. Windows is experimental and not covered by CI.
 
-## Phát triển
+## Costs
+
+Each round makes a few agent calls against your own Codex and Claude accounts. A small task took about 3 minutes, $0.33 of Claude usage and 67k Codex tokens. The live UI shows running totals. Use `claude.model`, `codex.model` and `claude.max_budget_usd` to keep costs down.
+
+## Development
 
 ```bash
-python3 -m unittest discover -s tests
+npm install
+npm test             # unit + end-to-end (fake agents) + UI tests
+npm run typecheck
+npm run test:pack    # build, pack, install into a temp prefix, run the binaries
+npm run demo:ui      # watch the live UI with scripted fake agents (free)
+npm run smoke:real   # REAL agents on a demo repo — costs money
 ```
 
-- `tests/test_units.py`: kiểm thử parser YAML, validate config, schema (gồm cả tương thích strict mode của OpenAI), guards, snapshot git, cách dựng lệnh và parse output của từng CLI.
-- `tests/test_workflow.py`: chạy orchestrator đầy đủ qua subprocess thật, với `codex`/`claude` giả (`tests/fake_agent.py`) đọc kịch bản. Các kịch bản phủ: debate nhiều vòng; gates fail rồi sửa; review rồi sửa; vượt số vòng planning/review; `resume`/`revise`/`abort`; ghi file trong bước read-only; ghi `.env` và tự commit; output sai JSON/schema hoặc sai `reviewed_commit` được retry; finding critical; implementer blocked; `pause_before_implement`; working tree bẩn.
+## License
 
-## Đối chiếu tiêu chí hoàn thành (mục 9 của kế hoạch)
-
-| Tiêu chí | Cách đáp ứng |
-|---|---|
-| Plan có mục tiêu, phạm vi, acceptance criteria, rủi ro | `plan.schema.json`. `goals`, `scope_in`, `steps` và `acceptance_criteria` rỗng sẽ bị từ chối và retry |
-| Claude phản biện plan trước khi implement | Pha `PLAN_REVIEW` là bắt buộc |
-| Codex xác nhận plan cuối | Pha `PLAN_FINALIZE` (`require_plan_approval`) |
-| Claude là agent duy nhất sửa code | Config bắt buộc implementer là Claude; reviewer chạy read-only ở mức CLI và tree được kiểm chứng bằng hash |
-| Codex review diff và kết quả kiểm tra | Prompt review chứa diff `base..snapshot`, diff stat và kết quả gates |
-| Claude xử lý findings, Codex review lại trên revision mới | `addressed_findings`, `resolved_findings`, mỗi vòng có snapshot SHA mới |
-| Gates bắt buộc đạt, findings nghiêm trọng đã xử lý | Điều kiện `DONE`; finding `critical` → `HUMAN_REVIEW` |
-| Không vượt số vòng; dừng và resume được | Giới hạn trong `limits`, `state.json`, `--resume`, `--decision` |
-| Log, báo cáo cuối, vấn đề chưa giải quyết | `logs/`, `events.jsonl`, `report.md` |
-
-## Chưa làm (Phase 3)
-
-Đã có output tiến độ trên terminal, `--status` và `--list`. Phần MCP server hoặc extension VS Code riêng để quan sát, phê duyệt và resume chưa được xây; kế hoạch chỉ ghi phần này là "có thể thêm".
-
-## Đã chạy thử với CLI thật
-
-Repo thử là một module `calc.py` nhỏ, task: *"Add a subtract(a, b) function to calc.py, with a unit test"*. Dùng codex-cli 0.164.0 và Claude Code 2.1.311. Run đi qua 8 bước, từ `PLAN` đến `DONE`, hết khoảng 3 phút:
-
-- Codex lập plan với 3 bước và 6 acceptance criteria. Claude approve, kèm 2 gợi ý không blocking. Codex chốt plan.
-- Claude sửa 2 file, gate test pass, Codex review approve.
-- Không có commit nào; diff để lại trong working tree.
-
-Chi phí: Claude khoảng $0.33 cho 2 lần gọi, Codex khoảng 67k token cho 3 lần gọi.
-
-## Chi phí
-
-Mỗi vòng gồm vài lần gọi agent. Flag `--strict-mcp-config` (mặc định trong `claude.extra_args`) giảm đáng kể chi phí của Claude vì không nạp MCP server: khi thử, một lần gọi đơn giản giảm từ $0.44 xuống $0.075. Dùng `claude.model` / `codex.model` để chọn model rẻ hơn, và `claude.max_budget_usd` để chặn chi phí mỗi lần gọi. Dùng subscription không có nghĩa là API không giới hạn; xem mục 11 của kế hoạch.
+MIT
