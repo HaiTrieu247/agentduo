@@ -89,12 +89,13 @@ describe("Chat", () => {
 
   it("stops the step on Esc and re-runs it with the next message as a note", async () => {
     const chat = newChat();
-    fake.setScenario({ ...happy(), implementer: [{ sleep: 10_000, output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }] });
+    fake.setScenario({ ...happy(), implementer: [{ activities: [{ tool: "Read", input: { file_path: "app.txt" } }], sleep: 10_000, output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }] });
     let escaped = false;
     bus.on((e) => {
-      if (e.type === "phase.started" && e.phase === "IMPLEMENT" && !escaped) {
+      // Once the agent is really working: a fixed delay can fire before it has even started on a busy machine.
+      if (e.type === "agent.activity" && e.role === "implementer" && !escaped) {
         escaped = true;
-        setTimeout(() => chat.escape(), 300);
+        chat.escape();
       }
     });
     await chat.submit("Make app.txt fixed");
@@ -111,9 +112,9 @@ describe("Chat", () => {
 
   it("leaves a stopped run resumable when the next message is /new", async () => {
     const chat = newChat();
-    fake.setScenario({ ...happy(), implementer: [{ sleep: 10_000, output: impl() }] });
+    fake.setScenario({ ...happy(), implementer: [{ activities: [{ tool: "Read", input: { file_path: "app.txt" } }], sleep: 10_000, output: impl() }] });
     bus.on((e) => {
-      if (e.type === "phase.started" && e.phase === "IMPLEMENT") setTimeout(() => chat.escape(), 300);
+      if (e.type === "agent.activity" && e.role === "implementer") chat.escape();
     });
     await chat.submit("Make app.txt fixed");
     await chat.idle();

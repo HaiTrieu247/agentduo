@@ -217,10 +217,15 @@ describe("Workflow", () => {
   });
 
   it("interrupts a running agent and re-runs that step on resume", async () => {
-    fake.setScenario({ ...happy(), implementer: [{ sleep: 10_000, output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }] });
+    fake.setScenario({ ...happy(), implementer: [{ activities: [{ tool: "Read", input: { file_path: "app.txt" } }], sleep: 10_000, output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }] });
     const { wf, bus } = newWorkflow(h, "Make app.txt fixed");
+    let interrupted = false;
     bus.on((e) => {
-      if (e.type === "phase.started" && e.phase === "IMPLEMENT") setTimeout(() => wf.interrupt(), 300);
+      // Once the agent is really working: a fixed delay can fire before it has even started on a busy machine.
+      if (e.type === "agent.activity" && e.role === "implementer" && !interrupted) {
+        interrupted = true;
+        wf.interrupt();
+      }
     });
     expect(await wf.run()).toBe(130);
     expect(stateOf(h).inProgress?.phase).toBe("IMPLEMENT");
