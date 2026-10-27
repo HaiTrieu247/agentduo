@@ -99,16 +99,16 @@ export class CodexBackend implements AgentBackend {
     return found;
   }
 
-  buildArgs({ schemaName, permission, lastMessageFile }: BuildArgs): string[] {
+  buildArgs({ schemaName, lastMessageFile, role }: BuildArgs): string[] {
     return [
       "exec", "--json",
-      "--sandbox", permission,
       "--color", "never",
       "--output-schema", schemaPath(schemaName),
       "--output-last-message", lastMessageFile,
       "--cd", this.repo,
       ...(this.cfg.model ? ["--model", this.cfg.model] : []),
-      ...this.cfg.extra_args.map(String),
+      ...this.cfg.args,
+      ...(this.cfg.role_args[role] ?? []),
       "-", // read the prompt from stdin
     ];
   }

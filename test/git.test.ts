@@ -34,7 +34,6 @@ describe("Git", () => {
       expect(await g.head()).toBe(head);
       expect(readFileSync(join(repo, ".git", "index")).equals(index)).toBe(true);
       expect(git(repo, "rev-parse", "refs/agentduo/t/r1")).toBe(snap.commit);
-      expect(await g.statusPorcelain(EXCLUDE)).toContain("?? new.txt");
       expect(await g.diffStat(base.commit, snap.commit)).toContain("new.txt");
       expect(await g.diff(base.commit, snap.commit)).toContain("+n");
     });
@@ -48,12 +47,43 @@ describe("Git", () => {
     expect(await g.nameStatus(before, await g.worktreeTree())).toEqual([["A", "tệp.txt"]]);
   });
 
+  it("keeps names with tabs and quotes intact", async () => {
+    const { repo } = newRepo();
+    const g = new Git(repo);
+    const before = await g.worktreeTree();
+    writeFileSync(join(repo, "a\tb.txt"), "x\n");
+    writeFileSync(join(repo, 'q"x.txt'), "y\n");
+    expect((await g.nameStatus(before, await g.worktreeTree())).sort()).toEqual([["A", "a\tb.txt"], ["A", 'q"x.txt']]);
+  });
+
+  it("scopes snapshots and diffs to a workspace subdirectory", async () => {
+    const { repo } = newRepo();
+    const ws = join(repo, "gói pkg");
+    mkdirSync(ws);
+    writeFileSync(join(ws, "a.txt"), "a\n");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", "ws");
+    const g = new Git(ws);
+    expect(await g.prefix()).toBe("gói pkg");
+    expect(await new Git(repo).prefix()).toBe("");
+    const base = await g.snapshot();
+    const wholeBefore = await g.worktreeTree([], ":/");
+    writeFileSync(join(ws, "a.txt"), "a2\n");
+    writeFileSync(join(repo, "outside.txt"), "o\n");
+    const snap = await g.snapshot();
+    expect(await g.nameStatus(base.tree, snap.tree)).toEqual([["M", "a.txt"]]);
+    expect(await g.diffStat(base.commit, snap.commit)).toContain("a.txt");
+    expect(await g.diff(base.commit, snap.commit)).not.toContain("outside.txt");
+    const wholeAfter = await g.worktreeTree([], ":/");
+    expect(await g.outsideChanges(wholeBefore, wholeAfter)).toEqual([["A", "outside.txt"]]);
+  });
+
   it("knows HEAD, branch and whether a path is a repo or ignored", async () => {
     const { tmp, repo } = newRepo();
     const g = new Git(repo);
     expect(await g.isRepo()).toBe(true);
     expect(await g.toplevel()).toBe(repo);
-    expect(await g.position()).toEqual([git(repo, "rev-parse", "HEAD"), "main"]);
+    expect([await g.head(), await g.branch()]).toEqual([git(repo, "rev-parse", "HEAD"), "main"]);
     expect(await g.isIgnored(".agentduo/runs")).toBe(true);
     expect(await g.isIgnored("src")).toBe(false);
     expect(await new Git(tmp).isRepo()).toBe(false);

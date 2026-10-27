@@ -24,14 +24,10 @@ describe("detectGates", () => {
     expect(detectGates(dir).map((g) => [g.name, g.command])).toEqual([["test", "pnpm run test"], ["lint", "pnpm run lint"], ["typecheck", "pnpm run type-check"]]);
   });
 
-  it("skips npm's placeholder test script", () => {
+  it("skips npm's placeholder test script and detects other ecosystems", () => {
     const dir = tmp();
     writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } }));
     expect(detectGates(dir)).toEqual([]);
-  });
-
-  it("detects Python, Go, Rust and make", () => {
-    const dir = tmp();
     for (const name of ["pyproject.toml", "go.mod", "Cargo.toml"]) writeFileSync(join(dir, name), "");
     writeFileSync(join(dir, "Makefile"), "build:\n\techo build\ntest:\n\techo ok\n");
     expect(detectGates(dir).map((g) => g.name)).toEqual(["pytest", "go-test", "cargo-test", "make-test"]);
@@ -39,21 +35,23 @@ describe("detectGates", () => {
 });
 
 describe("initRepo", () => {
-  it("writes a config that loads, ignores run data, and is idempotent", () => {
+  it("suggests detected gates as comments, ignores run data, and is idempotent", () => {
     const parent = tmp();
     const repo = makeRepo(parent, { ignoreRuns: false });
     writeFileSync(join(repo, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
-    expect(initRepo(repo)).toMatchObject({ created: true, ignoreCreated: true });
-    expect(loadConfig({ repo, env: { XDG_CONFIG_HOME: join(parent, "xdg") } }).data.gates).toEqual([{ name: "test", command: "npm run test", required: true }]);
+    expect(initRepo(repo)).toMatchObject({ created: true, ignoreCreated: true, gates: [{ name: "test", command: "npm run test" }] });
+    const yaml = readFileSync(join(repo, ".agentduo", "config.yaml"), "utf8");
+    expect(yaml).toContain('#     command: "npm run test"');
+    expect(yaml).toContain("uncomment");
+    expect(yaml).toContain("role_args");
+    expect(loadConfig({ dir: repo, env: { XDG_CONFIG_HOME: join(parent, "xdg") } }).data.gates).toEqual([]);
     expect(initRepo(repo)).toMatchObject({ created: false, ignoreCreated: false });
     expect(readFileSync(join(repo, ".agentduo", ".gitignore"), "utf8")).toBe("runs/\n");
     expect(existsSync(join(repo, ".gitignore"))).toBe(false);
     expect(git(repo, "check-ignore", ".agentduo/runs/x")).toBe(".agentduo/runs/x");
   });
 
-  it("renders a valid placeholder when nothing is detected", () => {
-    const yaml = renderConfigYaml([]);
-    expect(yaml).toContain("gates: []");
-    expect(yaml).toContain("None were detected");
+  it("renders a valid config when nothing is detected", () => {
+    expect(renderConfigYaml([])).toContain('#     command: "npm test"');
   });
 });

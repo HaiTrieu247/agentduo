@@ -8,65 +8,58 @@ import { AgentFailure } from "../src/agents/types.js";
 import { defaultConfig } from "../src/core/config.js";
 import { tempDir } from "./helpers/tmp.js";
 
-const cfg = defaultConfig();
+const PERMISSION_FLAGS = ["--sandbox", "--tools", "--allowedTools", "--disallowedTools", "--permission-mode", "--dangerously-skip-permissions"];
 
 describe("ClaudeBackend", () => {
-  const backend = new ClaudeBackend(cfg.claude, "/repo");
-
-  it("builds read-only and implementer command lines", () => {
-    const ro = backend.buildArgs({ schemaName: "plan_critique", permission: "read-only", lastMessageFile: "/tmp/x", extraAllowed: [] });
-    expect(ro.slice(0, 5)).toEqual(["-p", "--output-format", "stream-json", "--verbose", "--json-schema"]);
-    expect(JSON.parse(ro[5]!)).toEqual(loadSchema("plan_critique"));
-    expect(ro[ro.indexOf("--permission-mode") + 1]).toBe("dontAsk");
-    expect(ro[ro.indexOf("--permission-prompts") + 1]).toBe("none");
-    expect(ro[ro.indexOf("--tools") + 1]).toBe("Read,Grep,Glob");
-    expect(ro).not.toContain("--disallowedTools");
-    const rw = backend.buildArgs({ schemaName: "implementation", permission: "workspace-write", lastMessageFile: "/tmp/x", extraAllowed: ["Bash(npm test*)"] });
-    expect(rw[rw.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
-    expect(rw[rw.indexOf("--tools") + 1]).toBe("Read,Grep,Glob,Edit,Write,Bash");
-    expect(rw.slice(rw.indexOf("--allowedTools"), rw.indexOf("--disallowedTools"))).toContain("Bash(npm test*)");
-    expect(rw.slice(rw.indexOf("--disallowedTools"))).toContain("Bash(git push*)");
-    expect(rw).toContain("--strict-mcp-config");
+  it("passes only protocol flags, then args and the role's args", () => {
+    const cfg = defaultConfig();
+    cfg.claude.model = "opus";
+    cfg.claude.max_budget_usd = 2;
+    cfg.claude.role_args = { implementer: ["--permission-mode", "acceptEdits"] };
+    const backend = new ClaudeBackend(cfg.claude, "/ws");
+    const critic = backend.buildArgs({ schemaName: "plan_critique", lastMessageFile: "/tmp/x", role: "plan_reviewer" });
+    expect(critic.slice(0, 5)).toEqual(["-p", "--output-format", "stream-json", "--verbose", "--json-schema"]);
+    expect(JSON.parse(critic[5]!)).toEqual(loadSchema("plan_critique"));
+    expect(critic.slice(6)).toEqual(["--permission-prompts", "none", "--model", "opus", "--max-budget-usd", "2", "--no-session-persistence"]);
+    for (const flag of PERMISSION_FLAGS) expect(critic).not.toContain(flag);
+    const impl = backend.buildArgs({ schemaName: "implementation", lastMessageFile: "/tmp/x", role: "implementer" });
+    expect(impl.slice(-3)).toEqual(["--no-session-persistence", "--permission-mode", "acceptEdits"]);
   });
 
-  it("finalizes from the result envelope", () => {
-    const p = new ClaudeParser("/repo");
+  it("finalizes from the result envelope and keeps the cost on errors", () => {
+    const backend = new ClaudeBackend(defaultConfig().claude, "/ws");
+    const p = new ClaudeParser("/ws");
     p.feed(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: '{"a":1}', structured_output: { a: 2 }, total_cost_usd: 0.5, permission_denials: [] }));
     expect(backend.finalize(p, "", "")).toMatchObject({ data: { a: 2 }, meta: { costUsd: 0.5 } });
-    const q = new ClaudeParser("/repo");
-    q.feed(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: '{"a":1}' }));
-    expect(backend.finalize(q, "", "").data).toEqual({ a: 1 });
-  });
-
-  it("keeps the cost when the envelope reports an error", () => {
-    const p = new ClaudeParser("/repo");
-    p.feed(JSON.stringify({ type: "result", subtype: "error_max_budget_usd", is_error: true, total_cost_usd: 0.7 }));
+    const q = new ClaudeParser("/ws");
+    q.feed(JSON.stringify({ type: "result", subtype: "error_max_budget_usd", is_error: true, total_cost_usd: 0.7 }));
     let failure: unknown;
     try {
-      backend.finalize(p, "", "");
+      backend.finalize(q, "", "");
     } catch (e) {
       failure = e;
     }
-    expect(failure).toBeInstanceOf(AgentFailure);
     expect((failure as AgentFailure).meta.costUsd).toBe(0.7);
-    expect(() => backend.finalize(new ClaudeParser("/repo"), "garbage", "")).toThrow("did not return a result envelope");
+    expect(() => backend.finalize(new ClaudeParser("/ws"), "garbage", "")).toThrow("did not return a result envelope");
   });
 });
 
 describe("CodexBackend", () => {
-  const backend = new CodexBackend(cfg.codex, "/repo");
-
-  it("builds the command line", () => {
-    const args = backend.buildArgs({ schemaName: "review", permission: "read-only", lastMessageFile: "/tmp/last.json", extraAllowed: [] });
-    expect(args.slice(0, 4)).toEqual(["exec", "--json", "--sandbox", "read-only"]);
-    expect(args[args.indexOf("--output-schema") + 1]).toBe(schemaPath("review"));
-    expect(args[args.indexOf("--output-last-message") + 1]).toBe("/tmp/last.json");
-    expect(args[args.indexOf("--cd") + 1]).toBe("/repo");
-    expect(args).toContain("--ephemeral");
-    expect(args.at(-1)).toBe("-");
+  it("passes only protocol flags, then args and the role's args", () => {
+    const cfg = defaultConfig();
+    cfg.codex.args = ["--ephemeral", "-c", "model_reasoning_effort=high"];
+    cfg.codex.role_args = { code_reviewer: ["--sandbox", "read-only"] };
+    const backend = new CodexBackend(cfg.codex, "/ws");
+    const planner = backend.buildArgs({ schemaName: "plan", lastMessageFile: "/tmp/last.json", role: "planner" });
+    expect(planner).toEqual(["exec", "--json", "--color", "never", "--output-schema", schemaPath("plan"), "--output-last-message", "/tmp/last.json",
+      "--cd", "/ws", "--ephemeral", "-c", "model_reasoning_effort=high", "-"]);
+    for (const flag of PERMISSION_FLAGS) expect(planner).not.toContain(flag);
+    const reviewer = backend.buildArgs({ schemaName: "review", lastMessageFile: "/tmp/last.json", role: "code_reviewer" });
+    expect(reviewer.slice(-3)).toEqual(["--sandbox", "read-only", "-"]);
   });
 
   it("finalizes from the last-message file, then from the stream", () => {
+    const backend = new CodexBackend(defaultConfig().codex, "/ws");
     const t = tempDir();
     try {
       const file = join(t.path, "last.json");

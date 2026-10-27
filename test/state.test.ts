@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { acquireRepoLock, LockError, nowIso, RunStore, slugify } from "../src/core/state.js";
+import { acquireWorkspaceLock, LockError, nowIso, RunStore, slugify } from "../src/core/state.js";
 import { tempDir } from "./helpers/tmp.js";
 
 const dirs: Array<{ cleanup(): void }> = [];
@@ -62,12 +62,12 @@ describe("RunStore", () => {
     expect(existsSync(store.path("lock"))).toBe(false);
   });
 
-  it("allows only one active run per repository", () => {
+  it("allows only one active run per workspace", () => {
     const dir = runsDir();
-    const release = acquireRepoLock(dir);
-    expect(() => acquireRepoLock(dir)).toThrow(LockError);
+    const release = acquireWorkspaceLock(dir);
+    expect(() => acquireWorkspaceLock(dir)).toThrow(LockError);
     release();
-    acquireRepoLock(dir)();
+    acquireWorkspaceLock(dir)();
   });
 
   it("writes atomically and updates timestamps", () => {

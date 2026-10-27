@@ -5,10 +5,9 @@ import YAML from "yaml";
 
 export type Backend = "codex" | "claude";
 export type AgentRole = "planner" | "plan_reviewer" | "implementer" | "code_reviewer";
-export type Permission = "read-only" | "workspace-write";
+export type RoleArgs = Partial<Record<AgentRole, string[]>>;
 
 export const AGENT_ROLES: AgentRole[] = ["planner", "plan_reviewer", "implementer", "code_reviewer"];
-export const READ_ONLY_ROLES: AgentRole[] = ["planner", "plan_reviewer", "code_reviewer"];
 export const SEVERITIES = ["critical", "high", "medium", "low"] as const;
 
 export interface GateConfig {
@@ -18,7 +17,10 @@ export interface GateConfig {
   timeout_sec?: number;
 }
 
-/** agentduo's own config schema (not a Codex or Claude Code config). Keys match the YAML. */
+/**
+ * agentduo's own settings: who plays which role, loop limits, optional gates, and extra CLI arguments.
+ * Permissions are deliberately absent; each CLI takes them from its own configuration.
+ */
 export interface ConfigData {
   agents: Record<AgentRole, Backend>;
   limits: {
@@ -27,11 +29,11 @@ export interface ConfigData {
     max_retries: number;
     max_consecutive_gate_failures: number;
     agent_timeout_sec: number;
+    agent_idle_timeout_sec: number;
     gate_timeout_sec: number;
     max_diff_chars: number;
     max_gate_output_chars: number;
   };
-  permissions: { codex: Permission; claude_planning: Permission; claude_implementation: Permission };
   quality_gates: {
     require_plan_approval: boolean;
     require_tests_pass: boolean;
@@ -41,23 +43,9 @@ export interface ConfigData {
     review_on_gate_failure: boolean;
   };
   gates: GateConfig[];
-  safety: {
-    allow_dirty_worktree: boolean;
-    pause_before_implement: boolean;
-    max_deleted_files: number;
-    protected_paths: string[];
-  };
-  codex: { bin: string; model: string | null; extra_args: string[] };
-  claude: {
-    bin: string;
-    model: string | null;
-    max_budget_usd: number | null;
-    extra_args: string[];
-    read_only_tools: string[];
-    implementation_tools: string[];
-    implementation_allowed_tools: string[];
-    implementation_disallowed_tools: string[];
-  };
+  safety: { pause_before_implement: boolean };
+  codex: { bin: string; model: string | null; args: string[]; role_args: RoleArgs };
+  claude: { bin: string; model: string | null; max_budget_usd: number | null; args: string[]; role_args: RoleArgs };
   paths: { runs_dir: string };
 }
 
@@ -69,11 +57,11 @@ const DEFAULTS: ConfigData = {
     max_retries: 1,
     max_consecutive_gate_failures: 3,
     agent_timeout_sec: 1800,
+    agent_idle_timeout_sec: 900,
     gate_timeout_sec: 900,
     max_diff_chars: 120000,
     max_gate_output_chars: 6000,
   },
-  permissions: { codex: "read-only", claude_planning: "read-only", claude_implementation: "workspace-write" },
   quality_gates: {
     require_plan_approval: true,
     require_tests_pass: true,
@@ -83,35 +71,16 @@ const DEFAULTS: ConfigData = {
     review_on_gate_failure: false,
   },
   gates: [],
-  safety: {
-    allow_dirty_worktree: false,
-    pause_before_implement: false,
-    max_deleted_files: 5,
-    protected_paths: [".agentduo/**", ".git/**", ".env", ".env.*", "**/*.pem", "**/*.key", "**/secrets/**", ".github/workflows/**"],
-  },
-  codex: { bin: "codex", model: null, extra_args: ["--ephemeral"] },
-  claude: {
-    bin: "claude",
-    model: null,
-    max_budget_usd: null,
-    extra_args: ["--strict-mcp-config", "--no-session-persistence"],
-    read_only_tools: ["Read", "Grep", "Glob"],
-    implementation_tools: ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
-    implementation_allowed_tools: [
-      "Read", "Grep", "Glob", "Edit", "Write",
-      "Bash(git status*)", "Bash(git diff*)", "Bash(git log*)", "Bash(git show*)",
-      "Bash(ls*)", "Bash(cat*)", "Bash(pwd)",
-    ],
-    implementation_disallowed_tools: [
-      "Bash(git push*)", "Bash(git commit*)", "Bash(git reset*)", "Bash(git checkout*)",
-      "Bash(git switch*)", "Bash(git rebase*)", "Bash(git merge*)", "Bash(git clean*)",
-      "Bash(git stash*)", "Bash(git tag*)", "Bash(git branch*)", "Bash(git update-ref*)",
-      "Bash(rm -rf*)", "Bash(rm -fr*)", "Bash(sudo*)", "Bash(curl*)", "Bash(wget*)",
-      "WebFetch", "WebSearch",
-    ],
-  },
+  safety: { pause_before_implement: false },
+  codex: { bin: "codex", model: null, args: ["--ephemeral"], role_args: {} },
+  claude: { bin: "claude", model: null, max_budget_usd: null, args: ["--no-session-persistence"], role_args: {} },
   paths: { runs_dir: ".agentduo/runs" },
 };
+
+/** Keys from agentduo v1 that kept their meaning under a new name. */
+const RENAMED: Record<string, string> = { "codex.extra_args": "codex.args", "claude.extra_args": "claude.args" };
+/** Mappings whose keys are user-chosen (validated later) rather than fixed by the defaults. */
+const OPEN_MAPPINGS = new Set(["codex.role_args", "claude.role_args"]);
 
 export class ConfigError extends Error {
   override name = "ConfigError";
@@ -127,20 +96,22 @@ export function defaultConfig(): ConfigData {
   return structuredClone(DEFAULTS);
 }
 
-const isPlainObject = (v: unknown): v is Record<string, unknown> =>
-  typeof v === "object" && v !== null && !Array.isArray(v);
+const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
-function mergeInto(base: Record<string, unknown>, override: Record<string, unknown>, where: string,
-  warnings: string[]): Record<string, unknown> {
+function mergeInto(base: Record<string, unknown>, override: Record<string, unknown>, where: string, warnings: string[]): Record<string, unknown> {
   const out = structuredClone(base);
   for (const [key, value] of Object.entries(override)) {
     const path = where ? `${where}.${key}` : key;
     if (!(key in base)) {
-      warnings.push(`unknown config key '${path}' (ignored)`);
+      warnings.push(RENAMED[path] ? `config key '${path}' was renamed to '${RENAMED[path]}' (ignored)` : `unknown config key '${path}' (ignored)`);
       continue;
     }
     const current = base[key];
     if ((isPlainObject(current) || Array.isArray(current)) && (value === null || value === undefined)) continue; // "codex:" / "gates:" with no body keep the defaults
+    if (OPEN_MAPPINGS.has(path)) {
+      out[key] = value;
+      continue;
+    }
     if (isPlainObject(current)) {
       if (!isPlainObject(value)) throw new ConfigError(`'${path}' must be a mapping`);
       out[key] = mergeInto(current, value, path, warnings);
@@ -169,15 +140,15 @@ function readYaml(path: string): Record<string, unknown> {
   return parsed;
 }
 
-export function loadConfig(opts: { repo: string; configPath?: string; env?: NodeJS.ProcessEnv;
-  platform?: NodeJS.Platform; validate?: boolean }): LoadedConfig {
+/** Defaults ← user config ← `<dir>/.agentduo/config.yaml` (or --config). */
+export function loadConfig(opts: { dir: string; configPath?: string; env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; validate?: boolean }): LoadedConfig {
   const warnings: string[] = [];
   const sources: string[] = [];
   let data = defaultConfig() as unknown as Record<string, unknown>;
-  const repoPath = opts.configPath ? resolve(opts.configPath) : join(opts.repo, ".agentduo", "config.yaml");
-  if (opts.configPath && !existsSync(repoPath)) throw new ConfigError(`config file not found: ${repoPath}`);
+  const dirPath = opts.configPath ? resolve(opts.configPath) : join(opts.dir, ".agentduo", "config.yaml");
+  if (opts.configPath && !existsSync(dirPath)) throw new ConfigError(`config file not found: ${dirPath}`);
   const userPath = userConfigPath(opts.env ?? process.env, opts.platform ?? process.platform);
-  for (const path of userPath === repoPath ? [repoPath] : [userPath, repoPath]) {
+  for (const path of userPath === dirPath ? [dirPath] : [userPath, dirPath]) {
     if (!existsSync(path)) continue;
     const fileWarnings: string[] = [];
     try {
@@ -194,33 +165,27 @@ export function loadConfig(opts: { repo: string; configPath?: string; env?: Node
   return { data: cfg, sources, warnings };
 }
 
-export function permissionFor(cfg: ConfigData, role: AgentRole): Permission {
-  if (cfg.agents[role] === "codex") return cfg.permissions.codex;
-  return READ_ONLY_ROLES.includes(role) ? cfg.permissions.claude_planning : cfg.permissions.claude_implementation;
+/** A run's saved config.json, merged over today's defaults so keys added later get their default value. */
+export function configFromSaved(raw: unknown): ConfigData {
+  if (!isPlainObject(raw)) throw new ConfigError("saved run config is not a mapping");
+  return mergeInto(defaultConfig() as unknown as Record<string, unknown>, raw, "", []) as unknown as ConfigData;
 }
 
 const isPosInt = (v: unknown): boolean => Number.isInteger(v) && (v as number) >= 1;
 const isNonNegInt = (v: unknown): boolean => Number.isInteger(v) && (v as number) >= 0;
+const isStringList = (v: unknown): boolean => Array.isArray(v) && v.every((x) => typeof x === "string");
 
 export function validateConfig(cfg: ConfigData, source?: string): void {
   const errors: string[] = [];
   for (const role of AGENT_ROLES) {
     if (cfg.agents[role] !== "codex" && cfg.agents[role] !== "claude") errors.push(`agents.${role} must be one of codex, claude`);
   }
-  if (cfg.agents.implementer !== "claude") {
-    errors.push("agents.implementer must be 'claude' (Claude is the only agent allowed to modify source code)");
-  }
-  if (!errors.length) {
-    for (const role of READ_ONLY_ROLES) {
-      if (permissionFor(cfg, role) !== "read-only") errors.push(`role '${role}' must run read-only (check permissions.*)`);
-    }
-    if (permissionFor(cfg, "implementer") !== "workspace-write") errors.push("permissions for the implementer must be 'workspace-write'");
-  }
   for (const key of ["max_planning_rounds", "max_review_rounds", "max_consecutive_gate_failures", "agent_timeout_sec",
     "gate_timeout_sec", "max_diff_chars", "max_gate_output_chars"] as const) {
     if (!isPosInt(cfg.limits[key])) errors.push(`limits.${key} must be a positive integer`);
   }
   if (!isNonNegInt(cfg.limits.max_retries)) errors.push("limits.max_retries must be an integer >= 0");
+  if (!isNonNegInt(cfg.limits.agent_idle_timeout_sec)) errors.push("limits.agent_idle_timeout_sec must be an integer >= 0");
   if (!Array.isArray(cfg.quality_gates.blocking_severities)) {
     errors.push("quality_gates.blocking_severities must be a list");
   } else {
@@ -245,16 +210,12 @@ export function validateConfig(cfg: ConfigData, source?: string): void {
       if (g.required !== undefined && typeof g.required !== "boolean") errors.push(`gates[${i}].required must be true or false`);
       if (g.timeout_sec !== undefined && !isPosInt(g.timeout_sec)) errors.push(`gates[${i}].timeout_sec must be a positive integer`);
     });
-    if (cfg.quality_gates.require_tests_pass && !cfg.gates.some((g) => isPlainObject(g) && g.required !== false)) {
-      errors.push("quality_gates.require_tests_pass is true but no required gate is configured under 'gates' (run 'duo init')");
-    }
   }
-  if (!isNonNegInt(cfg.safety.max_deleted_files)) errors.push("safety.max_deleted_files must be an integer >= 0");
-  // YAML 1.2 reads `no`/`yes` as strings, so every flag is checked: a string must never silently disable a safety refusal.
+  // YAML 1.2 reads `no`/`yes` as strings; a string flag must not be mistaken for false.
   const flags: Array<[string, unknown]> = [
     ...(["require_plan_approval", "require_tests_pass", "require_codex_approval", "stop_on_critical_issue", "review_on_gate_failure"] as const)
       .map((k): [string, unknown] => [`quality_gates.${k}`, cfg.quality_gates[k]]),
-    ...(["allow_dirty_worktree", "pause_before_implement"] as const).map((k): [string, unknown] => [`safety.${k}`, cfg.safety[k]]),
+    ["safety.pause_before_implement", cfg.safety.pause_before_implement],
   ];
   for (const [name, value] of flags) if (typeof value !== "boolean") errors.push(`${name} must be true or false`);
   const strings: Array<[string, unknown]> = [["codex.bin", cfg.codex.bin], ["claude.bin", cfg.claude.bin], ["paths.runs_dir", cfg.paths.runs_dir]];
@@ -264,15 +225,17 @@ export function validateConfig(cfg: ConfigData, source?: string): void {
   }
   const budget = cfg.claude.max_budget_usd;
   if (budget !== null && !(typeof budget === "number" && budget > 0)) errors.push("claude.max_budget_usd must be a positive number or null");
-  const lists: Array<[string, unknown]> = [
-    ["safety.protected_paths", cfg.safety.protected_paths],
-    ["codex.extra_args", cfg.codex.extra_args], ["claude.extra_args", cfg.claude.extra_args],
-    ["claude.read_only_tools", cfg.claude.read_only_tools], ["claude.implementation_tools", cfg.claude.implementation_tools],
-    ["claude.implementation_allowed_tools", cfg.claude.implementation_allowed_tools],
-    ["claude.implementation_disallowed_tools", cfg.claude.implementation_disallowed_tools],
-  ];
-  for (const [name, value] of lists) {
-    if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) errors.push(`${name} must be a list of strings`);
+  for (const backend of ["codex", "claude"] as const) {
+    if (!isStringList(cfg[backend].args)) errors.push(`${backend}.args must be a list of strings`);
+    const roleArgs = cfg[backend].role_args as unknown;
+    if (!isPlainObject(roleArgs)) {
+      errors.push(`${backend}.role_args must be a mapping of role to a list of strings`);
+      continue;
+    }
+    for (const [role, args] of Object.entries(roleArgs)) {
+      if (!(AGENT_ROLES as string[]).includes(role)) errors.push(`${backend}.role_args: unknown role '${role}' (roles: ${AGENT_ROLES.join(", ")})`);
+      else if (!isStringList(args)) errors.push(`${backend}.role_args.${role} must be a list of strings`);
+    }
   }
   if (errors.length) {
     throw new ConfigError(`invalid configuration${source ? ` (${source})` : ""}:\n  - ${errors.join("\n  - ")}`);

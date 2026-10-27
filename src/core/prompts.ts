@@ -1,4 +1,4 @@
-import type { GateConfig } from "./config.js";
+import type { AgentRole, Backend, GateConfig } from "./config.js";
 import { describeGates, type GateResult } from "./gates.js";
 import type { Approval, Critique, Finding, Implementation, Plan, Review } from "./outputs.js";
 import { findingsMarkdown, issuesMarkdown } from "./render.js";
@@ -8,6 +8,7 @@ export interface PromptContext {
   repo: string;
   taskId: string;
   task: string;
+  agents: Record<AgentRole, Backend>;
   gates: GateConfig[];
   notes: HumanNote[];
 }
@@ -25,28 +26,28 @@ export const SEVERITY_GUIDE = [
   "- low: minor improvement or nit.",
 ].join("\n");
 
-export const READONLY_RULES =
-  "## Hard rules\n" +
-  "- You are READ-ONLY. Do not create, modify, move or delete any file, and do not run commands that " +
-  "change the repository, its git state or the network. The orchestrator verifies the working tree " +
-  "is byte-for-byte unchanged after your turn and escalates to a human if it is not.\n" +
-  "- Inspect the repository as needed (read files, search, read-only git commands such as " +
-  "`git log`, `git show`, `git diff <a> <b>`).\n" +
-  "- Your final message must be a single JSON object matching the provided output schema. " +
-  "No prose outside the JSON.\n";
+export const OUTPUT_RULES = "## Output\nYour final message must be a single JSON object matching the provided output schema. No prose outside the JSON.\n";
+
+const NAMES: Record<Backend, string> = { codex: "Codex", claude: "Claude Code" };
+
+/** A markdown fence longer than any backtick run inside `text`, so the text cannot close it early. */
+export function fenceFor(text: string): string {
+  const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((m) => m[0].length));
+  return "`".repeat(Math.max(3, longest + 1));
+}
 
 function header(role: string, title: string, ctx: PromptContext): string {
+  const a = ctx.agents;
   return "[orchestrator-role: " + role + "]\n" +
-    "You are the **" + title + "** in an automated multi-agent software workflow driven by an orchestrator (agentduo).\n" +
-    "Team: Codex designs and plans, then reviews code (never edits files). Claude Code critiques plans for " +
-    "feasibility and is the only agent that edits files. Agreement between agents is not proof of " +
-    "correctness: the orchestrator runs the project's quality gates independently.\n\n" +
-    "- Repository: `" + ctx.repo + "`\n" +
+    "You are the **" + title + "** in a two-agent software workflow. agentduo only relays structured messages between the agents.\n" +
+    "Roles: planner and plan sign-off: " + NAMES[a.planner] + "; plan critic: " + NAMES[a.plan_reviewer] + "; implementer: " +
+    NAMES[a.implementer] + "; code reviewer: " + NAMES[a.code_reviewer] + ".\n" +
+    "Follow your own configuration and the repository's instructions (AGENTS.md / CLAUDE.md).\n\n" +
+    "- Workspace: `" + ctx.repo + "`\n" +
     "- Task ID: `" + ctx.taskId + "`\n";
 }
 
 function gateList(gates: GateConfig[]): string {
-  if (!gates.length) return "_(none configured)_";
   return gates.map((g) => "- `" + g.command + "` (" + g.name + ", " + (g.required === false ? "optional" : "required") + ")").join("\n");
 }
 
@@ -74,18 +75,15 @@ export function planner(ctx: PromptContext, round: number, version: number, prev
     `- Planning round: ${round} · Producing plan version: v${version}\n`,
     "## Task\n" + ctx.task + "\n",
     notes(ctx.notes),
-    READONLY_RULES,
     "## Your job\n" +
-      "Study the repository and produce an implementation plan that another agent (Claude Code) can " +
-      "execute without further clarification.\n" +
+      "Study the repository and produce an implementation plan that the implementer can execute without further clarification.\n" +
       "- Goals and explicit scope (in / out). Keep the scope to what the task needs.\n" +
       "- Architecture / design decisions that fit the existing code and conventions.\n" +
       "- Ordered, concrete steps; list the files each step creates or changes.\n" +
       "- Acceptance criteria that are objective and testable.\n" +
       "- Risks with mitigations, and a test strategy (which tests to add or update).\n" +
-      "- Open questions only for things that truly cannot be decided from the repository; " +
-      "state the assumption you made for each.\n\n" +
-      "After implementation the orchestrator will run these quality gates, which must pass:\n" + gateList(ctx.gates) + "\n",
+      "- Open questions only for things that truly cannot be decided from the repository; state the assumption you made for each.\n" +
+      (ctx.gates.length ? "\nAfter implementation agentduo runs these commands and shows their results to the code reviewer:\n" + gateList(ctx.gates) + "\n" : ""),
   ];
   if (!previousPlan) {
     out.push("\nThis is the first version: return `feedback_resolution` as an empty list.\n");
@@ -96,6 +94,7 @@ export function planner(ctx: PromptContext, round: number, version: number, prev
       "above with decision `accepted`, `partially_accepted` or `disputed` and a rationale. Dispute only " +
       "with a concrete technical reason; disputed critical/high issues will go back to the critic.\n");
   }
+  out.push(OUTPUT_RULES);
   return out.join("\n");
 }
 
@@ -105,30 +104,28 @@ export function planReviewer(ctx: PromptContext, round: number, version: number,
     `- Planning round: ${round} · Plan under review: v${version}\n`,
     "## Task\n" + ctx.task + "\n",
     notes(ctx.notes),
-    READONLY_RULES,
     "## Plan under review\n" + planMd + "\n",
     "## Your job\n" +
-      "You will implement this plan later, so judge whether it is feasible in THIS codebase:\n" +
+      "Judge whether this plan is feasible in THIS codebase; the implementer must be able to execute it without guessing:\n" +
       "- Do the files, modules, APIs and commands it relies on actually exist and work as assumed?\n" +
       "- Missing steps, wrong ordering, hidden dependencies, migration or compatibility concerns.\n" +
-      "- Are the acceptance criteria objective and testable with the quality gates below?\n" +
-      "- Risks the planner missed; unnecessary scope; ambiguity that would force guessing.\n\n" +
-      "Quality gates that must pass after implementation:\n" + gateList(ctx.gates) + "\n\n" +
+      "- Are the acceptance criteria objective and testable?\n" +
+      "- Risks the planner missed; unnecessary scope; ambiguity that would force guessing.\n" +
+      (ctx.gates.length ? "\nCommands agentduo runs after implementation:\n" + gateList(ctx.gates) + "\n" : "") + "\n" +
       SEVERITY_GUIDE + "\n\n" +
       "Decision rules:\n" +
       "- Set `approved: true` and `status: \"approved\"` only if no critical or high issue remains. " +
       "Medium/low issues may accompany an approval as suggestions.\n" +
-      "- Give each issue a stable id (`C1`, `C2`, ...). Reuse the same id when you re-raise an issue " +
-      "from a previous round.\n" +
-      "- `accepted`: planner responses (by issue id and short reason) you now agree with. `disputed`: " +
-      "planner responses you still disagree with, with your reasoning; re-raise any still-blocking one " +
-      "in `issues`.\n" +
+      "- Give each issue a stable id (`C1`, `C2`, ...). Reuse the same id when you re-raise an issue from a previous round.\n" +
+      "- `accepted`: planner responses (by issue id and short reason) you now agree with. `disputed`: planner responses you " +
+      "still disagree with, with your reasoning; re-raise any still-blocking one in `issues`.\n" +
       "- `proposed_changes`: concrete edits to the plan you recommend.\n",
   ];
   if (previousCritique) {
     out.push("\n## Your critique from the previous round\n" + issuesMarkdown(previousCritique.issues) +
       "\n\nCheck how the new plan version addressed each of these (see its 'Response to feedback' section).\n");
   }
+  out.push(OUTPUT_RULES);
   return out.join("\n");
 }
 
@@ -138,7 +135,6 @@ export function planFinalizer(ctx: PromptContext, round: number, version: number
     `- Planning round: ${round} · Plan up for sign-off: v${version}\n`,
     "## Task\n" + ctx.task + "\n",
     notes(ctx.notes),
-    READONLY_RULES,
     "## Plan\n" + planMd + "\n",
     "## The critic approved this version\n" + critique.summary + "\n\nRemaining suggestions:\n" + issuesMarkdown(critique.issues) + "\n",
     "## Your job\n" +
@@ -146,30 +142,25 @@ export function planFinalizer(ctx: PromptContext, round: number, version: number
       "(`approved: true`, `status: \"approved\"`) unless you find a critical or high problem; then return " +
       "`changes_requested` with issues (ids `A1`, `A2`, ...) and the plan goes through another revision " +
       "round. Do not request changes for style or wording alone.\n\n" + SEVERITY_GUIDE + "\n",
+    OUTPUT_RULES,
   ].join("\n");
 }
 
-export function implementer(ctx: PromptContext, round: number, planMd: string, protectedPaths: string[], findings: Finding[],
-  review: Review | null, failedGates: GateResult[], previousReport: { summary: string | null } | null): string {
+export function implementer(ctx: PromptContext, round: number, planMd: string, findings: Finding[], review: Review | null,
+  failedGates: GateResult[], previousReport: { summary: string | null } | null): string {
   const out = [
     header("implementer", "Implementer", ctx),
     `- Implementation round: ${round}\n`,
     "## Task\n" + ctx.task + "\n",
     notes(ctx.notes),
     "## Final approved plan\n" + planMd + "\n",
-    "## Hard rules\n" +
-      "- You are the only agent allowed to edit files. Stay within the plan's scope.\n" +
-      "- Never commit, push, reset, stash, switch branches or rewrite git history; the orchestrator " +
-      "snapshots your changes itself and leaves them uncommitted for the human.\n" +
-      "- Do not touch these protected paths: " + protectedPaths.map((p) => "`" + p + "`").join(", ") + ".\n" +
-      "- Do not delete files unless the plan requires it. No network access, no deploys, no secrets.\n" +
-      "- Run the quality gates yourself before finishing and fix what fails:\n" + gateList(ctx.gates) + "\n" +
-      "- Shell access is an allowlist matched per command: run each check as its own Bash call, " +
-      "exactly as written above. Chained commands (`;`, `&&`, `|`) do not match and are denied.\n" +
-      "- If you cannot proceed (missing information, contradictory requirements, missing permissions), " +
-      "stop and return `status: \"blocked\"` with a precise `blocking_reason`.\n" +
-      "- Your final message must be a single JSON object matching the output schema: summary, " +
-      "files_changed, tests_run (what you actually ran and whether it passed) and addressed_findings.\n",
+    "## How to work\n" +
+      "- Implement the plan and stay within its scope.\n" +
+      (ctx.gates.length
+        ? "- After your turn agentduo runs these commands and shows the results to the code reviewer; make them pass:\n" + gateList(ctx.gates) + "\n"
+        : "- Run the project's checks yourself, as your configuration and the repository's instructions describe.\n") +
+      "- If you cannot proceed (missing information, contradictory requirements, missing permissions), stop and return " +
+      "`status: \"blocked\"` with a precise `blocking_reason`.\n",
   ];
   if (round === 1 && !findings.length && !failedGates.length) {
     out.push("\nImplement the plan now. `addressed_findings` should be an empty list.\n");
@@ -182,28 +173,31 @@ export function implementer(ctx: PromptContext, round: number, planMd: string, p
         findingsMarkdown(findings) + "\n\nFor every finding id, add an entry to `addressed_findings`: `fixed`, " +
         "`not_applicable`, or `disputed` with a concrete technical justification.\n");
     }
-    if (failedGates.length) out.push("### Failing quality gates (run by the orchestrator)\n" + describeGates(failedGates) + "\n");
+    if (failedGates.length) out.push("### Failing quality gates (run by agentduo)\n" + describeGates(failedGates) + "\n");
     if (previousReport?.summary) out.push("### Your previous report\n" + previousReport.summary + "\n");
   }
+  out.push("## Output\nYour final message must be a single JSON object matching the output schema: summary, files_changed, " +
+    "tests_run (what you actually ran and whether it passed) and addressed_findings.\n");
   return out.join("\n");
 }
 
 export function codeReviewer(ctx: PromptContext, round: number, planMd: string, base: string, snapshot: string, gateResults: GateResult[],
   diffStat: string, diff: string, truncated: boolean, previousFindings: Finding[], implReport: Implementation): string {
   const tests = implReport.tests_run.map((t) => "- `" + t.command + "` passed=" + t.passed + " " + t.notes).join("\n") || "_(none)_";
+  const fence = fenceFor(diff);
   const out = [
     header("code_reviewer", "Code Reviewer", ctx),
     `- Review round: ${round}\n` +
-      "- Revision under review: `" + snapshot + "` (orchestrator snapshot of the working tree)\n" +
+      "- Revision under review: `" + snapshot + "` (agentduo snapshot of the workspace)\n" +
       "- Base revision: `" + base + "`\n",
     "## Task\n" + ctx.task + "\n",
     notes(ctx.notes),
-    READONLY_RULES,
     "## Final approved plan\n" + planMd + "\n",
-    "## Quality gate results (authoritative, run by the orchestrator on this revision)\n" + describeGates(gateResults) + "\n",
+    "## Quality gate results (run by agentduo on this revision)\n" + describeGates(gateResults) + "\n",
     "## Implementer's report\n" + implReport.summary + "\n\nTests the implementer says it ran:\n" + tests + "\n",
     "## Diff stat (base → revision)\n```\n" + (diffStat.trimEnd() || "(no changes)") + "\n```\n",
-    "## Diff" + (truncated ? " (TRUNCATED: run `git diff " + base + " " + snapshot + "` for the full diff)" : "") + "\n```diff\n" + diff + "\n```\n",
+    "## Diff" + (truncated ? " (TRUNCATED: run `git diff " + base + " " + snapshot + " -- .` for the full diff)" : "") + "\n" +
+      fence + "diff\n" + diff + "\n" + fence + "\n",
   ];
   if (previousFindings.length) {
     const responses = new Map(implReport.addressed_findings.map((a) => [a.finding_id, a]));
@@ -220,13 +214,14 @@ export function codeReviewer(ctx: PromptContext, round: number, planMd: string, 
     "## Your job\n" +
     "Review the change against the plan and its acceptance criteria: correctness, edge cases, error " +
     "handling, security, test adequacy, scope creep, and consistency with the codebase's conventions. " +
-    "The working tree currently equals the revision under review, so you may read files directly.\n\n" +
+    "The workspace currently equals the revision under review, so you may read files directly.\n\n" +
     SEVERITY_GUIDE + "\n\n" +
     "Decision rules:\n" +
-    "- Approve (`approved: true`, `status: \"approved\"`) only if there is no critical or high finding, " +
-    "the acceptance criteria are met and the required quality gates pass.\n" +
+    "- Approve (`approved: true`, `status: \"approved\"`) only if there is no critical or high finding and the acceptance " +
+    "criteria are met" + (ctx.gates.length ? ", and the required quality gates pass" : "") + ".\n" +
     "- `reviewed_commit` must be exactly `" + snapshot + "`.\n" +
-    "- New finding ids continue the sequence `F1`, `F2`, ...; `file` is repo-relative (empty string if " +
-    "general) and `line` may be null.\n");
+    "- New finding ids continue the sequence `F1`, `F2`, ...; `file` is workspace-relative (empty string if " +
+    "general) and `line` may be null.\n",
+    OUTPUT_RULES);
   return out.join("\n");
 }

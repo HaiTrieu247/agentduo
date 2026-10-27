@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ConfigError, defaultConfig, loadConfig, permissionFor, userConfigPath } from "../src/core/config.js";
+import { configFromSaved, ConfigError, defaultConfig, loadConfig, userConfigPath } from "../src/core/config.js";
 import { tempDir } from "./helpers/tmp.js";
 
 const dirs: Array<{ cleanup(): void }> = [];
@@ -9,128 +9,106 @@ afterEach(() => {
   while (dirs.length) dirs.pop()!.cleanup();
 });
 
-function setup(repoYaml?: string, userYaml?: string) {
+function setup(dirYaml?: string, userYaml?: string) {
   const t = tempDir();
   dirs.push(t);
-  const repo = join(t.path, "repo");
+  const dir = join(t.path, "ws");
   const xdg = join(t.path, "xdg");
-  mkdirSync(join(repo, ".agentduo"), { recursive: true });
-  if (repoYaml !== undefined) writeFileSync(join(repo, ".agentduo", "config.yaml"), repoYaml);
+  mkdirSync(join(dir, ".agentduo"), { recursive: true });
+  if (dirYaml !== undefined) writeFileSync(join(dir, ".agentduo", "config.yaml"), dirYaml);
   if (userYaml !== undefined) {
     mkdirSync(join(xdg, "agentduo"), { recursive: true });
     writeFileSync(join(xdg, "agentduo", "config.yaml"), userYaml);
   }
-  return { repo, env: { XDG_CONFIG_HOME: xdg, HOME: t.path } as NodeJS.ProcessEnv };
+  return { dir, env: { XDG_CONFIG_HOME: xdg, HOME: t.path } as NodeJS.ProcessEnv };
 }
 
-const GATES = "gates:\n  - name: t\n    command: npm test\n";
-
 describe("loadConfig", () => {
-  it("layers defaults, user config and repo config", () => {
-    const { repo, env } = setup(`${GATES}codex:\n  model: gpt-repo\n`, "codex:\n  model: gpt-user\nclaude:\n  model: opus\n");
-    const { data, sources, warnings } = loadConfig({ repo, env });
-    expect(data.codex.model).toBe("gpt-repo");
+  it("layers defaults, user config and workspace config; gates are optional", () => {
+    const { dir, env } = setup("codex:\n  model: gpt-ws\n", "codex:\n  model: gpt-user\nclaude:\n  model: opus\n");
+    const { data, sources, warnings } = loadConfig({ dir, env });
+    expect(data.codex.model).toBe("gpt-ws");
     expect(data.claude.model).toBe("opus");
-    expect(data.limits.max_planning_rounds).toBe(4);
-    expect(data.safety.protected_paths).toContain(".agentduo/**");
+    expect(data.gates).toEqual([]);
+    expect(data.limits.agent_idle_timeout_sec).toBe(900);
+    expect(data.codex.args).toEqual(["--ephemeral"]);
+    expect(data.claude.args).toEqual(["--no-session-persistence"]);
     expect(data.paths.runs_dir).toBe(".agentduo/runs");
     expect(sources).toHaveLength(2);
     expect(warnings).toEqual([]);
   });
 
-  it("warns about unknown keys and names the file", () => {
-    const { repo, env } = setup(`${GATES}limits:\n  max_planing_rounds: 3\n`);
-    const { warnings } = loadConfig({ repo, env });
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("config.yaml: unknown config key 'limits.max_planing_rounds' (ignored)");
+  it("loads a v1 config with warnings only", () => {
+    const { dir, env } = setup("permissions:\n  codex: read-only\nsafety:\n  protected_paths: [.env]\n  allow_dirty_worktree: true\nclaude:\n  extra_args: [--x]\n  read_only_tools: [Read]\n");
+    const { warnings } = loadConfig({ dir, env });
+    const text = warnings.join("\n");
+    expect(text).toContain("unknown config key 'permissions' (ignored)");
+    expect(text).toContain("unknown config key 'safety.protected_paths' (ignored)");
+    expect(text).toContain("config key 'claude.extra_args' was renamed to 'claude.args' (ignored)");
+    expect(text).toContain("unknown config key 'claude.read_only_tools' (ignored)");
   });
 
-  it("keeps defaults when a section is present but empty", () => {
-    const { repo, env } = setup(`${GATES}codex:\nclaude:\n`);
-    const { data } = loadConfig({ repo, env });
+  it("accepts role_args per role and rejects unknown roles or non-string args", () => {
+    const ok = setup("claude:\n  role_args:\n    implementer: [--permission-mode, acceptEdits]\n");
+    expect(loadConfig({ dir: ok.dir, env: ok.env }).data.claude.role_args).toEqual({ implementer: ["--permission-mode", "acceptEdits"] });
+    const badRole = setup("codex:\n  role_args:\n    hacker: [--x]\n");
+    expect(() => loadConfig({ dir: badRole.dir, env: badRole.env })).toThrow("codex.role_args: unknown role 'hacker'");
+    const badArgs = setup("claude:\n  role_args:\n    implementer: --x\n");
+    expect(() => loadConfig({ dir: badArgs.dir, env: badArgs.env })).toThrow("claude.role_args.implementer must be a list of strings");
+  });
+
+  it("keeps defaults when a section or list is present but empty", () => {
+    const { dir, env } = setup("codex:\nclaude:\n  args:\ngates:\n");
+    const { data } = loadConfig({ dir, env });
     expect(data.codex.bin).toBe("codex");
-    expect(data.claude.read_only_tools).toEqual(["Read", "Grep", "Glob"]);
+    expect(data.claude.args).toEqual(["--no-session-persistence"]);
+    expect(data.gates).toEqual([]);
   });
 
-  it("rejects wrong types with a clear message", () => {
+  it("type-checks values and names every config file in errors", () => {
     const cases: Array<[string, string]> = [
       ["gates: npm test\n", "gates must be a list"],
-      [`limits: 5\n${GATES}`, "'limits' must be a mapping"],
+      ["limits: 5\n", "'limits' must be a mapping"],
       ["- a\n- b\n", "top level must be a mapping"],
       ["a: [1\n", "config.yaml"],
-      [`${GATES}safety:\n  protected_paths: .env\n`, "safety.protected_paths must be a list"],
-    ];
-    for (const [yaml, expected] of cases) {
-      const { repo, env } = setup(yaml);
-      expect(() => loadConfig({ repo, env }), yaml).toThrow(ConfigError);
-      expect(() => loadConfig({ repo, env }), yaml).toThrow(expected);
-    }
-  });
-
-  it("rejects unsafe settings", () => {
-    const cases: Array<[string, string]> = [
-      [`${GATES}agents:\n  implementer: codex\n`, "only agent allowed"],
-      [`${GATES}permissions:\n  codex: workspace-write\n`, "must run read-only"],
-      ["gates: []\n", "no required gate"],
-      [`${GATES}limits:\n  max_review_rounds: 0\n`, "limits.max_review_rounds must be a positive integer"],
-      [`${GATES}quality_gates:\n  blocking_severities: [urgent]\n`, "unknown severity 'urgent'"],
-    ];
-    for (const [yaml, expected] of cases) {
-      const { repo, env } = setup(yaml);
-      expect(() => loadConfig({ repo, env }), yaml).toThrow(expected);
-    }
-  });
-
-  it("type-checks every value instead of crashing later", () => {
-    const cases: Array<[string, string]> = [
-      [`${GATES}codex:\n  bin: 5\n`, "codex.bin must be a non-empty string"],
-      [`${GATES}safety:\n  allow_dirty_worktree: no\n`, "safety.allow_dirty_worktree must be true or false"],
-      [`${GATES}quality_gates:\n  require_tests_pass: yes\n`, "quality_gates.require_tests_pass must be true or false"],
-      [`${GATES}claude:\n  max_budget_usd: lots\n`, "claude.max_budget_usd must be a positive number or null"],
-      [`${GATES}codex:\n  model: 4\n`, "codex.model must be a string or null"],
-      [`${GATES}codex:\n  extra_args: [1]\n`, "codex.extra_args must be a list of strings"],
-      [`${GATES}safety:\n  protected_paths: [3]\n`, "safety.protected_paths must be a list of strings"],
+      ["codex:\n  bin: 5\n", "codex.bin must be a non-empty string"],
+      ["safety:\n  pause_before_implement: no\n", "safety.pause_before_implement must be true or false"],
+      ["quality_gates:\n  require_tests_pass: yes\n", "quality_gates.require_tests_pass must be true or false"],
+      ["claude:\n  max_budget_usd: lots\n", "claude.max_budget_usd must be a positive number or null"],
+      ["codex:\n  args: [1]\n", "codex.args must be a list of strings"],
+      ["limits:\n  agent_idle_timeout_sec: -1\n", "limits.agent_idle_timeout_sec must be an integer >= 0"],
+      ["limits:\n  max_review_rounds: 0\n", "limits.max_review_rounds must be a positive integer"],
+      ["agents:\n  implementer: gemini\n", "agents.implementer must be one of codex, claude"],
       ["gates: [npm test]\n", "gates[0] needs 'name' and 'command'"],
     ];
     for (const [yaml, expected] of cases) {
-      const { repo, env } = setup(yaml);
-      expect(() => loadConfig({ repo, env }), yaml).toThrow(expected);
+      const { dir, env } = setup(yaml);
+      expect(() => loadConfig({ dir, env }), yaml).toThrow(expected);
     }
+    const both = setup("", "limits:\n  max_retries: -1\n");
+    expect(() => loadConfig({ dir: both.dir, env: both.env })).toThrow(/xdg\/agentduo\/config\.yaml/);
   });
 
-  it("keeps list defaults when a list key is present but empty", () => {
-    const { repo, env } = setup(`${GATES}safety:\n  protected_paths:\ncodex:\n  extra_args:\n`);
-    const { data } = loadConfig({ repo, env });
-    expect(data.safety.protected_paths).toContain(".env");
-    expect(data.codex.extra_args).toEqual(["--ephemeral"]);
-    const empty = setup("gates:\nquality_gates:\n  require_tests_pass: false\n");
-    expect(loadConfig({ repo: empty.repo, env: empty.env }).data.gates).toEqual([]);
-  });
-
-  it("names every config file in validation errors", () => {
-    const { repo, env } = setup(GATES, "limits:\n  max_retries: -1\n");
-    expect(() => loadConfig({ repo, env })).toThrow(/xdg\/agentduo\/config\.yaml/);
+  it("lets any backend take any role", () => {
+    const { dir, env } = setup("agents:\n  implementer: codex\n  plan_reviewer: codex\n");
+    expect(loadConfig({ dir, env }).data.agents.implementer).toBe("codex");
   });
 
   it("errors when --config points to a missing file", () => {
-    const { repo, env } = setup();
-    expect(() => loadConfig({ repo, env, configPath: join(repo, "missing.yaml") })).toThrow("config file not found");
-  });
-
-  it("can skip validation for read-only commands", () => {
-    const { repo, env } = setup();
-    expect(loadConfig({ repo, env, validate: false }).data.gates).toEqual([]);
-    expect(() => loadConfig({ repo, env })).toThrow("no required gate");
+    const { dir, env } = setup();
+    expect(() => loadConfig({ dir, env, configPath: join(dir, "missing.yaml") })).toThrow("config file not found");
   });
 });
 
-describe("permissions and paths", () => {
-  it("maps roles to permissions", () => {
-    const cfg = defaultConfig();
-    expect(permissionFor(cfg, "planner")).toBe("read-only");
-    expect(permissionFor(cfg, "plan_reviewer")).toBe("read-only");
-    expect(permissionFor(cfg, "code_reviewer")).toBe("read-only");
-    expect(permissionFor(cfg, "implementer")).toBe("workspace-write");
+describe("saved configs and paths", () => {
+  it("merges a saved config over the defaults", () => {
+    const saved = defaultConfig() as unknown as Record<string, unknown>;
+    delete (saved.limits as Record<string, unknown>).agent_idle_timeout_sec;
+    (saved.codex as Record<string, unknown>).model = "gpt-saved";
+    const cfg = configFromSaved(saved);
+    expect(cfg.codex.model).toBe("gpt-saved");
+    expect(cfg.limits.agent_idle_timeout_sec).toBe(900);
+    expect(() => configFromSaved("nope")).toThrow(ConfigError);
   });
 
   it("finds the user config file per platform", () => {

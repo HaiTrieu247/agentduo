@@ -1,13 +1,11 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import { AgentRunner, type AgentResult } from "../agents/runner.js";
 import type { SchemaName } from "../agents/schema.js";
 import type { Decider, DuoEvent, EventBus, HistoryEntry, Message, Party, Phase, Role } from "../events.js";
 import type { AgentRole, ConfigData } from "./config.js";
 import { GatesInterrupted, requiredPassed, runGates, type GateResult } from "./gates.js";
-import { Git } from "./git.js";
-import { checkChanges, checkGitPosition } from "./guards.js";
+import { Git, type Change } from "./git.js";
 import type { Approval, Critique, Finding, Implementation, Issue, Plan, Review } from "./outputs.js";
 import * as prompts from "./prompts.js";
 import * as render from "./render.js";
@@ -26,7 +24,11 @@ const PHASE_ROLES: Partial<Record<Phase, { role: Role; agentRole: AgentRole }>> 
   IMPLEMENT: { role: "implementer", agentRole: "implementer" },
   CODE_REVIEW: { role: "code_reviewer", agentRole: "code_reviewer" },
 };
+const ROLE_NAMES: Record<Role, string> = {
+  planner: "planner", plan_reviewer: "plan critic", plan_finalizer: "plan sign-off", implementer: "implementer", code_reviewer: "code reviewer",
+};
 const SEVERITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+const MAX_WARNINGS = 50;
 
 class Interrupted extends Error {}
 
@@ -36,12 +38,12 @@ export class DecisionError extends Error {
 
 export interface WorkflowOptions {
   cfg: ConfigData;
+  /** The workspace directory: agents run here and snapshots/diffs are limited to it. */
   repo: string;
   store: RunStore;
   state: RunState;
   bus: EventBus;
   decider: Decider;
-  allowDirty?: boolean;
   runner?: AgentRunner;
 }
 
@@ -70,17 +72,8 @@ const bySeverity = <T extends { severity: string }>(xs: T[]) =>
 const issueItems = (issues: Issue[]) => bySeverity(issues).map((i) => `[${i.severity}] ${i.id} ${i.description}`);
 const findingItems = (findings: Finding[]) =>
   bySeverity(findings).map((f) => `[${f.severity}] ${f.id} ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} ` : ""}${f.issue}`);
-
-function hashFile(path: string): string {
-  try {
-    return createHash("sha256").update(readFileSync(path)).digest("hex");
-  } catch {
-    return "unreadable";
-  }
-}
-
-/** Run files that prompts read back from disk; an agent must not rewrite them. */
-const GUARDED_RUN_FILES = ["plan.final.md", "review.json"];
+const listChanges = (changes: Change[], max = 10) =>
+  changes.slice(0, max).map(([s, p]) => `${s} ${p}`).join(", ") + (changes.length > max ? `, … (${changes.length - max} more)` : "");
 
 function lastLine(text: string): string {
   const line = text.trim().split("\n").filter((l) => l.trim()).at(-1) ?? "";
@@ -91,19 +84,16 @@ export class Workflow {
   private readonly git: Git;
   private readonly runner: AgentRunner;
   private readonly snapshotExclude: string[];
-  private readonly dirtyExclude: string[];
-  private readonly allowDirty: boolean;
   private readonly abort = new AbortController();
   private stopRequested = false;
   private phaseStartedAt = Date.now();
+  private inSubdir: boolean | null = null;
 
   constructor(private readonly o: WorkflowOptions) {
     this.git = new Git(o.repo);
     this.runner = o.runner ?? new AgentRunner(o.cfg, o.repo, o.store.path("logs"), o.bus);
     const runsRel = relativeInside(o.store.runsDir, o.repo);
     this.snapshotExclude = runsRel ? [runsRel] : [];
-    this.dirtyExclude = [".agentduo", ...this.snapshotExclude.filter((p) => !p.startsWith(".agentduo"))];
-    this.allowDirty = !!o.allowDirty || o.cfg.safety.allow_dirty_worktree;
   }
 
   get state(): RunState {
@@ -124,7 +114,7 @@ export class Workflow {
   async run(): Promise<number> {
     const st = this.state;
     this.emit({ type: "run.started", runId: st.taskId, task: st.task, repo: this.o.repo, runDir: this.o.store.dir });
-    if (st.inProgress) this.emit({ type: "warning", text: `previous run was interrupted during ${st.inProgress.phase}; re-running it` });
+    if (st.inProgress) this.warn(`previous run was interrupted during ${st.inProgress.phase}; re-running it`);
     for (;;) {
       const phase = st.phase;
       if (phase === "DONE") return this.finish("DONE", EXIT.DONE);
@@ -183,13 +173,21 @@ export class Workflow {
     this.o.bus.emit(event);
   }
 
+  /** Shown on screen and kept for the report; warnings never stop the run. */
+  private warn(text: string): void {
+    const st = this.state;
+    st.warnings ??= [];
+    if (st.warnings.length < MAX_WARNINGS) st.warnings.push(text);
+    this.emit({ type: "warning", text });
+  }
+
   private save(): void {
     this.o.store.saveState(this.state);
   }
 
   private ctx(): prompts.PromptContext {
     const st = this.state;
-    return { repo: this.o.repo, taskId: st.taskId, task: st.task, gates: this.o.cfg.gates, notes: st.humanNotes };
+    return { repo: this.o.repo, taskId: st.taskId, task: st.task, agents: this.o.cfg.agents, gates: this.o.cfg.gates, notes: st.humanNotes };
   }
 
   private party(role: AgentRole): Party {
@@ -210,6 +208,20 @@ export class Workflow {
 
   private tree(): Promise<string> {
     return this.git.worktreeTree(this.snapshotExclude);
+  }
+
+  /** Whole-repository tree; only computed when the workspace is a subdirectory, to notice edits outside it. */
+  private async outsideTree(): Promise<string | null> {
+    if (this.inSubdir === null) this.inSubdir = (await this.git.prefix()) !== "";
+    return this.inSubdir ? this.git.worktreeTree(this.snapshotExclude, ":/") : null;
+  }
+
+  private async warnOutside(before: string | null, phase: Phase): Promise<void> {
+    if (!before) return;
+    const after = await this.outsideTree();
+    if (!after || after === before) return;
+    const changes = await this.git.outsideChanges(before, after);
+    if (changes.length) this.warn(`${changes.length} file(s) outside the workspace changed during ${phase}: ${listChanges(changes)}`);
   }
 
   private emitPhaseStarted(phase: Phase): void {
@@ -277,58 +289,22 @@ export class Workflow {
     return null;
   }
 
-  /** Hashes of what tree snapshots cannot see: git-ignored protected files, git config/hooks, and guarded run files. */
-  private async protectedState(): Promise<Record<string, string>> {
-    const out: Record<string, string> = {};
-    const skip = this.snapshotExclude.map((p) => `${p}/`);
-    for (const path of await this.git.ignoredMatching(this.o.cfg.safety.protected_paths)) {
-      if (!skip.some((prefix) => path.startsWith(prefix))) out[`ignored:${path}`] = hashFile(join(this.o.repo, path));
-    }
-    for (const file of await this.git.metadataFiles()) out[`git:${relative(this.o.repo, file).split("\\").join("/")}`] = hashFile(file);
-    for (const name of GUARDED_RUN_FILES) if (this.o.store.exists(name)) out[`run:${name}`] = hashFile(this.o.store.path(name));
-    return out;
-  }
-
-  private protectedViolations(before: Record<string, string>, after: Record<string, string>): string[] {
-    const violations: string[] = [];
-    for (const key of [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()) {
-      if (before[key] === after[key]) continue;
-      const status = !(key in before) ? "A" : !(key in after) ? "D" : "M";
-      const [kind, ...rest] = key.split(":");
-      const name = rest.join(":");
-      if (kind === "ignored") violations.push(`modified protected path '${name}' (${status}, git-ignored)`);
-      else if (kind === "git") violations.push(`modified git metadata '${name}' (${status})`);
-      else violations.push(`modified agentduo run file '${name}' (${status})`);
-    }
-    return violations;
-  }
-
-  /**
-   * Run a read-only role and verify, independently of the agent's own sandbox, that the working tree and
-   * git position did not change.
-   */
-  private async readonlyCall<T>(role: Role, agentRole: AgentRole, label: string, prompt: string, schemaName: SchemaName,
+  /** Planner, plan critic, plan sign-off and code reviewer. Files they change are reported, never blocked. */
+  private async callReviewer<T>(role: Role, agentRole: AgentRole, label: string, prompt: string, schemaName: SchemaName,
     round: number, check?: (data: T) => string[]): Promise<AgentResult | null> {
     const beforeTree = await this.tree();
-    const beforePos = await this.git.position();
-    const beforeProtected = await this.protectedState();
+    const beforeOutside = await this.outsideTree();
     const r = await this.runner.call({ role, agentRole, prompt, schemaName, logPrefix: this.logPrefix(label, round), check, signal: this.abort.signal });
     this.addUsage(r);
     if (r.interrupted) throw new Interrupted();
     const afterTree = await this.tree();
-    const violations = [...checkGitPosition(beforePos, await this.git.position()), ...this.protectedViolations(beforeProtected, await this.protectedState())];
     if (afterTree !== beforeTree) {
       const changed = await this.git.nameStatus(beforeTree, afterTree);
-      violations.unshift(`working tree changed during a read-only step: ${changed.slice(0, 20).map(([s, p]) => `${s} ${p}`).join(", ")}`);
+      if (changed.length) this.warn(`${this.agentName(agentRole)} (${ROLE_NAMES[role]}) changed files: ${listChanges(changed)}`);
     }
-    const who = `${role} (${r.backend})`;
-    if (violations.length) {
-      this.escalate("readonly_violation", `${who} changed the repository although it must be read-only. Inspect and revert the changes, then resume to re-run this step.`,
-        this.state.phase, violations);
-      return null;
-    }
+    await this.warnOutside(beforeOutside, this.state.phase);
     if (!r.ok) {
-      this.escalate("agent_error", `${who} failed after ${r.attempts} attempt(s): ${r.error}`, this.state.phase);
+      this.escalate("agent_error", `${role} (${r.backend}) failed after ${r.attempts} attempt(s): ${r.error}`, this.state.phase);
       return null;
     }
     return r;
@@ -343,7 +319,7 @@ export class Workflow {
     const previous = v > 1 ? store.readJson<{ output: Plan }>(`plan.v${v - 1}.json`).output : null;
     const prompt = prompts.planner(this.ctx(), r, v, previous, st.planFeedback);
     const check = (p: Plan) => (["goals", "scope_in", "steps", "acceptance_criteria"] as const).filter((k) => p[k].length === 0).map((k) => `'${k}' must not be empty`);
-    const res = await this.readonlyCall<Plan>("planner", "planner", "plan", prompt, "plan", r, check);
+    const res = await this.callReviewer<Plan>("planner", "planner", "plan", prompt, "plan", r, check);
     if (!res) return;
     const plan = res.data as Plan;
     store.writeJson(`plan.v${v}.json`, await this.envelope("planner", r, res, { plan_version: v }));
@@ -369,14 +345,14 @@ export class Workflow {
     const r = st.planningRound;
     const v = st.planVersion;
     const prompt = prompts.planReviewer(this.ctx(), r, v, store.readText(`plan.v${v}.md`), this.lastCritique(r));
-    const res = await this.readonlyCall<Critique>("plan_reviewer", "plan_reviewer", "plan_review", prompt, "plan_critique", r, consistentStatus);
+    const res = await this.callReviewer<Critique>("plan_reviewer", "plan_reviewer", "plan_review", prompt, "plan_critique", r, consistentStatus);
     if (!res) return;
     const critique = res.data as Critique;
     store.writeJson(`critique.r${r}.json`, await this.envelope("plan_reviewer", r, res));
     store.appendText("plan-feedback.md", render.critiqueMarkdown(critique, r, v, this.agentName("plan_reviewer")));
     const blocking = this.blocking(critique.issues);
     const approved = critique.approved && blocking.length === 0;
-    if (critique.approved && blocking.length) this.emit({ type: "warning", text: "the critic approved but raised blocking issues; treating as changes requested" });
+    if (critique.approved && blocking.length) this.warn("the critic approved but raised blocking issues; treating as changes requested");
     this.message({
       from: this.party("plan_reviewer"), to: this.party("planner"), kind: "critique",
       headline: approved ? `approved${critique.issues.length ? ` · ${critique.issues.length} suggestion(s)` : ""}` : `changes requested · ${blocking.length} blocking`,
@@ -401,7 +377,7 @@ export class Workflow {
     const v = st.planVersion;
     const critique = store.readJson<{ output: Critique }>(`critique.r${r}.json`).output;
     const prompt = prompts.planFinalizer(this.ctx(), r, v, store.readText(`plan.v${v}.md`), critique);
-    const res = await this.readonlyCall<Approval>("plan_finalizer", "planner", "plan_finalize", prompt, "plan_approval", r, consistentStatus);
+    const res = await this.callReviewer<Approval>("plan_finalizer", "planner", "plan_finalize", prompt, "plan_approval", r, consistentStatus);
     if (!res) return;
     const approval = res.data as Approval;
     store.writeJson(`approval.r${r}.json`, await this.envelope("plan_finalizer", r, res));
@@ -443,9 +419,11 @@ export class Workflow {
     const header = `<!-- final plan v${version}, sha256 ${st.planHash}${byHuman ? ", accepted by the human operator" : ""} -->\n`;
     store.writeText("plan.final.md", header + store.readText(`plan.v${version}.md`));
     if (st.base !== null) {
-      // Re-planned after implementation started: continue in a new round.
+      // Re-planned after implementation started: continue in a new round, with no stale review or gate results.
       st.implRound += 1;
       st.openFindings = [];
+      st.lastGates = null;
+      st.consecutiveGateFailures = 0;
       this.ensureReviewBudget();
     }
     if (cfg.safety.pause_before_implement && !byHuman) {
@@ -477,65 +455,40 @@ export class Workflow {
     const st = this.state;
     const { store, cfg } = this.o;
     if (st.base === null) {
-      const dirty = await this.git.statusPorcelain(this.dirtyExclude);
-      if (dirty.length && !this.allowDirty) {
-        this.escalate("dirty_worktree",
-          `the working tree has ${dirty.length} uncommitted change(s). Commit or stash them, then resume (or resume with --allow-dirty ` +
-          "to let the implementer work on top of them).", "IMPLEMENT", dirty.slice(0, 20));
-        return;
-      }
       const base = await this.git.snapshot(this.snapshotExclude, this.ref("base"), `agentduo ${st.taskId}: base`);
-      st.base = { commit: base.commit, tree: base.tree, head: await this.git.head(), branch: await this.git.branch(), dirty: dirty.length > 0 };
+      st.base = { commit: base.commit, tree: base.tree, head: await this.git.head(), branch: await this.git.branch() };
       st.implRound = Math.max(st.implRound, 1);
     }
     const k = st.implRound;
-    const protectedPaths = [...cfg.safety.protected_paths];
-    // A re-run of the same round (after a failure or interrupt) keeps comparing against the original pre-state,
-    // so changes made by the earlier attempt are still checked.
-    if (st.roundPre?.round !== k) {
-      const snap = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}-pre`), `agentduo ${st.taskId}: before implementation round ${k}`);
-      st.roundPre = { ...snap, round: k, head: await this.git.head(), branch: await this.git.branch(), protected: await this.protectedState() };
-      this.save();
-    }
-    const pre = st.roundPre;
-    const beforePos: [string | null, string | null] = [pre.head, pre.branch];
+    const pre = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}-pre`), `agentduo ${st.taskId}: before implementation round ${k}`);
+    const beforeOutside = await this.outsideTree();
     const review = store.exists("review.json") ? store.readJson<{ output: Review }>("review.json").output : null;
     const failed = k > 1 ? (st.lastGates ?? []).filter((g) => !g.passed) : [];
-    const prompt = prompts.implementer(this.ctx(), k, store.readText("plan.final.md"), protectedPaths, st.openFindings, review, failed, st.lastImplementation);
+    const prompt = prompts.implementer(this.ctx(), k, store.readText("plan.final.md"), st.openFindings, review, failed, st.lastImplementation);
     const check = (rep: Implementation) =>
       rep.status === "blocked" && !(rep.blocking_reason ?? "").trim() ? ["status is 'blocked' but blocking_reason is empty"] : [];
     const res = await this.runner.call({
       role: "implementer", agentRole: "implementer", prompt, schemaName: "implementation", logPrefix: this.logPrefix("implement", k),
-      check, extraAllowed: cfg.gates.map((g) => `Bash(${g.command}*)`), signal: this.abort.signal,
+      check, signal: this.abort.signal,
     });
     this.addUsage(res);
     const post = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}`), `agentduo ${st.taskId}: implementation round ${k}`);
     st.lastSnapshot = { commit: post.commit, tree: post.tree };
     if (res.interrupted) throw new Interrupted();
     const changes = await this.git.nameStatus(pre.tree, post.tree);
-    const violations = [
-      ...checkGitPosition(beforePos, await this.git.position()),
-      ...checkChanges(changes, protectedPaths, cfg.safety.max_deleted_files),
-      ...this.protectedViolations(pre.protected, await this.protectedState()),
-    ];
+    await this.warnOutside(beforeOutside, "IMPLEMENT");
     const denials = res.meta.permissionDenials ?? [];
     const report = res.data as Implementation | null;
     const answered = new Set((report?.addressed_findings ?? []).map((a) => a.finding_id));
     const missing = report ? st.openFindings.filter((f) => !answered.has(f.id)).map((f) => f.id) : [];
     store.writeJson(`implementation.r${k}.json`, await this.envelope("implementer", k, res, {
-      pre_snapshot: pre.commit, snapshot: post.commit, changes: changes.map(([status, path]) => ({ status, path })),
-      violations, unanswered_findings: missing,
+      pre_snapshot: pre.commit, snapshot: post.commit, changes: changes.map(([status, path]) => ({ status, path })), unanswered_findings: missing,
     }));
     st.lastImplementation = { round: k, summary: report?.summary ?? null, status: report?.status ?? null, permissionDenials: denials };
-    if (violations.length) {
-      // Safety first: a failed attempt can still have changed files.
-      const failed = !res.ok || !report;
-      this.escalate("guard_violation",
-        `the implementer broke a safety rule${failed ? ` (and then failed: ${res.error})` : ""}. Inspect the working tree; the state before ` +
-        `this round is pinned at ${this.ref(`impl-r${k}-pre`)} (${pre.commit.slice(0, 12)}). ` +
-        (failed ? "Revert what you do not want, then resume to re-run this round, or abort." : "Resume to accept the changes and continue with the quality gates, or abort."),
-        failed ? "IMPLEMENT" : "VERIFY", violations);
-      return;
+    if (denials.length) {
+      this.warn(cfg.agents.implementer === "claude"
+        ? `Claude was denied ${denials.length} tool call(s); allow them in your Claude Code settings (e.g. permissions.defaultMode "acceptEdits" or allow rules) or via claude.role_args.implementer`
+        : `Codex was denied ${denials.length} tool call(s); allow them in your Codex configuration or via codex.role_args.implementer`);
     }
     if (!res.ok || !report) {
       this.escalate("agent_error", `implementer (${res.backend}) failed after ${res.attempts} attempt(s): ${res.error}`, "IMPLEMENT");
@@ -552,20 +505,19 @@ export class Workflow {
     });
     this.record("IMPLEMENT", k, this.agentName("implementer"), report.status, `${changes.length} file(s) changed; ${report.summary.slice(0, 140)}`,
       report.status === "completed" ? "ok" : "warn", `implementation.r${k}.json`, res);
-    if (missing.length) this.emit({ type: "warning", text: `implementer did not respond to finding(s): ${missing.join(", ")}` });
-    if (denials.length) this.emit({ type: "warning", text: `${denials.length} tool call(s) were denied by permissions (see implementation.r${k}.json)` });
+    if (missing.length) this.warn(`implementer did not respond to finding(s): ${missing.join(", ")}`);
     if (report.status === "blocked") {
       this.escalate("implementer_blocked", report.blocking_reason ?? "implementer reported blocked", "IMPLEMENT");
       return;
     }
-    st.phase = "VERIFY";
+    st.phase = cfg.gates.length ? "VERIFY" : "CODE_REVIEW";
   }
 
   private async stepVerify(): Promise<void> {
     const st = this.state;
     const { store, cfg } = this.o;
     const k = st.implRound;
-    const beforeProtected = await this.protectedState();
+    const beforeOutside = await this.outsideTree();
     let results: GateResult[];
     try {
       results = await runGates({
@@ -577,20 +529,13 @@ export class Workflow {
       throw e;
     }
     const tree = await this.tree();
-    const gateViolations = this.protectedViolations(beforeProtected, await this.protectedState());
     if (tree !== st.lastSnapshot!.tree) {
       const changed = await this.git.nameStatus(st.lastSnapshot!.tree, tree);
-      gateViolations.unshift(...checkChanges(changed, cfg.safety.protected_paths, cfg.safety.max_deleted_files));
-      this.emit({ type: "warning", text: `quality gates modified the working tree: ${changed.slice(0, 10).map(([s, p]) => `${s} ${p}`).join(", ")} (re-snapshotting)` });
+      if (changed.length) this.warn(`quality gates modified the working tree: ${listChanges(changed)} (re-snapshotting)`);
       const snap = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}`), `agentduo ${st.taskId}: round ${k} after gates`);
       st.lastSnapshot = { commit: snap.commit, tree: snap.tree };
     }
-    if (gateViolations.length) {
-      this.escalate("guard_violation",
-        "the quality gates changed protected files (gate scripts can be edited by the implementer). Inspect the changes, then resume to " +
-        "re-run the gates, or abort.", "VERIFY", gateViolations);
-      return;
-    }
+    await this.warnOutside(beforeOutside, "VERIFY");
     store.writeJson(`gates.r${k}.json`, { round: k, snapshot: st.lastSnapshot!.commit, timestamp: nowIso(), results });
     st.lastGates = results;
     const passed = requiredPassed(results);
@@ -634,7 +579,7 @@ export class Workflow {
       if (rv.reviewed_commit !== snap) errors.push(`reviewed_commit is '${rv.reviewed_commit}', expected '${snap}'`);
       return errors;
     };
-    const res = await this.readonlyCall<Review>("code_reviewer", "code_reviewer", "code_review", prompt, "review", k, check);
+    const res = await this.callReviewer<Review>("code_reviewer", "code_reviewer", "code_review", prompt, "review", k, check);
     if (!res) return;
     const review = res.data as Review;
     const envelope = await this.envelope("code_reviewer", k, res, { base, snapshot: snap });
@@ -643,10 +588,10 @@ export class Workflow {
     st.openFindings = review.findings;
     const blocking = this.blocking(review.findings);
     const critical = review.findings.filter((f) => f.severity === "critical");
-    const gatesOk = requiredPassed(st.lastGates ?? []) || !cfg.quality_gates.require_tests_pass;
+    const gatesOk = !cfg.gates.length || !cfg.quality_gates.require_tests_pass || requiredPassed(st.lastGates ?? []);
     const approved = review.approved || !cfg.quality_gates.require_codex_approval;
     const done = approved && blocking.length === 0 && gatesOk;
-    if (review.approved && blocking.length) this.emit({ type: "warning", text: "the reviewer approved but reported blocking findings; continuing with a fix round" });
+    if (review.approved && blocking.length) this.warn("the reviewer approved but reported blocking findings; continuing with a fix round");
     this.message({
       from: this.party("code_reviewer"), to: this.party("implementer"), kind: "review",
       headline: done
@@ -681,6 +626,8 @@ export class Workflow {
       if (IMPL_PHASES.includes(hr.fromPhase)) st.planFeedback = null; // planning-era critique is stale; the note drives the revision
       st.finalPlanVersion = null;
       st.finalPlanHash = null;
+      st.lastGates = null;
+      st.consecutiveGateFailures = 0;
       st.planningRound += 1;
       st.limits.planningRounds = Math.max(st.limits.planningRounds, st.planningRound + this.o.cfg.limits.max_planning_rounds - 1);
       st.phase = "PLAN";

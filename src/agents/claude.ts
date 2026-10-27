@@ -117,24 +117,18 @@ export class ClaudeBackend implements AgentBackend {
     return found;
   }
 
-  buildArgs({ schemaName, permission, extraAllowed }: BuildArgs): string[] {
-    const write = permission === "workspace-write";
-    const tools = write ? this.cfg.implementation_tools : this.cfg.read_only_tools;
-    const allowed = write ? [...this.cfg.implementation_allowed_tools, ...extraAllowed] : [...tools];
-    const disallowed = write ? this.cfg.implementation_disallowed_tools : [];
+  /** Protocol flags only; what Claude may do comes from the user's Claude Code settings plus args/role_args. */
+  buildArgs({ schemaName, role }: BuildArgs): string[] {
     return [
       "-p",
       "--output-format", "stream-json",
       "--verbose",
       "--json-schema", JSON.stringify(loadSchema(schemaName)),
-      "--permission-mode", write ? "acceptEdits" : "dontAsk",
-      "--permission-prompts", "none",
-      "--tools", tools.join(","),
-      "--allowedTools", ...allowed,
-      ...(disallowed.length ? ["--disallowedTools", ...disallowed] : []),
+      "--permission-prompts", "none", // nobody can answer a prompt in -p mode; this grants nothing
       ...(this.cfg.model ? ["--model", this.cfg.model] : []),
       ...(this.cfg.max_budget_usd ? ["--max-budget-usd", String(this.cfg.max_budget_usd)] : []),
-      ...this.cfg.extra_args.map(String),
+      ...this.cfg.args,
+      ...(this.cfg.role_args[role] ?? []),
     ];
   }
 

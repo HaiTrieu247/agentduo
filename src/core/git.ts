@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
 export class GitError extends Error {
   override name = "GitError";
@@ -20,19 +20,27 @@ const IDENTITY = {
   GIT_COMMITTER_NAME: "agentduo", GIT_COMMITTER_EMAIL: "agentduo@localhost",
 };
 
+function parseNameStatusZ(out: string): Change[] {
+  const parts = out.split("\0");
+  const changes: Change[] = [];
+  for (let i = 0; i + 1 < parts.length && parts[i]; i += 2) changes.push([parts[i]!, parts[i + 1]!]);
+  return changes;
+}
+
 /**
- * Git helpers. Snapshots stage the whole working tree (tracked + untracked, honouring .gitignore) into a
- * temporary index and write an unreferenced commit, so the user's index, HEAD and branches are never touched.
+ * Git helpers for one workspace directory: every command runs with cwd = that directory, so the pathspec "."
+ * means "this workspace" and ":/" the whole repository. Snapshots stage the working tree into a temporary
+ * index and write an unreferenced commit; the user's index, HEAD and branches are never touched.
  */
 export class Git {
-  constructor(readonly repo: string) {}
+  constructor(readonly dir: string) {}
 
   run(args: string[], opts: { env?: Record<string, string>; check?: boolean } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
     return new Promise((resolvePromise, reject) => {
-      execFile("git", args, { cwd: this.repo, env: { ...process.env, ...opts.env }, maxBuffer: 512 * 1024 * 1024, encoding: "utf8" },
+      execFile("git", args, { cwd: this.dir, env: { ...process.env, ...opts.env }, maxBuffer: 512 * 1024 * 1024, encoding: "utf8" },
         (error, stdout, stderr) => {
           if (error && typeof error.code === "string") {
-            reject(new GitError(`cannot run git in ${this.repo}: ${error.message}`));
+            reject(new GitError(`cannot run git in ${this.dir}: ${error.message}`));
             return;
           }
           const code = error ? Number(error.code ?? 1) : 0;
@@ -57,16 +65,17 @@ export class Git {
     return (await this.run(["rev-parse", "--show-toplevel"])).stdout.trim();
   }
 
+  /** The workspace's path relative to the repository root ("" at the root). */
+  async prefix(): Promise<string> {
+    return (await this.run(["rev-parse", "--show-prefix"])).stdout.trim().replace(/\/$/, "");
+  }
+
   async head(): Promise<string | null> {
     return (await this.run(["rev-parse", "--verify", "-q", "HEAD"], { check: false })).stdout.trim() || null;
   }
 
   async branch(): Promise<string | null> {
     return (await this.run(["symbolic-ref", "-q", "--short", "HEAD"], { check: false })).stdout.trim() || null;
-  }
-
-  async position(): Promise<[string | null, string | null]> {
-    return [await this.head(), await this.branch()];
   }
 
   async isIgnored(path: string): Promise<boolean> {
@@ -77,24 +86,27 @@ export class Git {
   }
 
   /** `git add` fails when an exclude pathspec names an already-ignored path, and ignored paths are skipped anyway. */
-  private async pathspec(exclude: string[]): Promise<string[]> {
+  private async pathspec(exclude: string[], scope: "." | ":/"): Promise<string[]> {
     const kept: string[] = [];
     for (const p of exclude) if (!(await this.isIgnored(p))) kept.push(`:(exclude)${p}`);
-    return ["--", ".", ...kept];
+    return ["--", scope, ...kept];
   }
 
-  async statusPorcelain(exclude: string[] = []): Promise<string[]> {
-    const out = await this.run(["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=all", ...(await this.pathspec(exclude))]);
-    return out.stdout.split("\n").filter((line) => line.trim());
-  }
-
-  async worktreeTree(exclude: string[] = []): Promise<string> {
+  /** Tree hash of the working tree: the workspace (".") or the whole repository (":/"). */
+  async worktreeTree(exclude: string[] = [], scope: "." | ":/" = "."): Promise<string> {
     const dir = await mkdtemp(join(tmpdir(), "agentduo-index-"));
-    const env = { GIT_INDEX_FILE: join(dir, "index") };
+    const index = join(dir, "index");
+    const env = { GIT_INDEX_FILE: index };
     try {
-      const head = await this.head();
-      if (head) await this.run(["read-tree", head], { env });
-      await this.run(["add", "-A", ...(await this.pathspec(exclude))], { env });
+      // Seeding from the real index keeps its stat data, so `git add -A` only rehashes files that changed.
+      const real = join((await this.run(["rev-parse", "--absolute-git-dir"])).stdout.trim(), "index");
+      if (existsSync(real)) {
+        await copyFile(real, index);
+      } else {
+        const head = await this.head();
+        if (head) await this.run(["read-tree", head], { env });
+      }
+      await this.run(["add", "-A", ...(await this.pathspec(exclude, scope))], { env });
       return (await this.run(["write-tree"], { env })).stdout.trim();
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -109,35 +121,21 @@ export class Git {
     return { commit, tree };
   }
 
-  /** Untracked, git-ignored files matching the globs. Snapshots never see these, so guards hash them separately. */
-  async ignoredMatching(globs: string[]): Promise<string[]> {
-    if (!globs.length) return [];
-    const out = await this.run(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...globs.map((g) => `:(glob)${g}`)]);
-    return out.stdout.split("\0").filter(Boolean);
-  }
-
-  /** Absolute paths of the repository's git config and hook files (an agent writing these could run code later). */
-  async metadataFiles(): Promise<string[]> {
-    const lines = (await this.run(["rev-parse", "--git-path", "config", "--git-path", "hooks"])).stdout.split("\n").map((l) => l.trim()).filter(Boolean);
-    const [config, hooks] = lines.map((l) => resolve(this.repo, l));
-    const files = config ? [config] : [];
-    if (hooks && existsSync(hooks)) files.push(...readdirSync(hooks).map((name) => join(hooks, name)));
-    return files.filter((f) => existsSync(f) && statSync(f).isFile());
-  }
-
+  /** Changes inside the workspace, with paths relative to it. */
   async nameStatus(a: string, b: string): Promise<Change[]> {
-    const out = (await this.run(["-c", "core.quotePath=false", "diff", "--no-renames", "--name-status", a, b])).stdout;
-    return out.split("\n").filter((line) => line.trim()).map((line) => {
-      const [status, ...rest] = line.split("\t");
-      return [status!.trim(), rest.join("\t").trim()] as Change;
-    });
+    return parseNameStatusZ((await this.run(["diff", "--no-renames", "--relative", "--name-status", "-z", a, b, "--", "."])).stdout);
+  }
+
+  /** Changes outside the workspace, with paths relative to the repository root. */
+  async outsideChanges(a: string, b: string): Promise<Change[]> {
+    return parseNameStatusZ((await this.run(["diff", "--no-renames", "--name-status", "-z", a, b, "--", ":/", ":(exclude)."])).stdout);
   }
 
   async diff(a: string, b: string): Promise<string> {
-    return (await this.run(["diff", "--no-color", a, b])).stdout;
+    return (await this.run(["diff", "--no-color", "--relative", a, b, "--", "."])).stdout;
   }
 
   async diffStat(a: string, b: string): Promise<string> {
-    return (await this.run(["diff", "--no-color", "--stat", a, b])).stdout;
+    return (await this.run(["diff", "--no-color", "--stat", "--relative", a, b, "--", "."])).stdout;
   }
 }

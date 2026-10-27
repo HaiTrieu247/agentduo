@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import YAML from "yaml";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { main, type CliIO } from "../src/cli.js";
+import { applyColorPreference, isBackgroundFromPs, main, type CliIO } from "../src/cli.js";
+import { RunStore } from "../src/core/state.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
 import { testConfig, type ConfigOverrides } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
@@ -23,12 +24,12 @@ afterEach(() => {
   t.cleanup();
 });
 
-function writeRepoConfig(overrides: ConfigOverrides = {}): void {
-  mkdirSync(join(repo, ".agentduo"), { recursive: true });
-  writeFileSync(join(repo, ".agentduo", "config.yaml"), YAML.stringify(testConfig(fake, overrides)));
+function writeConfig(dir: string, overrides: ConfigOverrides = {}): void {
+  mkdirSync(join(dir, ".agentduo"), { recursive: true });
+  writeFileSync(join(dir, ".agentduo", "config.yaml"), YAML.stringify(testConfig(fake, overrides)));
 }
 
-async function cli(args: string[], cwd = repo): Promise<{ code: number; out: string; err: string }> {
+async function cli(args: string[], cwd = repo, extra: Partial<CliIO> = {}): Promise<{ code: number; out: string; err: string }> {
   let out = "";
   let err = "";
   const io: CliIO = {
@@ -37,6 +38,7 @@ async function cli(args: string[], cwd = repo): Promise<{ code: number; out: str
     stdin: {},
     env: { ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg"), CI: "" },
     cwd,
+    ...extra,
   };
   const code = await main(args, io);
   return { code, out, err };
@@ -56,98 +58,123 @@ describe("cli", () => {
     expect([r.code, r.out.trim()]).toEqual([0, "0.1.0"]);
   });
 
-  it("init detects gates and ignores run data", async () => {
-    const other = makeRepo(join(t.path, "other"), { ignoreRuns: false });
-    writeFileSync(join(other, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
-    const r = await cli(["init"], other);
-    expect(r.code).toBe(0);
-    for (const s of ["created", "gate test: npm run test", "created .agentduo/.gitignore"]) expect(r.out).toContain(s);
-    expect(existsSync(join(other, ".agentduo", "config.yaml"))).toBe(true);
-  });
-
-  it("runs a task end to end from a subdirectory with plain output", async () => {
-    writeRepoConfig();
+  it("runs a task in the current directory, on a dirty tree, with plain output", async () => {
+    writeConfig(repo);
+    writeFileSync(join(repo, "README.md"), "local edit\n");
     fake.setScenario(happy());
-    mkdirSync(join(repo, "sub"));
-    const r = await cli(["Make app.txt fixed"], join(repo, "sub"));
+    const r = await cli(["Make app.txt fixed"]);
     expect(r.code, r.err).toBe(0);
-    for (const s of ["agentduo 0.1.0 · run", "▶ planner", "Codex → Claude  Plan v1", "Claude → Codex  approved", "✓ gate check", "[DONE]"]) {
-      expect(r.out).toContain(s);
-    }
+    for (const s of ["agentduo 0.1.0 · run", "▶ planner", "Codex → Claude  Plan v1", "Claude → Codex  approved", "✓ gate check", "[DONE]"]) expect(r.out).toContain(s);
     expect((await cli(["list"])).out).toContain("DONE");
     expect((await cli(["status"])).out).toMatch(/Run \S+ — DONE/);
   });
 
+  it("treats a subdirectory (or --dir) as the workspace", async () => {
+    const ws = join(repo, "gói pkg");
+    mkdirSync(ws);
+    writeFileSync(join(ws, "check.mjs"), 'import { existsSync, readFileSync } from "node:fs";\nprocess.exit(existsSync("app.txt") && readFileSync("app.txt", "utf8").includes("fixed") ? 0 : 1);\n');
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", "add pkg");
+    writeConfig(ws);
+    fake.setScenario(happy());
+    const r = await cli(["Make app.txt fixed", "--dir", ws], t.path);
+    expect(r.code, r.err).toBe(0);
+    expect(existsSync(join(ws, "app.txt"))).toBe(true);
+    expect(existsSync(join(repo, "app.txt"))).toBe(false);
+    expect(RunStore.list(join(ws, ".agentduo", "runs"))).toHaveLength(1);
+    expect(existsSync(join(repo, ".agentduo", "runs"))).toBe(false);
+  });
+
   it("refuses bad starts before calling any agent", async () => {
-    writeRepoConfig();
+    writeConfig(repo);
     fake.setScenario(happy());
     expect((await cli([])).err).toContain("a task description is required");
-    writeFileSync(join(repo, "README.md"), "local edit\n");
-    const dirty = await cli(["Fix"]);
-    expect([dirty.code, dirty.err.includes("uncommitted")]).toEqual([1, true]);
-    git(repo, "checkout", "README.md");
-    const outside = await cli(["Fix", "--repo", join(t.path, "nowhere")]);
-    expect([outside.code, outside.err.includes("not a git repository")]).toEqual([1, true]);
-    writeRepoConfig({ codex: { bin: join(t.path, "missing") } });
+    const outside = join(t.path, "plain folder");
+    mkdirSync(outside);
+    const notGit = await cli(["Fix"], outside);
+    expect([notGit.code, notGit.err.includes("is not inside a git repository (run 'git init' here, or 'duo init' to be asked)")]).toEqual([1, true]);
+    const missingFile = await cli(["--task-file", join(t.path, "nope.md")]);
+    expect([missingFile.code, missingFile.err.includes("cannot read task file")]).toEqual([1, true]);
+    expect((await cli(["stauts"])).err).toContain("did you mean 'status'");
+    writeConfig(repo, { codex: { bin: join(t.path, "missing") } });
     expect((await cli(["Fix"])).err).toContain("CLI not found: codex");
     expect(fake.calls()).toEqual([]);
   });
 
-  it("waits for a decision in plain mode and resumes with flags", async () => {
-    writeRepoConfig({ limits: { max_review_rounds: 1 } });
+  it("accepts a task that starts with a dash after --", async () => {
+    writeConfig(repo);
+    fake.setScenario(happy());
+    const r = await cli(["--", "-fix app.txt"]);
+    expect(r.code, r.err).toBe(0);
+    expect(fake.calls("planner")[0]!.prompt).toContain("-fix app.txt");
+  });
+
+  it("resumes with the run's saved config unless --reload-config", async () => {
+    writeConfig(repo, { limits: { max_review_rounds: 1 } });
     fake.setScenario({ ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }] });
     const first = await cli(["Make app.txt fixed"]);
     expect(first.code).toBe(2);
     expect(first.out).toContain("HUMAN_REVIEW needed (max_review_rounds)");
-    expect(first.out).toContain("duo resume");
+    writeConfig(repo, { codex: { bin: join(t.path, "missing") } });
+    expect((await cli(["resume", "--reload-config", "--decision", "resume"])).err).toContain("CLI not found: codex");
+    writeConfig(repo, { limits: { max_review_rounds: 1 } });
+    const store = RunStore.open(join(repo, ".agentduo", "runs"));
+    writeFileSync(store.path("config.json"), JSON.stringify(testConfig(fake, { limits: { max_review_rounds: 1 } })));
+    writeConfig(repo, { codex: { bin: join(t.path, "missing") } });
+    expect((await cli(["resume", "--decision", "resume"])).code).toBe(2);
     expect((await cli(["resume", "--note", "x"])).err).toContain("--note is only accepted together with --decision");
-    expect((await cli(["resume", "--decision", "bogus"])).code).toBe(1);
+    unlinkSync(store.path("config.json"));
+    writeConfig(repo, { limits: { max_review_rounds: 1 } });
     expect((await cli(["resume", "--decision", "abort"])).code).toBe(3);
-    const again = await cli(["resume", "--decision", "resume"]);
-    expect([again.code, again.err.includes("not waiting for a decision")]).toEqual([1, true]);
+    expect(existsSync(store.path("config.json"))).toBe(true);
   });
 
-  it("follows the README quick start: init, then run, with no commit in between", async () => {
-    const other = makeRepo(join(t.path, "quick"), { ignoreRuns: false });
-    writeFileSync(join(other, "package.json"), JSON.stringify({ scripts: { test: "node check.mjs" } }));
-    git(other, "add", "package.json");
-    git(other, "commit", "-q", "-m", "add package.json");
-    mkdirSync(join(t.path, "xdg", "agentduo"), { recursive: true });
-    writeFileSync(join(t.path, "xdg", "agentduo", "config.yaml"), `codex:\n  bin: ${JSON.stringify(fake.path("codex"))}\nclaude:\n  bin: ${JSON.stringify(fake.path("claude"))}\n`);
-    expect((await cli(["init"], other)).code).toBe(0);
-    fake.setScenario(happy());
-    const r = await cli(["Make app.txt fixed"], other);
-    expect(r.code, r.err).toBe(0);
+  it("init writes the config, and offers git init outside a repository", async () => {
+    const other = join(t.path, "new project");
+    mkdirSync(other);
+    const asked: string[] = [];
+    const r = await cli(["init"], other, { stdin: { isTTY: true }, ask: async (q) => { asked.push(q); return "y"; } });
+    expect(r.code).toBe(0);
+    expect(asked[0]).toContain("Run 'git init' here?");
+    expect(existsSync(join(other, ".git"))).toBe(true);
+    expect(existsSync(join(other, ".agentduo", "config.yaml"))).toBe(true);
+    const third = join(t.path, "third");
+    mkdirSync(third);
+    const quiet = await cli(["init"], third);
+    expect(quiet.out).toContain("run 'git init' here before 'duo run'");
+    expect(existsSync(join(third, ".git"))).toBe(false);
   });
 
-  it("does not start a paid run for a mistyped command", async () => {
-    writeRepoConfig();
-    fake.setScenario(happy());
-    const r = await cli(["stauts"]);
-    expect(r.code).toBe(1);
-    expect(r.err).toContain("unknown command 'stauts'");
-    expect(r.err).toContain("did you mean 'status'");
-    expect(fake.calls()).toEqual([]);
-  });
-
-  it("reports config type errors in doctor instead of crashing", async () => {
-    mkdirSync(join(repo, ".agentduo"), { recursive: true });
-    writeFileSync(join(repo, ".agentduo", "config.yaml"), "codex:\n  bin: 5\ngates:\n");
-    const r = await cli(["doctor"]);
-    expect(r.code).toBe(1);
-    expect(r.out).toContain("✗ config:");
-    expect(r.out).toContain("codex.bin must be a non-empty string");
-  });
-
-  it("runs doctor", async () => {
-    writeRepoConfig();
+  it("runs doctor, also with a broken config", async () => {
+    writeConfig(repo);
     const ok = await cli(["doctor"]);
     expect(ok.code, ok.out).toBe(0);
     expect(ok.out).toContain("✓ codex CLI:");
-    expect(ok.out).toContain("doctor: ready");
-    writeRepoConfig({ claude: { bin: join(t.path, "missing") } });
+    writeFileSync(join(repo, ".agentduo", "config.yaml"), "codex:\n  bin: 5\n");
     const bad = await cli(["doctor"]);
     expect(bad.code).toBe(1);
-    expect(bad.out).toContain("✗ claude CLI not found");
+    expect(bad.out).toContain("codex.bin must be a non-empty string");
+  });
+
+  it("detects background runs and colour preferences", () => {
+    expect(isBackgroundFromPs(" 4242  4242\n")).toBe(false);
+    expect(isBackgroundFromPs(" 4242  5151\n")).toBe(true);
+    expect(isBackgroundFromPs(" 4242  -1\n")).toBe(false);
+    const env: NodeJS.ProcessEnv = {};
+    applyColorPreference({ color: false }, env);
+    expect(env.FORCE_COLOR).toBe("0");
+    const env2: NodeJS.ProcessEnv = { NO_COLOR: "1" };
+    applyColorPreference({}, env2);
+    expect(env2.FORCE_COLOR).toBe("0");
+    const env3: NodeJS.ProcessEnv = {};
+    applyColorPreference({}, env3);
+    expect(env3.FORCE_COLOR).toBeUndefined();
+  });
+
+  it("uses the plain renderer when running in the background", async () => {
+    writeConfig(repo);
+    fake.setScenario(happy());
+    const r = await cli(["Make app.txt fixed"], repo, { stdout: { write: () => true, isTTY: true }, isBackground: () => true });
+    expect(r.code).toBe(0);
   });
 });

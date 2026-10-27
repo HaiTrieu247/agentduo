@@ -17,16 +17,16 @@ export interface InitResult {
 
 const read = (path: string): string | null => (existsSync(path) ? readFileSync(path, "utf8") : null);
 
-function packageManager(repo: string): "npm" | "pnpm" | "yarn" | "bun" {
-  if (existsSync(join(repo, "pnpm-lock.yaml"))) return "pnpm";
-  if (existsSync(join(repo, "yarn.lock"))) return "yarn";
-  if (existsSync(join(repo, "bun.lockb")) || existsSync(join(repo, "bun.lock"))) return "bun";
+function packageManager(dir: string): "npm" | "pnpm" | "yarn" | "bun" {
+  if (existsSync(join(dir, "pnpm-lock.yaml"))) return "pnpm";
+  if (existsSync(join(dir, "yarn.lock"))) return "yarn";
+  if (existsSync(join(dir, "bun.lockb")) || existsSync(join(dir, "bun.lock"))) return "bun";
   return "npm";
 }
 
-export function detectGates(repo: string): DetectedGate[] {
+export function detectGates(dir: string): DetectedGate[] {
   const gates: DetectedGate[] = [];
-  const pkg = read(join(repo, "package.json"));
+  const pkg = read(join(dir, "package.json"));
   if (pkg) {
     let scripts: Record<string, unknown> = {};
     try {
@@ -34,7 +34,7 @@ export function detectGates(repo: string): DetectedGate[] {
     } catch {
       // unreadable package.json: no script gates
     }
-    const pm = packageManager(repo);
+    const pm = packageManager(dir);
     const wanted: Array<[string, string[]]> = [["test", ["test"]], ["lint", ["lint"]], ["typecheck", ["typecheck", "type-check"]]];
     for (const [name, candidates] of wanted) {
       const script = candidates.find((c) => typeof scripts[c] === "string");
@@ -43,55 +43,61 @@ export function detectGates(repo: string): DetectedGate[] {
       gates.push({ name, command: `${pm} run ${script}`, reason: `package.json script "${script}"` });
     }
   }
-  if (existsSync(join(repo, "pyproject.toml")) || existsSync(join(repo, "pytest.ini")) || (read(join(repo, "setup.cfg"))?.includes("[tool:pytest]") ?? false)) {
+  if (existsSync(join(dir, "pyproject.toml")) || existsSync(join(dir, "pytest.ini")) || (read(join(dir, "setup.cfg"))?.includes("[tool:pytest]") ?? false)) {
     gates.push({ name: "pytest", command: "python3 -m pytest", reason: "Python project (pyproject.toml / pytest.ini / setup.cfg)" });
   }
-  if (existsSync(join(repo, "go.mod"))) gates.push({ name: "go-test", command: "go test ./...", reason: "go.mod" });
-  if (existsSync(join(repo, "Cargo.toml"))) gates.push({ name: "cargo-test", command: "cargo test", reason: "Cargo.toml" });
-  const makefile = read(join(repo, "Makefile"));
+  if (existsSync(join(dir, "go.mod"))) gates.push({ name: "go-test", command: "go test ./...", reason: "go.mod" });
+  if (existsSync(join(dir, "Cargo.toml"))) gates.push({ name: "cargo-test", command: "cargo test", reason: "Cargo.toml" });
+  const makefile = read(join(dir, "Makefile"));
   if (makefile && /^test\s*:/m.test(makefile)) gates.push({ name: "make-test", command: "make test", reason: "Makefile target 'test'" });
   return gates;
 }
 
+/** Everything is commented out: agentduo's defaults apply until the user opts in. */
 export function renderConfigYaml(gates: DetectedGate[]): string {
   const lines = [
-    "# agentduo configuration for this repository.",
-    "# Every key is optional; anything not set here uses the built-in defaults (run `duo doctor` to check).",
+    "# agentduo configuration for this workspace. Every key is optional (run `duo doctor` to check the setup).",
+    "# Permissions are not set here: Codex and Claude Code use their own configuration.",
     "",
-    "# Quality gates: commands agentduo runs itself after every implementation round.",
+    "# Quality gates (optional): commands agentduo runs after every implementation round and shows to the code reviewer.",
   ];
   if (gates.length) {
-    lines.push("gates:");
-    for (const g of gates) lines.push(`  - name: ${g.name}`, `    command: ${JSON.stringify(g.command)}   # detected: ${g.reason}`, "    required: true");
+    lines.push("# Detected for this project; uncomment to have agentduo run them after every implementation round:", "# gates:");
+    for (const g of gates) lines.push(`#   - name: ${g.name}`, `#     command: ${JSON.stringify(g.command)}   # ${g.reason}`, "#     required: true");
   } else {
-    lines.push(
-      "# None were detected. Add your test/lint/typecheck commands, for example:",
-      "#   - name: tests",
-      '#     command: "npm test"',
-      "#     required: true",
-      "gates: []",
-    );
+    lines.push("# gates:", "#   - name: tests", '#     command: "npm test"', "#     required: true");
   }
-  lines.push("", "# limits:", "#   max_planning_rounds: 4", "#   max_review_rounds: 5", "# safety:", "#   pause_before_implement: false",
-    "# codex:", "#   model: null", "# claude:", "#   model: null", "#   max_budget_usd: null", "");
+  lines.push(
+    "",
+    "# Extra CLI arguments, for every call or per role (planner, plan_reviewer, implementer, code_reviewer):",
+    "# claude:",
+    "#   role_args:",
+    "#     implementer: [--permission-mode, acceptEdits]",
+    "# codex:",
+    "#   args: [--ephemeral]",
+    "",
+    "# limits:",
+    "#   max_planning_rounds: 4",
+    "#   max_review_rounds: 5",
+    "#   agent_idle_timeout_sec: 900",
+    "",
+  );
   return lines.join("\n");
 }
 
-export function initRepo(repo: string): InitResult {
-  const configPath = join(repo, ".agentduo", "config.yaml");
-  const gates = detectGates(repo);
+export function initRepo(dir: string): InitResult {
+  const configPath = join(dir, ".agentduo", "config.yaml");
+  const gates = detectGates(dir);
   let created = false;
   if (!existsSync(configPath)) {
-    mkdirSync(join(repo, ".agentduo"), { recursive: true });
+    mkdirSync(join(dir, ".agentduo"), { recursive: true });
     writeFileSync(configPath, renderConfigYaml(gates));
     created = true;
   }
-  // A nested .gitignore keeps run data out of git without dirtying the root .gitignore (and so the first run
-  // does not trip the uncommitted-changes check: everything under .agentduo/ is exempt from it).
-  const ignoreFile = join(repo, ".agentduo", ".gitignore");
+  const ignoreFile = join(dir, ".agentduo", ".gitignore");
   let ignoreCreated = false;
   if (!existsSync(ignoreFile)) {
-    mkdirSync(join(repo, ".agentduo"), { recursive: true });
+    mkdirSync(join(dir, ".agentduo"), { recursive: true });
     writeFileSync(ignoreFile, "runs/\n");
     ignoreCreated = true;
   }

@@ -29,16 +29,16 @@ export interface RunState {
   finalPlanHash: string | null;
   planFeedback: { critique?: Critique; approval?: Approval } | null;
   implRound: number;
-  base: (Snapshot & { head: string | null; branch: string | null; dirty: boolean }) | null;
+  base: (Snapshot & { head: string | null; branch: string | null }) | null;
   lastSnapshot: Snapshot | null;
-  /** The pre-implementation snapshot of the current round, reused when the round re-runs (resume after a failure). */
-  roundPre: (Snapshot & { round: number; head: string | null; branch: string | null; protected: Record<string, string> }) | null;
   lastGates: GateResult[] | null;
   consecutiveGateFailures: number;
   openFindings: Finding[];
   lastImplementation: { round: number; summary: string | null; status: string | null; permissionDenials: PermissionDenial[] } | null;
   humanReview: HumanReview | null;
   humanNotes: HumanNote[];
+  /** Notable things the run saw but did not act on (files changed outside the workspace, permission denials…). */
+  warnings: string[];
   costUsd: number;
   tokens: number;
   step: number;
@@ -94,11 +94,11 @@ function acquireLock(path: string, busy: (pid: number) => string): void {
   }
 }
 
-/** One active run per repository: concurrent runs would see each other's edits as their own. */
-export function acquireRepoLock(runsDir: string): () => void {
+/** One active run per workspace: concurrent runs in one directory would review each other's edits. */
+export function acquireWorkspaceLock(runsDir: string): () => void {
   mkdirSync(runsDir, { recursive: true });
   const path = join(runsDir, ".lock");
-  acquireLock(path, (pid) => `another agentduo run is active in this repository (pid ${pid}); wait for it to finish or stop it first`);
+  acquireLock(path, (pid) => `another agentduo run is active in this workspace (pid ${pid}); wait for it to finish or stop it first`);
   return () => {
     try {
       unlinkSync(path);
@@ -123,8 +123,8 @@ export function newState(taskId: string, task: string, limits: { max_planning_ro
     version: STATE_VERSION, taskId, task, phase: "PLAN", createdAt: ts, updatedAt: ts,
     limits: { planningRounds: limits.max_planning_rounds, reviewRounds: limits.max_review_rounds },
     planningRound: 1, planVersion: 0, planHash: null, finalPlanVersion: null, finalPlanHash: null, planFeedback: null,
-    implRound: 0, base: null, lastSnapshot: null, roundPre: null, lastGates: null, consecutiveGateFailures: 0, openFindings: [],
-    lastImplementation: null, humanReview: null, humanNotes: [], costUsd: 0, tokens: 0, step: 0, inProgress: null, history: [],
+    implRound: 0, base: null, lastSnapshot: null, lastGates: null, consecutiveGateFailures: 0, openFindings: [],
+    lastImplementation: null, humanReview: null, humanNotes: [], warnings: [], costUsd: 0, tokens: 0, step: 0, inProgress: null, history: [],
   };
 }
 

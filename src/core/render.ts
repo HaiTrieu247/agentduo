@@ -60,7 +60,7 @@ export function reportMarkdown(st: RunState, diffStat: string, lastReview: Revie
     `- **Started:** ${st.createdAt} · **Updated:** ${st.updatedAt}`,
     `- **Planning rounds:** ${st.planningRound} · **Plan version:** ${st.planVersion} · **Final plan:** ${st.finalPlanVersion ? `v${st.finalPlanVersion}` : "—"}`,
     `- **Implementation rounds:** ${st.implRound}`,
-    `- **Claude cost (reported):** $${(st.costUsd ?? 0).toFixed(2)} · **Codex tokens:** ${st.tokens ?? 0}`,
+    `- **Claude cost (reported):** $${(st.costUsd ?? 0).toFixed(2)} · **Tokens:** ${st.tokens ?? 0}`,
     "- **Run directory:** `" + runDir + "`",
   ];
   if (st.base && st.lastSnapshot) {
@@ -82,6 +82,7 @@ export function reportMarkdown(st: RunState, diffStat: string, lastReview: Revie
     unresolved.push(`[permission denied] ${d.tool_name}: ${JSON.stringify(d.tool_input ?? "").slice(0, 160)}`);
   }
   lines.push("\n## Unresolved issues\n" + bullets(unresolved));
+  if (st.warnings?.length) lines.push("\n## Warnings\n" + bullets(st.warnings));
   if (st.phase === "HUMAN_REVIEW" && hr) {
     lines.push("\n## Next step\n" + hr.message + "\n\n```bash\nduo resume " + st.taskId + " --decision resume|revise|abort [--note \"...\"]\n```");
   }

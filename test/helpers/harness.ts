@@ -36,14 +36,14 @@ export function newWorkflow(h: Harness, task: string, decider: Decider = new Scr
   return { wf: new Workflow({ cfg: h.cfg, repo: h.repo, store, state, bus, decider }), bus };
 }
 
-export function resumedWorkflow(h: Harness, opts: { decider?: Decider; allowDirty?: boolean } = {}): { wf: Workflow; bus: EventBus } {
+export function resumedWorkflow(h: Harness, opts: { decider?: Decider } = {}): { wf: Workflow; bus: EventBus } {
   const bus = busFor(h);
   const store = RunStore.open(h.runsDir);
-  const wf = new Workflow({ cfg: h.cfg, repo: h.repo, store, state: store.loadState(), bus, decider: opts.decider ?? new ScriptedDecider(), allowDirty: opts.allowDirty });
+  const wf = new Workflow({ cfg: h.cfg, repo: h.repo, store, state: store.loadState(), bus, decider: opts.decider ?? new ScriptedDecider() });
   return { wf, bus };
 }
 
-export async function resume(h: Harness, decision?: Decision, opts: { decider?: Decider; allowDirty?: boolean } = {}): Promise<number> {
+export async function resume(h: Harness, decision?: Decision, opts: { decider?: Decider } = {}): Promise<number> {
   const { wf } = resumedWorkflow(h, opts);
   if (decision) await wf.applyDecision(decision.decision, decision.note);
   return wf.run();

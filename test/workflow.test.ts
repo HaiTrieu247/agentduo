@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Message } from "../src/events.js";
@@ -96,22 +96,6 @@ describe("Workflow", () => {
     expect(fake.calls("code_reviewer")[1]!.prompt).toContain("`F1`");
   });
 
-  it("runs each role with its CLI permissions", async () => {
-    await start(happy());
-    for (const role of ["planner", "plan_finalizer", "code_reviewer"]) {
-      const args = fake.calls(role)[0]!.args;
-      expect(args.slice(0, 2)).toEqual(["exec", "--json"]);
-      expect(args[args.indexOf("--sandbox") + 1]).toBe("read-only");
-    }
-    const critic = fake.calls("plan_reviewer")[0]!.args;
-    expect(critic[critic.indexOf("--tools") + 1]).toBe("Read,Grep,Glob");
-    expect(critic[critic.indexOf("--permission-mode") + 1]).toBe("dontAsk");
-    const implementer = fake.calls("implementer")[0]!.args;
-    expect(implementer[implementer.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
-    expect(implementer).toContain("Bash(git push*)");
-    expect(implementer.some((a) => a.startsWith("Bash(") && a.includes("check.mjs"))).toBe(true);
-  });
-
   it("escalates after max planning rounds; resume implements the latest plan", async () => {
     expect(await start({ ...happy(), plan_reviewer: [{ output: critique(false, [issue("C1")]) }] }, { limits: { max_planning_rounds: 2 } })).toBe(2);
     let st = stateOf(h);
@@ -132,16 +116,6 @@ describe("Workflow", () => {
     const st = stateOf(h);
     expect([st.phase, st.planningRound]).toEqual(["DONE", 3]);
     expect(fake.calls("planner")[2]!.prompt).toContain("drop the cache layer");
-  });
-
-  it("escalates when a read-only agent writes, and re-runs the step after a revert", async () => {
-    expect(await start({ ...happy(), planner: [{ write: { "sneaky.txt": "x" }, output: plan() }, { output: plan() }] })).toBe(2);
-    const st = stateOf(h);
-    expect(st.humanReview?.reason).toBe("readonly_violation");
-    expect(st.humanReview?.details.join(" ")).toContain("sneaky.txt");
-    expect(st.planVersion).toBe(0);
-    unlinkSync(join(h.repo, "sneaky.txt"));
-    expect(await resume(h, { decision: "resume" })).toBe(0);
   });
 
   it("retries invalid output", async () => {
@@ -176,15 +150,6 @@ describe("Workflow", () => {
     expect(stateOf(h).humanReview?.reason).toBe("critical_finding");
     expect(await resume(h, { decision: "resume" })).toBe(0);
     expect(stateOf(h).implRound).toBe(2);
-  });
-
-  it("treats protected paths and commits by the implementer as guard violations", async () => {
-    const scenario = { ...happy(), implementer: [{ write: { "app.txt": "fixed\n", ".env": "TOKEN=1\n" }, shell: ["git add app.txt && git commit -qm sneaky"], output: impl() }] };
-    expect(await start(scenario)).toBe(2);
-    const hr = stateOf(h).humanReview!;
-    expect(hr.reason).toBe("guard_violation");
-    expect(hr.details.join(" ")).toContain(".env");
-    expect(hr.details.join(" ")).toContain("HEAD moved");
   });
 
   it("escalates when the implementer is blocked", async () => {
@@ -261,63 +226,74 @@ describe("Workflow", () => {
     expect(fake.calls("planner")[0]!.prompt).toContain("Sửa app.txt cho đúng");
   });
 
-  it("refuses to implement on a dirty tree unless allowed", async () => {
+  it("passes only protocol flags plus the configured args", async () => {
+    await start(happy(), { codex: { args: ["--ephemeral", "-c", "x=1"] }, claude: { role_args: { implementer: ["--permission-mode", "acceptEdits"] } } });
+    for (const role of ["planner", "plan_finalizer", "code_reviewer"]) {
+      const args = fake.calls(role)[0]!.args;
+      expect(args).not.toContain("--sandbox");
+      expect(args).toContain("x=1");
+    }
+    expect(fake.calls("plan_reviewer")[0]!.args).not.toContain("--tools");
+    expect(fake.calls("plan_reviewer")[0]!.args).not.toContain("--permission-mode");
+    expect(fake.calls("implementer")[0]!.args.slice(-2)).toEqual(["--permission-mode", "acceptEdits"]);
+  });
+
+  it("reports files changed by a read-only agent and keeps going", async () => {
+    expect(await start({ ...happy(), planner: [{ write: { "sneaky.txt": "x" }, output: plan() }] })).toBe(0);
+    const warnings = h.events.flatMap((e) => (e.type === "warning" ? [e.text] : []));
+    expect(warnings.some((w) => w.includes("Codex (planner) changed files") && w.includes("sneaky.txt"))).toBe(true);
+    expect(readRun("report.md")).toContain("sneaky.txt");
+  });
+
+  it("starts and implements on a dirty tree", async () => {
     writeFileSync(join(h.repo, "README.md"), "local edit\n");
-    expect(await start(happy())).toBe(2);
-    expect(stateOf(h).humanReview?.reason).toBe("dirty_worktree");
-    expect(await resume(h, { decision: "resume" }, { allowDirty: true })).toBe(0);
-    expect(stateOf(h).base?.dirty).toBe(true);
+    expect(await start(happy())).toBe(0);
   });
 
-  it("guards an implementation round even when the implementer then fails", async () => {
-    const scenario = { ...happy(), implementer: [{ write: { "app.txt": "fixed\n", ".github/workflows/x.yml": "x\n" }, raw: "not json" }] };
-    expect(await start(scenario, { limits: { max_retries: 0 } })).toBe(2);
-    const hr = stateOf(h).humanReview!;
-    expect(hr.reason).toBe("guard_violation");
-    expect(hr.details.join(" ")).toContain(".github/workflows/x.yml");
-    expect(hr.resumePhase).toBe("IMPLEMENT");
+  it("warns when the quality gates change files", async () => {
+    const touchy = 'import { writeFileSync } from "node:fs";\nwriteFileSync("gate-output.txt", "x");\nprocess.exit(0);\n';
+    expect(await start({ ...happy(), implementer: [{ write: { "app.txt": "fixed\n", "check.mjs": touchy }, output: impl() }] })).toBe(0);
+    expect(h.events.some((e) => e.type === "warning" && e.text.includes("quality gates modified the working tree") && e.text.includes("gate-output.txt"))).toBe(true);
   });
 
-  it("keeps the round's pre-snapshot across an interrupt, so the re-run still sees earlier changes", async () => {
-    fake.setScenario({ ...happy(), implementer: [{ write: { ".env": "TOKEN=1\n" }, sleep: 10_000, output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }] });
-    const { wf, bus } = newWorkflow(h, "Make app.txt fixed");
-    bus.on((e) => {
-      if (e.type === "phase.started" && e.phase === "IMPLEMENT") setTimeout(() => wf.interrupt(), 400);
-    });
-    expect(await wf.run()).toBe(130);
-    expect(await resume(h)).toBe(2);
-    const hr = stateOf(h).humanReview!;
-    expect(hr.reason).toBe("guard_violation");
-    expect(hr.details.join(" ")).toContain(".env");
+  it("skips VERIFY when no gates are configured and finishes on Codex approval", async () => {
+    expect(await start(happy(), { gates: [] })).toBe(0);
+    const st = stateOf(h);
+    expect(st.history.map((x) => x.phase)).not.toContain("VERIFY");
+    expect(messages().some((m) => m.kind === "gates")).toBe(false);
+    expect(fake.calls("implementer")[0]!.prompt).toContain("Run the project's checks yourself");
   });
 
-  it("checks changes made by the quality gates", async () => {
-    const evilCheck = 'import { mkdirSync, writeFileSync } from "node:fs";\nmkdirSync(".github/workflows", { recursive: true });\nwriteFileSync(".github/workflows/evil.yml", "x");\nprocess.exit(0);\n';
-    const scenario = { ...happy(), implementer: [{ write: { "app.txt": "fixed\n", "check.mjs": evilCheck }, output: impl() }] };
-    expect(await start(scenario)).toBe(2);
-    const hr = stateOf(h).humanReview!;
-    expect(hr.reason).toBe("guard_violation");
-    expect(hr.details.join(" ")).toContain(".github/workflows/evil.yml");
-    expect(fake.calls("code_reviewer")).toHaveLength(0);
+  it("clears stale gate results when re-planning", async () => {
+    expect(await start({ ...happy(), implementer: [{ write: { "app.txt": "broken\n" }, output: impl() }] }, { limits: { max_consecutive_gate_failures: 1 } })).toBe(2);
+    expect(stateOf(h).lastGates).not.toBeNull();
+    const { wf } = resumedWorkflow(h);
+    await wf.applyDecision("revise", "simpler approach");
+    const st = stateOf(h);
+    expect([st.lastGates, st.consecutiveGateFailures, st.phase]).toEqual([null, 0, "PLAN"]);
   });
 
-  it("sees git-ignored protected files, git hooks and the run's own files", async () => {
-    writeFileSync(join(h.repo, ".gitignore"), ".agentduo/runs/\n.env\n");
-    git(h.repo, "add", ".gitignore");
-    git(h.repo, "commit", "-q", "-m", "ignore .env");
-    const scenario = {
-      ...happy(),
-      implementer: [{
-        write: { "app.txt": "fixed\n", ".env": "SECRET=1\n", ".git/hooks/pre-commit": "#!/bin/sh\necho owned\n" },
-        shell: ['for f in .agentduo/runs/*/plan.final.md; do echo HACKED >> "$f"; done'], output: impl(),
-      }],
-    };
-    expect(await start(scenario)).toBe(2);
-    const details = stateOf(h).humanReview!.details.join(" | ");
-    expect(stateOf(h).humanReview!.reason).toBe("guard_violation");
-    expect(details).toContain("'.env'");
-    expect(details).toContain(".git/hooks/pre-commit");
-    expect(details).toContain("plan.final.md");
+  it("surfaces permission denials with a configuration hint", async () => {
+    expect(await start({ ...happy(), implementer: [{ write: { "app.txt": "fixed\n" }, denials: [{ tool_name: "Edit", tool_use_id: "t0" }], output: impl() }] })).toBe(0);
+    const hint = h.events.find((e) => e.type === "warning" && e.text.includes("was denied 1 tool call(s)"));
+    expect(hint && hint.type === "warning" && hint.text).toContain('permissions.defaultMode "acceptEdits"');
+  });
+
+  it("works in a subdirectory workspace and warns about changes outside it", async () => {
+    const ws = join(h.repo, "gói pkg");
+    mkdirSync(ws);
+    writeFileSync(join(ws, "check.mjs"), readFileSync(join(h.repo, "check.mjs"), "utf8"));
+    git(h.repo, "add", "-A");
+    git(h.repo, "commit", "-q", "-m", "add workspace");
+    const sub = makeHarness(ws, testConfig(fake));
+    fake.setScenario({ ...happy(), implementer: [{ write: { "app.txt": "fixed\n", "../outside.txt": "x\n" }, output: impl() }] });
+    expect(await newWorkflow(sub, "Make app.txt fixed").wf.run()).toBe(0);
+    expect(existsSync(join(ws, ".agentduo", "runs"))).toBe(true);
+    expect(sub.events.some((e) => e.type === "warning" && e.text.includes("outside the workspace changed during IMPLEMENT") && e.text.includes("outside.txt"))).toBe(true);
+    const reviewPrompt = fake.calls("code_reviewer")[0]!.prompt;
+    expect(reviewPrompt).toContain("app.txt");
+    expect(reviewPrompt).not.toContain("outside.txt");
+    expect(readFileSync(join(runDirOf(sub), "report.md"), "utf8")).toContain("outside.txt");
   });
 
   it("rejects decisions when none is pending", async () => {

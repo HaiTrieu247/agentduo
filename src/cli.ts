@@ -1,15 +1,18 @@
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { Command, CommanderError, Option } from "commander";
 import { killAllActive } from "./agents/process.js";
 import { resolveBinary } from "./agents/resolve.js";
-import { ConfigError, defaultConfig, loadConfig, validateConfig, type ConfigData } from "./core/config.js";
+import { configFromSaved, ConfigError, defaultConfig, loadConfig, validateConfig, type ConfigData } from "./core/config.js";
 import { runDoctor } from "./core/doctor.js";
 import { Git } from "./core/git.js";
 import { initRepo } from "./core/init.js";
 import type { Review } from "./core/outputs.js";
 import { findingsMarkdown } from "./core/render.js";
-import { acquireRepoLock, LockError, RunStore, type RunState } from "./core/state.js";
+import { acquireWorkspaceLock, LockError, RunStore, type RunState } from "./core/state.js";
 import { DecisionError, EXIT, Workflow } from "./core/workflow.js";
 import { EventBus, type Decider, type Decision } from "./events.js";
 import { packageVersion } from "./paths.js";
@@ -23,8 +26,12 @@ export interface CliIO {
   stdin: { isTTY?: boolean };
   env: NodeJS.ProcessEnv;
   cwd: string;
-  /** Subscribe to SIGINT/SIGTERM; returns an unsubscribe function. */
+  /** Subscribe to SIGINT/SIGTERM/SIGHUP; returns an unsubscribe function. */
   onSignal?: (handler: () => void) => () => void;
+  /** Ask a question on the terminal; absent when nobody can answer. */
+  ask?: (question: string) => Promise<string>;
+  /** True when this process runs in the terminal's background process group (`duo &`). */
+  isBackground?: () => boolean;
 }
 
 /** A reader that went away (`duo … | head`) must not crash the run; any other stream error still does. */
@@ -32,6 +39,17 @@ export function guardStream(stream: { on(event: "error", listener: (err: NodeJS.
   stream.on("error", (err) => {
     if (err.code !== "EPIPE") throw err;
   });
+}
+
+/** `ps -o pgid=,tpgid=` output: background when the terminal's foreground group is another group. */
+export function isBackgroundFromPs(out: string): boolean {
+  const [pgid, tpgid] = out.trim().split(/\s+/).map(Number);
+  return !!pgid && !!tpgid && tpgid > 0 && pgid !== tpgid;
+}
+
+/** Ink's colour support reads FORCE_COLOR when it is first imported; set it before that import. */
+export function applyColorPreference(opts: { color?: boolean }, env: NodeJS.ProcessEnv): void {
+  if (opts.color === false || env.NO_COLOR) env.FORCE_COLOR = "0";
 }
 
 let exitHookInstalled = false;
@@ -53,12 +71,27 @@ export function processIO(): CliIO {
         for (const signal of STOP_SIGNALS) process.off(signal, handler);
       };
     },
+    ask: process.stdin.isTTY
+      ? async (question) => {
+        const rl = createInterface({ input: process.stdin, output: process.stdout });
+        try {
+          return await rl.question(question);
+        } finally {
+          rl.close();
+        }
+      }
+      : undefined,
+    isBackground: () => {
+      if (process.platform === "win32" || !process.stdout.isTTY) return false;
+      const r = spawnSync("ps", ["-o", "pgid=,tpgid=", "-p", String(process.pid)], { encoding: "utf8" });
+      return r.status === 0 && isBackgroundFromPs(r.stdout);
+    },
   };
 }
 
-interface CommonOptions { repo?: string; config?: string; plain?: boolean; verbose?: boolean; color?: boolean; allowDirty?: boolean }
+interface CommonOptions { dir?: string; config?: string; plain?: boolean; verbose?: boolean; color?: boolean }
 interface RunOptions extends CommonOptions { taskFile?: string }
-interface ResumeOptions extends CommonOptions { decision?: Decision["decision"]; note?: string }
+interface ResumeOptions extends CommonOptions { decision?: Decision["decision"]; note?: string; reloadConfig?: boolean }
 
 class CliExit extends Error {
   constructor(readonly code: number, message = "") {
@@ -66,24 +99,29 @@ class CliExit extends Error {
   }
 }
 
-interface Env { repo: string; isRepo: boolean; git: Git; cfg: ConfigData; sources: string[]; runsDir: string }
+interface Env { workspace: string; isRepo: boolean; git: Git; cfg: ConfigData; sources: string[]; runsDir: string }
 
-/** Resolve the repo (walking up to the git toplevel) and load config without validating it yet. */
-async function prepare(io: CliIO, opts: CommonOptions): Promise<Env> {
-  const start = resolve(io.cwd, opts.repo ?? ".");
-  const probe = new Git(start);
-  const isRepo = await probe.isRepo();
-  const repo = isRepo ? await probe.toplevel() : start;
-  const loaded = loadConfig({ repo, configPath: opts.config ? resolve(io.cwd, opts.config) : undefined, env: io.env, validate: false });
-  for (const warning of loaded.warnings) io.stderr.write(`warning: ${warning}\n`);
-  const runsDir = isAbsolute(loaded.data.paths.runs_dir) ? loaded.data.paths.runs_dir : join(repo, loaded.data.paths.runs_dir);
-  return { repo, isRepo, git: new Git(repo), cfg: loaded.data, sources: loaded.sources, runsDir };
+function expandHome(path: string, env: NodeJS.ProcessEnv): string {
+  return path === "~" || path.startsWith("~/") ? join(env.HOME || homedir(), path.slice(1)) : path;
 }
 
-function requireRunnable(env: Env, io: CliIO): void {
-  if (!env.isRepo) throw new CliExit(EXIT.ERROR, `${env.repo} is not a git repository (run 'git init' and commit first)`);
-  validateConfig(env.cfg, env.sources.join(", ") || undefined);
-  const missing = (["codex", "claude"] as const).filter((b) => Object.values(env.cfg.agents).includes(b) && !resolveBinary(env.cfg[b].bin, b, io.env));
+/** The workspace is --dir or the current directory (never the repository root above it); config is loaded unvalidated. */
+async function prepare(io: CliIO, opts: CommonOptions): Promise<Env> {
+  const workspace = resolve(io.cwd, opts.dir ?? ".");
+  if (!existsSync(workspace)) throw new CliExit(EXIT.ERROR, `no such directory: ${workspace}`);
+  const git = new Git(workspace);
+  const isRepo = await git.isRepo();
+  const loaded = loadConfig({ dir: workspace, configPath: opts.config ? resolve(io.cwd, opts.config) : undefined, env: io.env, validate: false });
+  for (const warning of loaded.warnings) io.stderr.write(`warning: ${warning}\n`);
+  const runs = expandHome(String(loaded.data.paths.runs_dir), io.env);
+  const runsDir = isAbsolute(runs) ? runs : join(workspace, runs);
+  return { workspace, isRepo, git, cfg: loaded.data, sources: loaded.sources, runsDir };
+}
+
+function requireRunnable(env: Env, cfg: ConfigData, source: string, io: CliIO): void {
+  if (!env.isRepo) throw new CliExit(EXIT.ERROR, `${env.workspace} is not inside a git repository (run 'git init' here, or 'duo init' to be asked)`);
+  validateConfig(cfg, source || undefined);
+  const missing = (["codex", "claude"] as const).filter((b) => Object.values(cfg.agents).includes(b) && !resolveBinary(cfg[b].bin, b, io.env));
   if (missing.length) {
     throw new CliExit(EXIT.ERROR, `CLI not found: ${missing.join(", ")}. Install it or set '<backend>.bin' in the config; run 'duo doctor' for details.`);
   }
@@ -122,9 +160,10 @@ async function readView(kind: ViewKind, store: RunStore, st: RunState, git: Git)
   }
 }
 
-async function execute(io: CliIO, env: Env, store: RunStore, state: RunState, opts: CommonOptions, allowDirty: boolean, decision?: Decision): Promise<number> {
+async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, state: RunState, opts: CommonOptions, decision?: Decision): Promise<number> {
   const bus = new EventBus();
-  const plain = !!opts.plain || io.env.CI === "true" || !io.stdout.isTTY;
+  // A backgrounded process that touches the terminal's raw mode gets stopped by the shell, so it renders plain.
+  const plain = !!opts.plain || io.env.CI === "true" || !io.stdout.isTTY || !!io.isBackground?.();
   const interactive = !plain && !!io.stdin.isTTY;
   const version = packageVersion();
   let workflow: Workflow | undefined;
@@ -145,6 +184,7 @@ async function execute(io: CliIO, env: Env, store: RunStore, state: RunState, op
     const detach = attachPlainRenderer(bus, io.stdout, { color: opts.color !== false && !io.env.NO_COLOR && !!io.stdout.isTTY, verbose: !!opts.verbose, version });
     closeUi = async () => detach();
   } else {
+    applyColorPreference(opts, io.env);
     const { startInk } = await import("./ui/ink/session.js");
     const session = startInk({
       bus, version, verbose: !!opts.verbose, interactive, onStop, onInterrupt,
@@ -155,12 +195,12 @@ async function execute(io: CliIO, env: Env, store: RunStore, state: RunState, op
     decider = session.decider;
     closeUi = session.close;
   }
-  workflow = new Workflow({ cfg: env.cfg, repo: env.repo, store, state, bus, decider, allowDirty });
+  workflow = new Workflow({ cfg, repo: env.workspace, store, state, bus, decider });
   const offSignal = io.onSignal?.(onInterrupt);
   let locked = false;
-  let releaseRepo: (() => void) | undefined;
+  let releaseWorkspace: (() => void) | undefined;
   try {
-    releaseRepo = acquireRepoLock(env.runsDir);
+    releaseWorkspace = acquireWorkspaceLock(env.runsDir);
     store.lock();
     locked = true;
     if (decision) await workflow.applyDecision(decision.decision, decision.note);
@@ -170,7 +210,7 @@ async function execute(io: CliIO, env: Env, store: RunStore, state: RunState, op
     throw e;
   } finally {
     if (locked) store.unlock();
-    releaseRepo?.();
+    releaseWorkspace?.();
     offSignal?.();
     await closeUi();
   }
@@ -203,26 +243,35 @@ async function runCommand(io: CliIO, words: string[], opts: RunOptions, explicit
   const near = explicit ? null : mistypedCommand(words);
   if (near) throw new CliExit(EXIT.ERROR, `unknown command '${words[0]}' — did you mean '${near}'? To start a run with this task, use: duo run ${words[0]}`);
   let task = words.join(" ").trim();
-  if (opts.taskFile) task = `${task}\n\n${readFileSync(resolve(io.cwd, opts.taskFile), "utf8")}`.trim();
+  if (opts.taskFile) {
+    const path = resolve(io.cwd, opts.taskFile);
+    let text: string;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch (e) {
+      throw new CliExit(EXIT.ERROR, `cannot read task file ${path}: ${(e as Error).message}`);
+    }
+    task = `${task}\n\n${text}`.trim();
+  }
   if (!task) throw new CliExit(EXIT.ERROR, 'a task description is required, e.g. duo "Add JWT auth" (other commands: resume, status, list, doctor, init)');
   const env = await prepare(io, opts);
-  requireRunnable(env, io);
-  const allowDirty = !!opts.allowDirty || env.cfg.safety.allow_dirty_worktree;
-  const dirty = await env.git.statusPorcelain([".agentduo"]);
-  if (dirty.length && !allowDirty) {
-    throw new CliExit(EXIT.ERROR, `working tree has ${dirty.length} uncommitted change(s); commit or stash them first, or pass --allow-dirty\n`
-      + dirty.slice(0, 10).map((l) => `    ${l}`).join("\n"));
-  }
+  requireRunnable(env, env.cfg, env.sources.join(", "), io);
   const { store, state } = RunStore.create(env.runsDir, task, env.cfg.limits);
-  return execute(io, env, store, state, opts, allowDirty);
+  store.writeJson("config.json", env.cfg);
+  return execute(io, env, env.cfg, store, state, opts);
 }
 
 async function resumeCommand(io: CliIO, runId: string | undefined, opts: ResumeOptions): Promise<number> {
   if (opts.note && !opts.decision) throw new CliExit(EXIT.ERROR, "--note is only accepted together with --decision");
   const env = await prepare(io, opts);
-  requireRunnable(env, io);
+  if (!env.isRepo) requireRunnable(env, env.cfg, "", io);
   const store = openStore(env.runsDir, runId);
-  return execute(io, env, store, store.loadState(), opts, !!opts.allowDirty, opts.decision ? { decision: opts.decision, note: opts.note } : undefined);
+  // A run keeps the config it started with, unless asked to pick up the current one.
+  const useSaved = !opts.reloadConfig && store.exists("config.json");
+  const cfg = useSaved ? configFromSaved(store.readJson("config.json")) : env.cfg;
+  requireRunnable(env, cfg, useSaved ? store.path("config.json") : env.sources.join(", "), io);
+  if (!useSaved) store.writeJson("config.json", cfg);
+  return execute(io, env, cfg, store, store.loadState(), opts, opts.decision ? { decision: opts.decision, note: opts.note } : undefined);
 }
 
 async function statusCommand(io: CliIO, runId: string | undefined, opts: CommonOptions): Promise<number> {
@@ -239,6 +288,7 @@ async function statusCommand(io: CliIO, runId: string | undefined, opts: CommonO
   for (const h of st.history.slice(-12)) {
     out(`  [${String(h.step).padStart(2, "0")}] ${`${h.phase} r${h.round}`.padEnd(16)} ${h.agent.padEnd(12)} ${h.status}: ${h.summary}`);
   }
+  if (st.warnings?.length) out(`  warnings: ${st.warnings.length} (see report.md)`);
   if (st.phase === "HUMAN_REVIEW" && st.humanReview) {
     out(`  waiting for a decision (${st.humanReview.reason}): ${st.humanReview.message}`);
     out(`  continue: duo resume ${st.taskId} --decision resume|revise|abort [--note "..."]`);
@@ -266,7 +316,7 @@ async function doctorCommand(io: CliIO, opts: CommonOptions): Promise<number> {
   }
   // An invalid config cannot be trusted for the remaining checks; fall back to the defaults for those.
   const cfg = configError ? defaultConfig() : env.cfg;
-  const checks = await runDoctor({ repo: env.repo, cfg, sources: env.sources, configError, env: io.env });
+  const checks = await runDoctor({ dir: env.workspace, cfg, sources: env.sources, configError, env: io.env, runsDir: env.runsDir });
   let failed = false;
   for (const c of checks) {
     if (c.ok) io.stdout.write(`  ✓ ${c.message}\n`);
@@ -281,16 +331,27 @@ async function doctorCommand(io: CliIO, opts: CommonOptions): Promise<number> {
 
 async function initCommand(io: CliIO, opts: CommonOptions): Promise<number> {
   const env = await prepare(io, opts);
-  const r = initRepo(env.repo);
+  if (!env.isRepo) {
+    if (io.ask && io.stdin.isTTY) {
+      const answer = (await io.ask("This folder is not a git repository. Run 'git init' here? [y/N] ")).trim().toLowerCase();
+      if (answer === "y" || answer === "yes") {
+        await env.git.run(["init", "-q"]);
+        io.stdout.write(`initialized a git repository in ${env.workspace}\n`);
+      } else {
+        io.stdout.write("skipped; run 'git init' here before 'duo run'\n");
+      }
+    } else {
+      io.stdout.write("note: this folder is not a git repository; run 'git init' here before 'duo run'\n");
+    }
+  }
+  const r = initRepo(env.workspace);
   if (r.created) {
     io.stdout.write(`created ${r.configPath}\n`);
-    for (const g of r.gates) io.stdout.write(`  gate ${g.name}: ${g.command}  (${g.reason})\n`);
-    if (!r.gates.length) io.stdout.write("  no quality gates detected: add your test/lint/typecheck commands under 'gates' before running\n");
+    for (const g of r.gates) io.stdout.write(`  suggested gate ${g.name}: ${g.command}  (${g.reason}; commented out)\n`);
   } else {
     io.stdout.write(`kept existing ${r.configPath}\n`);
   }
   io.stdout.write(r.ignoreCreated ? "created .agentduo/.gitignore (keeps run data out of git)\n" : ".agentduo/.gitignore already exists\n");
-  if (!env.isRepo) io.stderr.write(`warning: ${env.repo} is not a git repository yet\n`);
   return EXIT.DONE;
 }
 
@@ -298,31 +359,31 @@ export async function main(argv: string[], io: CliIO = processIO()): Promise<num
   let exitCode: number = EXIT.DONE;
   const program = new Command()
     .name("duo")
-    .description("Codex plans and reviews; Claude Code critiques and implements. Start a run with a task description.")
+    .description("A channel between Codex and Claude Code: Codex plans and reviews, Claude critiques and implements. Start a run with a task description.")
     .version(packageVersion(), "-V, --version")
     .enablePositionalOptions()
     .exitOverride()
     .configureOutput({ writeOut: (s) => io.stdout.write(s), writeErr: (s) => io.stderr.write(s) })
     .showHelpAfterError();
   const common = (cmd: Command) => cmd
-    .option("--repo <path>", "target git repository (default: the one containing the current directory)")
-    .option("--config <path>", "config file (default: <repo>/.agentduo/config.yaml)")
-    .option("--plain", "plain line output (default when stdout is not a TTY or CI=true)")
+    .option("--dir <path>", "workspace directory (default: the current directory)")
+    .option("--config <path>", "config file (default: <dir>/.agentduo/config.yaml)")
+    .option("--plain", "plain line output (default when stdout is not a TTY, in CI, or in the background)")
     .option("-v, --verbose", "show every agent activity, including thoughts")
     .option("--no-color", "disable colors");
-  const dirtyOption = () => new Option("--allow-dirty", "allow implementing on top of uncommitted changes");
 
-  common(program.argument("[task...]", "task description for a new run").option("--task-file <file>", "read the task description from a file").addOption(dirtyOption()))
+  common(program.argument("[task...]", "task description for a new run (use -- before a task that starts with '-')").option("--task-file <file>", "read the task description from a file"))
     .action(async (words: string[], opts: RunOptions) => {
       exitCode = await runCommand(io, words, opts);
     });
-  common(program.command("run").description("start a new run").argument("<task...>").option("--task-file <file>", "read the task description from a file").addOption(dirtyOption()))
+  common(program.command("run").description("start a new run").argument("<task...>").option("--task-file <file>", "read the task description from a file"))
     .action(async (words: string[], opts: RunOptions) => {
       exitCode = await runCommand(io, words, opts, true);
     });
   common(program.command("resume").description("continue a run (default: the latest), optionally answering a pending decision").argument("[runId]")
     .addOption(new Option("--decision <decision>", "answer a run waiting in HUMAN_REVIEW").choices(["resume", "revise", "abort"]))
-    .option("--note <text>", "instruction for the agents, recorded with the decision").addOption(dirtyOption()))
+    .option("--note <text>", "instruction for the agents, recorded with the decision")
+    .option("--reload-config", "use the current config instead of the one the run started with"))
     .action(async (runId: string | undefined, opts: ResumeOptions) => {
       exitCode = await resumeCommand(io, runId, opts);
     });
@@ -330,15 +391,15 @@ export async function main(argv: string[], io: CliIO = processIO()): Promise<num
     .action(async (runId: string | undefined, opts: CommonOptions) => {
       exitCode = await statusCommand(io, runId, opts);
     });
-  common(program.command("list").description("list runs in this repository"))
+  common(program.command("list").description("list runs in this workspace"))
     .action(async (opts: CommonOptions) => {
       exitCode = await listCommand(io, opts);
     });
-  common(program.command("doctor").description("check CLIs, config and repository (no agent calls)"))
+  common(program.command("doctor").description("check CLIs, config and workspace (no agent calls)"))
     .action(async (opts: CommonOptions) => {
       exitCode = await doctorCommand(io, opts);
     });
-  common(program.command("init").description("create .agentduo/config.yaml with detected quality gates"))
+  common(program.command("init").description("create .agentduo/config.yaml (and offer git init)"))
     .action(async (opts: CommonOptions) => {
       exitCode = await initCommand(io, opts);
     });

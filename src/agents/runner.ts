@@ -1,6 +1,6 @@
 import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { permissionFor, type AgentRole, type ConfigData } from "../core/config.js";
+import type { AgentRole, ConfigData } from "../core/config.js";
 import type { EventBus, Party, Role } from "../events.js";
 import { ClaudeBackend } from "./claude.js";
 import { CodexBackend } from "./codex.js";
@@ -15,7 +15,6 @@ export interface CallOptions {
   schemaName: SchemaName;
   logPrefix: string;
   check?: (data: any) => string[];
-  extraAllowed?: string[];
   signal?: AbortSignal;
 }
 
@@ -43,7 +42,6 @@ export class AgentRunner {
   async call(o: CallOptions): Promise<AgentResult> {
     const backend = this.backends[this.cfg.agents[o.agentRole]];
     const agent: Party = backend.name;
-    const permission = permissionFor(this.cfg, o.agentRole);
     const attemptsAllowed = this.cfg.limits.max_retries + 1;
     const timeoutMs = this.cfg.limits.agent_timeout_sec * 1000;
     mkdirSync(this.logDir, { recursive: true });
@@ -70,7 +68,7 @@ export class AgentRunner {
       let args: string[];
       try {
         binary = backend.binary();
-        args = backend.buildArgs({ schemaName: o.schemaName, permission, lastMessageFile, extraAllowed: o.extraAllowed ?? [] });
+        args = backend.buildArgs({ schemaName: o.schemaName, lastMessageFile, role: o.agentRole });
       } catch (e) {
         if (e instanceof BinaryNotFound) return finish(false, attempt, null, e.message);
         throw e;

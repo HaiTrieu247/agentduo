@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
-import type { Permission } from "../core/config.js";
+import type { AgentRole } from "../core/config.js";
 import type { Activity } from "../events.js";
 import type { SchemaName } from "./schema.js";
 
@@ -29,9 +29,9 @@ export interface StreamParser {
 
 export interface BuildArgs {
   schemaName: SchemaName;
-  permission: Permission;
   lastMessageFile: string;
-  extraAllowed: string[];
+  /** Config role of the call (plan sign-off uses "planner"); selects <backend>.role_args. */
+  role: AgentRole;
 }
 
 export interface FinalOutput {

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { runProcess } from "../agents/process.js";
 import { resolveBinary } from "../agents/resolve.js";
 import { loadSchema, SCHEMA_NAMES, strictProblems } from "../agents/schema.js";
@@ -12,10 +12,12 @@ export interface Check {
   message: string;
 }
 
-const REQUIRED_FLAGS = {
-  codex: { args: ["exec", "--help"], flags: ["--json", "--output-schema", "--sandbox", "--output-last-message", "--cd"] },
-  claude: { args: ["--help"], flags: ["--output-format", "--verbose", "--json-schema", "--permission-mode", "--permission-prompts", "--tools", "--allowedTools", "--disallowedTools"] },
+/** Flags agentduo itself needs (the protocol); permissions are the CLIs' own business. */
+const PROTOCOL_FLAGS = {
+  codex: { args: ["exec", "--help"], flags: ["--json", "--output-schema", "--output-last-message", "--cd"] },
+  claude: { args: ["--help"], flags: ["--output-format", "--verbose", "--json-schema", "--permission-prompts"] },
 } as const;
+const EDIT_PERMISSION_FLAGS = ["--permission-mode", "--allowedTools", "--allowed-tools", "--dangerously-skip-permissions"];
 
 async function probe(bin: string, args: readonly string[], cwd: string): Promise<{ ok: boolean; out: string }> {
   try {
@@ -32,18 +34,18 @@ function firstToken(command: string): string {
 }
 
 /** Environment checks for `duo doctor`. Never calls a model. */
-export async function runDoctor(o: { repo: string; cfg: ConfigData; sources: string[]; configError?: string; env?: NodeJS.ProcessEnv }): Promise<Check[]> {
+export async function runDoctor(o: { dir: string; cfg: ConfigData; sources: string[]; configError?: string; env?: NodeJS.ProcessEnv; runsDir: string }): Promise<Check[]> {
   const env = o.env ?? process.env;
   const checks: Check[] = [];
   const add = (ok: boolean, message: string, required = true) => checks.push({ ok, required, message });
 
   const [major = 0, minor = 0] = process.versions.node.split(".").map(Number);
   add(major > 22 || (major === 22 && minor >= 12), `node ${process.versions.node} (>= 22.12)`);
-  const gitVersion = await probe("git", ["--version"], o.repo);
+  const gitVersion = await probe("git", ["--version"], o.dir);
   add(gitVersion.ok, gitVersion.ok ? gitVersion.out.trim() : "git is not installed");
-  const git = new Git(o.repo);
+  const git = new Git(o.dir);
   const isRepo = await git.isRepo();
-  add(isRepo, `git repository: ${o.repo}`);
+  add(isRepo, `workspace inside a git repository: ${o.dir}`);
   add(!o.configError, o.configError ? `config: ${o.configError}` : `config: ${o.sources.length ? o.sources.join(", ") : "built-in defaults"}`);
   for (const name of SCHEMA_NAMES) {
     const problems = strictProblems(loadSchema(name));
@@ -56,23 +58,31 @@ export async function runDoctor(o: { repo: string; cfg: ConfigData; sources: str
       add(false, `${backend} CLI not found (bin: '${o.cfg[backend].bin}')`);
       continue;
     }
-    const version = await probe(bin, ["--version"], o.repo);
+    const version = await probe(bin, ["--version"], o.dir);
     add(version.ok, `${backend} CLI: ${bin} (${version.out.trim().split("\n")[0] || "?"})`);
-    const spec = REQUIRED_FLAGS[backend];
-    const help = await probe(bin, spec.args, o.repo);
+    const spec = PROTOCOL_FLAGS[backend];
+    const help = await probe(bin, spec.args, o.dir);
     const missing = spec.flags.filter((f) => !help.out.includes(f));
     add(help.ok && !missing.length, `${backend} supports ${spec.flags.join(", ")}${missing.length ? ` — missing: ${missing.join(", ")}` : ""}`);
   }
-  if (!o.cfg.gates.length) add(!o.cfg.quality_gates.require_tests_pass, "no quality gates configured (run 'duo init')");
+  if (o.cfg.agents.implementer === "claude") {
+    const args = [...o.cfg.claude.args, ...(o.cfg.claude.role_args.implementer ?? [])];
+    if (!args.some((a) => EDIT_PERMISSION_FLAGS.includes(a))) {
+      add(false, 'implementer edits rely on your Claude Code permission settings (e.g. permissions.defaultMode "acceptEdits"); ' +
+        "without them every edit is denied in non-interactive mode", false);
+    }
+  }
   for (const gate of o.cfg.gates) {
     const exe = firstToken(gate.command);
-    const found = !!exe && (resolveBinary(exe, "codex", env) !== null || existsSync(join(o.repo, exe)));
+    const found = !!exe && (resolveBinary(exe, "codex", env) !== null || existsSync(join(o.dir, exe)));
     add(found, `gate '${gate.name}': ${gate.command}${found ? "" : ` — '${exe}' not found`}`, false);
   }
   if (isRepo) {
-    const dirty = await git.statusPorcelain([".agentduo"]);
-    add(!dirty.length, `working tree clean${dirty.length ? ` (${dirty.length} uncommitted change(s))` : ""}`, false);
-    add(await git.isIgnored(o.cfg.paths.runs_dir), `${o.cfg.paths.runs_dir}/ is git-ignored`, false);
+    const rel = relative(o.dir, o.runsDir);
+    if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
+      const shown = rel.split("\\").join("/");
+      add(await git.isIgnored(shown), `${shown}/ is git-ignored`, false);
+    }
   }
   return checks;
 }
