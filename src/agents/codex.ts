@@ -35,7 +35,7 @@ export class CodexParser implements StreamParser {
     if (!event || typeof event !== "object" || Array.isArray(event)) return [];
     if (event.type === "turn.completed" && event.usage && typeof event.usage === "object") {
       const usage = event.usage as { input_tokens?: number; output_tokens?: number };
-      this.tokens += (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
+      this.tokens += (Number(usage.input_tokens) || 0) + (Number(usage.output_tokens) || 0);
       return [{ type: "usage", tokens: this.tokens }];
     }
     if (event.type === "turn.failed" || event.type === "error") {

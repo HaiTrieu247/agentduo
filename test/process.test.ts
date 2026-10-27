@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { runProcess } from "../src/agents/process.js";
+import { describe, expect, it, vi } from "vitest";
+import { killAllActive, runProcess } from "../src/agents/process.js";
 
 const node = process.execPath;
 const cwd = process.cwd();
@@ -34,6 +34,17 @@ describe("runProcess", () => {
     const r = await runProcess(node, ["-e", "setInterval(() => {}, 1000)"], { cwd, timeoutMs: 10_000, signal: controller.signal, killGraceMs: 200 });
     expect(r.aborted).toBe(true);
     expect(r.code).toBeNull();
+  });
+
+  it.skipIf(process.platform === "win32")("killAllActive sends SIGKILL immediately (the process is about to exit)", async () => {
+    const running = runProcess(node, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { cwd, timeoutMs: 10_000 });
+    await new Promise((res) => setTimeout(res, 200));
+    const kill = vi.spyOn(process, "kill");
+    killAllActive();
+    const signals = kill.mock.calls.map((c) => c[1]);
+    kill.mockRestore();
+    expect(signals).toEqual(["SIGKILL"]);
+    await running;
   });
 
   it("rejects when the binary does not exist", async () => {

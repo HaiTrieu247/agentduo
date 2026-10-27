@@ -22,7 +22,7 @@ Khi vượt giới hạn, vi phạm quy tắc an toàn hoặc agent gặp lỗi,
 ```bash
 npm i -g agentduo
 cd my-project
-duo init      # tạo .agentduo/config.yaml với các gate tự đoán, thêm .agentduo/runs/ vào .gitignore
+duo init      # tạo .agentduo/config.yaml (gate tự đoán) và .agentduo/.gitignore (không đưa dữ liệu run vào git)
 duo doctor    # kiểm tra môi trường, không gọi model
 duo "Thêm xác thực JWT với refresh token"
 ```
@@ -63,10 +63,14 @@ Trong terminal, agentduo hiện lý do kèm menu:
   - Claude khi implement dùng allowlist/denylist (chặn commit, push, `rm -rf`, `curl`, truy cập web).
 - **agentduo tự kiểm chứng thêm:**
   - Snapshot toàn bộ working tree vào `refs/agentduo/...` mà không đụng vào index, HEAD hay branch của bạn.
-  - Hash working tree trước và sau mỗi bước read-only.
-  - Chặn mọi commit của agent và mọi thay đổi trên `protected_paths`.
-  - Giới hạn số file bị xoá.
-  - Mặc định từ chối chạy khi working tree có thay đổi chưa commit.
+  - Trước và sau mỗi bước của agent và mỗi lần chạy gate, so sánh:
+    - working tree;
+    - các file bị git ignore khớp `protected_paths` (ví dụ `.env` đã ignore);
+    - `.git/config` và `.git/hooks/*`;
+    - `plan.final.md` và `review.json` của run.
+  - Chặn mọi commit của agent, mọi thay đổi trên `protected_paths`, và giới hạn số file bị xoá. Điều này vẫn áp dụng khi agent lỗi hoặc bị ngắt giữa chừng, và áp dụng cả với thay đổi do chính gate script gây ra.
+  - Mặc định từ chối chạy khi working tree có thay đổi chưa commit, và mỗi repo chỉ cho một run chạy cùng lúc.
+  - **Giới hạn:** file bị ignore mà không khớp `protected_paths` thì không được theo dõi, và agent vẫn đọc được file.
 
 ## Exit code
 

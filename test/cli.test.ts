@@ -61,7 +61,7 @@ describe("cli", () => {
     writeFileSync(join(other, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
     const r = await cli(["init"], other);
     expect(r.code).toBe(0);
-    for (const s of ["created", "gate test: npm run test", "added .agentduo/runs/ to .gitignore"]) expect(r.out).toContain(s);
+    for (const s of ["created", "gate test: npm run test", "created .agentduo/.gitignore"]) expect(r.out).toContain(s);
     expect(existsSync(join(other, ".agentduo", "config.yaml"))).toBe(true);
   });
 
@@ -105,6 +105,38 @@ describe("cli", () => {
     expect((await cli(["resume", "--decision", "abort"])).code).toBe(3);
     const again = await cli(["resume", "--decision", "resume"]);
     expect([again.code, again.err.includes("not waiting for a decision")]).toEqual([1, true]);
+  });
+
+  it("follows the README quick start: init, then run, with no commit in between", async () => {
+    const other = makeRepo(join(t.path, "quick"), { ignoreRuns: false });
+    writeFileSync(join(other, "package.json"), JSON.stringify({ scripts: { test: "node check.mjs" } }));
+    git(other, "add", "package.json");
+    git(other, "commit", "-q", "-m", "add package.json");
+    mkdirSync(join(t.path, "xdg", "agentduo"), { recursive: true });
+    writeFileSync(join(t.path, "xdg", "agentduo", "config.yaml"), `codex:\n  bin: ${JSON.stringify(fake.path("codex"))}\nclaude:\n  bin: ${JSON.stringify(fake.path("claude"))}\n`);
+    expect((await cli(["init"], other)).code).toBe(0);
+    fake.setScenario(happy());
+    const r = await cli(["Make app.txt fixed"], other);
+    expect(r.code, r.err).toBe(0);
+  });
+
+  it("does not start a paid run for a mistyped command", async () => {
+    writeRepoConfig();
+    fake.setScenario(happy());
+    const r = await cli(["stauts"]);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("unknown command 'stauts'");
+    expect(r.err).toContain("did you mean 'status'");
+    expect(fake.calls()).toEqual([]);
+  });
+
+  it("reports config type errors in doctor instead of crashing", async () => {
+    mkdirSync(join(repo, ".agentduo"), { recursive: true });
+    writeFileSync(join(repo, ".agentduo", "config.yaml"), "codex:\n  bin: 5\ngates:\n");
+    const r = await cli(["doctor"]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("✗ config:");
+    expect(r.out).toContain("codex.bin must be a non-empty string");
   });
 
   it("runs doctor", async () => {

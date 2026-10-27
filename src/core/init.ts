@@ -10,7 +10,8 @@ export interface DetectedGate {
 export interface InitResult {
   configPath: string;
   created: boolean;
-  gitignoreUpdated: boolean;
+  /** True when .agentduo/.gitignore was written (it ignores runs/ without touching the root .gitignore). */
+  ignoreCreated: boolean;
   gates: DetectedGate[];
 }
 
@@ -76,8 +77,6 @@ export function renderConfigYaml(gates: DetectedGate[]): string {
   return lines.join("\n");
 }
 
-const IGNORE_LINES = [".agentduo/runs/", ".agentduo/runs", "/.agentduo/runs/", ".agentduo/", ".agentduo", "/.agentduo/"];
-
 export function initRepo(repo: string): InitResult {
   const configPath = join(repo, ".agentduo", "config.yaml");
   const gates = detectGates(repo);
@@ -87,12 +86,14 @@ export function initRepo(repo: string): InitResult {
     writeFileSync(configPath, renderConfigYaml(gates));
     created = true;
   }
-  const gitignore = join(repo, ".gitignore");
-  const current = read(gitignore) ?? "";
-  let gitignoreUpdated = false;
-  if (!current.split(/\r?\n/).some((line) => IGNORE_LINES.includes(line.trim()))) {
-    writeFileSync(gitignore, `${current}${current && !current.endsWith("\n") ? "\n" : ""}.agentduo/runs/\n`);
-    gitignoreUpdated = true;
+  // A nested .gitignore keeps run data out of git without dirtying the root .gitignore (and so the first run
+  // does not trip the uncommitted-changes check: everything under .agentduo/ is exempt from it).
+  const ignoreFile = join(repo, ".agentduo", ".gitignore");
+  let ignoreCreated = false;
+  if (!existsSync(ignoreFile)) {
+    mkdirSync(join(repo, ".agentduo"), { recursive: true });
+    writeFileSync(ignoreFile, "runs/\n");
+    ignoreCreated = true;
   }
-  return { configPath, created, gitignoreUpdated, gates };
+  return { configPath, created, ignoreCreated, gates };
 }

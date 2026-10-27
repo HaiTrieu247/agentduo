@@ -3,13 +3,13 @@ import { isAbsolute, join, resolve } from "node:path";
 import { Command, CommanderError, Option } from "commander";
 import { killAllActive } from "./agents/process.js";
 import { resolveBinary } from "./agents/resolve.js";
-import { ConfigError, loadConfig, validateConfig, type ConfigData } from "./core/config.js";
+import { ConfigError, defaultConfig, loadConfig, validateConfig, type ConfigData } from "./core/config.js";
 import { runDoctor } from "./core/doctor.js";
 import { Git } from "./core/git.js";
 import { initRepo } from "./core/init.js";
 import type { Review } from "./core/outputs.js";
 import { findingsMarkdown } from "./core/render.js";
-import { LockError, RunStore, type RunState } from "./core/state.js";
+import { acquireRepoLock, LockError, RunStore, type RunState } from "./core/state.js";
 import { DecisionError, EXIT, Workflow } from "./core/workflow.js";
 import { EventBus, type Decider, type Decision } from "./events.js";
 import { packageVersion } from "./paths.js";
@@ -27,15 +27,30 @@ export interface CliIO {
   onSignal?: (handler: () => void) => () => void;
 }
 
+/** A reader that went away (`duo … | head`) must not crash the run; any other stream error still does. */
+export function guardStream(stream: { on(event: "error", listener: (err: NodeJS.ErrnoException) => void): unknown }): void {
+  stream.on("error", (err) => {
+    if (err.code !== "EPIPE") throw err;
+  });
+}
+
+let exitHookInstalled = false;
+const STOP_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
+
 export function processIO(): CliIO {
+  if (!exitHookInstalled) {
+    exitHookInstalled = true;
+    guardStream(process.stdout);
+    guardStream(process.stderr);
+    // Agents run in their own process groups, so they do not die with us unless we kill them.
+    process.once("exit", () => killAllActive());
+  }
   return {
     stdout: process.stdout, stderr: process.stderr, stdin: process.stdin, env: process.env, cwd: process.cwd(),
     onSignal: (handler) => {
-      process.on("SIGINT", handler);
-      process.on("SIGTERM", handler);
+      for (const signal of STOP_SIGNALS) process.on(signal, handler);
       return () => {
-        process.off("SIGINT", handler);
-        process.off("SIGTERM", handler);
+        for (const signal of STOP_SIGNALS) process.off(signal, handler);
       };
     },
   };
@@ -67,7 +82,7 @@ async function prepare(io: CliIO, opts: CommonOptions): Promise<Env> {
 
 function requireRunnable(env: Env, io: CliIO): void {
   if (!env.isRepo) throw new CliExit(EXIT.ERROR, `${env.repo} is not a git repository (run 'git init' and commit first)`);
-  validateConfig(env.cfg, env.sources.at(-1));
+  validateConfig(env.cfg, env.sources.join(", ") || undefined);
   const missing = (["codex", "claude"] as const).filter((b) => Object.values(env.cfg.agents).includes(b) && !resolveBinary(env.cfg[b].bin, b, io.env));
   if (missing.length) {
     throw new CliExit(EXIT.ERROR, `CLI not found: ${missing.join(", ")}. Install it or set '<backend>.bin' in the config; run 'duo doctor' for details.`);
@@ -143,7 +158,9 @@ async function execute(io: CliIO, env: Env, store: RunStore, state: RunState, op
   workflow = new Workflow({ cfg: env.cfg, repo: env.repo, store, state, bus, decider, allowDirty });
   const offSignal = io.onSignal?.(onInterrupt);
   let locked = false;
+  let releaseRepo: (() => void) | undefined;
   try {
+    releaseRepo = acquireRepoLock(env.runsDir);
     store.lock();
     locked = true;
     if (decision) await workflow.applyDecision(decision.decision, decision.note);
@@ -153,12 +170,38 @@ async function execute(io: CliIO, env: Env, store: RunStore, state: RunState, op
     throw e;
   } finally {
     if (locked) store.unlock();
+    releaseRepo?.();
     offSignal?.();
     await closeUi();
   }
 }
 
-async function runCommand(io: CliIO, words: string[], opts: RunOptions): Promise<number> {
+const COMMANDS = ["run", "resume", "status", "list", "doctor", "init"];
+
+function editDistance(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let prev = row[0]!;
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = row[j]!;
+      row[j] = Math.min(row[j]! + 1, row[j - 1]! + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = tmp;
+    }
+  }
+  return row[b.length]!;
+}
+
+/** `duo stauts` would otherwise start a paid run with the task "stauts". */
+function mistypedCommand(words: string[]): string | null {
+  if (words.length !== 1 || /\s/.test(words[0]!)) return null;
+  const word = words[0]!.toLowerCase();
+  return COMMANDS.find((c) => editDistance(word, c) <= 2) ?? null;
+}
+
+async function runCommand(io: CliIO, words: string[], opts: RunOptions, explicit = false): Promise<number> {
+  const near = explicit ? null : mistypedCommand(words);
+  if (near) throw new CliExit(EXIT.ERROR, `unknown command '${words[0]}' — did you mean '${near}'? To start a run with this task, use: duo run ${words[0]}`);
   let task = words.join(" ").trim();
   if (opts.taskFile) task = `${task}\n\n${readFileSync(resolve(io.cwd, opts.taskFile), "utf8")}`.trim();
   if (!task) throw new CliExit(EXIT.ERROR, 'a task description is required, e.g. duo "Add JWT auth" (other commands: resume, status, list, doctor, init)');
@@ -216,12 +259,14 @@ async function doctorCommand(io: CliIO, opts: CommonOptions): Promise<number> {
   const env = await prepare(io, opts);
   let configError: string | undefined;
   try {
-    validateConfig(env.cfg, env.sources.at(-1));
+    validateConfig(env.cfg, env.sources.join(", ") || undefined);
   } catch (e) {
     if (!(e instanceof ConfigError)) throw e;
     configError = e.message.replace(/\n\s*/g, " ");
   }
-  const checks = await runDoctor({ repo: env.repo, cfg: env.cfg, sources: env.sources, configError, env: io.env });
+  // An invalid config cannot be trusted for the remaining checks; fall back to the defaults for those.
+  const cfg = configError ? defaultConfig() : env.cfg;
+  const checks = await runDoctor({ repo: env.repo, cfg, sources: env.sources, configError, env: io.env });
   let failed = false;
   for (const c of checks) {
     if (c.ok) io.stdout.write(`  ✓ ${c.message}\n`);
@@ -244,7 +289,7 @@ async function initCommand(io: CliIO, opts: CommonOptions): Promise<number> {
   } else {
     io.stdout.write(`kept existing ${r.configPath}\n`);
   }
-  io.stdout.write(r.gitignoreUpdated ? "added .agentduo/runs/ to .gitignore\n" : ".agentduo/runs/ is already ignored\n");
+  io.stdout.write(r.ignoreCreated ? "created .agentduo/.gitignore (keeps run data out of git)\n" : ".agentduo/.gitignore already exists\n");
   if (!env.isRepo) io.stderr.write(`warning: ${env.repo} is not a git repository yet\n`);
   return EXIT.DONE;
 }
@@ -273,7 +318,7 @@ export async function main(argv: string[], io: CliIO = processIO()): Promise<num
     });
   common(program.command("run").description("start a new run").argument("<task...>").option("--task-file <file>", "read the task description from a file").addOption(dirtyOption()))
     .action(async (words: string[], opts: RunOptions) => {
-      exitCode = await runCommand(io, words, opts);
+      exitCode = await runCommand(io, words, opts, true);
     });
   common(program.command("resume").description("continue a run (default: the latest), optionally answering a pending decision").argument("[runId]")
     .addOption(new Option("--decision <decision>", "answer a run waiting in HUMAN_REVIEW").choices(["resume", "revise", "abort"]))

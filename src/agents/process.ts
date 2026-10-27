@@ -42,6 +42,10 @@ export function killTree(child: ChildProcess, graceMs = 5000): void {
       // the group is already gone
     }
   };
+  if (graceMs <= 0) {
+    send("SIGKILL"); // no grace: the caller is about to exit and timers would never fire
+    return;
+  }
   send("SIGTERM");
   setTimeout(() => send("SIGKILL"), graceMs).unref();
 }

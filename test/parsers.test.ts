@@ -102,6 +102,21 @@ describe("ClaudeParser", () => {
   });
 });
 
+describe("parser robustness", () => {
+  it("never throws on malformed content blocks", () => {
+    const p = new ClaudeParser("/repo");
+    const lines = [
+      JSON.stringify({ type: "assistant", message: { content: [null, 5, "x", { type: "tool_use" }] } }),
+      JSON.stringify({ type: "user", message: { content: [null, { type: "tool_result", tool_use_id: null }] } }),
+      JSON.stringify({ type: "result", permission_denials: [null, 3] }),
+    ];
+    expect(() => feedAll(p, lines)).not.toThrow();
+    const q = new CodexParser();
+    expect(() => feedAll(q, [JSON.stringify({ type: "item.completed", item: null }), JSON.stringify({ type: "turn.completed", usage: { input_tokens: "12", output_tokens: 3 } })])).not.toThrow();
+    expect(q.tokens).toBe(15);
+  });
+});
+
 describe("extractJson", () => {
   it("handles fences and surrounding prose", () => {
     expect(extractJson('```json\n{"a": 1}\n```')).toEqual({ a: 1 });

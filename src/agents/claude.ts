@@ -32,6 +32,7 @@ export class ClaudeParser implements StreamParser {
     if (!Array.isArray(content)) return [];
     const out: ParsedEvent[] = [];
     content.forEach((block: Block, i: number) => {
+      if (!block || typeof block !== "object") return;
       if (event.type === "assistant") {
         const id = `${event.uuid ?? event.message.id ?? "msg"}-${i}`;
         if (block.type === "text" && String(block.text ?? "").trim()) {
@@ -58,7 +59,7 @@ export class ClaudeParser implements StreamParser {
     this.result = event;
     const out: ParsedEvent[] = [];
     for (const denial of Array.isArray(event.permission_denials) ? event.permission_denials : []) {
-      const activity = denial?.tool_use_id ? this.tools.get(String(denial.tool_use_id)) : undefined;
+      const activity = denial && typeof denial === "object" && denial.tool_use_id ? this.tools.get(String(denial.tool_use_id)) : undefined;
       if (activity && activity.status !== "denied") {
         activity.status = "denied";
         out.push({ type: "activity", activity: { ...activity } });

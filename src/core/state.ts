@@ -31,6 +31,8 @@ export interface RunState {
   implRound: number;
   base: (Snapshot & { head: string | null; branch: string | null; dirty: boolean }) | null;
   lastSnapshot: Snapshot | null;
+  /** The pre-implementation snapshot of the current round, reused when the round re-runs (resume after a failure). */
+  roundPre: (Snapshot & { round: number; head: string | null; branch: string | null; protected: Record<string, string> }) | null;
   lastGates: GateResult[] | null;
   consecutiveGateFailures: number;
   openFindings: Finding[];
@@ -74,6 +76,38 @@ export class LockError extends Error {
   override name = "LockError";
 }
 
+/** Create `path` exclusively holding our pid; a lock left by a dead process is reclaimed. */
+function acquireLock(path: string, busy: (pid: number) => string): void {
+  const take = () => {
+    const fd = openSync(path, "wx");
+    writeFileSync(fd, String(process.pid));
+    closeSync(fd);
+  };
+  try {
+    take();
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    const pid = Number(readFileSync(path, "utf8").trim());
+    if (pid && pidAlive(pid)) throw new LockError(busy(pid));
+    unlinkSync(path);
+    take();
+  }
+}
+
+/** One active run per repository: concurrent runs would see each other's edits as their own. */
+export function acquireRepoLock(runsDir: string): () => void {
+  mkdirSync(runsDir, { recursive: true });
+  const path = join(runsDir, ".lock");
+  acquireLock(path, (pid) => `another agentduo run is active in this repository (pid ${pid}); wait for it to finish or stop it first`);
+  return () => {
+    try {
+      unlinkSync(path);
+    } catch {
+      // already removed
+    }
+  };
+}
+
 function pidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -89,7 +123,7 @@ export function newState(taskId: string, task: string, limits: { max_planning_ro
     version: STATE_VERSION, taskId, task, phase: "PLAN", createdAt: ts, updatedAt: ts,
     limits: { planningRounds: limits.max_planning_rounds, reviewRounds: limits.max_review_rounds },
     planningRound: 1, planVersion: 0, planHash: null, finalPlanVersion: null, finalPlanHash: null, planFeedback: null,
-    implRound: 0, base: null, lastSnapshot: null, lastGates: null, consecutiveGateFailures: 0, openFindings: [],
+    implRound: 0, base: null, lastSnapshot: null, roundPre: null, lastGates: null, consecutiveGateFailures: 0, openFindings: [],
     lastImplementation: null, humanReview: null, humanNotes: [], costUsd: 0, tokens: 0, step: 0, inProgress: null, history: [],
   };
 }
@@ -144,21 +178,7 @@ export class RunStore {
   }
 
   lock(): void {
-    const path = this.path("lock");
-    const take = () => {
-      const fd = openSync(path, "wx");
-      writeFileSync(fd, String(process.pid));
-      closeSync(fd);
-    };
-    try {
-      take();
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const pid = Number(readFileSync(path, "utf8").trim());
-      if (pid && pidAlive(pid)) throw new LockError(`run ${this.taskId} is already being processed by pid ${pid}`);
-      unlinkSync(path);
-      take();
-    }
+    acquireLock(this.path("lock"), (pid) => `run ${this.taskId} is already being processed by pid ${pid}`);
     this.locked = true;
   }
 

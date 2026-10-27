@@ -50,7 +50,7 @@ npm i -g agentduo
 
 ```bash
 cd my-project
-duo init      # writes .agentduo/config.yaml with detected gates and git-ignores .agentduo/runs/
+duo init      # writes .agentduo/config.yaml (detected gates) and .agentduo/.gitignore (keeps run data out of git)
 duo doctor    # checks CLIs, flags, config and gates; makes no model calls
 duo "Add JWT authentication with refresh tokens"
 ```
@@ -123,10 +123,17 @@ Permissions are enforced by the CLIs themselves, not only stated in prompts:
 
 agentduo also checks independently:
 
-- It snapshots the whole working tree into `refs/agentduo/<run>/…` through a temporary index, leaving your index, HEAD and branch untouched. Every review therefore targets an exact SHA, and the state before every round can be restored.
-- It hashes the working tree before and after each read-only step. Any change, or any movement of HEAD or the branch, stops the run.
-- After each implementation round it checks that HEAD and the branch did not move (no commits), that no protected path changed, and that the number of deleted files stays within a limit.
-- It refuses to start on uncommitted changes unless you pass `--allow-dirty`.
+- **Snapshots.** It snapshots the whole working tree into `refs/agentduo/<run>/…` through a temporary index, leaving your index, HEAD and branch untouched. Every review therefore targets an exact SHA, and the state before every round can be restored.
+- **What the checks cover.** Before and after every agent step and every gate run, it compares:
+  - the working tree (tracked and untracked files);
+  - git-ignored files that match `protected_paths` (for example a git-ignored `.env`);
+  - `.git/config` and `.git/hooks/*`;
+  - the run's own `plan.final.md` and `review.json`.
+- **Read-only steps.** Any change during a read-only step, or any movement of HEAD or the branch, stops the run.
+- **Implementation rounds and gates.** HEAD and the branch must not move (no commits), no protected path may change, and deletions stay within a limit. This also holds when an attempt fails or is interrupted: a re-run of the round is still compared against the state before its first attempt. Changes made by the gate scripts themselves are checked too, because the implementer can edit those scripts.
+- **Starting a run.** It refuses to start on uncommitted changes unless you pass `--allow-dirty`, and allows one active run per repository.
+
+Limits: files that are git-ignored and do not match `protected_paths` are not tracked, and nothing stops an agent from reading files. Keep secrets out of the repository, or list them in `protected_paths`.
 
 ## Run files
 

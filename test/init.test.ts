@@ -1,9 +1,9 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/core/config.js";
 import { detectGates, initRepo, renderConfigYaml } from "../src/core/init.js";
-import { makeRepo } from "./helpers/repo.js";
+import { git, makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
 
 const dirs: Array<{ cleanup(): void }> = [];
@@ -43,10 +43,12 @@ describe("initRepo", () => {
     const parent = tmp();
     const repo = makeRepo(parent, { ignoreRuns: false });
     writeFileSync(join(repo, "package.json"), JSON.stringify({ scripts: { test: "node --test" } }));
-    expect(initRepo(repo)).toMatchObject({ created: true, gitignoreUpdated: true });
+    expect(initRepo(repo)).toMatchObject({ created: true, ignoreCreated: true });
     expect(loadConfig({ repo, env: { XDG_CONFIG_HOME: join(parent, "xdg") } }).data.gates).toEqual([{ name: "test", command: "npm run test", required: true }]);
-    expect(initRepo(repo)).toMatchObject({ created: false, gitignoreUpdated: false });
-    expect(readFileSync(join(repo, ".gitignore"), "utf8").match(/\.agentduo\/runs\//g)).toHaveLength(1);
+    expect(initRepo(repo)).toMatchObject({ created: false, ignoreCreated: false });
+    expect(readFileSync(join(repo, ".agentduo", ".gitignore"), "utf8")).toBe("runs/\n");
+    expect(existsSync(join(repo, ".gitignore"))).toBe(false);
+    expect(git(repo, "check-ignore", ".agentduo/runs/x")).toBe(".agentduo/runs/x");
   });
 
   it("renders a valid placeholder when nothing is detected", () => {

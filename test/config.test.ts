@@ -81,6 +81,37 @@ describe("loadConfig", () => {
     }
   });
 
+  it("type-checks every value instead of crashing later", () => {
+    const cases: Array<[string, string]> = [
+      [`${GATES}codex:\n  bin: 5\n`, "codex.bin must be a non-empty string"],
+      [`${GATES}safety:\n  allow_dirty_worktree: no\n`, "safety.allow_dirty_worktree must be true or false"],
+      [`${GATES}quality_gates:\n  require_tests_pass: yes\n`, "quality_gates.require_tests_pass must be true or false"],
+      [`${GATES}claude:\n  max_budget_usd: lots\n`, "claude.max_budget_usd must be a positive number or null"],
+      [`${GATES}codex:\n  model: 4\n`, "codex.model must be a string or null"],
+      [`${GATES}codex:\n  extra_args: [1]\n`, "codex.extra_args must be a list of strings"],
+      [`${GATES}safety:\n  protected_paths: [3]\n`, "safety.protected_paths must be a list of strings"],
+      ["gates: [npm test]\n", "gates[0] needs 'name' and 'command'"],
+    ];
+    for (const [yaml, expected] of cases) {
+      const { repo, env } = setup(yaml);
+      expect(() => loadConfig({ repo, env }), yaml).toThrow(expected);
+    }
+  });
+
+  it("keeps list defaults when a list key is present but empty", () => {
+    const { repo, env } = setup(`${GATES}safety:\n  protected_paths:\ncodex:\n  extra_args:\n`);
+    const { data } = loadConfig({ repo, env });
+    expect(data.safety.protected_paths).toContain(".env");
+    expect(data.codex.extra_args).toEqual(["--ephemeral"]);
+    const empty = setup("gates:\nquality_gates:\n  require_tests_pass: false\n");
+    expect(loadConfig({ repo: empty.repo, env: empty.env }).data.gates).toEqual([]);
+  });
+
+  it("names every config file in validation errors", () => {
+    const { repo, env } = setup(GATES, "limits:\n  max_retries: -1\n");
+    expect(() => loadConfig({ repo, env })).toThrow(/xdg\/agentduo\/config\.yaml/);
+  });
+
   it("errors when --config points to a missing file", () => {
     const { repo, env } = setup();
     expect(() => loadConfig({ repo, env, configPath: join(repo, "missing.yaml") })).toThrow("config file not found");

@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 export class GitError extends Error {
   override name = "GitError";
@@ -106,6 +107,22 @@ export class Git {
     const commit = (await this.run(["commit-tree", tree, ...(head ? ["-p", head] : []), "-m", message], { env: IDENTITY })).stdout.trim();
     if (ref) await this.run(["update-ref", ref, commit]);
     return { commit, tree };
+  }
+
+  /** Untracked, git-ignored files matching the globs. Snapshots never see these, so guards hash them separately. */
+  async ignoredMatching(globs: string[]): Promise<string[]> {
+    if (!globs.length) return [];
+    const out = await this.run(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", ...globs.map((g) => `:(glob)${g}`)]);
+    return out.stdout.split("\0").filter(Boolean);
+  }
+
+  /** Absolute paths of the repository's git config and hook files (an agent writing these could run code later). */
+  async metadataFiles(): Promise<string[]> {
+    const lines = (await this.run(["rev-parse", "--git-path", "config", "--git-path", "hooks"])).stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+    const [config, hooks] = lines.map((l) => resolve(this.repo, l));
+    const files = config ? [config] : [];
+    if (hooks && existsSync(hooks)) files.push(...readdirSync(hooks).map((name) => join(hooks, name)));
+    return files.filter((f) => existsSync(f) && statSync(f).isFile());
   }
 
   async nameStatus(a: string, b: string): Promise<Change[]> {

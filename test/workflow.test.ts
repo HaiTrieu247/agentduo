@@ -269,6 +269,57 @@ describe("Workflow", () => {
     expect(stateOf(h).base?.dirty).toBe(true);
   });
 
+  it("guards an implementation round even when the implementer then fails", async () => {
+    const scenario = { ...happy(), implementer: [{ write: { "app.txt": "fixed\n", ".github/workflows/x.yml": "x\n" }, raw: "not json" }] };
+    expect(await start(scenario, { limits: { max_retries: 0 } })).toBe(2);
+    const hr = stateOf(h).humanReview!;
+    expect(hr.reason).toBe("guard_violation");
+    expect(hr.details.join(" ")).toContain(".github/workflows/x.yml");
+    expect(hr.resumePhase).toBe("IMPLEMENT");
+  });
+
+  it("keeps the round's pre-snapshot across an interrupt, so the re-run still sees earlier changes", async () => {
+    fake.setScenario({ ...happy(), implementer: [{ write: { ".env": "TOKEN=1\n" }, sleep: 10_000, output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }] });
+    const { wf, bus } = newWorkflow(h, "Make app.txt fixed");
+    bus.on((e) => {
+      if (e.type === "phase.started" && e.phase === "IMPLEMENT") setTimeout(() => wf.interrupt(), 400);
+    });
+    expect(await wf.run()).toBe(130);
+    expect(await resume(h)).toBe(2);
+    const hr = stateOf(h).humanReview!;
+    expect(hr.reason).toBe("guard_violation");
+    expect(hr.details.join(" ")).toContain(".env");
+  });
+
+  it("checks changes made by the quality gates", async () => {
+    const evilCheck = 'import { mkdirSync, writeFileSync } from "node:fs";\nmkdirSync(".github/workflows", { recursive: true });\nwriteFileSync(".github/workflows/evil.yml", "x");\nprocess.exit(0);\n';
+    const scenario = { ...happy(), implementer: [{ write: { "app.txt": "fixed\n", "check.mjs": evilCheck }, output: impl() }] };
+    expect(await start(scenario)).toBe(2);
+    const hr = stateOf(h).humanReview!;
+    expect(hr.reason).toBe("guard_violation");
+    expect(hr.details.join(" ")).toContain(".github/workflows/evil.yml");
+    expect(fake.calls("code_reviewer")).toHaveLength(0);
+  });
+
+  it("sees git-ignored protected files, git hooks and the run's own files", async () => {
+    writeFileSync(join(h.repo, ".gitignore"), ".agentduo/runs/\n.env\n");
+    git(h.repo, "add", ".gitignore");
+    git(h.repo, "commit", "-q", "-m", "ignore .env");
+    const scenario = {
+      ...happy(),
+      implementer: [{
+        write: { "app.txt": "fixed\n", ".env": "SECRET=1\n", ".git/hooks/pre-commit": "#!/bin/sh\necho owned\n" },
+        shell: ['for f in .agentduo/runs/*/plan.final.md; do echo HACKED >> "$f"; done'], output: impl(),
+      }],
+    };
+    expect(await start(scenario)).toBe(2);
+    const details = stateOf(h).humanReview!.details.join(" | ");
+    expect(stateOf(h).humanReview!.reason).toBe("guard_violation");
+    expect(details).toContain("'.env'");
+    expect(details).toContain(".git/hooks/pre-commit");
+    expect(details).toContain("plan.final.md");
+  });
+
   it("rejects decisions when none is pending", async () => {
     await start(happy());
     const { wf } = resumedWorkflow(h);

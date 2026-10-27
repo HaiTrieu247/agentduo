@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { LockError, nowIso, RunStore, slugify } from "../src/core/state.js";
+import { acquireRepoLock, LockError, nowIso, RunStore, slugify } from "../src/core/state.js";
 import { tempDir } from "./helpers/tmp.js";
 
 const dirs: Array<{ cleanup(): void }> = [];
@@ -60,6 +60,14 @@ describe("RunStore", () => {
     again.lock();
     again.unlock();
     expect(existsSync(store.path("lock"))).toBe(false);
+  });
+
+  it("allows only one active run per repository", () => {
+    const dir = runsDir();
+    const release = acquireRepoLock(dir);
+    expect(() => acquireRepoLock(dir)).toThrow(LockError);
+    release();
+    acquireRepoLock(dir)();
   });
 
   it("writes atomically and updates timestamps", () => {

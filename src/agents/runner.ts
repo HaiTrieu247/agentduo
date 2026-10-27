@@ -87,7 +87,13 @@ export class AgentRunner {
           cwd: this.repo, input: prompt, timeoutMs, signal: o.signal,
           onStdoutLine: (line) => {
             eventsLog.write(`${line}\n`);
-            for (const ev of parser.feed(line)) {
+            let parsed: ReturnType<typeof parser.feed> = [];
+            try {
+              parsed = parser.feed(line);
+            } catch {
+              // a display-only parser bug must never take the run down
+            }
+            for (const ev of parsed) {
               if (ev.type === "activity") this.bus.emit({ type: "agent.activity", role: o.role, agent, activity: ev.activity });
               else this.bus.emit({
                 type: "agent.usage", agent,

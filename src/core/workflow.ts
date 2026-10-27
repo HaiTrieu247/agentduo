@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { isAbsolute, relative, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { AgentRunner, type AgentResult } from "../agents/runner.js";
 import type { SchemaName } from "../agents/schema.js";
 import type { Decider, DuoEvent, EventBus, HistoryEntry, Message, Party, Phase, Role } from "../events.js";
@@ -69,6 +70,17 @@ const bySeverity = <T extends { severity: string }>(xs: T[]) =>
 const issueItems = (issues: Issue[]) => bySeverity(issues).map((i) => `[${i.severity}] ${i.id} ${i.description}`);
 const findingItems = (findings: Finding[]) =>
   bySeverity(findings).map((f) => `[${f.severity}] ${f.id} ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} ` : ""}${f.issue}`);
+
+function hashFile(path: string): string {
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch {
+    return "unreadable";
+  }
+}
+
+/** Run files that prompts read back from disk; an agent must not rewrite them. */
+const GUARDED_RUN_FILES = ["plan.final.md", "review.json"];
 
 function lastLine(text: string): string {
   const line = text.trim().split("\n").filter((l) => l.trim()).at(-1) ?? "";
@@ -265,6 +277,32 @@ export class Workflow {
     return null;
   }
 
+  /** Hashes of what tree snapshots cannot see: git-ignored protected files, git config/hooks, and guarded run files. */
+  private async protectedState(): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    const skip = this.snapshotExclude.map((p) => `${p}/`);
+    for (const path of await this.git.ignoredMatching(this.o.cfg.safety.protected_paths)) {
+      if (!skip.some((prefix) => path.startsWith(prefix))) out[`ignored:${path}`] = hashFile(join(this.o.repo, path));
+    }
+    for (const file of await this.git.metadataFiles()) out[`git:${relative(this.o.repo, file).split("\\").join("/")}`] = hashFile(file);
+    for (const name of GUARDED_RUN_FILES) if (this.o.store.exists(name)) out[`run:${name}`] = hashFile(this.o.store.path(name));
+    return out;
+  }
+
+  private protectedViolations(before: Record<string, string>, after: Record<string, string>): string[] {
+    const violations: string[] = [];
+    for (const key of [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()) {
+      if (before[key] === after[key]) continue;
+      const status = !(key in before) ? "A" : !(key in after) ? "D" : "M";
+      const [kind, ...rest] = key.split(":");
+      const name = rest.join(":");
+      if (kind === "ignored") violations.push(`modified protected path '${name}' (${status}, git-ignored)`);
+      else if (kind === "git") violations.push(`modified git metadata '${name}' (${status})`);
+      else violations.push(`modified agentduo run file '${name}' (${status})`);
+    }
+    return violations;
+  }
+
   /**
    * Run a read-only role and verify, independently of the agent's own sandbox, that the working tree and
    * git position did not change.
@@ -273,11 +311,12 @@ export class Workflow {
     round: number, check?: (data: T) => string[]): Promise<AgentResult | null> {
     const beforeTree = await this.tree();
     const beforePos = await this.git.position();
+    const beforeProtected = await this.protectedState();
     const r = await this.runner.call({ role, agentRole, prompt, schemaName, logPrefix: this.logPrefix(label, round), check, signal: this.abort.signal });
     this.addUsage(r);
     if (r.interrupted) throw new Interrupted();
     const afterTree = await this.tree();
-    const violations = checkGitPosition(beforePos, await this.git.position());
+    const violations = [...checkGitPosition(beforePos, await this.git.position()), ...this.protectedViolations(beforeProtected, await this.protectedState())];
     if (afterTree !== beforeTree) {
       const changed = await this.git.nameStatus(beforeTree, afterTree);
       violations.unshift(`working tree changed during a read-only step: ${changed.slice(0, 20).map(([s, p]) => `${s} ${p}`).join(", ")}`);
@@ -451,8 +490,15 @@ export class Workflow {
     }
     const k = st.implRound;
     const protectedPaths = [...cfg.safety.protected_paths];
-    const pre = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}-pre`), `agentduo ${st.taskId}: before implementation round ${k}`);
-    const beforePos = await this.git.position();
+    // A re-run of the same round (after a failure or interrupt) keeps comparing against the original pre-state,
+    // so changes made by the earlier attempt are still checked.
+    if (st.roundPre?.round !== k) {
+      const snap = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}-pre`), `agentduo ${st.taskId}: before implementation round ${k}`);
+      st.roundPre = { ...snap, round: k, head: await this.git.head(), branch: await this.git.branch(), protected: await this.protectedState() };
+      this.save();
+    }
+    const pre = st.roundPre;
+    const beforePos: [string | null, string | null] = [pre.head, pre.branch];
     const review = store.exists("review.json") ? store.readJson<{ output: Review }>("review.json").output : null;
     const failed = k > 1 ? (st.lastGates ?? []).filter((g) => !g.passed) : [];
     const prompt = prompts.implementer(this.ctx(), k, store.readText("plan.final.md"), protectedPaths, st.openFindings, review, failed, st.lastImplementation);
@@ -467,7 +513,11 @@ export class Workflow {
     st.lastSnapshot = { commit: post.commit, tree: post.tree };
     if (res.interrupted) throw new Interrupted();
     const changes = await this.git.nameStatus(pre.tree, post.tree);
-    const violations = [...checkGitPosition(beforePos, await this.git.position()), ...checkChanges(changes, protectedPaths, cfg.safety.max_deleted_files)];
+    const violations = [
+      ...checkGitPosition(beforePos, await this.git.position()),
+      ...checkChanges(changes, protectedPaths, cfg.safety.max_deleted_files),
+      ...this.protectedViolations(pre.protected, await this.protectedState()),
+    ];
     const denials = res.meta.permissionDenials ?? [];
     const report = res.data as Implementation | null;
     const answered = new Set((report?.addressed_findings ?? []).map((a) => a.finding_id));
@@ -477,14 +527,18 @@ export class Workflow {
       violations, unanswered_findings: missing,
     }));
     st.lastImplementation = { round: k, summary: report?.summary ?? null, status: report?.status ?? null, permissionDenials: denials };
-    if (!res.ok || !report) {
-      this.escalate("agent_error", `implementer (${res.backend}) failed after ${res.attempts} attempt(s): ${res.error}`, "IMPLEMENT");
+    if (violations.length) {
+      // Safety first: a failed attempt can still have changed files.
+      const failed = !res.ok || !report;
+      this.escalate("guard_violation",
+        `the implementer broke a safety rule${failed ? ` (and then failed: ${res.error})` : ""}. Inspect the working tree; the state before ` +
+        `this round is pinned at ${this.ref(`impl-r${k}-pre`)} (${pre.commit.slice(0, 12)}). ` +
+        (failed ? "Revert what you do not want, then resume to re-run this round, or abort." : "Resume to accept the changes and continue with the quality gates, or abort."),
+        failed ? "IMPLEMENT" : "VERIFY", violations);
       return;
     }
-    if (violations.length) {
-      this.escalate("guard_violation",
-        `the implementer broke a safety rule. Inspect the working tree; the state before this round is pinned at ${this.ref(`impl-r${k}-pre`)} ` +
-        `(${pre.commit.slice(0, 12)}). Resume to accept the changes and continue with the quality gates, or abort.`, "VERIFY", violations);
+    if (!res.ok || !report) {
+      this.escalate("agent_error", `implementer (${res.backend}) failed after ${res.attempts} attempt(s): ${res.error}`, "IMPLEMENT");
       return;
     }
     this.message({
@@ -511,6 +565,7 @@ export class Workflow {
     const st = this.state;
     const { store, cfg } = this.o;
     const k = st.implRound;
+    const beforeProtected = await this.protectedState();
     let results: GateResult[];
     try {
       results = await runGates({
@@ -522,11 +577,19 @@ export class Workflow {
       throw e;
     }
     const tree = await this.tree();
+    const gateViolations = this.protectedViolations(beforeProtected, await this.protectedState());
     if (tree !== st.lastSnapshot!.tree) {
       const changed = await this.git.nameStatus(st.lastSnapshot!.tree, tree);
+      gateViolations.unshift(...checkChanges(changed, cfg.safety.protected_paths, cfg.safety.max_deleted_files));
       this.emit({ type: "warning", text: `quality gates modified the working tree: ${changed.slice(0, 10).map(([s, p]) => `${s} ${p}`).join(", ")} (re-snapshotting)` });
       const snap = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}`), `agentduo ${st.taskId}: round ${k} after gates`);
       st.lastSnapshot = { commit: snap.commit, tree: snap.tree };
+    }
+    if (gateViolations.length) {
+      this.escalate("guard_violation",
+        "the quality gates changed protected files (gate scripts can be edited by the implementer). Inspect the changes, then resume to " +
+        "re-run the gates, or abort.", "VERIFY", gateViolations);
+      return;
     }
     store.writeJson(`gates.r${k}.json`, { round: k, snapshot: st.lastSnapshot!.commit, timestamp: nowIso(), results });
     st.lastGates = results;

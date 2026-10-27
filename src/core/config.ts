@@ -140,8 +140,8 @@ function mergeInto(base: Record<string, unknown>, override: Record<string, unkno
       continue;
     }
     const current = base[key];
+    if ((isPlainObject(current) || Array.isArray(current)) && (value === null || value === undefined)) continue; // "codex:" / "gates:" with no body keep the defaults
     if (isPlainObject(current)) {
-      if (value === null || value === undefined) continue; // "codex:" with no body keeps the defaults
       if (!isPlainObject(value)) throw new ConfigError(`'${path}' must be a mapping`);
       out[key] = mergeInto(current, value, path, warnings);
     } else {
@@ -190,7 +190,7 @@ export function loadConfig(opts: { repo: string; configPath?: string; env?: Node
     sources.push(path);
   }
   const cfg = data as unknown as ConfigData;
-  if (opts.validate !== false) validateConfig(cfg, sources.at(-1));
+  if (opts.validate !== false) validateConfig(cfg, sources.join(", ") || undefined);
   return { data: cfg, sources, warnings };
 }
 
@@ -249,16 +249,31 @@ export function validateConfig(cfg: ConfigData, source?: string): void {
       errors.push("quality_gates.require_tests_pass is true but no required gate is configured under 'gates' (run 'duo init')");
     }
   }
-  if (!Array.isArray(cfg.safety.protected_paths)) errors.push("safety.protected_paths must be a list");
   if (!isNonNegInt(cfg.safety.max_deleted_files)) errors.push("safety.max_deleted_files must be an integer >= 0");
+  // YAML 1.2 reads `no`/`yes` as strings, so every flag is checked: a string must never silently disable a safety refusal.
+  const flags: Array<[string, unknown]> = [
+    ...(["require_plan_approval", "require_tests_pass", "require_codex_approval", "stop_on_critical_issue", "review_on_gate_failure"] as const)
+      .map((k): [string, unknown] => [`quality_gates.${k}`, cfg.quality_gates[k]]),
+    ...(["allow_dirty_worktree", "pause_before_implement"] as const).map((k): [string, unknown] => [`safety.${k}`, cfg.safety[k]]),
+  ];
+  for (const [name, value] of flags) if (typeof value !== "boolean") errors.push(`${name} must be true or false`);
+  const strings: Array<[string, unknown]> = [["codex.bin", cfg.codex.bin], ["claude.bin", cfg.claude.bin], ["paths.runs_dir", cfg.paths.runs_dir]];
+  for (const [name, value] of strings) if (typeof value !== "string" || !value) errors.push(`${name} must be a non-empty string`);
+  for (const [name, value] of [["codex.model", cfg.codex.model], ["claude.model", cfg.claude.model]] as const) {
+    if (value !== null && typeof value !== "string") errors.push(`${name} must be a string or null`);
+  }
+  const budget = cfg.claude.max_budget_usd;
+  if (budget !== null && !(typeof budget === "number" && budget > 0)) errors.push("claude.max_budget_usd must be a positive number or null");
   const lists: Array<[string, unknown]> = [
+    ["safety.protected_paths", cfg.safety.protected_paths],
     ["codex.extra_args", cfg.codex.extra_args], ["claude.extra_args", cfg.claude.extra_args],
     ["claude.read_only_tools", cfg.claude.read_only_tools], ["claude.implementation_tools", cfg.claude.implementation_tools],
     ["claude.implementation_allowed_tools", cfg.claude.implementation_allowed_tools],
     ["claude.implementation_disallowed_tools", cfg.claude.implementation_disallowed_tools],
   ];
-  for (const [name, value] of lists) if (!Array.isArray(value)) errors.push(`${name} must be a list`);
-  if (typeof cfg.paths.runs_dir !== "string" || !cfg.paths.runs_dir) errors.push("paths.runs_dir must be a non-empty string");
+  for (const [name, value] of lists) {
+    if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) errors.push(`${name} must be a list of strings`);
+  }
   if (errors.length) {
     throw new ConfigError(`invalid configuration${source ? ` (${source})` : ""}:\n  - ${errors.join("\n  - ")}`);
   }
