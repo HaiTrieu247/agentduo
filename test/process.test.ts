@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { killAllActive, runProcess } from "../src/agents/process.js";
+import { killAllActive, runProcess, type ChildIO } from "../src/agents/process.js";
 
 const node = process.execPath;
 const cwd = process.cwd();
@@ -55,6 +55,30 @@ describe("runProcess", () => {
     expect(chatty).toMatchObject({ idle: false, code: 0 });
     const off = await runProcess(node, ["-e", "setTimeout(() => {}, 500)"], { cwd, timeoutMs: 10_000, idleTimeoutMs: 0 });
     expect(off).toMatchObject({ idle: false, code: 0 });
+  });
+
+  it("holds stdin open for a conversation and pauses both timeouts while the caller is waiting", async () => {
+    // Answers every stdin line, then says bye when stdin closes; silent in between.
+    const echo = "process.stdin.setEncoding('utf8'); let b = ''; process.stdin.on('data', (c) => { b += c; let i; " +
+      "while ((i = b.indexOf('\\n')) >= 0) { process.stdout.write('got ' + b.slice(0, i) + '\\n'); b = b.slice(i + 1); } }); " +
+      "process.stdin.on('end', () => process.stdout.write('bye\\n'));";
+    const lines: string[] = [];
+    let io: ChildIO | undefined;
+    const r = await runProcess(node, ["-e", echo], {
+      cwd, input: "first\n", holdStdin: true, timeoutMs: 700, idleTimeoutMs: 300, killGraceMs: 100,
+      onSpawn: (child) => { io = child; },
+      onStdoutLine: (line) => {
+        lines.push(line);
+        if (line === "got first") {
+          io!.pause(); // longer than both timeouts: a human thinking must not count as a hang
+          setTimeout(() => { io!.write("second\n"); io!.resume(); }, 900);
+        } else if (line === "got second") io!.end();
+      },
+    });
+    expect(lines).toEqual(["got first", "got second", "bye"]);
+    expect(r).toMatchObject({ code: 0, timedOut: false, idle: false });
+    const held = await runProcess(node, ["-e", echo], { cwd, input: "x\n", holdStdin: true, timeoutMs: 10_000, idleTimeoutMs: 300, killGraceMs: 100 });
+    expect(held).toMatchObject({ idle: true, code: null });
   });
 
   it("keeps only the tail of very large output but still reports every line", async () => {

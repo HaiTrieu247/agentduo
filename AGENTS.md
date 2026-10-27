@@ -21,4 +21,5 @@ A prompt that starts with `[orchestrator-role: <role>]` comes from agentduo. Its
 - CLI flags and stream formats were verified against codex-cli 0.164 and Claude Code 2.1.31x. After a CLI upgrade, run `duo doctor` and the parser tests.
 - `git add` fails when an `:(exclude)` pathspec names an already-ignored path, so `Git.pathspec` drops ignored excludes.
 - Claude's stream reports each message's `usage` as the message starts, so its output tokens are far too low. The final token count comes from the result envelope's `usage`; the streamed count is only a fallback for attempts that never finished.
-- Claude's `--permission-prompts none` must stay. Without it a non-interactive run can hang on a permission prompt that nobody answers.
+- Claude runs in host mode (`--input-format stream-json --permission-prompts host --permission-prompt-tool stdio`) only when the runner has a `PermissionDecider`, which the CLI passes only when someone can answer. Every other call keeps `--permission-prompts none`; without it a non-interactive run hangs on a prompt nobody answers. In host mode stdin stays open until the `result` event, and a `control_request` must always get a `control_response` (deny when in doubt).
+- "Always allow" saves Claude's rule to `.claude/settings.local.json`, so `Git` excludes that file from every snapshot.

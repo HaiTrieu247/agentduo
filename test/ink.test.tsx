@@ -1,9 +1,10 @@
 import { Box } from "ink";
 import { render } from "ink-testing-library";
 import { describe, expect, it } from "vitest";
-import { EventBus, type Activity, type DuoEvent, type HistoryEntry, type Phase, type Role } from "../src/events.js";
+import { EventBus, type Activity, type DuoEvent, type HistoryEntry, type PermissionAnswer, type PermissionRequest, type Phase, type Role } from "../src/events.js";
 import { App } from "../src/ui/ink/App.js";
 import { HumanReviewPrompt } from "../src/ui/ink/HumanReviewPrompt.js";
+import { PermissionPrompt } from "../src/ui/ink/PermissionPrompt.js";
 import { StepBlock } from "../src/ui/ink/StepBlock.js";
 import { initialView, reduce, type StepView, type ViewState } from "../src/ui/ink/store.js";
 
@@ -23,6 +24,10 @@ const lastStep = (s: ViewState): StepView => {
   return item.step;
 };
 const noop = () => undefined;
+const ask = (id: string, rules = ["Bash(npm test:*)"]): PermissionRequest =>
+  ({ id, tool: "Bash", label: "Bash  npm test", description: "Run the test suite", blockedPath: null, rules });
+const requested = (request: PermissionRequest): DuoEvent => ({ type: "permission.requested", role: "implementer", agent: "claude", request });
+const answered = (id: string, answer: PermissionAnswer): DuoEvent => ({ type: "permission.answered", role: "implementer", agent: "claude", id, answer });
 
 describe("view reducer", () => {
   it("collects activities into the current step and finalizes it", () => {
@@ -148,6 +153,59 @@ describe("Ink components", () => {
     await wait();
     const frame = app.lastFrame()!;
     for (const text of ["PLAN ✓", "IMPLEMENT ● r2", "plan 1/4 · impl 2/5", "Claude (implementer)", "Bash  npm test", "$0.41"]) expect(frame).toContain(text);
+    app.unmount();
+  });
+
+  it("queues permission prompts and keeps each answer in scrollback", () => {
+    let s = play([requested(ask("p1")), requested(ask("p2"))]);
+    expect(s.permissions.map((x) => x.request.id)).toEqual(["p1", "p2"]);
+    s = play([answered("p1", { decision: "always" })], s);
+    expect(s.permissions.map((x) => x.request.id)).toEqual(["p2"]);
+    expect(s.items.at(-1)).toMatchObject({ kind: "permission", label: "Bash  npm test", answer: { decision: "always" }, rules: ["Bash(npm test:*)"] });
+    s = play([{ type: "run.finished", runId: "r1", phase: "INTERRUPTED", reportPath: "/r", exitCode: 130 }], s);
+    expect(s.permissions).toEqual([]);
+  });
+
+  it("asks for permission with once, always (with the rule) and deny, optionally with a message", async () => {
+    const answers: unknown[] = [];
+    const ui = render(<PermissionPrompt ask={{ role: "implementer", agent: "claude", request: { ...ask("p1"), blockedPath: "build/out.js" } }} onAnswer={(a) => answers.push(a)} />);
+    const frame = ui.lastFrame()!;
+    for (const text of ["Claude (implementer) asks to use Bash", "Bash  npm test", "Run the test suite", "build/out.js", "❯ Allow once",
+      "Always allow Bash(npm test:*)", ".claude/settings.local.json", "Deny", "Deny with a message"]) expect(frame).toContain(text);
+    await wait();
+    ui.stdin.write("\u001B[B");
+    await wait();
+    ui.stdin.write("\r");
+    await wait();
+    expect(answers).toEqual([{ decision: "always" }]);
+    const quiet = render(<PermissionPrompt ask={{ role: "plan_reviewer", agent: "claude", request: ask("p2", []) }} onAnswer={(a) => answers.push(a)} />);
+    expect(quiet.lastFrame()).not.toContain("Always allow");
+    await wait();
+    for (const key of ["\u001B[B", "\u001B[B", "\r"]) {
+      quiet.stdin.write(key);
+      await wait();
+    }
+    quiet.stdin.write("use the npm script");
+    await wait();
+    quiet.stdin.write("\r");
+    await wait();
+    expect(answers.at(-1)).toEqual({ decision: "deny", message: "use the npm script" });
+  });
+
+  it("shows the oldest pending permission prompt and passes the answer on", async () => {
+    const bus = new EventBus();
+    const given: Array<[string, PermissionAnswer]> = [];
+    const app = render(<App bus={bus} version="0.1.0" verbose={false} interactive onStop={noop} onInterrupt={noop} onDecision={noop}
+      onPermission={(id, a) => given.push([id, a])} views={() => []} readView={async () => null} />);
+    bus.emit(phase("IMPLEMENT", "implementer", "claude"));
+    bus.emit(requested(ask("p1")));
+    bus.emit(requested({ ...ask("p2"), label: "Bash  rm -rf build" }));
+    await wait();
+    expect(app.lastFrame()).toContain("Bash  npm test");
+    expect(app.lastFrame()).not.toContain("rm -rf build");
+    app.stdin.write("\r");
+    await wait();
+    expect(given).toEqual([["p1", { decision: "once" }]]);
     app.unmount();
   });
 

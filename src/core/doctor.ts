@@ -17,6 +17,8 @@ const PROTOCOL_FLAGS = {
   codex: { args: ["exec", "--help"], flags: ["--json", "--output-schema", "--output-last-message", "--cd"] },
   claude: { args: ["--help"], flags: ["--output-format", "--verbose", "--json-schema", "--permission-prompts"] },
 } as const;
+/** Relaying permission prompts (claude.permission_prompts: ask) needs Claude's host protocol. */
+const CLAUDE_HOST_FLAGS = ["--input-format", "--permission-prompt-tool"];
 const EDIT_PERMISSION_FLAGS = ["--permission-mode", "--allowedTools", "--allowed-tools", "--dangerously-skip-permissions"];
 const CODEX_WRITE_FLAGS = ["--sandbox", "-s", "--full-auto", "--dangerously-bypass-approvals-and-sandbox"];
 /** "--permission-mode=acceptEdits" counts like "--permission-mode acceptEdits". */
@@ -64,15 +66,19 @@ export async function runDoctor(o: { dir: string; cfg: ConfigData; sources: stri
     const version = await probe(bin, ["--version"], o.dir);
     add(version.ok, `${backend} CLI: ${bin} (${version.out.trim().split("\n")[0] || "?"})`);
     const spec = PROTOCOL_FLAGS[backend];
+    const flags = [...spec.flags, ...(backend === "claude" && o.cfg.claude.permission_prompts === "ask" ? CLAUDE_HOST_FLAGS : [])];
     const help = await probe(bin, spec.args, o.dir);
-    const missing = spec.flags.filter((f) => !help.out.includes(f));
-    add(help.ok && !missing.length, `${backend} supports ${spec.flags.join(", ")}${missing.length ? ` — missing: ${missing.join(", ")}` : ""}`);
+    const missing = flags.filter((f) => !help.out.includes(f));
+    add(help.ok && !missing.length, `${backend} supports ${flags.join(", ")}${missing.length ? ` — missing: ${missing.join(", ")}` : ""}`);
   }
   if (o.cfg.agents.implementer === "claude") {
     const args = [...o.cfg.claude.args, ...(o.cfg.claude.role_args.implementer ?? [])];
     if (!args.some((a) => EDIT_PERMISSION_FLAGS.includes(flagName(a)))) {
-      add(false, 'implementer edits rely on your Claude Code permission settings (e.g. permissions.defaultMode "acceptEdits"); ' +
-        "without them every edit is denied in non-interactive mode", false);
+      add(false, o.cfg.claude.permission_prompts === "ask"
+        ? "Claude asks you in the terminal before a tool call its settings do not allow; without a terminal (CI, background, piped output) " +
+          'such calls are denied, so allow them in your Claude Code settings (e.g. permissions.defaultMode "acceptEdits") for unattended runs'
+        : 'implementer edits rely on your Claude Code permission settings (e.g. permissions.defaultMode "acceptEdits"); ' +
+          "without them every edit is denied in non-interactive mode", false);
     }
   } else {
     const args = [...o.cfg.codex.args, ...(o.cfg.codex.role_args.implementer ?? [])];

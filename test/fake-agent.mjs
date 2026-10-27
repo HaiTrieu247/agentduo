@@ -1,13 +1,16 @@
 // Stand-in for the codex / claude CLIs in tests: fake-agent.mjs <codex|claude> <cli args...>.
 // The prompt arrives on stdin; its "[orchestrator-role: X]" tag selects the next scripted response for
 // role X from $FAKE_SCENARIO (the last response repeats). Every call is appended to $FAKE_LOG.
+// Claude in host mode (--permission-prompt-tool stdio) reads the prompt as a stream-json user message, asks
+// for each scripted `permissions` entry with a control_request, and applies the answer the way Claude does.
 import { execSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { createInterface } from "node:readline";
 
 const HELP = {
   codex: "Usage: codex exec [OPTIONS] --json --output-schema --sandbox --output-last-message --cd",
-  claude: "Usage: claude [options] --output-format --verbose --json-schema --permission-mode --permission-prompts --tools --allowedTools --disallowedTools",
+  claude: "Usage: claude [options] --output-format --input-format --verbose --json-schema --permission-mode --permission-prompts --permission-prompt-tool --tools --allowedTools --disallowedTools",
 };
 
 async function main() {
@@ -20,7 +23,9 @@ async function main() {
     process.stdout.write(`${HELP[backend]}\n`);
     return 0;
   }
-  const prompt = readFileSync(0, "utf8");
+  const host = args.includes("--permission-prompt-tool");
+  const stdin = host ? createInterface({ input: process.stdin })[Symbol.asyncIterator]() : null;
+  const prompt = host ? JSON.parse((await stdin.next()).value).message.content : readFileSync(0, "utf8");
   const role = /\[orchestrator-role: (\w+)\]/.exec(prompt)?.[1] ?? "unknown";
   const scenario = JSON.parse(readFileSync(process.env.FAKE_SCENARIO, "utf8"));
   const counts = existsSync(process.env.FAKE_COUNTS) ? JSON.parse(readFileSync(process.env.FAKE_COUNTS, "utf8")) : {};
@@ -31,9 +36,31 @@ async function main() {
   const resp = responses[Math.min(n, responses.length - 1)];
   appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend, role, call: n, args, prompt }) + "\n");
 
-  for (const [path, content] of Object.entries(resp.write ?? {})) {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, content);
+  const writeFiles = (files) => {
+    for (const [path, content] of Object.entries(files ?? {})) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, content);
+    }
+  };
+  writeFiles(resp.write);
+  const denials = [...(resp.denials ?? [])];
+  for (const [i, ask] of (host ? resp.permissions ?? [] : []).entries()) {
+    const toolUseId = `perm-tool-${i}`;
+    const suggestions = [{ type: "addRules", rules: ask.rules ?? [], behavior: "allow", destination: "localSettings" }, { type: "setMode", mode: "acceptEdits", destination: "session" }];
+    process.stdout.write(JSON.stringify({ type: "control_request", request_id: `perm-${i}`, request: {
+      subtype: "can_use_tool", tool_name: ask.tool, display_name: ask.tool, input: ask.input, description: ask.description ?? null, permission_suggestions: suggestions, tool_use_id: toolUseId,
+    } }) + "\n");
+    const reply = JSON.parse((await stdin.next()).value).response.response;
+    appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend, role, permission: reply }) + "\n");
+    if (reply.behavior !== "allow") {
+      denials.push({ tool_name: ask.tool, tool_use_id: toolUseId, tool_input: ask.input });
+      continue;
+    }
+    writeFiles(ask.write);
+    const rules = (reply.updatedPermissions ?? []).filter((u) => u.type === "addRules" && u.destination === "localSettings")
+      .flatMap((u) => u.rules.map((r) => (r.ruleContent ? `${r.toolName}(${r.ruleContent})` : r.toolName)));
+    if (rules.length) writeFiles({ ".claude/settings.local.json": JSON.stringify({ permissions: { allow: rules } }, null, 2) });
+    if ((reply.updatedPermissions ?? []).some((u) => u.type === "setMode")) writeFiles({ "fake-mode-changed.txt": "the session mode was changed\n" });
   }
   for (const path of resp.delete ?? []) rmSync(path);
   for (const command of resp.shell ?? []) {
@@ -74,9 +101,17 @@ async function main() {
       emit({ type: "user", uuid: `r${i}`, message: { content: [{ type: "tool_result", tool_use_id: `t${i}`, content: a.result ?? "ok", is_error: a.error ?? false }] } });
     });
     await sleep();
-    const envelope = { type: "result", subtype: "success", is_error: false, result: text, total_cost_usd: 0.01, session_id: "fake", num_turns: 1, permission_denials: resp.denials ?? [] };
+    const envelope = { type: "result", subtype: "success", is_error: false, result: text, total_cost_usd: 0.01, session_id: "fake", num_turns: 1, permission_denials: denials };
     if (!("raw" in resp)) envelope.structured_output = JSON.parse(text);
     emit(envelope);
+    // Real Claude keeps reading stdin in host mode until the host closes it.
+    if (host) {
+      const closed = await Promise.race([stdin.next().then((r) => r.done), new Promise((r) => setTimeout(() => r(false), 3000).unref())]);
+      if (!closed) {
+        process.stderr.write("fake-agent: stdin was never closed after the result\n");
+        return 9;
+      }
+    }
   }
   return resp.exit ?? 0;
 }

@@ -48,6 +48,20 @@ export interface HumanReview {
   at: string;
 }
 
+/** A tool call the agent's own settings do not allow, waiting for the human (Claude in host mode). */
+export interface PermissionRequest {
+  id: string;
+  tool: string;
+  /** What the call does, as an activity label ("Bash  npm test"). */
+  label: string;
+  description: string | null;
+  blockedPath: string | null;
+  /** The rules "Always allow" saves, as Claude spells them ("Bash(npm test:*)"); empty when Claude suggests none. */
+  rules: string[];
+}
+
+export type PermissionAnswer = { decision: "once" } | { decision: "always" } | { decision: "deny"; message?: string };
+
 export interface RoundInfo {
   round: number;
   limit: number;
@@ -58,6 +72,8 @@ export type DuoEvent =
   | { type: "phase.started"; step: number; phase: Phase; round: number; role?: Role; agent?: Party; planning: RoundInfo; impl: RoundInfo }
   | { type: "agent.activity"; role: Role; agent: Party; activity: Activity }
   | { type: "agent.retry"; role: Role; agent: Party; attempt: number; max: number; reason: string }
+  | { type: "permission.requested"; role: Role; agent: Party; request: PermissionRequest }
+  | { type: "permission.answered"; role: Role; agent: Party; id: string; answer: PermissionAnswer }
   /** Running totals for the current agent call (all attempts so far). */
   | { type: "agent.usage"; agent: Party; costUsd?: number; tokens?: number }
   | { type: "gate.started"; name: string; command: string }
@@ -76,6 +92,11 @@ export interface Decision {
 
 export interface Decider {
   decide(review: HumanReview): Promise<Decision | "defer">;
+}
+
+/** Answers an agent's permission prompt; only given to the runner when someone can answer. */
+export interface PermissionDecider {
+  askPermission(ask: { role: Role; agent: Party; request: PermissionRequest }, signal?: AbortSignal): Promise<PermissionAnswer>;
 }
 
 export class EventBus {

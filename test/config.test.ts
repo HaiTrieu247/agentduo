@@ -57,6 +57,15 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ dir: badArgs.dir, env: badArgs.env })).toThrow("claude.role_args.implementer must be a list of strings");
   });
 
+  it("asks the user about Claude's permission prompts by default, and accepts deny", () => {
+    const { dir, env } = setup();
+    expect(loadConfig({ dir, env }).data.claude.permission_prompts).toBe("ask");
+    const deny = setup("claude:\n  permission_prompts: deny\n");
+    expect(loadConfig({ dir: deny.dir, env: deny.env }).data.claude.permission_prompts).toBe("deny");
+    const bad = setup("claude:\n  permission_prompts: maybe\n");
+    expect(() => loadConfig({ dir: bad.dir, env: bad.env })).toThrow("claude.permission_prompts must be 'ask' or 'deny'");
+  });
+
   it("merges role_args from several files role by role", () => {
     const { dir, env } = setup("claude:\n  role_args:\n    plan_reviewer: [--model, haiku]\n", "claude:\n  role_args:\n    implementer: [--permission-mode, acceptEdits]\n");
     expect(loadConfig({ dir, env }).data.claude.role_args).toEqual({

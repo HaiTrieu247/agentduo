@@ -63,9 +63,26 @@ If an agent changes files outside the workspace (elsewhere in the same repositor
 
 ## Permissions and scope
 
-agentduo passes only the flags its protocol needs: streaming JSON, the output schema, and the prompt on stdin. For Claude it also passes `--permission-prompts none`, because nobody can answer a prompt in non-interactive mode. That flag grants nothing.
+agentduo passes only the flags its protocol needs: streaming JSON, the output schema, and the prompt on stdin. None of them grants a permission.
 
-What each agent may do is up to its own configuration:
+**Claude's permission prompts come to you.** When Claude wants a tool that its settings do not allow, the run pauses and agentduo shows Claude's own prompt:
+
+```
+⚠ Claude (implementer) asks to use Bash
+  Bash  npm test
+❯ Allow once
+  Always allow Bash(npm test:*)  saved by Claude to .claude/settings.local.json
+  Deny
+  Deny with a message…
+```
+
+- **Always allow** hands Claude back the rule it suggested, and Claude saves it in its own settings, as it does when you answer its prompt directly. That file is never part of a snapshot or of the diff the reviewer sees.
+- **Deny with a message** tells Claude what to do instead.
+- The agent's timeouts stop while the prompt waits for you.
+- In plain mode on a terminal, the same choices are a one-line question.
+- Where nobody can answer (CI, the background, output piped elsewhere) Claude runs with `--permission-prompts none` and denies such calls itself. `claude.permission_prompts: deny` does that everywhere.
+
+What each agent may do without asking is up to its own configuration:
 
 - **Claude Code**: your settings (`~/.claude/settings.json`, `.claude/settings.json`). In non-interactive mode Claude can only use a tool that your settings allow:
   - `"permissions": { "defaultMode": "acceptEdits" }` allows edits, but not commands;
@@ -131,7 +148,7 @@ gates:                       # optional
     command: "npm test"
     required: true
 codex:  { model: null, args: [--ephemeral], role_args: {} }
-claude: { model: null, max_budget_usd: null, args: [--no-session-persistence], role_args: {} }
+claude: { model: null, max_budget_usd: null, permission_prompts: ask, args: [--no-session-persistence], role_args: {} }
 ```
 
 `agent_idle_timeout_sec` stops an agent that prints nothing for that long; set it to 0 to turn the check off.
@@ -160,7 +177,7 @@ The runs directory carries its own `.gitignore`, so run data stays out of `git s
 
 ## Troubleshooting
 
-- **Tool calls are denied.** The warning names the tools.
+- **Tool calls are denied.** In a terminal, Claude asks you first (see [Permissions and scope](#permissions-and-scope)). Unattended runs need the permission in advance; the warning names the denied tools.
   - Edits (`Edit`, `Write`): set `permissions.defaultMode` to `"acceptEdits"` in your Claude Code settings, or add `claude.role_args.implementer: [--permission-mode, acceptEdits]`.
   - Commands (`Bash`): add allow rules such as `"Bash(npm test:*)"`.
   - With a Codex implementer, see **Codex** under [Permissions and scope](#permissions-and-scope).

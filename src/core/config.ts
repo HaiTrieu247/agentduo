@@ -45,7 +45,8 @@ export interface ConfigData {
   gates: GateConfig[];
   safety: { pause_before_implement: boolean };
   codex: { bin: string; model: string | null; args: string[]; role_args: RoleArgs };
-  claude: { bin: string; model: string | null; max_budget_usd: number | null; args: string[]; role_args: RoleArgs };
+  /** permission_prompts: "ask" relays Claude's permission prompts to the user when someone can answer; "deny" never asks. */
+  claude: { bin: string; model: string | null; max_budget_usd: number | null; permission_prompts: "ask" | "deny"; args: string[]; role_args: RoleArgs };
   paths: { runs_dir: string };
 }
 
@@ -73,7 +74,7 @@ const DEFAULTS: ConfigData = {
   gates: [],
   safety: { pause_before_implement: false },
   codex: { bin: "codex", model: null, args: ["--ephemeral"], role_args: {} },
-  claude: { bin: "claude", model: null, max_budget_usd: null, args: ["--no-session-persistence"], role_args: {} },
+  claude: { bin: "claude", model: null, max_budget_usd: null, permission_prompts: "ask", args: ["--no-session-persistence"], role_args: {} },
   paths: { runs_dir: ".agentduo/runs" },
 };
 
@@ -224,6 +225,7 @@ export function validateConfig(cfg: ConfigData, source?: string): void {
   for (const [name, value] of [["codex.model", cfg.codex.model], ["claude.model", cfg.claude.model]] as const) {
     if (value !== null && typeof value !== "string") errors.push(`${name} must be a string or null`);
   }
+  if (!["ask", "deny"].includes(cfg.claude.permission_prompts as string)) errors.push("claude.permission_prompts must be 'ask' or 'deny'");
   const budget = cfg.claude.max_budget_usd;
   if (budget !== null && !(typeof budget === "number" && budget > 0)) errors.push("claude.max_budget_usd must be a positive number or null");
   for (const backend of ["codex", "claude"] as const) {

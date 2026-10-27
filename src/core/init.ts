@@ -71,6 +71,7 @@ export function renderConfigYaml(gates: DetectedGate[]): string {
     "",
     "# Extra CLI arguments, for every call or per role (planner, plan_reviewer, implementer, code_reviewer):",
     "# claude:",
+    "#   permission_prompts: ask   # ask you in the terminal before a tool Claude's settings do not allow; deny = never ask",
     "#   role_args:",
     "#     implementer: [--permission-mode, acceptEdits]",
     "# codex:",

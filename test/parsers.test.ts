@@ -10,7 +10,8 @@ const fixture = (name: string) =>
   readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8").split("\n").filter(Boolean);
 const feedAll = (p: StreamParser, lines: string[]) => lines.flatMap((l) => p.feed(l));
 const summary = (events: ParsedEvent[]) => events.map((e) =>
-  e.type === "activity" ? `${e.activity.kind}:${e.activity.status}:${e.activity.label}` : `usage:${e.costUsd ?? ""}:${e.tokens ?? ""}`);
+  e.type === "activity" ? `${e.activity.kind}:${e.activity.status}:${e.activity.label}`
+    : e.type === "usage" ? `usage:${e.costUsd ?? ""}:${e.tokens ?? ""}` : e.type);
 
 describe("CodexParser", () => {
   it("turns a real codex exec --json stream into activities", () => {
@@ -61,6 +62,7 @@ describe("ClaudeParser", () => {
       "submit:running:submitting result",
       "submit:ok:submitting result",
       "usage:0.0847458:",
+      "end",
     ]);
     expect(p.result?.structured_output).toEqual({ answer: "hello", n: 2 });
   });
@@ -81,10 +83,27 @@ describe("ClaudeParser", () => {
     ]);
     expect(summary(events)).toEqual([
       "edit:running:Edit  src/x.ts", "command:running:Bash  git push", "say:ok:Done.",
-      "command:denied:Bash  git push", "edit:error:Edit  src/x.ts", "usage:0.5:",
+      "command:denied:Bash  git push", "edit:error:Edit  src/x.ts", "usage:0.5:", "end",
     ]);
     expect(events[0]).toMatchObject({ activity: { added: 3, removed: 2 } });
   });
+  it("turns a real permission prompt (host mode) into a request with the rules Claude suggests", () => {
+    const p = new ClaudeParser("/repo");
+    const events = feedAll(p, fixture("claude-permission-stream.jsonl"));
+    const asks = events.filter((e) => e.type === "permission");
+    expect(asks).toHaveLength(1);
+    expect(asks[0]).toMatchObject({
+      request: {
+        id: "1d649903-7e84-463c-b533-0782e2f1fb5e", tool: "Bash", label: "Bash  touch probe-made.txt",
+        description: "Create probe-made.txt in working directory", blockedPath: "probe-made.txt", rules: ["Bash(touch probe-made.txt)"],
+      },
+      raw: { request_id: "1d649903-7e84-463c-b533-0782e2f1fb5e", input: { command: "touch probe-made.txt" } },
+    });
+    // Only the persistent allow rules are kept: "always" must not also switch the session to acceptEdits.
+    expect((asks[0] as unknown as { raw: { suggestions: Array<{ type: string }> } }).raw.suggestions.map((x) => x.type)).toEqual(["addRules"]);
+    expect(events.at(-1)).toEqual({ type: "end" });
+  });
+
   it("shows repo-relative paths through symlinks and ignores the trailing newline when counting lines", () => {
     const t = tempDir();
     try {
@@ -139,7 +158,7 @@ describe("token accounting", () => {
     expect(p.usage().tokens).toBe(218334);
     const events = feedAll(p, lines.filter(isResult));
     expect(p.usage().tokens).toBe(220122);
-    expect(events.at(-1)).toMatchObject({ type: "usage", tokens: 220122 });
+    expect(events.filter((e) => e.type === "usage").at(-1)).toMatchObject({ type: "usage", tokens: 220122 });
     expect(p.result?.permission_denials).toHaveLength(2);
   });
 });

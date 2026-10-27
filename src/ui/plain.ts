@@ -1,5 +1,5 @@
-import type { Decider, DuoEvent, EventBus } from "../events.js";
-import { activityText, formatDuration, messageHeadline, roleLabel, statusIcon, usageText } from "./format.js";
+import type { Decider, DuoEvent, EventBus, PermissionAnswer, PermissionDecider } from "../events.js";
+import { activityText, formatDuration, messageHeadline, permissionAnswerText, roleLabel, statusIcon, usageText } from "./format.js";
 
 export interface TextSink {
   write(text: string): unknown;
@@ -16,6 +16,34 @@ export interface PlainOptions {
 /** Plain mode cannot ask questions: every human review becomes "exit 2, resume later". */
 export const deferDecider: Decider = { decide: async () => "defer" };
 
+/**
+ * Permission prompts in plain mode, for a terminal that can answer: one question at a time (an agent may ask for
+ * several tools at once), and anything but a clear yes is a deny.
+ */
+export function plainPermissionDecider(ask: (question: string) => Promise<string>): PermissionDecider {
+  let queue: Promise<unknown> = Promise.resolve();
+  const answer = async (rules: string[]): Promise<PermissionAnswer> => {
+    const choices = `[o]nce, ${rules.length ? "[a]lways, " : ""}[d]eny, deny with a [m]essage`;
+    for (;;) {
+      const reply = (await ask(`  Allow? ${choices} (Enter = deny): `)).trim().toLowerCase();
+      if (reply === "o" || reply === "once") return { decision: "once" };
+      if (rules.length && (reply === "a" || reply === "always")) return { decision: "always" };
+      if (reply === "" || reply === "d" || reply === "deny") return { decision: "deny" };
+      if (reply === "m" || reply === "message") {
+        const message = (await ask("  Your message for the agent: ")).trim();
+        return { decision: "deny", message: message || undefined };
+      }
+    }
+  };
+  return {
+    askPermission: ({ request }, signal) => {
+      const next = queue.then(() => (signal?.aborted ? { decision: "deny" as const } : answer(request.rules)));
+      queue = next.catch(() => undefined);
+      return next;
+    },
+  };
+}
+
 const CODES = { dim: 2, bold: 1, red: 31, green: 32, yellow: 33, cyan: 36 } as const;
 const AGENT_WIDTH = 12; // fits "orchestrator"
 const INDENT = " ".repeat(8 + 2 + AGENT_WIDTH + 1 + 16 + 1);
@@ -25,6 +53,7 @@ export function attachPlainRenderer(bus: EventBus, out: TextSink, o: PlainOption
   const now = o.now ?? (() => new Date());
   const cmd = o.commandName ?? "duo";
   let ctx = { agent: "", where: "" };
+  const rulesFor = new Map<string, string[]>(); // an answer line names the rules its request offered
   const clock = () => {
     const d = now();
     return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
@@ -73,6 +102,19 @@ export function attachPlainRenderer(bus: EventBus, out: TextSink, o: PlainOption
       }
       case "warning":
         out.write(`${paint("yellow", "warning: ")}${e.text}\n`);
+        break;
+      case "permission.requested": {
+        const r = e.request;
+        rulesFor.set(r.id, r.rules);
+        line(paint("yellow", `⚠ asks to use ${r.tool}: ${r.label}`), e.agent);
+        if (r.description) out.write(`${INDENT}${r.description}\n`);
+        if (r.blockedPath) out.write(`${INDENT}path: ${r.blockedPath}\n`);
+        if (r.rules.length) out.write(`${INDENT}always allow would save: ${r.rules.join(", ")}\n`);
+        break;
+      }
+      case "permission.answered":
+        line(paint(e.answer.decision === "deny" ? "yellow" : "green", `→ ${permissionAnswerText(e.answer, rulesFor.get(e.id) ?? [])}`), e.agent);
+        rulesFor.delete(e.id);
         break;
       case "human.required": {
         const r = e.review;

@@ -3,7 +3,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { AgentRunner, type AgentResult } from "../agents/runner.js";
 import type { SchemaName } from "../agents/schema.js";
 import type { PermissionDenial } from "../agents/types.js";
-import type { Decider, DuoEvent, EventBus, HistoryEntry, Message, Party, Phase, Role } from "../events.js";
+import type { Decider, DuoEvent, EventBus, HistoryEntry, Message, Party, PermissionDecider, Phase, Role } from "../events.js";
 import type { AgentRole, Backend, ConfigData } from "./config.js";
 import { GatesInterrupted, requiredPassed, runGates, type GateResult } from "./gates.js";
 import { Git, type Change } from "./git.js";
@@ -63,6 +63,8 @@ export interface WorkflowOptions {
   state: RunState;
   bus: EventBus;
   decider: Decider;
+  /** Answers Claude's permission prompts; absent when nobody can (CI, background), so the CLI denies them. */
+  permissions?: PermissionDecider;
   runner?: AgentRunner;
 }
 
@@ -110,7 +112,7 @@ export class Workflow {
 
   constructor(private readonly o: WorkflowOptions) {
     this.git = new Git(o.repo);
-    this.runner = o.runner ?? new AgentRunner(o.cfg, o.repo, o.store.path("logs"), o.bus);
+    this.runner = o.runner ?? new AgentRunner(o.cfg, o.repo, o.store.path("logs"), o.bus, { permissions: o.permissions });
     const runsRel = relativeInside(o.store.runsDir, o.repo);
     this.snapshotExclude = runsRel ? [runsRel] : [];
   }

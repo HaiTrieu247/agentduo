@@ -1,5 +1,5 @@
 import type { ConfigData } from "../core/config.js";
-import type { Activity } from "../events.js";
+import type { Activity, PermissionAnswer } from "../events.js";
 import { resolveBinary } from "./resolve.js";
 import { loadSchema } from "./schema.js";
 import {
@@ -51,6 +51,7 @@ export class ClaudeParser implements StreamParser {
     }
     if (!event || typeof event !== "object" || Array.isArray(event)) return [];
     if (event.type === "result") return this.onResult(event);
+    if (event.type === "control_request") return this.onControlRequest(event);
     const out: ParsedEvent[] = event.type === "assistant" ? this.trackUsage(event.message) : [];
     const content = event.message?.content;
     if (!Array.isArray(content)) return out;
@@ -78,6 +79,28 @@ export class ClaudeParser implements StreamParser {
     return out;
   }
 
+  /** Host mode: Claude asks before a tool call its settings do not allow. */
+  private onControlRequest(event: Record<string, any>): ParsedEvent[] {
+    const r = event.request;
+    if (!r || typeof r !== "object" || r.subtype !== "can_use_tool" || !event.request_id) return [];
+    const id = String(event.request_id);
+    const activity = this.toolActivity({ type: "tool_use", id: String(r.tool_use_id ?? id), name: r.tool_name, input: r.input });
+    // Only persistent allow rules: Claude also suggests switching the session to acceptEdits, which is broader than "always allow this".
+    const suggestions = (Array.isArray(r.permission_suggestions) ? r.permission_suggestions : [])
+      .filter((x: any) => x && x.type === "addRules" && x.behavior === "allow" && Array.isArray(x.rules));
+    const rules = suggestions.flatMap((x: any) => x.rules.filter((rule: any) => rule && rule.toolName)
+      .map((rule: any) => (rule.ruleContent ? `${rule.toolName}(${rule.ruleContent})` : String(rule.toolName))));
+    return [{
+      type: "permission",
+      request: {
+        id, tool: String(r.display_name ?? r.tool_name ?? "tool"), label: activity.label,
+        description: typeof r.description === "string" ? r.description : null,
+        blockedPath: typeof r.blocked_path === "string" ? relPath(r.blocked_path, this.repo) : null, rules,
+      },
+      raw: { request_id: id, tool_use_id: r.tool_use_id ?? null, input: r.input ?? {}, suggestions },
+    }];
+  }
+
   private onResult(event: Record<string, any>): ParsedEvent[] {
     this.result = event;
     const out: ParsedEvent[] = [];
@@ -96,6 +119,7 @@ export class ClaudeParser implements StreamParser {
         ...(this.resultTokens ? { tokens: this.resultTokens } : {}),
       });
     }
+    out.push({ type: "end" });
     return out;
   }
 
@@ -148,18 +172,34 @@ export class ClaudeBackend implements AgentBackend {
   }
 
   /** Protocol flags only; what Claude may do comes from the user's Claude Code settings plus args/role_args. */
-  buildArgs({ schemaName, role }: BuildArgs): string[] {
+  buildArgs({ schemaName, role, askPermissions }: BuildArgs): string[] {
     return [
       "-p",
       "--output-format", "stream-json",
       "--verbose",
       "--json-schema", JSON.stringify(loadSchema(schemaName)),
-      "--permission-prompts", "none", // nobody can answer a prompt in -p mode; this grants nothing
+      // Host mode sends permission prompts to agentduo (the user answers them); without a host, "none" denies
+      // them automatically, since nobody could answer and the run would hang. Neither grants anything.
+      ...(askPermissions
+        ? ["--input-format", "stream-json", "--permission-prompts", "host", "--permission-prompt-tool", "stdio"]
+        : ["--permission-prompts", "none"]),
       ...(this.cfg.model ? ["--model", this.cfg.model] : []),
       ...(this.cfg.max_budget_usd ? ["--max-budget-usd", String(this.cfg.max_budget_usd)] : []),
       ...this.cfg.args,
       ...(this.cfg.role_args[role] ?? []),
     ];
+  }
+
+  hostInput(prompt: string): string {
+    return `${JSON.stringify({ type: "user", message: { role: "user", content: prompt }, parent_tool_use_id: null, session_id: "" })}\n`;
+  }
+
+  permissionReply(raw: Record<string, unknown>, answer: PermissionAnswer): string {
+    const suggestions = Array.isArray(raw.suggestions) ? raw.suggestions : [];
+    const response = answer.decision === "deny"
+      ? { behavior: "deny", message: answer.message?.trim() || "The user denied this tool call. Do not retry it; continue without it and say so in your report." }
+      : { behavior: "allow", updatedInput: raw.input ?? {}, ...(answer.decision === "always" && suggestions.length ? { updatedPermissions: suggestions } : {}) };
+    return `${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: raw.request_id, response } })}\n`;
   }
 
   createParser(): ClaudeParser {

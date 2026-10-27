@@ -20,11 +20,16 @@ describe("runDoctor", () => {
     const checks = await runDoctor({ dir: repo, cfg: testConfig(new FakeClis(t.path)), sources: ["ws.yaml"], runsDir: join(repo, ".agentduo", "runs") });
     expect(checks.filter((c) => !c.ok && c.required)).toEqual([]);
     const text = checks.map((c) => c.message).join("\n");
-    for (const s of ["codex CLI:", "codex-fake 1.0.0", "claude supports --output-format, --verbose, --json-schema, --permission-prompts", "schema review",
-      ".agentduo/runs/ is git-ignored", "config: ws.yaml", "implementer edits rely on your Claude Code permission settings"]) {
+    for (const s of ["codex CLI:", "codex-fake 1.0.0", "claude supports --output-format, --verbose, --json-schema, --permission-prompts, --input-format, --permission-prompt-tool",
+      "schema review", ".agentduo/runs/ is git-ignored", "config: ws.yaml", "Claude asks you in the terminal before a tool call its settings do not allow"]) {
       expect(text).toContain(s);
     }
     const cfg = testConfig(new FakeClis(join(t.path, "b")));
+    cfg.claude.permission_prompts = "deny";
+    const denying = (await runDoctor({ dir: repo, cfg, sources: [], runsDir: join(repo, ".agentduo", "runs") })).map((c) => c.message).join("\n");
+    expect(denying).toContain("implementer edits rely on your Claude Code permission settings");
+    expect(denying).toContain("claude supports --output-format, --verbose, --json-schema, --permission-prompts");
+    expect(denying).not.toContain("--permission-prompt-tool");
     cfg.claude.role_args = { implementer: ["--permission-mode", "acceptEdits"] };
     const quiet = await runDoctor({ dir: repo, cfg, sources: [], runsDir: join(repo, ".agentduo", "runs") });
     expect(quiet.map((c) => c.message).join("\n")).not.toContain("implementer edits rely on");

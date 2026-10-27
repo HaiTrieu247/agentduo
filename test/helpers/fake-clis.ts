@@ -53,9 +53,17 @@ export class FakeClis {
     }
   }
 
-  calls(role?: string): FakeCall[] {
+  private entries(): Array<Record<string, unknown>> {
     if (!existsSync(this.files.FAKE_LOG)) return [];
-    return readFileSync(this.files.FAKE_LOG, "utf8").split("\n").filter(Boolean)
-      .map((line) => JSON.parse(line) as FakeCall).filter((c) => !role || c.role === role);
+    return readFileSync(this.files.FAKE_LOG, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+  }
+
+  calls(role?: string): FakeCall[] {
+    return this.entries().filter((e) => !e.permission).map((e) => e as unknown as FakeCall).filter((c) => !role || c.role === role);
+  }
+
+  /** The answers the fake Claude received to its permission prompts, in order. */
+  permissionAnswers(): Array<{ behavior: string; message?: string; updatedPermissions?: unknown[] }> {
+    return this.entries().flatMap((e) => (e.permission ? [e.permission as { behavior: string; message?: string }] : []));
   }
 }

@@ -315,6 +315,30 @@ describe("Workflow", () => {
     expect(wf.state.warnings.slice(-2)).toEqual(["w48", "… 6 more warning(s) not stored"]);
   });
 
+  it("relays Claude's permission prompts, and keeps rules saved by \"always allow\" out of the diff and the warnings", async () => {
+    git(h.repo, "config", "core.excludesFile", "/dev/null"); // as on a machine whose git does not ignore .claude/settings.local.json
+    const answers: string[] = [];
+    h.permissions = { askPermission: async ({ role, request }) => { answers.push(`${role}: ${request.label}`); return { decision: "always" }; } };
+    const ask = (command: string, write: Record<string, string> = {}) => ({ tool: "Bash", input: { command }, rules: [{ toolName: "Bash", ruleContent: `${command}:*` }], write });
+    expect(await start({
+      ...happy(),
+      plan_reviewer: [{ permissions: [ask("npm test")], output: critique(true) }],
+      implementer: [{ permissions: [ask("node fix.mjs", { "app.txt": "fixed\n" })], output: impl() }],
+    })).toBe(0);
+    expect(answers).toEqual(["plan_reviewer: Bash  npm test", "implementer: Bash  node fix.mjs"]);
+    expect(readFileSync(join(h.repo, ".claude", "settings.local.json"), "utf8")).toContain("Bash(node fix.mjs:*)");
+    expect(JSON.parse(readRun("implementation.r1.json")).changes).toEqual([{ status: "A", path: "app.txt" }]);
+    expect(h.events.some((e) => e.type === "warning")).toBe(false);
+    expect(fake.calls("code_reviewer")[0]!.prompt).not.toContain("settings.local.json");
+  });
+
+  it("gives no settings hint for a call the user denied at the prompt", async () => {
+    h.permissions = { askPermission: async () => ({ decision: "deny", message: "not now" }) };
+    expect(await start({ ...happy(), implementer: [{ write: { "app.txt": "fixed\n" }, permissions: [{ tool: "Bash", input: { command: "rm -rf build" } }], output: impl() }] })).toBe(0);
+    expect(fake.permissionAnswers()).toEqual([{ behavior: "deny", message: "not now" }]);
+    expect(h.events.some((e) => e.type === "warning" && e.text.includes("was denied"))).toBe(false);
+  });
+
   it("works in a subdirectory workspace and warns about changes outside it", async () => {
     const ws = join(h.repo, "gói pkg");
     mkdirSync(ws);

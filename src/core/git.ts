@@ -15,6 +15,12 @@ export interface Snapshot {
 
 export type Change = [status: string, path: string];
 
+/**
+ * Never part of a snapshot: Claude's personal settings, where "Always allow" at a permission prompt saves its rule.
+ * Anchored at the repository root (`top`), so it holds for both the workspace and the whole-repository scope.
+ */
+const ALWAYS_EXCLUDED = [":(exclude,glob,top)**/.claude/settings.local.json"];
+
 const IDENTITY = {
   GIT_AUTHOR_NAME: "agentduo", GIT_AUTHOR_EMAIL: "agentduo@localhost",
   GIT_COMMITTER_NAME: "agentduo", GIT_COMMITTER_EMAIL: "agentduo@localhost",
@@ -89,7 +95,7 @@ export class Git {
   private async pathspec(exclude: string[], scope: "." | ":/"): Promise<string[]> {
     const kept: string[] = [];
     for (const p of exclude) if (!(await this.isIgnored(p))) kept.push(`:(exclude)${p}`);
-    return ["--", scope, ...kept];
+    return ["--", scope, ...kept, ...ALWAYS_EXCLUDED];
   }
 
   /** Tree hash of the working tree: the workspace (".") or the whole repository (":/"). */

@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import type { AgentRole } from "../core/config.js";
-import type { Activity } from "../events.js";
+import type { Activity, PermissionAnswer, PermissionRequest } from "../events.js";
 import type { SchemaName } from "./schema.js";
 
 export interface PermissionDenial {
@@ -20,7 +20,11 @@ export interface AgentMeta {
 
 export type ParsedEvent =
   | { type: "activity"; activity: Activity }
-  | { type: "usage"; costUsd?: number; tokens?: number };
+  | { type: "usage"; costUsd?: number; tokens?: number }
+  /** A permission prompt in host mode; `raw` is what the backend needs to answer it. */
+  | { type: "permission"; request: PermissionRequest; raw: Record<string, unknown> }
+  /** The final result arrived; in host mode the runner closes stdin so the CLI exits. */
+  | { type: "end" };
 
 /** Stateful translator from one CLI's stdout lines to activities. Must never throw. */
 export interface StreamParser {
@@ -34,6 +38,8 @@ export interface BuildArgs {
   lastMessageFile: string;
   /** Config role of the call (plan sign-off uses "planner"); selects <backend>.role_args. */
   role: AgentRole;
+  /** Route permission prompts to the runner (host mode) instead of denying them. */
+  askPermissions?: boolean;
 }
 
 export interface FinalOutput {
@@ -48,6 +54,9 @@ export interface AgentBackend {
   createParser(): StreamParser;
   /** Extract the final JSON; throws AgentFailure (carrying whatever meta is known) when unusable. */
   finalize(parser: StreamParser, stdout: string, lastMessageFile: string): FinalOutput;
+  /** Host mode (backends that support it): the prompt as the first stdin message, and the answer to a permission prompt. */
+  hostInput?(prompt: string): string;
+  permissionReply?(raw: Record<string, unknown>, answer: PermissionAnswer): string;
 }
 
 export class AgentFailure extends Error {

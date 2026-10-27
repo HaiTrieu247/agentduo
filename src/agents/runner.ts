@@ -1,12 +1,12 @@
-import { createWriteStream, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, createWriteStream, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentRole, ConfigData } from "../core/config.js";
-import type { EventBus, Party, Role } from "../events.js";
+import type { EventBus, Party, PermissionAnswer, PermissionDecider, Role } from "../events.js";
 import { ClaudeBackend } from "./claude.js";
 import { CodexBackend } from "./codex.js";
-import { runProcess, type RunResult } from "./process.js";
+import { runProcess, type ChildIO, type RunResult } from "./process.js";
 import { validateOutput, type SchemaName } from "./schema.js";
-import { AgentFailure, BinaryNotFound, type AgentBackend, type AgentMeta } from "./types.js";
+import { AgentFailure, BinaryNotFound, type AgentBackend, type AgentMeta, type ParsedEvent } from "./types.js";
 
 export interface CallOptions {
   role: Role;
@@ -31,12 +31,47 @@ export interface AgentResult {
   interrupted: boolean;
 }
 
+export interface RunnerOptions {
+  backends?: Record<"codex" | "claude", AgentBackend>;
+  /** Who answers permission prompts; absent when nobody can (CI, background), so prompts are denied by the CLI. */
+  permissions?: PermissionDecider;
+}
+
+type PermissionEvent = Extract<ParsedEvent, { type: "permission" }>;
+
 export class AgentRunner {
   readonly backends: Record<"codex" | "claude", AgentBackend>;
+  private readonly permissions?: PermissionDecider;
 
   constructor(private readonly cfg: ConfigData, private readonly repo: string, private readonly logDir: string,
-    private readonly bus: EventBus, backends?: Record<"codex" | "claude", AgentBackend>) {
-    this.backends = backends ?? { codex: new CodexBackend(cfg.codex, repo), claude: new ClaudeBackend(cfg.claude, repo) };
+    private readonly bus: EventBus, o: RunnerOptions = {}) {
+    this.backends = o.backends ?? { codex: new CodexBackend(cfg.codex, repo), claude: new ClaudeBackend(cfg.claude, repo) };
+    this.permissions = o.permissions;
+  }
+
+  /** Host mode: the backend can relay permission prompts, the config asks for it, and someone can answer. */
+  private hosts(backend: AgentBackend): boolean {
+    return !!this.permissions && backend.name === "claude" && this.cfg.claude.permission_prompts === "ask"
+      && !!backend.hostInput && !!backend.permissionReply;
+  }
+
+  /** Asks the user while the agent's clocks are stopped, then answers on its stdin. */
+  private async answerPermission(ev: PermissionEvent, o: CallOptions, agent: Party, backend: AgentBackend, io: ChildIO,
+    deniedByUser: Set<string>, answersLog: string): Promise<void> {
+    this.bus.emit({ type: "permission.requested", role: o.role, agent, request: ev.request });
+    io.pause();
+    let answer: PermissionAnswer;
+    try {
+      answer = await this.permissions!.askPermission({ role: o.role, agent, request: ev.request }, o.signal);
+    } catch {
+      answer = { decision: "deny" };
+    }
+    if (answer.decision === "deny" && typeof ev.raw.tool_use_id === "string") deniedByUser.add(ev.raw.tool_use_id);
+    const reply = backend.permissionReply!(ev.raw, answer);
+    appendFileSync(answersLog, reply);
+    io.write(reply);
+    io.resume();
+    this.bus.emit({ type: "permission.answered", role: o.role, agent, id: ev.request.id, answer });
   }
 
   async call(o: CallOptions): Promise<AgentResult> {
@@ -72,7 +107,7 @@ export class AgentRunner {
       let args: string[];
       try {
         binary = backend.binary();
-        args = backend.buildArgs({ schemaName: o.schemaName, lastMessageFile, role: o.agentRole });
+        args = backend.buildArgs({ schemaName: o.schemaName, lastMessageFile, role: o.agentRole, askPermissions: this.hosts(backend) });
       } catch (e) {
         if (e instanceof BinaryNotFound) return finish(false, attempt, null, e.message);
         throw e;
@@ -84,10 +119,16 @@ export class AgentRunner {
       const parser = backend.createParser();
       const baseCost = cost;
       const baseTokens = tokens;
+      const host = this.hosts(backend);
+      let io: ChildIO | undefined;
+      const deniedByUser = new Set<string>();
       let run: RunResult;
       try {
         run = await runProcess(binary, args, {
-          cwd: this.repo, input: prompt, timeoutMs, idleTimeoutMs, signal: o.signal,
+          cwd: this.repo, input: host ? backend.hostInput!(prompt) : prompt, holdStdin: host, timeoutMs, idleTimeoutMs, signal: o.signal,
+          onSpawn: (child) => {
+            io = child;
+          },
           onStdoutLine: (line) => {
             eventsLog.write(`${line}\n`);
             let parsed: ReturnType<typeof parser.feed> = [];
@@ -98,7 +139,11 @@ export class AgentRunner {
             }
             for (const ev of parsed) {
               if (ev.type === "activity") this.bus.emit({ type: "agent.activity", role: o.role, agent, activity: ev.activity });
-              else this.bus.emit({
+              else if (ev.type === "end") {
+                if (host) io?.end(); // host mode keeps stdin open; closing it lets the CLI exit
+              } else if (ev.type === "permission") {
+                if (host && io) void this.answerPermission(ev, o, agent, backend, io, deniedByUser, `${stem}.answers.jsonl`);
+              } else this.bus.emit({
                 type: "agent.usage", agent,
                 costUsd: ev.costUsd !== undefined ? baseCost + ev.costUsd : undefined,
                 tokens: ev.tokens !== undefined ? baseTokens + ev.tokens : undefined,
@@ -137,6 +182,8 @@ export class AgentRunner {
         parseError = e.message;
         meta = { permissionDenials: [], ...e.meta };
       }
+      // A call the user denied at the prompt was their choice, not a settings problem worth a hint.
+      if (deniedByUser.size) meta.permissionDenials = meta.permissionDenials.filter((d) => !d.tool_use_id || !deniedByUser.has(d.tool_use_id));
       if (typeof meta.costUsd === "number") {
         cost += meta.costUsd;
         costSeen = true;

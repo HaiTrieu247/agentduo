@@ -29,7 +29,16 @@ Thư mục runs có `.gitignore` riêng, nên dữ liệu run không lọt vào 
 
 ## Quyền
 
-agentduo chỉ truyền các flag giao thức. Với Claude, nó có thêm `--permission-prompts none`, flag này không cấp quyền gì.
+agentduo chỉ truyền các flag giao thức, và không flag nào cấp quyền.
+
+**Khi Claude xin quyền, agentduo hỏi bạn.** Nếu Claude cần một tool mà settings chưa cho phép, run tạm dừng và hiện đúng câu hỏi của Claude:
+- **Cho lần này**.
+- **Luôn cho**: Claude tự lưu rule nó đề xuất vào `.claude/settings.local.json`, giống như khi bạn trả lời Claude trực tiếp. File này không bao giờ nằm trong snapshot hay trong diff gửi reviewer.
+- **Từ chối**, hoặc **từ chối kèm lời nhắn** cho Claude.
+
+Trong lúc chờ bạn trả lời, timeout của agent tạm dừng. Ở chế độ `--plain` trong terminal, các lựa chọn hiện dưới dạng một câu hỏi một dòng.
+
+Khi không ai trả lời được (CI, chạy nền, output bị chuyển hướng), Claude chạy với `--permission-prompts none` và tự từ chối. Đặt `claude.permission_prompts: deny` nếu muốn luôn tự từ chối như vậy.
 
 - **Claude Code** lấy quyền từ settings của bạn. Khi chạy không tương tác, Claude chỉ dùng được tool mà settings cho phép:
   - `"permissions": { "defaultMode": "acceptEdits" }` cho phép sửa file, nhưng không cho chạy lệnh;
@@ -87,7 +96,7 @@ Gate là tuỳ chọn. Mặc định không có gate: Claude tự chạy test th
 
 ## Xử lý sự cố
 
-- **Tool bị từ chối:** cảnh báo sẽ ghi tên tool.
+- **Tool bị từ chối:** khi chạy trong terminal, Claude sẽ hỏi bạn trước (xem phần [Quyền](#quyền)). Run không có người trông thì cần cấp quyền từ trước; cảnh báo sẽ ghi tên các tool bị từ chối.
   - Sửa file (`Edit`, `Write`): đặt `permissions.defaultMode` thành `"acceptEdits"` trong settings của Claude Code, hoặc thêm `claude.role_args.implementer: [--permission-mode, acceptEdits]`.
   - Chạy lệnh (`Bash`): thêm allow rule, ví dụ `"Bash(npm test:*)"`.
   - Nếu Codex làm implementer, xem mục **Codex** ở phần [Quyền](#quyền).

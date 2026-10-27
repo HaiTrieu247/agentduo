@@ -239,6 +239,26 @@ describe("cli", () => {
     expect(env3.FORCE_COLOR).toBeUndefined();
   });
 
+  it("asks permission questions on a terminal in plain mode, and lets Claude deny them without one", async () => {
+    writeConfig(repo);
+    const asking = { ...happy(), implementer: [{ write: { "app.txt": "fixed\n" }, permissions: [{ tool: "Bash", input: { command: "npm test" }, rules: [] }], output: impl() }] };
+    fake.setScenario(asking);
+    const questions: string[] = [];
+    let shown = "";
+    const tty = await cli(["--plain", "Make app.txt fixed"], repo, {
+      stdin: { isTTY: true }, stdout: { write: (s: string) => { shown += s; }, isTTY: true },
+      ask: async (q) => { questions.push(q); return "o"; },
+    });
+    expect(tty.code, tty.err).toBe(0);
+    expect(questions).toHaveLength(1);
+    expect(shown).toContain("⚠ asks to use Bash: Bash  npm test");
+    expect(fake.permissionAnswers().map((a) => a.behavior)).toEqual(["allow"]);
+    const piped = await cli(["Make app.txt fixed"]);
+    expect(piped.code, piped.err).toBe(0);
+    const last = fake.calls("implementer").at(-1)!.args;
+    expect(last[last.indexOf("--permission-prompts") + 1]).toBe("none");
+  });
+
   it("uses the plain renderer when running in the background", async () => {
     writeConfig(repo);
     fake.setScenario(happy());

@@ -26,6 +26,24 @@ describe("ClaudeBackend", () => {
     expect(impl.slice(-3)).toEqual(["--no-session-persistence", "--permission-mode", "acceptEdits"]);
   });
 
+  it("speaks the host protocol when permission prompts go to the user", () => {
+    const backend = new ClaudeBackend(defaultConfig().claude, "/ws");
+    const host = backend.buildArgs({ schemaName: "plan", lastMessageFile: "", role: "plan_reviewer", askPermissions: true });
+    expect(host).toEqual(expect.arrayContaining(["--input-format", "stream-json", "--permission-prompt-tool", "stdio"]));
+    expect(host[host.indexOf("--permission-prompts") + 1]).toBe("host");
+    const quiet = backend.buildArgs({ schemaName: "plan", lastMessageFile: "", role: "plan_reviewer" });
+    expect(quiet[quiet.indexOf("--permission-prompts") + 1]).toBe("none");
+    expect(quiet).not.toContain("--input-format");
+    expect(JSON.parse(backend.hostInput("hi"))).toEqual({ type: "user", message: { role: "user", content: "hi" }, parent_tool_use_id: null, session_id: "" });
+    const raw = { request_id: "r1", input: { command: "npm test" }, suggestions: [{ type: "addRules", rules: [{ toolName: "Bash", ruleContent: "npm test:*" }], behavior: "allow", destination: "localSettings" }] };
+    const reply = (answer: Parameters<typeof backend.permissionReply>[1]) => JSON.parse(backend.permissionReply(raw, answer));
+    expect(reply({ decision: "once" })).toEqual({ type: "control_response", response: { subtype: "success", request_id: "r1", response: { behavior: "allow", updatedInput: { command: "npm test" } } } });
+    expect(reply({ decision: "always" }).response.response.updatedPermissions).toEqual(raw.suggestions);
+    expect(reply({ decision: "deny", message: "use the npm script" }).response.response).toEqual({ behavior: "deny", message: "use the npm script" });
+    expect(reply({ decision: "deny" }).response.response.message).toContain("denied");
+    expect(backend.hostInput("x").endsWith("\n")).toBe(true);
+  });
+
   it("finalizes from the result envelope and keeps the cost on errors", () => {
     const backend = new ClaudeBackend(defaultConfig().claude, "/ws");
     const p = new ClaudeParser("/ws");

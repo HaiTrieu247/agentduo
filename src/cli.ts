@@ -14,11 +14,11 @@ import type { Review } from "./core/outputs.js";
 import { findingsMarkdown } from "./core/render.js";
 import { acquireWorkspaceLock, LockError, RunStore, type RunState } from "./core/state.js";
 import { DecisionError, EXIT, Workflow } from "./core/workflow.js";
-import { EventBus, type Decider, type Decision } from "./events.js";
+import { EventBus, type Decider, type Decision, type PermissionDecider } from "./events.js";
 import { packageVersion } from "./paths.js";
 import { formatCost, formatTokens } from "./ui/format.js";
 import type { ViewKind } from "./ui/ink/HumanReviewPrompt.js";
-import { attachPlainRenderer, deferDecider } from "./ui/plain.js";
+import { attachPlainRenderer, deferDecider, plainPermissionDecider } from "./ui/plain.js";
 
 export interface CliIO {
   stdout: { write(text: string): unknown; isTTY?: boolean };
@@ -193,8 +193,12 @@ async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, st
   }
   const bus = new EventBus();
   // A backgrounded process that touches the terminal's raw mode gets stopped by the shell, so it renders plain.
-  const plain = !!opts.plain || io.env.CI === "true" || !io.stdout.isTTY || !!io.isBackground?.();
+  const background = !!io.isBackground?.();
+  const plain = !!opts.plain || io.env.CI === "true" || !io.stdout.isTTY || background;
   const interactive = !plain && !!io.stdin.isTTY;
+  // Claude's permission prompts reach the user only where someone can answer; elsewhere Claude denies them itself.
+  const terminal = !!io.stdin.isTTY && !!io.stdout.isTTY && !background && io.env.CI !== "true";
+  let permissions: PermissionDecider | undefined;
   const version = packageVersion();
   let workflow: Workflow | undefined;
   let presses = 0;
@@ -213,6 +217,7 @@ async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, st
   if (plain) {
     const detach = attachPlainRenderer(bus, io.stdout, { color: opts.color !== false && !io.env.NO_COLOR && !!io.stdout.isTTY, verbose: !!opts.verbose, version });
     closeUi = async () => detach();
+    if (terminal && io.ask) permissions = plainPermissionDecider(io.ask);
   } else {
     applyColorPreference(opts, io.env);
     const { startInk } = await import("./ui/ink/session.js");
@@ -224,8 +229,9 @@ async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, st
     });
     decider = session.decider;
     closeUi = session.close;
+    if (interactive) permissions = session.permissions;
   }
-  workflow = new Workflow({ cfg, repo: env.workspace, store, state, bus, decider });
+  workflow = new Workflow({ cfg, repo: env.workspace, store, state, bus, decider, permissions });
   const offSignal = io.onSignal?.(onInterrupt);
   try {
     if (decision) await workflow.applyDecision(decision.decision, decision.note);

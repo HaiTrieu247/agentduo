@@ -1,4 +1,5 @@
-import type { Activity, DuoEvent, HistoryEntry, HumanReview, Message, Party, Phase, Role, RoundInfo } from "../../events.js";
+import type { Activity, DuoEvent, HistoryEntry, HumanReview, Message, Party, PermissionAnswer, Phase, Role, RoundInfo } from "../../events.js";
+import type { PermissionAsk } from "./PermissionPrompt.js";
 
 export interface StepView {
   phase: Phase;
@@ -21,7 +22,8 @@ type StaticContent =
   | { kind: "note"; text: string }
   | { kind: "artifact"; title: string; body: string }
   | { kind: "finish"; phase: string; runId: string; reportPath: string; summary?: string }
-  | { kind: "review"; review: HumanReview };
+  | { kind: "review"; review: HumanReview }
+  | { kind: "permission"; agent: Party; role: Role; label: string; rules: string[]; answer: PermissionAnswer };
 export type StaticItem = { id: string } & StaticContent;
 
 export interface ViewState {
@@ -34,6 +36,8 @@ export interface ViewState {
   totals: { costUsd: number; tokens: number };
   live: { costUsd: number; tokens: number };
   humanReview: HumanReview | null;
+  /** Permission prompts waiting for an answer, oldest first (an agent may ask for several tools at once). */
+  permissions: PermissionAsk[];
   finished: { phase: string; reportPath: string; exitCode: number } | null;
   verbose: boolean;
   stopping: boolean;
@@ -49,7 +53,7 @@ export type ViewAction =
 export function initialView(version: string, verbose = false): ViewState {
   return {
     version, items: [], current: null, planning: { round: 1, limit: 0 }, impl: { round: 0, limit: 0 }, reached: [],
-    totals: { costUsd: 0, tokens: 0 }, live: { costUsd: 0, tokens: 0 }, humanReview: null, finished: null, verbose, stopping: false, seq: 0,
+    totals: { costUsd: 0, tokens: 0 }, live: { costUsd: 0, tokens: 0 }, humanReview: null, permissions: [], finished: null, verbose, stopping: false, seq: 0,
   };
 }
 
@@ -124,12 +128,19 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
       return push(s, { kind: "note", text: e.text });
     case "human.required":
       return { ...s, humanReview: e.review, current: null };
+    case "permission.requested":
+      return { ...s, permissions: [...s.permissions, { role: e.role, agent: e.agent, request: e.request }] };
+    case "permission.answered": {
+      const ask = s.permissions.find((p) => p.request.id === e.id);
+      const rest = { ...s, permissions: s.permissions.filter((p) => p.request.id !== e.id) };
+      return ask ? push(rest, { kind: "permission", agent: ask.agent, role: ask.role, label: ask.request.label, rules: ask.request.rules, answer: e.answer }) : rest;
+    }
     case "run.finished": {
       // A deferred decision (non-interactive, or "Decide later") keeps the reason in scrollback.
       const withReview = e.phase === "HUMAN_REVIEW" && s.humanReview ? push(s, { kind: "review", review: s.humanReview }) : s;
       return {
         ...push(withReview, { kind: "finish", phase: e.phase, runId: e.runId, reportPath: e.reportPath, summary: e.summary }),
-        finished: { phase: e.phase, reportPath: e.reportPath, exitCode: e.exitCode }, current: null, humanReview: null,
+        finished: { phase: e.phase, reportPath: e.reportPath, exitCode: e.exitCode }, current: null, humanReview: null, permissions: [],
       };
     }
     default:

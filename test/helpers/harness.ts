@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { ConfigData } from "../../src/core/config.js";
 import { RunStore, type RunState } from "../../src/core/state.js";
 import { Workflow } from "../../src/core/workflow.js";
-import { EventBus, type Decider, type Decision, type DuoEvent, type HumanReview } from "../../src/events.js";
+import { EventBus, type Decider, type Decision, type DuoEvent, type HumanReview, type PermissionDecider } from "../../src/events.js";
 
 export class ScriptedDecider implements Decider {
   readonly seen: string[] = [];
@@ -18,6 +18,8 @@ export interface Harness {
   cfg: ConfigData;
   runsDir: string;
   events: DuoEvent[];
+  /** Answers Claude's permission prompts in host mode; absent = nobody can answer. */
+  permissions?: PermissionDecider;
 }
 
 export function makeHarness(repo: string, cfg: ConfigData): Harness {
@@ -33,13 +35,13 @@ function busFor(h: Harness): EventBus {
 export function newWorkflow(h: Harness, task: string, decider: Decider = new ScriptedDecider()): { wf: Workflow; bus: EventBus } {
   const bus = busFor(h);
   const { store, state } = RunStore.create(h.runsDir, task, h.cfg.limits);
-  return { wf: new Workflow({ cfg: h.cfg, repo: h.repo, store, state, bus, decider }), bus };
+  return { wf: new Workflow({ cfg: h.cfg, repo: h.repo, store, state, bus, decider, permissions: h.permissions }), bus };
 }
 
 export function resumedWorkflow(h: Harness, opts: { decider?: Decider } = {}): { wf: Workflow; bus: EventBus } {
   const bus = busFor(h);
   const store = RunStore.open(h.runsDir);
-  const wf = new Workflow({ cfg: h.cfg, repo: h.repo, store, state: store.loadState(), bus, decider: opts.decider ?? new ScriptedDecider() });
+  const wf = new Workflow({ cfg: h.cfg, repo: h.repo, store, state: store.loadState(), bus, decider: opts.decider ?? new ScriptedDecider(), permissions: h.permissions });
   return { wf, bus };
 }
 

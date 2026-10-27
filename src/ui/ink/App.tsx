@@ -1,8 +1,10 @@
 import { Box, Static, Text, useInput, useStdout } from "ink";
 import { useEffect, useReducer, useState } from "react";
-import type { Decision, EventBus } from "../../events.js";
+import type { Decision, EventBus, PermissionAnswer } from "../../events.js";
+import { partyLabel, permissionAnswerText, roleLabel } from "../format.js";
 import { HumanReviewPrompt, VIEWS, type ViewKind } from "./HumanReviewPrompt.js";
 import { LiveFooter } from "./LiveFooter.js";
+import { PermissionPrompt } from "./PermissionPrompt.js";
 import { StepBlock } from "./StepBlock.js";
 import { initialView, reduce, type StaticItem } from "./store.js";
 
@@ -14,6 +16,8 @@ export interface AppProps {
   onStop(): void;
   onInterrupt(): void;
   onDecision(d: Decision | "defer"): void;
+  /** The user's answer to a relayed permission prompt. */
+  onPermission?(id: string, answer: PermissionAnswer): void;
   views(): ViewKind[];
   readView(kind: ViewKind): Promise<string | null>;
   /** Called once the finish line has been rendered, so the session can unmount without losing it. */
@@ -42,6 +46,13 @@ function StaticItemView({ item }: { item: StaticItem }) {
       );
     case "finish":
       return <FinishLine phase={item.phase} runId={item.runId} reportPath={item.reportPath} summary={item.summary} />;
+    case "permission":
+      return (
+        <Text dimColor wrap="truncate-end">
+          <Text color={item.answer.decision === "deny" ? "yellow" : "green"}>{item.answer.decision === "deny" ? "⊘" : "✓"}</Text>
+          {` ${partyLabel(item.agent)} (${roleLabel(item.role)}) ${item.label} — ${permissionAnswerText(item.answer, item.rules)}`}
+        </Text>
+      );
     case "review":
       return (
         <Box flexDirection="column">
@@ -96,7 +107,7 @@ export function App(p: AppProps) {
       dispatch({ type: "stopping" });
       p.onStop();
     }
-  }, { isActive: p.interactive && !view.humanReview });
+  }, { isActive: p.interactive && !view.humanReview && !view.permissions.length });
 
   const onView = (kind: ViewKind) => {
     void p.readView(kind).then((body) => dispatch({ type: "artifact", title: VIEWS[kind].title, body: body ?? "(not available)" }));
@@ -111,7 +122,10 @@ export function App(p: AppProps) {
           </Box>
         )}
       </Static>
-      {view.humanReview && p.interactive ? (
+      {view.permissions[0] && p.interactive ? (
+        <PermissionPrompt key={view.permissions[0].request.id} ask={view.permissions[0]}
+          onAnswer={(answer) => p.onPermission?.(view.permissions[0]!.request.id, answer)} />
+      ) : view.humanReview && p.interactive ? (
         <HumanReviewPrompt review={view.humanReview} views={p.views()} onDecision={p.onDecision} onView={onView} />
       ) : view.finished ? null : (
         <LiveFooter view={view} now={Date.now()} frame={frame} interactive={p.interactive} />

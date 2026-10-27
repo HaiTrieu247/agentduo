@@ -1,4 +1,4 @@
-import type { Activity, Message, Party, Phase, Role } from "../events.js";
+import type { Activity, Message, Party, PermissionAnswer, Phase, Role } from "../events.js";
 
 export const PIPELINE: Array<{ phase: Phase; label: string }> = [
   { phase: "PLAN", label: "PLAN" },
@@ -20,6 +20,13 @@ const STATUS_ICONS: Record<Activity["status"], string> = { running: "…", ok: "
 export const partyLabel = (p?: Party | string): string => (p ? PARTY_LABELS[p as Party] ?? p : "");
 export const roleLabel = (r?: Role): string => (r ? ROLE_LABELS[r] : "");
 export const statusIcon = (s: Activity["status"]): string => STATUS_ICONS[s];
+
+/** "allowed once", "always allowed: Bash(npm test:*)", "denied: use the npm script". */
+export function permissionAnswerText(answer: PermissionAnswer, rules: string[]): string {
+  if (answer.decision === "once") return "allowed once";
+  if (answer.decision === "always") return `always allowed${rules.length ? `: ${rules.join(", ")}` : ""}`;
+  return answer.message ? `denied: ${answer.message}` : "denied";
+}
 
 export function formatDuration(sec?: number): string {
   if (sec === undefined) return "";

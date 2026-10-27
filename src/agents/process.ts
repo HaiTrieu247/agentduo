@@ -13,6 +13,18 @@ export interface RunOptions {
   idleTimeoutMs?: number;
   /** Keep at most this many characters of each stream (the tail); line callbacks still see everything. */
   maxBufferChars?: number;
+  /** Leave stdin open after `input`, for a conversation driven through `onSpawn`'s ChildIO. */
+  holdStdin?: boolean;
+  onSpawn?: (io: ChildIO) => void;
+}
+
+/** A running child's stdin, plus a way to stop the clocks while the caller waits on someone else (a human). */
+export interface ChildIO {
+  write(text: string): void;
+  end(): void;
+  /** Stops the overall and idle timeouts until the matching resume(); calls nest. */
+  pause(): void;
+  resume(): void;
 }
 
 export interface RunResult {
@@ -92,8 +104,9 @@ export function runProcess(cmd: string, args: string[], opts: RunOptions): Promi
     const cap = opts.maxBufferChars ?? DEFAULT_MAX_BUFFER_CHARS;
     const keepTail = (text: string) => (text.length > cap ? text.slice(-cap) : text);
     let idleTimer: NodeJS.Timeout | undefined;
+    let paused = 0;
     const touch = () => {
-      if (!opts.idleTimeoutMs) return;
+      if (!opts.idleTimeoutMs || paused) return;
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
         idle = true;
@@ -125,11 +138,43 @@ export function runProcess(cmd: string, args: string[], opts: RunOptions): Promi
     child.stdin!.on("error", () => {
       // the child exited before reading all of its input
     });
-    child.stdin!.end(opts.input ?? "");
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killTree(child, opts.killGraceMs);
-    }, opts.timeoutMs);
+    let stdinOpen = true;
+    const endStdin = () => {
+      if (!stdinOpen) return;
+      stdinOpen = false;
+      child.stdin!.end();
+    };
+    if (opts.input) child.stdin!.write(opts.input);
+    if (!opts.holdStdin) endStdin();
+    let timer: NodeJS.Timeout | undefined;
+    let remainingMs = opts.timeoutMs;
+    let deadline = Date.now() + remainingMs;
+    const armTimeout = () => {
+      deadline = Date.now() + remainingMs;
+      timer = setTimeout(() => {
+        timedOut = true;
+        killTree(child, opts.killGraceMs);
+      }, remainingMs);
+    };
+    armTimeout();
+    opts.onSpawn?.({
+      write: (text) => {
+        if (stdinOpen && !settled) child.stdin!.write(text);
+      },
+      end: endStdin,
+      pause: () => {
+        if (paused++ > 0) return;
+        if (timer) clearTimeout(timer);
+        remainingMs = Math.max(0, deadline - Date.now());
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = undefined;
+      },
+      resume: () => {
+        if (paused === 0 || --paused > 0 || settled) return;
+        armTimeout();
+        touch();
+      },
+    });
     const onAbort = () => {
       aborted = true;
       killTree(child, opts.killGraceMs);
@@ -139,7 +184,7 @@ export function runProcess(cmd: string, args: string[], opts: RunOptions): Promi
       else opts.signal.addEventListener("abort", onAbort, { once: true });
     }
     const cleanup = () => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       if (idleTimer) clearTimeout(idleTimer);
       opts.signal?.removeEventListener("abort", onAbort);
       active.delete(child);
