@@ -42,7 +42,7 @@ export function StepBlock({ step }: { step: StepView }) {
   const who = step.agent ? `${partyLabel(step.agent)}${step.role ? ` (${roleLabel(step.role)})` : ""}` : "";
   const right = [formatDuration(step.durationSec), usageText(step.costUsd, step.tokens)].filter(Boolean).join(" · ");
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    <Box flexDirection="column" marginBottom={1} width="100%">
       <Box>
         <Box flexShrink={1}>
           <Text wrap="truncate-end">

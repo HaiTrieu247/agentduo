@@ -1,4 +1,5 @@
-import { isAbsolute, relative } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import type { Permission } from "../core/config.js";
 import type { Activity } from "../events.js";
 import type { SchemaName } from "./schema.js";
@@ -84,8 +85,24 @@ export function firstLine(text: string, max = 120): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
+function realpathOrSelf(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    try {
+      return join(realpathSync(dirname(path)), basename(path)); // a file that does not exist yet
+    } catch {
+      return path;
+    }
+  }
+}
+
+/** Repo-relative form of an absolute path, also when one side goes through a symlink (macOS /var → /private/var). */
 export function relPath(path: string, repo: string): string {
   if (!path || !isAbsolute(path)) return path;
-  const rel = relative(repo, path);
-  return rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel : path;
+  for (const [base, target] of [[repo, path], [realpathOrSelf(repo), realpathOrSelf(path)]] as const) {
+    const rel = relative(base, target);
+    if (rel && !rel.startsWith("..") && !isAbsolute(rel)) return rel;
+  }
+  return path;
 }

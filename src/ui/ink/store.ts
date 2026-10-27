@@ -19,7 +19,8 @@ type StaticContent =
   | { kind: "header"; runId: string; repo: string; version: string }
   | { kind: "step"; step: StepView }
   | { kind: "note"; text: string }
-  | { kind: "artifact"; title: string; body: string };
+  | { kind: "artifact"; title: string; body: string }
+  | { kind: "finish"; phase: string; runId: string; reportPath: string };
 export type StaticItem = { id: string } & StaticContent;
 
 export interface ViewState {
@@ -121,7 +122,10 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
     case "human.required":
       return { ...s, humanReview: e.review, current: null };
     case "run.finished":
-      return { ...s, finished: { phase: e.phase, reportPath: e.reportPath, exitCode: e.exitCode }, current: null, humanReview: null };
+      return {
+        ...push(s, { kind: "finish", phase: e.phase, runId: e.runId, reportPath: e.reportPath }),
+        finished: { phase: e.phase, reportPath: e.reportPath, exitCode: e.exitCode }, current: null, humanReview: null,
+      };
     default:
       return s;
   }

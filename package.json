@@ -9,16 +9,33 @@
     "agentduo": "dist/cli.js",
     "duo": "dist/cli.js"
   },
-  "files": ["dist", "schemas", "README.md", "README.vi.md", "LICENSE"],
-  "engines": { "node": ">=22.12" },
-  "keywords": ["codex", "claude", "claude-code", "ai-agents", "multi-agent", "code-review", "cli"],
+  "files": [
+    "dist",
+    "schemas",
+    "README.md",
+    "README.vi.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "keywords": [
+    "codex",
+    "claude",
+    "claude-code",
+    "ai-agents",
+    "multi-agent",
+    "code-review",
+    "cli"
+  ],
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc -p .",
     "test": "vitest run",
     "test:pack": "node scripts/pack-smoke.mjs",
     "smoke:real": "npm run build && node scripts/smoke-real.mjs",
-    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+    "prepublishOnly": "npm run typecheck && npm test && npm run build",
+    "demo:ui": "npm run build && node scripts/demo-ui.mjs"
   },
   "dependencies": {
     "ajv": "^8.20.0",

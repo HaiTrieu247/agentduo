@@ -78,6 +78,48 @@ describe("Ink components", () => {
     for (const line of frame.split("\n")) expect([...line].length).toBeLessThanOrEqual(40);
   });
 
+  it("right-aligns the step header to the full width even when every line is short", () => {
+    const s = play([
+      phase("PLAN_REVIEW", "plan_reviewer", "claude"),
+      { type: "message", message: { from: "claude", to: "codex", kind: "critique", headline: "approved", items: [] } },
+      { type: "step.completed", entry: entry("PLAN_REVIEW", "approved", "0 issue(s)"), durationSec: 1, costUsd: 0.01 },
+    ]);
+    const header = render(<Box width={60}><StepBlock step={lastStep(s)} /></Box>).lastFrame()!.split("\n")[0]!;
+    expect([...header].length).toBe(60);
+    expect(header.endsWith("1s · $0.01")).toBe(true);
+  });
+
+  it("prints finished steps across the full terminal width", async () => {
+    const bus = new EventBus();
+    const app = render(<App bus={bus} version="0.1.0" verbose={false} interactive={false} onStop={noop} onInterrupt={noop} onDecision={noop} views={() => []} readView={async () => null} />);
+    bus.emit(phase("PLAN_REVIEW", "plan_reviewer", "claude"));
+    bus.emit({ type: "message", message: { from: "claude", to: "codex", kind: "critique", headline: "approved", items: [] } });
+    bus.emit({ type: "step.completed", entry: entry("PLAN_REVIEW", "approved", "0 issue(s)"), durationSec: 1, costUsd: 0.01 });
+    await wait();
+    const header = app.frames.join("\n").split("\n").find((l) => l.includes("PLAN_REVIEW r1"))!;
+    expect(header.endsWith("1s · $0.01")).toBe(true);
+    expect([...header].length).toBe(100);
+    app.unmount();
+  });
+
+  it("ends with a line that says how the run finished and what to do next", async () => {
+    const cases: Array<[DuoEvent, string[]]> = [
+      [{ type: "run.finished", runId: "r1", phase: "DONE", reportPath: "/runs/r1/report.md", exitCode: 0 }, ["DONE", "/runs/r1/report.md"]],
+      [{ type: "run.finished", runId: "r1", phase: "INTERRUPTED", reportPath: "/x", exitCode: 130 }, ["Stopped", "duo resume r1"]],
+      [{ type: "run.finished", runId: "r1", phase: "HUMAN_REVIEW", reportPath: "/x", exitCode: 2 }, ["duo resume r1 --decision resume|revise|abort"]],
+      [{ type: "run.finished", runId: "r1", phase: "ABORTED", reportPath: "/x", exitCode: 3 }, ["Aborted"]],
+    ];
+    for (const [event, texts] of cases) {
+      const bus = new EventBus();
+      const app = render(<App bus={bus} version="0.1.0" verbose={false} interactive={false} onStop={noop} onInterrupt={noop} onDecision={noop} views={() => []} readView={async () => null} />);
+      bus.emit(event);
+      await wait();
+      const output = app.frames.join("\n");
+      for (const text of texts) expect(output, `${event.type === "run.finished" ? event.phase : ""}: ${text}`).toContain(text);
+      app.unmount();
+    }
+  });
+
   it("shows the live footer with pipeline, agent, activities and cost", async () => {
     const bus = new EventBus();
     const app = render(<App bus={bus} version="0.1.0" verbose={false} interactive={false} onStop={noop} onInterrupt={noop} onDecision={noop} views={() => []} readView={async () => null} />);

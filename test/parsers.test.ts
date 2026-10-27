@@ -1,8 +1,10 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ClaudeParser } from "../src/agents/claude.js";
 import { CodexParser, unwrapShell } from "../src/agents/codex.js";
 import { extractJson, type ParsedEvent, type StreamParser } from "../src/agents/types.js";
+import { tempDir } from "./helpers/tmp.js";
 
 const fixture = (name: string) =>
   readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8").split("\n").filter(Boolean);
@@ -80,6 +82,21 @@ describe("ClaudeParser", () => {
       "command:denied:Bash  git push", "edit:error:Edit  src/x.ts", "usage:0.5:",
     ]);
     expect(events[0]).toMatchObject({ activity: { added: 3, removed: 2 } });
+  });
+  it("shows repo-relative paths through symlinks and ignores the trailing newline when counting lines", () => {
+    const t = tempDir();
+    try {
+      const real = join(t.path, "real");
+      mkdirSync(join(real, "src"), { recursive: true });
+      symlinkSync(real, join(t.path, "link"));
+      const p = new ClaudeParser(real);
+      const events = p.feed(JSON.stringify({ type: "assistant", uuid: "a", message: { content: [
+        { type: "tool_use", id: "w", name: "Write", input: { file_path: join(t.path, "link", "src", "new.ts"), content: "a\nb\n" } },
+      ] } }));
+      expect(events[0]).toMatchObject({ activity: { label: "Write src/new.ts", added: 2 } });
+    } finally {
+      t.cleanup();
+    }
   });
 });
 

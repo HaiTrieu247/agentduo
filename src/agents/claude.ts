@@ -8,7 +8,8 @@ import {
 } from "./types.js";
 
 const DENIAL_RE = /permission|denied|haven't granted|not allowed/i;
-const countLines = (text: unknown): number => (typeof text === "string" && text.length ? text.split("\n").length : 0);
+const countLines = (text: unknown): number =>
+  typeof text === "string" && text.length ? text.split("\n").length - (text.endsWith("\n") ? 1 : 0) : 0;
 
 type Block = Record<string, unknown> & { type?: unknown };
 
