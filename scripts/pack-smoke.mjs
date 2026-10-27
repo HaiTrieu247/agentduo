@@ -26,7 +26,7 @@ try {
   writeFileSync(join(repo, "README.md"), "x\n");
   run("git", ["add", "-A"], { cwd: repo });
   run("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], { cwd: repo });
-  const doctor = spawnSync(join(bin, "duo"), ["doctor", "--repo", repo], { encoding: "utf8" });
+  const doctor = spawnSync(join(bin, "duo"), ["doctor", "--dir", repo], { encoding: "utf8" });
   if (!doctor.stdout.includes("✓ schema plan")) throw new Error(`doctor output is missing the schema check:\n${doctor.stdout}${doctor.stderr}`);
   console.log(`pack smoke OK: ${filename}`);
 } finally {

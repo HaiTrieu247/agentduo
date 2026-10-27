@@ -43,5 +43,5 @@ writeFileSync(join(dir, "scenario.json"), JSON.stringify({
   code_reviewer: [{ activities: [{ command: "git diff" }], sleep: 1500, output: { status: "approved", approved: true, reviewed_commit: "$SNAPSHOT", summary: "good", findings: [], resolved_findings: [] } }],
 }));
 const env = { ...process.env, FAKE_SCENARIO: join(dir, "scenario.json"), FAKE_COUNTS: join(dir, "counts.json"), FAKE_LOG: join(dir, "calls.jsonl") };
-const result = spawnSync(process.execPath, [join(root, "dist", "cli.js"), "Make app.txt fixed", "--repo", repo, ...process.argv.slice(2)], { stdio: "inherit", env });
+const result = spawnSync(process.execPath, [join(root, "dist", "cli.js"), "Make app.txt fixed", "--dir", repo, ...process.argv.slice(2)], { stdio: "inherit", env });
 process.exitCode = result.status ?? 1;

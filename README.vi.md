@@ -1,76 +1,65 @@
 # agentduo (tiếng Việt)
 
-Hai agent lập trình chạy chung một vòng lặp. **Codex** lập kế hoạch và review. **Claude Code** phản biện kế hoạch rồi implement. Bộ test của chính dự án đóng vai trọng tài. Giao diện terminal hiển thị live từng hành động của mỗi agent và những gì hai agent chuyển cho nhau.
+agentduo là kênh giao tiếp giữa hai agent lập trình. **Codex** lập kế hoạch và review. **Claude Code** phản biện kế hoạch rồi implement. agentduo chuyển các thông điệp có cấu trúc giữa hai bên, điều phối vòng lặp, và hiển thị live trên terminal từng hành động của mỗi agent cùng những gì hai agent chuyển cho nhau.
 
-## Cách hoạt động
+agentduo **không có luật riêng**. Quyền, sandbox và quy ước đều lấy từ config của từng CLI và từ `AGENTS.md`/`CLAUDE.md` của repo.
 
-1. **Lập kế hoạch và tranh luận.** Codex viết plan gồm mục tiêu, phạm vi, các bước, acceptance criteria và rủi ro. Claude kiểm tra xem plan có khả thi trong codebase của bạn không. Codex sửa plan cho đến khi Claude chấp thuận, rồi chốt bản cuối.
-2. **Implement và review.** Claude implement theo plan. agentduo tự chạy các quality gate (test, lint, typecheck). Codex review diff cùng kết quả gate, Claude sửa theo các finding, lặp lại cho đến `DONE`.
-
-Hai agent không nói chuyện trực tiếp với nhau. agentduo chuyển JSON đã kiểm tra theo schema giữa hai bên, và việc hai agent đồng ý với nhau không được tính là bằng chứng. `DONE` cần đủ cả ba điều kiện:
-- Codex approve;
-- mọi gate bắt buộc đều đạt;
-- không còn finding nào ở mức blocking.
-
-Khi vượt giới hạn, vi phạm quy tắc an toàn hoặc agent gặp lỗi, run dừng ở `HUMAN_REVIEW` và hỏi bạn.
-
-## Yêu cầu và cài đặt
-
-- Node.js ≥ 22.12 và git. Dự án phải là một git repository.
-- Codex CLI (`npm i -g @openai/codex`, sau đó `codex login`) và Claude Code. Nếu Claude Code chỉ được cài qua extension VS Code, Cursor hoặc Windsurf, agentduo tự tìm binary đi kèm.
+## Cài đặt và bắt đầu
 
 ```bash
 npm i -g agentduo
-cd my-project
-duo init      # tạo .agentduo/config.yaml (gate tự đoán) và .agentduo/.gitignore (không đưa dữ liệu run vào git)
-duo doctor    # kiểm tra môi trường, không gọi model
+cd my-project            # hoặc bất kỳ thư mục con nào: thư mục đó là workspace
+duo init                 # tạo .agentduo/config.yaml (mọi mục đều tuỳ chọn) và .agentduo/.gitignore
+duo doctor               # kiểm tra CLI và config, không gọi model
 duo "Thêm xác thực JWT với refresh token"
 ```
 
-`agentduo` là cùng một lệnh với `duo`. Hãy dùng `agentduo` nếu trên máy bạn đã có một công cụ khác tên là `duo`.
+Yêu cầu: Node.js ≥ 22.12, git, Codex CLI và Claude Code. Workspace phải nằm trong một git repo. Nếu chưa có, `duo init` sẽ hỏi có muốn `git init` không.
+
+## Workspace
+
+`duo` làm việc ở thư mục bạn gọi nó, hoặc ở `--dir PATH`:
+- hai agent chạy ở đó;
+- `.agentduo/` nằm ở đó;
+- diff gửi cho reviewer chỉ gồm thay đổi trong thư mục đó.
+
+Nếu agent sửa file ngoài workspace (trong cùng repo), agentduo cảnh báo trên màn hình và trong report, nhưng không dừng run.
+
+## Quyền
+
+agentduo chỉ truyền các flag giao thức. Với Claude, nó có thêm `--permission-prompts none`, flag này không cấp quyền gì.
+
+- **Claude Code** lấy quyền từ settings của bạn. Khi chạy không tương tác, Claude chỉ sửa được file nếu settings cho phép, ví dụ `"permissions": { "defaultMode": "acceptEdits" }`.
+- **Codex** lấy quyền từ `~/.codex/config.toml`.
+- **Muốn đặt riêng cho từng vai trò** khi chạy qua agentduo, dùng `role_args`:
+
+```yaml
+claude:
+  role_args:
+    implementer: [--permission-mode, acceptEdits]
+codex:
+  role_args:
+    code_reviewer: [--sandbox, read-only]
+```
+
+agentduo không chặn gì. Nó chỉ cảnh báo khi agent lập kế hoạch hoặc review sửa file, và khi có file ngoài workspace bị sửa. agentduo không bao giờ commit hay push.
 
 ## Lệnh
 
 | Lệnh | Tác dụng |
 |---|---|
-| `duo "<task>"` | Tạo run mới (`--task-file`, `--allow-dirty`) |
-| `duo resume [id] [--decision resume\|revise\|abort --note "..."]` | Chạy tiếp, hoặc trả lời một quyết định đang chờ |
+| `duo "<task>"` | Tạo run mới (`--task-file`; task bắt đầu bằng `-` thì gõ `duo -- "-x …"`) |
+| `duo resume [id]` | Chạy tiếp với config lúc run bắt đầu (thêm `--reload-config` để dùng config hiện tại); `--decision resume\|revise\|abort [--note "..."]` để trả lời quyết định đang chờ |
 | `duo status`, `duo list` | Xem tiến độ |
 | `duo doctor`, `duo init` | Kiểm tra môi trường, tạo config |
 
 Giao diện:
-- **Trong terminal:** giao diện live. Phím `v` bật/tắt chi tiết, `q` dừng sau bước hiện tại, `Ctrl-C` dừng ngay (run vẫn resume được).
-- **Log dạng dòng:** dùng khi có `--plain`, khi `CI=true`, hoặc khi stdout không phải TTY.
+- **Trong terminal:** giao diện live. Phím `v` bật/tắt chi tiết, `q` dừng sau bước hiện tại, `Ctrl-C` dừng ngay. Tại menu quyết định, `Ctrl-C` nghĩa là "Để sau".
+- **Log dạng dòng:** khi có `--plain`, khi chạy trong CI, khi stdout không phải TTY, hoặc khi chạy nền (`duo … &`).
 
-agentduo không bao giờ commit hay push. Thay đổi được để lại trong working tree cho bạn review rồi tự commit.
+## Quality gates
 
-## Khi run cần bạn quyết định
-
-Trong terminal, agentduo hiện lý do kèm menu:
-- Resume;
-- Revise (kèm ghi chú);
-- xem plan cuối, review gần nhất, phản biện plan hoặc diff stat;
-- Abort;
-- Để sau.
-
-Ở chế độ plain, run thoát với exit code 2, và bạn trả lời bằng `duo resume --decision …`. Tác dụng của `resume` theo từng lý do được liệt kê trong [README.md](README.md#when-a-run-needs-you).
-
-## An toàn
-
-- **Quyền được áp ở mức CLI:**
-  - Codex chạy `--sandbox read-only`.
-  - Claude khi phản biện chỉ có các tool đọc.
-  - Claude khi implement dùng allowlist/denylist (chặn commit, push, `rm -rf`, `curl`, truy cập web).
-- **agentduo tự kiểm chứng thêm:**
-  - Snapshot toàn bộ working tree vào `refs/agentduo/...` mà không đụng vào index, HEAD hay branch của bạn.
-  - Trước và sau mỗi bước của agent và mỗi lần chạy gate, so sánh:
-    - working tree;
-    - các file bị git ignore khớp `protected_paths` (ví dụ `.env` đã ignore);
-    - `.git/config` và `.git/hooks/*`;
-    - `plan.final.md` và `review.json` của run.
-  - Chặn mọi commit của agent, mọi thay đổi trên `protected_paths`, và giới hạn số file bị xoá. Điều này vẫn áp dụng khi agent lỗi hoặc bị ngắt giữa chừng, và áp dụng cả với thay đổi do chính gate script gây ra.
-  - Mặc định từ chối chạy khi working tree có thay đổi chưa commit, và mỗi repo chỉ cho một run chạy cùng lúc.
-  - **Giới hạn:** file bị ignore mà không khớp `protected_paths` thì không được theo dõi, và agent vẫn đọc được file.
+Gate là tuỳ chọn. Mặc định không có gate: Claude tự chạy test theo config của nó, và run DONE khi Codex approve. Nếu bạn khai báo `gates`, agentduo chạy chúng sau mỗi vòng implement và chuyển kết quả cho Codex. `duo init` gợi ý sẵn các gate tìm được, dưới dạng comment.
 
 ## Exit code
 
@@ -82,4 +71,9 @@ Trong terminal, agentduo hiện lý do kèm menu:
 | 3 | đã huỷ |
 | 130 | đã dừng (resume được) |
 
-Hỗ trợ macOS và Linux. Windows ở mức thử nghiệm.
+## Xử lý sự cố
+
+- **Mọi lần sửa file đều bị từ chối:** cho phép sửa trong settings của Claude Code, hoặc thêm `claude.role_args.implementer: [--permission-mode, acceptEdits]`.
+- **Terminal hiển thị lạ sau khi agentduo bị `kill -9`:** gõ `reset`.
+- **Giảm chi phí:** đặt `claude.args: [--strict-mcp-config, --no-session-persistence]` để agentduo không nạp các MCP server của bạn.
+- **Windows** ở mức thử nghiệm.

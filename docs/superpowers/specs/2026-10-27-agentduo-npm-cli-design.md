@@ -308,7 +308,7 @@ Dùng vitest. Lệnh `npm test` chạy unit, e2e và UI; smoke test đóng gói 
 ## 10. Phát hành và thay thế bản Python
 
 - **`package.json`:**
-  - `"name": "agentduo"`, `"version": "0.1.0"`, `"type": "module"`, `"engines": { "node": ">=20" }`;
+  - `"name": "agentduo"`, `"version": "0.1.0"`, `"type": "module"`, `"engines": { "node": ">=22.12" }`;
   - `"bin": { "agentduo": "dist/cli.js", "duo": "dist/cli.js" }`;
   - `"files": ["dist", "schemas", "README.md", "README.vi.md", "LICENSE"]`.
 - `README.md` viết tiếng Anh cho trang npm. `README.vi.md` là bản tiếng Việt, cập nhật từ README hiện tại.
