@@ -39,6 +39,8 @@ export function startInk(o: InkSessionOptions): InkSession {
   return {
     decider,
     close: async () => {
+      // Events emitted just before close (run.finished) are still pending in React; let them commit first.
+      await new Promise((resolve) => setTimeout(resolve, 50));
       instance.unmount();
       await instance.waitUntilExit().catch(() => undefined);
     },
