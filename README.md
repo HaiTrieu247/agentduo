@@ -89,6 +89,15 @@ Outside the chat, `duo --accept-edits "<task>"` does what `/edits auto` does.
 
 `duo "<task>"` still runs a single task and exits; that is the form for scripts and CI.
 
+## VS Code extension
+
+`extensions/vscode` holds the same chat as a VS Code sidebar. It has a timeline of both agents, the HUMAN_REVIEW and
+permission prompts above the composer, and buttons that open the plan, review and report, plus the run's changes in
+the diff editor. It runs this package's engine with your Node (≥ 22.12) and shares the configuration, runs and lock with
+`duo`, so a run started in one can be resumed in the other. It is not on the Marketplace yet. Build a VSIX with
+`npm run package:vscode` and install it with `code --install-extension extensions/vscode/agentduo-vscode-*.vsix`.
+See [extensions/vscode/README.md](extensions/vscode/README.md) for requirements, usage and current limits.
+
 ## The workspace
 
 `duo` works in the directory you call it from, or in `--dir PATH`:
@@ -235,7 +244,15 @@ npm run typecheck
 npm run test:pack    # build, pack, install into a temp prefix, run the binaries
 npm run demo:ui      # watch the live UI with scripted fake agents (free)
 npm run smoke:real   # REAL agents on a demo repo — costs money
+
+npm run typecheck:vscode   # the VS Code extension (F5 in VS Code runs it in a development host)
+npm run build:vscode       # extensions/vscode/dist (host, webview) and runtime/ (engine worker + schemas)
+npm run test:vscode        # smoke test in a downloaded VS Code; on Linux run it under xvfb-run
+npm run package:vscode     # extensions/vscode/agentduo-vscode-<version>.vsix (local, not published)
+npm run test:pack:vscode   # package, check the VSIX contents, run its worker outside the checkout
 ```
+
+The extension's design notes are in `docs/superpowers/specs/2026-10-28-agentduo-vscode-design.md`.
 
 ## License
 

@@ -17,6 +17,21 @@ const ROLE_LABELS: Record<Role, string> = {
 };
 const STATUS_ICONS: Record<Activity["status"], string> = { running: "…", ok: "✓", error: "✗", denied: "⊘" };
 
+const RESUME_HINTS: Record<string, string> = {
+  max_planning_rounds: "implement the latest plan as-is",
+  plan_ready: "start implementation",
+  max_review_rounds: "start another fix round",
+  critical_finding: "start another fix round",
+  gates_failing: "start another fix round",
+  implementer_blocked: "re-run this implementation round",
+  // Reasons only agentduo 0.1 runs can be waiting on; kept so those runs can still be resumed from the prompt.
+  dirty_worktree: "re-run this implementation round",
+  guard_violation: "accept the changes and run the gates",
+};
+
+/** What "resume" does for a run waiting with this reason. */
+export const resumeHint = (reason: string): string => RESUME_HINTS[reason] ?? "re-run the step that stopped";
+
 export const partyLabel = (p?: Party | string): string => (p ? PARTY_LABELS[p as Party] ?? p : "");
 export const roleLabel = (r?: Role): string => (r ? ROLE_LABELS[r] : "");
 export const statusIcon = (s: Activity["status"]): string => STATUS_ICONS[s];

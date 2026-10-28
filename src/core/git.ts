@@ -146,6 +146,23 @@ export class Git {
     return changes.map(([status, path]) => [status, posix.relative(prefix, path)]);
   }
 
+  /**
+   * A file's content in a snapshot tree, by its path relative to the workspace (as nameStatus reports it);
+   * null when the tree has no such file. Snapshot trees cover the whole repository, hence the prefix.
+   */
+  async readBlob(tree: string, path: string): Promise<Buffer | null> {
+    const prefix = await this.prefix();
+    const spec = `${tree}:${prefix ? `${prefix}/` : ""}${path}`;
+    if ((await this.run(["cat-file", "-e", spec], { check: false })).code !== 0) return null;
+    if ((await this.run(["cat-file", "-t", spec])).stdout.trim() !== "blob") return null;
+    return new Promise((resolvePromise, reject) => {
+      execFile("git", ["cat-file", "blob", spec], { cwd: this.dir, encoding: "buffer", maxBuffer: 512 * 1024 * 1024 }, (error, stdout, stderr) => {
+        if (error) reject(new GitError(`git cat-file blob ${spec} failed: ${stderr.toString().trim() || error.message}`));
+        else resolvePromise(stdout);
+      });
+    });
+  }
+
   async diff(a: string, b: string): Promise<string> {
     return (await this.run(["diff", "--no-color", "--relative", a, b, "--", "."])).stdout;
   }

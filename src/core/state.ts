@@ -111,11 +111,14 @@ export function ensureRunsDir(runsDir: string): void {
   if (!existsSync(ignore)) writeFileSync(ignore, "*\n");
 }
 
+export const workspaceBusy = (pid: number): string =>
+  `another agentduo run is active in this workspace (pid ${pid}); wait for it to finish or stop it first`;
+
 /** One active run per workspace: concurrent runs in one directory would review each other's edits. */
 export function acquireWorkspaceLock(runsDir: string): () => void {
   ensureRunsDir(runsDir);
   const path = join(runsDir, ".lock");
-  acquireLock(path, (pid) => `another agentduo run is active in this workspace (pid ${pid}); wait for it to finish or stop it first`);
+  acquireLock(path, workspaceBusy);
   return () => {
     try {
       unlinkSync(path);
@@ -123,6 +126,16 @@ export function acquireWorkspaceLock(runsDir: string): () => void {
       // already removed
     }
   };
+}
+
+/** The live process holding the workspace lock, or null; only looks, never takes or reclaims it. */
+export function workspaceLockHolder(runsDir: string): number | null {
+  try {
+    const pid = Number(readFileSync(join(runsDir, ".lock"), "utf8").trim());
+    return pid && pidAlive(pid) ? pid : null;
+  } catch {
+    return null;
+  }
 }
 
 function pidAlive(pid: number): boolean {

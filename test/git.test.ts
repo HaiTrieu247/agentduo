@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Git } from "../src/core/git.js";
@@ -97,6 +97,35 @@ describe("Git", () => {
     writeFileSync(join(repo, "pkg", "a.txt"), "a2\n");
     expect(await g.nameStatus(base.tree, (await g.snapshot()).tree)).toEqual([["M", "a.txt"]]);
     expect(git(repo, "ls-files", "-u")).toContain("README.md");
+  });
+
+  it("reads a file from a snapshot by its workspace path, without a shell", async () => {
+    const { repo } = newRepo();
+    const ws = join(repo, "gói pkg");
+    mkdirSync(join(ws, "sub dir"), { recursive: true });
+    writeFileSync(join(ws, "tệp $(touch pwned).txt"), "unicode\n");
+    writeFileSync(join(ws, "sub dir", "bin.dat"), Buffer.from([0, 1, 2, 255]));
+    const g = new Git(ws);
+    const snap = await g.snapshot();
+    expect((await g.readBlob(snap.tree, "tệp $(touch pwned).txt"))?.toString()).toBe("unicode\n");
+    expect(await g.readBlob(snap.tree, "sub dir/bin.dat")).toEqual(Buffer.from([0, 1, 2, 255]));
+    expect(await g.readBlob(snap.tree, "missing.txt")).toBeNull();
+    expect(await g.readBlob(snap.tree, "sub dir")).toBeNull(); // a directory is not a file
+    // Snapshot trees cover the whole repository; a workspace path is read below the workspace's prefix.
+    expect(await g.readBlob(snap.tree, "README.md")).toBeNull();
+    expect((await new Git(repo).readBlob(snap.tree, "README.md"))?.toString()).toBe("demo\n");
+    expect(existsSync(join(ws, "pwned"))).toBe(false);
+  });
+
+  it("reads snapshots of a repository with no commit yet", async () => {
+    const t = tempDir();
+    dirs.push(t);
+    git(t.path, "init", "-q", "-b", "main");
+    writeFileSync(join(t.path, "a.txt"), "a\n");
+    const g = new Git(t.path);
+    expect(await g.head()).toBeNull();
+    const snap = await g.snapshot();
+    expect((await g.readBlob(snap.tree, "a.txt"))?.toString()).toBe("a\n");
   });
 
   it("knows HEAD, branch and whether a path is a repo or ignored", async () => {

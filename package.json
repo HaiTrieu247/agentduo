@@ -37,6 +37,11 @@
     "typecheck": "tsc -p .",
     "test": "vitest run",
     "test:pack": "node scripts/pack-smoke.mjs",
+    "typecheck:vscode": "tsc -p extensions/vscode",
+    "build:vscode": "node scripts/build-vscode.mjs",
+    "test:vscode": "node scripts/test-vscode.mjs",
+    "package:vscode": "node scripts/build-vscode.mjs --package",
+    "test:pack:vscode": "node scripts/vscode-pack-smoke.mjs",
     "smoke:real": "npm run build && node scripts/smoke-real.mjs",
     "prepublishOnly": "npm run typecheck && npm test && npm run build",
     "demo:ui": "npm run build && node scripts/demo-ui.mjs"
@@ -51,6 +56,9 @@
   "devDependencies": {
     "@types/node": "^26.6.5",
     "@types/react": "^19.3.0",
+    "@types/vscode": "~1.95.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.9.2",
     "ink-testing-library": "^4.0.0",
     "tsup": "^9.0.0",
     "typescript": "^7.0.2",

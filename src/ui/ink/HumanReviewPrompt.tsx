@@ -1,6 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import { useState } from "react";
 import type { Decision, HumanReview } from "../../events.js";
+import { resumeHint } from "../format.js";
 
 export type ViewKind = "plan" | "review" | "feedback" | "diffstat";
 
@@ -9,18 +10,6 @@ export const VIEWS: Record<ViewKind, { label: string; title: string }> = {
   review: { label: "View last review", title: "Last review" },
   feedback: { label: "View plan feedback", title: "Plan feedback" },
   diffstat: { label: "View diff stat", title: "Diff stat" },
-};
-
-const RESUME_HINTS: Record<string, string> = {
-  max_planning_rounds: "implement the latest plan as-is",
-  plan_ready: "start implementation",
-  max_review_rounds: "start another fix round",
-  critical_finding: "start another fix round",
-  gates_failing: "start another fix round",
-  implementer_blocked: "re-run this implementation round",
-  // Reasons only agentduo 0.1 runs can be waiting on; kept so those runs can still be resumed from the prompt.
-  dirty_worktree: "re-run this implementation round",
-  guard_violation: "accept the changes and run the gates",
 };
 
 interface Option {
@@ -33,7 +22,7 @@ export function HumanReviewPrompt({ review, views, onDecision, onView }: {
   review: HumanReview; views: ViewKind[]; onDecision(d: Decision | "defer"): void; onView(kind: ViewKind): void;
 }) {
   const options: Option[] = [
-    { key: "resume", label: "Resume", hint: RESUME_HINTS[review.reason] ?? "re-run the step that stopped" },
+    { key: "resume", label: "Resume", hint: resumeHint(review.reason) },
     { key: "revise", label: "Revise", hint: "re-plan with your note" },
     ...views.map((kind) => ({ key: `view:${kind}`, label: VIEWS[kind].label, hint: "" })),
     { key: "abort", label: "Abort", hint: "end the run" },

@@ -74,6 +74,28 @@ const HELP = [
 
 const OUTCOMES: Partial<Record<RunState["phase"], string>> = { DONE: "done", ABORTED: "aborted", HUMAN_REVIEW: "waiting for a decision" };
 
+/** The latest run of this workspace when it is stopped or waiting for a decision; read-only, so no lock is needed. */
+export function latestResumable(runsDir: string, workspace: string): RunStore | null {
+  try {
+    const store = RunStore.open(runsDir);
+    const st = store.loadState();
+    if (st.phase === "DONE" || st.phase === "ABORTED") return null;
+    if (st.workspace && resolve(st.workspace) !== resolve(workspace)) return null;
+    return store;
+  } catch {
+    return null;
+  }
+}
+
+/** What the chat says on opening about a run an earlier session left stopped or waiting, or null. */
+export function resumeHint(runsDir: string, workspace: string): string | null {
+  const store = latestResumable(runsDir, workspace);
+  if (!store) return null;
+  const st = store.loadState();
+  const where = st.phase === "HUMAN_REVIEW" ? "is waiting for your decision" : `stopped during ${st.inProgress?.phase ?? st.phase}`;
+  return `Run ${st.taskId} (${firstLine(st.task, 60)}) ${where}. Type /resume to continue it.`;
+}
+
 /** One chat session in one workspace: every message becomes a run, a note for the running one, or a command. */
 export class Chat {
   private current: { store: RunStore; workflow: Workflow; cfg: ConfigData; done: Promise<void> } | null = null;
@@ -101,11 +123,8 @@ export class Chat {
   /** Points at a run an earlier session left stopped or waiting. */
   async greet(): Promise<void> {
     this.o.ui.setEdits(editMode(this.cfg));
-    const store = this.latestResumable();
-    if (!store) return;
-    const st = store.loadState();
-    const where = st.phase === "HUMAN_REVIEW" ? "is waiting for your decision" : `stopped during ${st.inProgress?.phase ?? st.phase}`;
-    this.o.ui.info(`Run ${st.taskId} (${firstLine(st.task, 60)}) ${where}. Type /resume to continue it.`);
+    const hint = resumeHint(this.o.runsDir, this.o.workspace);
+    if (hint) this.o.ui.info(hint);
   }
 
   async submit(raw: string): Promise<void> {
@@ -302,18 +321,6 @@ export class Chat {
     return false;
   }
 
-  private latestResumable(): RunStore | null {
-    try {
-      const store = RunStore.open(this.o.runsDir);
-      const st = store.loadState();
-      if (st.phase === "DONE" || st.phase === "ABORTED") return null;
-      if (st.workspace && resolve(st.workspace) !== resolve(this.o.workspace)) return null;
-      return store;
-    } catch {
-      return null;
-    }
-  }
-
   /** The run commands talk about: the one going, the stopped one, or the last one. */
   private focus(): RunStore | null {
     return this.current?.store ?? this.paused ?? this.last;
@@ -357,7 +364,7 @@ export class Chat {
           ui.info("A run is going already.");
           return;
         }
-        const target = this.paused ?? this.latestResumable();
+        const target = this.paused ?? latestResumable(this.o.runsDir, this.o.workspace);
         if (!target) {
           ui.info("Nothing to resume.");
           return;

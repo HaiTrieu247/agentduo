@@ -1,0 +1,13 @@
+# The VSIX holds only what runs: the host and webview bundles, the engine worker with its schemas, the icon,
+# the manifest, README and LICENSE. Everything else (sources, tests, run data, fixtures) stays out.
+**
+!package.json
+!README.md
+!LICENSE
+!media/agentduo.svg
+!dist/extension.cjs
+!dist/webview/main.js
+!dist/webview/styles.css
+!runtime/package.json
+!runtime/worker.js
+!runtime/schemas/*.schema.json

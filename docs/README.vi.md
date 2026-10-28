@@ -33,6 +33,27 @@ Thay đổi áp dụng cho các run mới, và cho run đang chạy kể từ l�
 
 `duo "<task>"` vẫn chạy một việc rồi thoát; đây là cách dùng cho script và CI.
 
+## Extension VS Code
+
+`extensions/vscode` đưa chat này vào sidebar của VS Code. Sidebar có timeline của hai agent, phần trả lời HUMAN_REVIEW và quyền của Claude ngay trên ô nhập, cùng các nút mở plan, review, report và xem thay đổi của run bằng diff editor. Extension chạy engine của agentduo bằng Node của bạn (≥ 22.12). Nó dùng chung cấu hình, thư mục run và lock với `duo`, nên run bắt đầu ở bên này có thể tiếp tục ở bên kia.
+
+Extension chưa có trên Marketplace. Để cài bản build tại máy:
+
+```sh
+npm ci
+npm run package:vscode
+code --install-extension extensions/vscode/agentduo-vscode-*.vsix
+```
+
+Không cần cài gói npm `agentduo`. Máy chỉ cần Node, git, Codex CLI và Claude Code đã đăng nhập. Nếu VS Code mở từ Dock không thấy đúng `PATH`, đặt `agentduo.nodePath` trong settings của VS Code, hoặc `codex.bin` / `claude.bin` trong `.agentduo/config.yaml`.
+
+- Mở sidebar không chạy gì cả. Run chỉ bắt đầu khi bạn gửi task. Với workspace nhiều thư mục, bạn chọn thư mục trước (**agentduo: Choose Workspace Folder**).
+- Enter để gửi, Shift+Enter để xuống dòng. Khi agent đang chạy, nội dung bạn gửi là ghi chú cho bước kế tiếp. **Stop** (hoặc Esc trong ô nhập) dừng bước hiện tại; gửi lại sẽ chạy lại bước đó. Các lệnh `/new`, `/resume`, `/edits`, `/claude …`, `/codex …` giống hệt trong terminal.
+- Reload cửa sổ hay đóng VS Code sẽ dừng bước đang chạy. Quyết định đang chờ được hoãn, yêu cầu quyền chưa trả lời bị từ chối, và run vẫn tiếp tục được. Extension không bao giờ tự chạy lại task; nó hiện nút **Resume** để bạn bấm.
+- Bản đầu chỉ hỗ trợ VS Code desktop với thư mục local. Chưa hỗ trợ Remote SSH, WSL, container hay VS Code web.
+
+Chi tiết xem [extensions/vscode/README.md](../extensions/vscode/README.md). Khi phát triển, mở repo trong VS Code rồi nhấn F5 (**Run agentduo extension**).
+
 Yêu cầu: Node.js ≥ 22.12, git, Codex CLI và Claude Code. Workspace phải nằm trong một git repo. Nếu chưa có, `duo init` sẽ hỏi có muốn `git init` không.
 
 ## Workspace

@@ -1,15 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { readFileSync, realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Command, CommanderError, Option } from "commander";
 import { killAllActive } from "./agents/process.js";
 import { Chat, newRun } from "./chat.js";
 import { settings } from "./core/settings.js";
-import { resolveBinary } from "./agents/resolve.js";
-import { configFromSaved, ConfigError, defaultConfig, loadConfig, validateConfig, type ConfigData } from "./core/config.js";
-import { runDoctor } from "./core/doctor.js";
+import { configFromSaved, ConfigError, type ConfigData } from "./core/config.js";
+import { diagnose, EnvironmentError, prepareEnvironment, runnableProblem, type WorkspaceEnv } from "./core/environment.js";
 import { Git } from "./core/git.js";
 import { initRepo } from "./core/init.js";
 import type { Review } from "./core/outputs.js";
@@ -123,38 +121,24 @@ class CliExit extends Error {
   }
 }
 
-interface Env { workspace: string; isRepo: boolean; git: Git; cfg: ConfigData; sources: string[]; runsDir: string }
-
-function expandHome(path: string, env: NodeJS.ProcessEnv): string {
-  return path === "~" || path.startsWith("~/") ? join(env.HOME || homedir(), path.slice(1)) : path;
-}
+type Env = WorkspaceEnv;
 
 /** The workspace is --dir or the current directory (never the repository root above it); config is loaded unvalidated. */
 async function prepare(io: CliIO, opts: CommonOptions): Promise<Env> {
-  const workspace = resolve(io.cwd, opts.dir ?? ".");
-  if (!existsSync(workspace)) throw new CliExit(EXIT.ERROR, `no such directory: ${workspace}`);
-  if (!statSync(workspace).isDirectory()) throw new CliExit(EXIT.ERROR, `not a directory: ${workspace}`);
-  const git = new Git(workspace);
-  const isRepo = await git.isRepo();
-  const loaded = loadConfig({ dir: workspace, configPath: opts.config ? resolve(io.cwd, opts.config) : undefined, env: io.env, validate: false });
-  for (const warning of loaded.warnings) io.stderr.write(`warning: ${warning}\n`);
-  // An unusable runs_dir is rejected by validateConfig before a run; status and list fall back to the default.
-  const configured = loaded.data.paths?.runs_dir;
-  const runs = expandHome(typeof configured === "string" && configured ? configured : defaultConfig().paths.runs_dir, io.env);
-  const runsDir = isAbsolute(runs) ? runs : join(workspace, runs);
-  return { workspace, isRepo, git, cfg: loaded.data, sources: loaded.sources, runsDir };
+  let env: Env;
+  try {
+    env = await prepareEnvironment({ cwd: io.cwd, dir: opts.dir, configPath: opts.config, env: io.env });
+  } catch (e) {
+    if (e instanceof EnvironmentError) throw new CliExit(EXIT.ERROR, e.message);
+    throw e;
+  }
+  for (const warning of env.warnings) io.stderr.write(`warning: ${warning}\n`);
+  return env;
 }
 
-/** A resumed run keeps the config it started with, so a fix made in config.yaml needs --reload-config. */
-const SAVED_CONFIG_HINT = "this run uses the config it started with; pass --reload-config to apply changes to config.yaml";
-
 function requireRunnable(env: Env, cfg: ConfigData, source: string, io: CliIO, saved = false): void {
-  if (!env.isRepo) throw new CliExit(EXIT.ERROR, `${env.workspace} is not inside a git repository (run 'git init' here, or 'duo init' to be asked)`);
-  validateConfig(cfg, source || undefined);
-  const missing = (["codex", "claude"] as const).filter((b) => Object.values(cfg.agents).includes(b) && !resolveBinary(cfg[b].bin, b, io.env));
-  if (missing.length) {
-    throw new CliExit(EXIT.ERROR, `CLI not found: ${missing.join(", ")}. Install it or set '<backend>.bin' in the config${saved ? ` (${SAVED_CONFIG_HINT})` : ""}; run 'duo doctor' for details.`);
-  }
+  const problem = runnableProblem(env, cfg, source, io.env, saved);
+  if (problem) throw new CliExit(EXIT.ERROR, problem.message);
 }
 
 function lockWorkspace(runsDir: string): () => void {
@@ -363,8 +347,9 @@ async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
       },
       stdout: io.stdout as NodeJS.WriteStream, stdin: io.stdin as NodeJS.ReadStream,
     });
-    const configFile = opts.config ? resolve(io.cwd, opts.config) : join(env.workspace, ".agentduo", "config.yaml");
-    chat = new Chat({ cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile, bus, decider: session.decider, permissions: session.permissions, ui: session.ui });
+    chat = new Chat({
+      cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, bus, decider: session.decider, permissions: session.permissions, ui: session.ui,
+    });
     const offSignal = io.onSignal?.(() => session.ui.exit());
     await chat.greet();
     await session.exited;
@@ -434,16 +419,7 @@ async function listCommand(io: CliIO, opts: CommonOptions): Promise<number> {
 
 async function doctorCommand(io: CliIO, opts: CommonOptions): Promise<number> {
   const env = await prepare(io, opts);
-  let configError: string | undefined;
-  try {
-    validateConfig(env.cfg, env.sources.join(", ") || undefined);
-  } catch (e) {
-    if (!(e instanceof ConfigError)) throw e;
-    configError = e.message.replace(/\n\s*/g, " ");
-  }
-  // An invalid config cannot be trusted for the remaining checks; fall back to the defaults for those.
-  const cfg = configError ? defaultConfig() : env.cfg;
-  const checks = await runDoctor({ dir: env.workspace, cfg, sources: env.sources, configError, env: io.env, runsDir: env.runsDir });
+  const checks = await diagnose(env, io.env);
   let failed = false;
   for (const c of checks) {
     if (c.ok) io.stdout.write(`  ✓ ${c.message}\n`);

@@ -101,6 +101,19 @@ describe("cli", () => {
     expect((await cli(["Fix"])).err).toContain("paths.runs_dir must be a non-empty string");
   });
 
+  it("prints config warnings, expands ~ in runs_dir and reads --config relative to the current directory", async () => {
+    mkdirSync(join(repo, ".agentduo"), { recursive: true });
+    writeFileSync(join(repo, ".agentduo", "config.yaml"), "codex:\n  extra_args: [x]\npaths:\n  runs_dir: ~/duo-runs\n");
+    const home = join(t.path, "home");
+    const r = await cli(["list"], repo, { env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(t.path, "xdg"), CI: "" } });
+    expect(r.out).toContain(`no runs in ${join(home, "duo-runs")}`);
+    expect(r.err).toContain("warning: ");
+    expect(r.err).toContain("'codex.extra_args' was renamed to 'codex.args' (ignored)");
+    writeFileSync(join(t.path, "alt.yaml"), `paths:\n  runs_dir: ${JSON.stringify(join(t.path, "alt-runs"))}\n`);
+    expect((await cli(["--dir", "repo", "--config", "alt.yaml", "list"], t.path)).out).toContain(`no runs in ${join(t.path, "alt-runs")}`);
+    expect((await cli(["list", "--config", "missing.yaml"])).err).toContain(`config file not found: ${join(repo, "missing.yaml")}`);
+  });
+
   it("keeps run data out of git even without duo init", async () => {
     const other = makeRepo(join(t.path, "bare"), { ignoreRuns: false });
     writeConfig(other);
