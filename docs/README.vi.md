@@ -23,6 +23,14 @@ Gõ `duo` (hoặc `agentduo`) mà không kèm task trong một terminal, rồi c
 - **Prompt hỏi quyền và các quyết định** hiện ra thay cho ô nhập.
 - **Lệnh:** `/plan`, `/diff`, `/status`, `/resume` (chạy tiếp một run đang dừng hoặc đang chờ, kể cả từ phiên trước), `/new`, `/help`, `/quit`. Bấm Ctrl-C hai lần cũng thoát; run đang chạy sẽ dừng ở bước hiện tại và vẫn resume được.
 
+**Đổi cấu hình ngay trong chat.** Các lệnh cấu hình của Claude Code và Codex dùng được trong chat, chỉ cần thêm tên agent ở trước:
+- Shift+Tab hoặc `/edits auto|ask`: implementer tự sửa file mà không hỏi (`acceptEdits`), hoặc hỏi trước khi sửa.
+- `/claude model …`, `/claude effort …`, `/claude permissions allow|deny|remove <rule>`, `/claude add-dir <path>`.
+- `/codex model <tên> [effort]`, `/codex permissions read-only|auto|full-access|default`. Riêng `full-access` phải xác nhận thêm bằng `--yes`.
+- `/config` để xem cấu hình mà hai agent đang chạy.
+
+Thay đổi áp dụng cho các run mới, và cho run đang chạy kể từ lần gọi agent kế tiếp. Thay đổi chỉ giữ trong phiên chat, trừ khi lệnh kết thúc bằng `--save`: khi đó agentduo ghi vào `.agentduo/config.yaml` và giữ nguyên các comment trong file. `/help` liệt kê mọi lệnh kèm giải thích. Ngoài chat, `duo --accept-edits "<task>"` có tác dụng giống `/edits auto`.
+
 `duo "<task>"` vẫn chạy một việc rồi thoát; đây là cách dùng cho script và CI.
 
 Yêu cầu: Node.js ≥ 22.12, git, Codex CLI và Claude Code. Workspace phải nằm trong một git repo. Nếu chưa có, `duo init` sẽ hỏi có muốn `git init` không.

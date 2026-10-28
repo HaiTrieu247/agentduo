@@ -166,6 +166,19 @@ describe("cli", () => {
     expect(fake.calls()).toEqual([]);
   });
 
+  it("lets the implementer edit without asking with --accept-edits", async () => {
+    writeConfig(repo);
+    fake.setScenario(happy());
+    const r = await cli(["--accept-edits", "Make app.txt fixed"]);
+    expect(r.code, r.err).toBe(0);
+    const args = fake.calls("implementer")[0]!.args;
+    expect(args.slice(-2)).toEqual(["--permission-mode", "acceptEdits"]);
+    expect(fake.calls("plan_reviewer")[0]!.args).not.toContain("--permission-mode");
+    const before = await cli(["--accept-edits", "run", "Make app.txt fixed"]);
+    expect(before.code, before.err).toBe(0);
+    expect(fake.calls("implementer").at(-1)!.args.slice(-2)).toEqual(["--permission-mode", "acceptEdits"]);
+  });
+
   it("accepts a task that starts with a dash after --", async () => {
     writeConfig(repo);
     fake.setScenario(happy());

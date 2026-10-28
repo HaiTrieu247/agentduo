@@ -9,7 +9,7 @@ import { LiveFooter } from "./LiveFooter.js";
 import { PermissionPrompt } from "./PermissionPrompt.js";
 import { initialView, reduce } from "./store.js";
 
-type ChatLine = { type: "user" | "info"; text: string } | { type: "status"; status: ChatStatus };
+type ChatLine = { type: "user" | "info"; text: string } | { type: "status"; status: ChatStatus } | { type: "edits"; mode: string };
 
 /** What the chat controller shows besides the agents' own events: your messages, its lines, and its status. */
 export class ChatChannel {
@@ -21,6 +21,10 @@ export class ChatChannel {
 
   info(text: string): void {
     this.emitter.emit("line", { type: "info", text });
+  }
+
+  edits(mode: string): void {
+    this.emitter.emit("line", { type: "edits", mode });
   }
 
   status(status: ChatStatus): void {
@@ -44,6 +48,8 @@ export interface ChatAppProps {
   onSubmit(text: string): void;
   onEscape(): void;
   onCtrlC(): void;
+  /** Shift+Tab, as in Claude Code: switch the implementer between asking before edits and editing automatically. */
+  onCycleEdits?(): void;
   onDecision(d: Decision | "defer"): void;
   onPermission(id: string, answer: PermissionAnswer): void;
   views(): ViewKind[];
@@ -61,10 +67,16 @@ const HINTS: Record<ChatStatus, string> = {
   paused: "Enter re-run · /new leave it · Ctrl-C twice quit",
 };
 
-function ChatInput({ status, onSubmit, onEscape }: { status: ChatStatus; onSubmit(text: string): void; onEscape(): void }) {
+function ChatInput({ status, edits, onSubmit, onEscape, onCycleEdits }: {
+  status: ChatStatus; edits: string | null; onSubmit(text: string): void; onEscape(): void; onCycleEdits?(): void;
+}) {
   const [text, setText] = useState("");
   useInput((input, key) => {
     if (key.ctrl && input === "c") return; // handled by the app, which counts presses
+    if (key.tab && key.shift) {
+      onCycleEdits?.();
+      return;
+    }
     if (key.escape) {
       if (status === "running") onEscape();
       else setText("");
@@ -92,7 +104,7 @@ function ChatInput({ status, onSubmit, onEscape }: { status: ChatStatus; onSubmi
           <Text inverse> </Text>
         </Text>
       </Box>
-      <Text dimColor>{`  ${HINTS[status]}`}</Text>
+      <Text dimColor>{`  ${edits ? `edits: ${edits} (Shift+Tab) · ` : ""}${HINTS[status]}`}</Text>
     </Box>
   );
 }
@@ -101,12 +113,14 @@ function ChatInput({ status, onSubmit, onEscape }: { status: ChatStatus; onSubmi
 export function ChatApp(p: ChatAppProps) {
   const [view, dispatch] = useReducer(reduce, undefined, () => initialView(p.version, p.verbose, { workspace: p.workspace }));
   const [status, setStatus] = useState<ChatStatus>("idle");
+  const [edits, setEdits] = useState<string | null>(null);
   const [frame, setFrame] = useState(0);
   const columns = (useStdout().stdout as NodeJS.WriteStream).columns || 80;
 
   useEffect(() => p.bus.on((event) => dispatch({ type: "event", event, now: Date.now() })), [p.bus]);
   useEffect(() => p.channel.on((line) => {
     if (line.type === "status") setStatus(line.status);
+    else if (line.type === "edits") setEdits(line.mode);
     else dispatch({ type: "chat", kind: line.type, text: line.text });
   }), [p.channel]);
   useEffect(() => {
@@ -139,7 +153,7 @@ export function ChatApp(p: ChatAppProps) {
       ) : (
         <>
           {status === "running" && view.current ? <LiveFooter view={view} now={Date.now()} frame={frame} interactive={false} /> : null}
-          <ChatInput status={status} onSubmit={p.onSubmit} onEscape={p.onEscape} />
+          <ChatInput status={status} edits={edits} onSubmit={p.onSubmit} onEscape={p.onEscape} onCycleEdits={p.onCycleEdits} />
         </>
       )}
     </>

@@ -247,6 +247,23 @@ describe("Ink components", () => {
     app.unmount();
   });
 
+  it("chat: Shift+Tab switches the edit mode, which the hint line shows", async () => {
+    const channel = new ChatChannel();
+    let cycles = 0;
+    const app = render(<ChatApp bus={new EventBus()} channel={channel} version="0.3.0" workspace="/ws" verbose={false} onSubmit={noop} onEscape={noop}
+      onCtrlC={noop} onCycleEdits={() => { cycles += 1; }} onDecision={noop} onPermission={noop} views={() => []} readView={async () => null} />);
+    channel.edits("ask");
+    await wait();
+    expect(app.lastFrame()).toContain("edits: ask (Shift+Tab)");
+    app.stdin.write("\u001B[Z");
+    await wait();
+    expect(cycles).toBe(1);
+    channel.edits("auto");
+    await wait();
+    expect(app.lastFrame()).toContain("edits: auto (Shift+Tab)");
+    app.unmount();
+  });
+
   it("chat: a pasted line that ends with Enter is sent, and pasted line breaks stay in the message", async () => {
     const sent: string[] = [];
     const app = render(<ChatApp bus={new EventBus()} channel={new ChatChannel()} version="0.2.0" workspace="/ws" verbose={false} onSubmit={(text) => sent.push(text)}

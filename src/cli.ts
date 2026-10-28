@@ -6,6 +6,7 @@ import { createInterface } from "node:readline/promises";
 import { Command, CommanderError, Option } from "commander";
 import { killAllActive } from "./agents/process.js";
 import { Chat, newRun } from "./chat.js";
+import { settings } from "./core/settings.js";
 import { resolveBinary } from "./agents/resolve.js";
 import { configFromSaved, ConfigError, defaultConfig, loadConfig, validateConfig, type ConfigData } from "./core/config.js";
 import { runDoctor } from "./core/doctor.js";
@@ -107,8 +108,14 @@ export function processIO(): CliIO {
 }
 
 interface CommonOptions { dir?: string; config?: string; plain?: boolean; verbose?: boolean; color?: boolean }
-interface RunOptions extends CommonOptions { taskFile?: string }
-interface ResumeOptions extends CommonOptions { decision?: Decision["decision"]; note?: string; reloadConfig?: boolean }
+interface RunOptions extends CommonOptions { taskFile?: string; acceptEdits?: boolean }
+interface ResumeOptions extends CommonOptions { decision?: Decision["decision"]; note?: string; reloadConfig?: boolean; acceptEdits?: boolean }
+
+/** --accept-edits: the implementer edits files without asking, like /edits auto in the chat. */
+function withAcceptEdits<T extends ConfigData>(cfg: T, opts: { acceptEdits?: boolean }): T {
+  if (opts.acceptEdits) settings.edits("auto").apply(cfg);
+  return cfg;
+}
 
 class CliExit extends Error {
   constructor(readonly code: number, message = "") {
@@ -265,7 +272,7 @@ async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, st
 }
 
 const COMMANDS = ["run", "resume", "status", "list", "doctor", "init"];
-const COMMON_KEYS = ["dir", "config", "plain", "verbose", "color"] as const;
+const COMMON_KEYS = ["dir", "config", "plain", "verbose", "color", "acceptEdits"] as const;
 
 /** With positional options, `duo --dir X list` parses --dir as the root's option; give it to the subcommand unless it set its own. */
 function withGlobals<T extends CommonOptions>(cmd: Command): T {
@@ -320,6 +327,7 @@ async function runCommand(io: CliIO, words: string[], opts: RunOptions, explicit
   }
   const env = await prepare(io, opts);
   requireRunnable(env, env.cfg, env.sources.join(", "), io);
+  withAcceptEdits(env.cfg, opts);
   // Lock first: a start refused because another run is active must not leave a run behind or move LATEST.
   const release = lockWorkspace(env.runsDir);
   try {
@@ -331,9 +339,10 @@ async function runCommand(io: CliIO, words: string[], opts: RunOptions, explicit
 }
 
 /** `duo` alone: a chat session in this workspace, holding its lock until the user leaves. */
-async function chatCommand(io: CliIO, opts: CommonOptions): Promise<number> {
+async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
   const env = await prepare(io, opts);
   requireRunnable(env, env.cfg, env.sources.join(", "), io);
+  withAcceptEdits(env.cfg, opts);
   const release = lockWorkspace(env.runsDir);
   try {
     applyColorPreference(opts, io.env);
@@ -343,7 +352,7 @@ async function chatCommand(io: CliIO, opts: CommonOptions): Promise<number> {
     let chat: Chat | undefined;
     const session = startChatInk({
       bus, version: packageVersion(), verbose: !!opts.verbose, workspace: env.workspace,
-      onSubmit: (text) => void chat?.submit(text), onEscape: () => chat?.escape(),
+      onSubmit: (text) => void chat?.submit(text), onEscape: () => chat?.escape(), onCycleEdits: () => chat?.toggleEdits(),
       views: () => {
         const run = chat?.focused();
         return run ? availableViews(run.store, run.state) : [];
@@ -354,7 +363,8 @@ async function chatCommand(io: CliIO, opts: CommonOptions): Promise<number> {
       },
       stdout: io.stdout as NodeJS.WriteStream, stdin: io.stdin as NodeJS.ReadStream,
     });
-    chat = new Chat({ cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, bus, decider: session.decider, permissions: session.permissions, ui: session.ui });
+    const configFile = opts.config ? resolve(io.cwd, opts.config) : join(env.workspace, ".agentduo", "config.yaml");
+    chat = new Chat({ cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile, bus, decider: session.decider, permissions: session.permissions, ui: session.ui });
     const offSignal = io.onSignal?.(() => session.ui.exit());
     await chat.greet();
     await session.exited;
@@ -381,9 +391,9 @@ async function resumeCommand(io: CliIO, runId: string | undefined, opts: ResumeO
   try {
     // A run keeps the config it started with, unless asked to pick up the current one.
     const useSaved = !opts.reloadConfig && store.exists("config.json");
-    const cfg = useSaved ? configFromSaved(store.readJson("config.json")) : env.cfg;
+    const cfg = withAcceptEdits(useSaved ? configFromSaved(store.readJson("config.json")) : env.cfg, opts);
     requireRunnable(env, cfg, useSaved ? store.path("config.json") : env.sources.join(", "), io, useSaved);
-    if (!useSaved) store.writeJson("config.json", cfg);
+    if (!useSaved || opts.acceptEdits) store.writeJson("config.json", cfg);
     state.workspace ??= env.workspace;
     return await execute(io, env, cfg, store, state, opts, opts.decision ? { decision: opts.decision, note: opts.note } : undefined);
   } finally {
@@ -489,18 +499,22 @@ export async function main(argv: string[], io: CliIO = processIO()): Promise<num
     .option("-v, --verbose", "show every agent activity, including thoughts")
     .option("--no-color", "disable colors");
 
-  common(program.argument("[task...]", "task description for a new run (use -- before a task that starts with '-')").option("--task-file <file>", "read the task description from a file"))
+  const acceptEdits = "the implementer edits files without asking (Claude's acceptEdits mode)";
+  common(program.argument("[task...]", "task description for a new run, or none for the chat (use -- before a task that starts with '-')")
+    .option("--task-file <file>", "read the task description from a file").option("--accept-edits", acceptEdits))
     .action(async (words: string[], opts: RunOptions) => {
       exitCode = await runCommand(io, words, opts);
     });
-  common(program.command("run").description("start a new run").argument("<task...>").option("--task-file <file>", "read the task description from a file"))
+  common(program.command("run").description("start a new run").argument("<task...>").option("--task-file <file>", "read the task description from a file")
+    .option("--accept-edits", acceptEdits))
     .action(async (words: string[], _opts: RunOptions, cmd: Command) => {
       exitCode = await runCommand(io, words, withGlobals<RunOptions>(cmd), true);
     });
   common(program.command("resume").description("continue a run (default: the latest), optionally answering a pending decision").argument("[runId]")
     .addOption(new Option("--decision <decision>", "answer a run waiting in HUMAN_REVIEW").choices(["resume", "revise", "abort"]))
     .option("--note <text>", "instruction for the agents, recorded with the decision")
-    .option("--reload-config", "use the current config instead of the one the run started with"))
+    .option("--reload-config", "use the current config instead of the one the run started with")
+    .option("--accept-edits", acceptEdits))
     .action(async (runId: string | undefined, _opts: ResumeOptions, cmd: Command) => {
       exitCode = await resumeCommand(io, runId, withGlobals<ResumeOptions>(cmd));
     });

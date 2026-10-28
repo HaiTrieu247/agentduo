@@ -70,6 +70,23 @@ agentduo 0.2.0 · chat
 - **Permission prompts and decisions** appear in place of the input line.
 - **Commands:** `/plan`, `/diff`, `/status`, `/resume` (continue a stopped or waiting run, also from an earlier session), `/new`, `/help`, `/quit`. Ctrl-C twice also quits; a running run stops at its current step and stays resumable.
 
+### Settings from the chat
+
+The settings commands of Claude Code and Codex work in the chat too, with the agent's name in front. A change applies to new runs, and to the current run from its next agent call. It lasts for this chat only, unless the command ends with `--save`, which writes it to `.agentduo/config.yaml` and keeps the file's comments.
+
+| Command | Same as | What it changes |
+|---|---|---|
+| Shift+Tab, `/edits auto\|ask` | Shift+Tab in Claude Code | `auto`: the implementer edits files without asking (`acceptEdits`); the plan critic is not affected |
+| `/claude model <name\|default>` | `/model` | Claude's model |
+| `/claude effort low\|medium\|high\|xhigh\|max\|default` | `/effort` | Claude's effort level |
+| `/claude permissions [allow\|deny\|remove <rule>]` | `/permissions` | tool rules for agentduo's Claude calls, e.g. `Bash(npm test:*)` |
+| `/claude add-dir <path>` | `/add-dir` | another directory Claude may work in |
+| `/codex model <name\|default> [effort]` | `/model` in Codex | Codex's model and reasoning effort |
+| `/codex permissions read-only\|auto\|full-access\|default` | `/permissions` in Codex | Codex's sandbox; `full-access` asks you to confirm with `--yes` |
+| `/config` | `/config`, `/status` | shows what both agents run with now |
+
+Outside the chat, `duo --accept-edits "<task>"` does what `/edits auto` does.
+
 `duo "<task>"` still runs a single task and exits; that is the form for scripts and CI.
 
 ## The workspace

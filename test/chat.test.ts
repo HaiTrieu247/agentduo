@@ -1,3 +1,4 @@
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Chat, type ChatUi } from "../src/chat.js";
@@ -14,7 +15,11 @@ import { tempDir } from "./helpers/tmp.js";
 class FakeUi implements ChatUi {
   readonly lines: string[] = [];
   readonly statuses: string[] = [];
+  readonly edits: string[] = [];
   exited = false;
+  setEdits(mode: string): void {
+    this.edits.push(mode);
+  }
   info(text: string): void {
     this.lines.push(text);
   }
@@ -54,7 +59,9 @@ const happy = () => ({
   code_reviewer: [{ output: review(true) }],
 });
 const newChat = (o: { cfg?: ConfigData; decider?: Decider } = {}) =>
-  new Chat({ cfg: o.cfg ?? testConfig(fake), workspace: repo, runsDir, bus, decider: o.decider ?? new ScriptedDecider(), ui });
+  new Chat({ cfg: o.cfg ?? testConfig(fake), workspace: repo, runsDir, configFile: join(repo, ".agentduo", "config.yaml"), bus, decider: o.decider ?? new ScriptedDecider(), ui });
+const argsOf = (role: string, call = 0) => fake.calls(role)[call]!.args;
+const after = (args: string[], flag: string) => args[args.lastIndexOf(flag) + 1];
 const latest = () => RunStore.open(runsDir).loadState();
 
 describe("Chat", () => {
@@ -142,6 +149,88 @@ describe("Chat", () => {
     expect(ui.lines.at(-1)).toContain("unknown command /bogus");
     await chat.submit("/quit");
     expect(ui.exited).toBe(true);
+  });
+
+  it("switches the implementer's edits with /edits or Shift+Tab, for this chat only", async () => {
+    const chat = newChat();
+    await chat.greet();
+    expect(ui.edits.at(-1)).toBe("ask");
+    await chat.submit("/edits auto");
+    expect(ui.edits.at(-1)).toBe("auto");
+    expect(ui.lines.at(-1)).toContain("this chat only");
+    fake.setScenario(happy());
+    await chat.submit("Make app.txt fixed");
+    await chat.idle();
+    expect(after(argsOf("implementer"), "--permission-mode")).toBe("acceptEdits");
+    expect(argsOf("plan_reviewer")).not.toContain("--permission-mode");
+    expect(JSON.parse(readFileSync(RunStore.open(runsDir).path("config.json"), "utf8")).claude.role_args.implementer).toEqual(["--permission-mode", "acceptEdits"]);
+    chat.toggleEdits();
+    expect(ui.edits.at(-1)).toBe("ask");
+    await chat.submit("/edits");
+    expect(ui.lines.at(-1)).toContain("ask");
+    await chat.submit("/edits sometimes");
+    expect(ui.lines.at(-1)).toContain("/edits auto|ask");
+  });
+
+  it("applies a change made during a run from that run's next agent call", async () => {
+    const chat = newChat();
+    fake.setScenario({ ...happy(), planner: [{ sleep: 1500, output: plan() }] });
+    bus.on((e) => {
+      if (e.type === "phase.started" && e.phase === "PLAN") setTimeout(() => void chat.submit("/claude model opus"), 300);
+    });
+    await chat.submit("Make app.txt fixed");
+    await chat.idle();
+    expect(after(argsOf("plan_reviewer"), "--model")).toBe("opus");
+    expect(ui.lines.some((l) => l.includes("from the next agent call"))).toBe(true);
+    expect(JSON.parse(readFileSync(RunStore.open(runsDir).path("config.json"), "utf8")).claude.model).toBe("opus");
+  });
+
+  it("mirrors the settings commands of Claude Code and Codex", async () => {
+    const chat = newChat();
+    for (const command of ["/claude effort high", "/claude permissions allow Bash(npm test:*)", "/claude permissions deny Bash(git push:*)",
+      "/claude add-dir ../shared", "/codex model gpt-5.5 high", "/codex permissions auto"]) {
+      await chat.submit(command);
+    }
+    await chat.submit("/claude permissions");
+    expect(ui.lines.at(-1)).toMatch(/allow: Bash\(npm test:\*\)[\s\S]*deny: Bash\(git push:\*\)/);
+    await chat.submit("/claude effort huge");
+    expect(ui.lines.at(-1)).toContain("low|medium|high|xhigh|max|default");
+    await chat.submit("/codex permissions full-access");
+    expect(ui.lines.at(-1)).toContain("--yes");
+    fake.setScenario(happy());
+    await chat.submit("Make app.txt fixed");
+    await chat.idle();
+    const claude = argsOf("implementer");
+    expect([after(claude, "--effort"), after(claude, "--allowedTools"), after(claude, "--disallowedTools"), after(claude, "--add-dir")])
+      .toEqual(["high", "Bash(npm test:*)", "Bash(git push:*)", "../shared"]);
+    const codex = argsOf("planner");
+    expect([after(codex, "--model"), after(codex, "--sandbox")]).toEqual(["gpt-5.5", "workspace-write"]);
+    expect(codex).toContain("model_reasoning_effort=high");
+    await chat.submit("/codex permissions full-access --yes");
+    await chat.submit("/config");
+    expect(ui.lines.at(-1)).toMatch(/Claude {2}model: default · effort: high[\s\S]*Codex {3}model: gpt-5\.5 · effort: high · permissions: full-access/);
+  });
+
+  it("saves a change to config.yaml with --save, keeping the file's comments", async () => {
+    mkdirSync(join(repo, ".agentduo"), { recursive: true });
+    writeFileSync(join(repo, ".agentduo", "config.yaml"), "# team settings\ngates: []\n");
+    const chat = newChat();
+    await chat.submit("/edits auto --save");
+    await chat.submit("/codex model gpt-5.5 --save");
+    const text = readFileSync(join(repo, ".agentduo", "config.yaml"), "utf8");
+    for (const s of ["# team settings", "acceptEdits", "model: gpt-5.5"]) expect(text).toContain(s);
+    expect(ui.lines.at(-1)).toContain("saved to");
+  });
+
+  it("lists every command with what it does", async () => {
+    const chat = newChat();
+    await chat.submit("/help");
+    const help = ui.lines.at(-1)!;
+    for (const command of ["/plan", "/diff", "/status", "/resume", "/new", "/quit", "Esc", "Shift+Tab", "/edits", "/claude model", "/claude effort",
+      "/claude permissions", "/claude add-dir", "/codex model", "/codex permissions", "/config", "/help", "--save"]) {
+      expect(help, command).toContain(command);
+    }
+    for (const line of help.split("\n").filter((l) => l.trimStart().startsWith("/"))) expect(line.trim(), line).toMatch(/^\S+(?: \S+)*\s{2,}\S/);
   });
 
   it("offers to resume a run left waiting in an earlier session, and asks for the decision again", async () => {
