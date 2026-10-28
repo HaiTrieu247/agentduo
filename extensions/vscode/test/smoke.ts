@@ -10,7 +10,7 @@ import { approval, critique, finding, impl, plan, review } from "../../../test/h
 import { ARTIFACT_SCHEME, artifactLocation, SNAPSHOT_SCHEME, snapshotLocation } from "../src/artifacts.js";
 import type { TestApi } from "../src/extension.js";
 
-const ID = "agentduo-dev.agentduo-vscode";
+const ID = "HaiTrieuThinh.agentduo-vscode";
 
 async function until<T>(what: string, get: () => T | null | undefined | false, timeoutMs = 30_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
