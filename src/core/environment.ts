@@ -2,7 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { resolveBinary } from "../agents/resolve.js";
-import { ConfigError, defaultConfig, loadConfig, validateConfig, type ConfigData } from "./config.js";
+import { ConfigError, defaultConfig, loadConfig, validateConfig, type Backend, type ConfigData } from "./config.js";
 import { runDoctor, type Check } from "./doctor.js";
 import { Git } from "./git.js";
 
@@ -56,9 +56,23 @@ export const SAVED_CONFIG_HINT = "this run uses the config it started with; pass
 
 export type RunnableProblem = { kind: "not_repo" | "config" | "missing_cli"; message: string };
 
-/** Why agents cannot run in this workspace with `cfg`, or null when they can. `saved`: cfg is a run's saved config. */
+/** The CLIs among `backends` that cannot be found, as the CLI says it; null when all are there. */
+export function missingCli(cfg: ConfigData, backends: readonly Backend[], processEnv: NodeJS.ProcessEnv, saved = false): RunnableProblem | null {
+  const missing = (["codex", "claude"] as const).filter((b) => backends.includes(b) && !resolveBinary(cfg[b].bin, b, processEnv));
+  if (!missing.length) return null;
+  return {
+    kind: "missing_cli",
+    message: `CLI not found: ${missing.join(", ")}. Install it or set '<backend>.bin' in the config${saved ? ` (${SAVED_CONFIG_HINT})` : ""}; run 'duo doctor' for details.`,
+  };
+}
+
+/**
+ * Why agents cannot run in this workspace with `cfg`, or null when they can. `saved`: cfg is a run's saved config.
+ * `backends`: the CLIs that must be there (default: every one the pipeline's roles use; none to open the chat, which
+ * checks each agent when it is asked).
+ */
 export function runnableProblem(env: Pick<WorkspaceEnv, "workspace" | "isRepo">, cfg: ConfigData, source: string,
-  processEnv: NodeJS.ProcessEnv, saved = false): RunnableProblem | null {
+  processEnv: NodeJS.ProcessEnv, saved = false, backends?: readonly Backend[]): RunnableProblem | null {
   if (!env.isRepo) {
     return { kind: "not_repo", message: `${env.workspace} is not inside a git repository (run 'git init' here, or 'duo init' to be asked)` };
   }
@@ -68,14 +82,7 @@ export function runnableProblem(env: Pick<WorkspaceEnv, "workspace" | "isRepo">,
     if (e instanceof ConfigError) return { kind: "config", message: e.message };
     throw e;
   }
-  const missing = (["codex", "claude"] as const).filter((b) => Object.values(cfg.agents).includes(b) && !resolveBinary(cfg[b].bin, b, processEnv));
-  if (missing.length) {
-    return {
-      kind: "missing_cli",
-      message: `CLI not found: ${missing.join(", ")}. Install it or set '<backend>.bin' in the config${saved ? ` (${SAVED_CONFIG_HINT})` : ""}; run 'duo doctor' for details.`,
-    };
-  }
-  return null;
+  return missingCli(cfg, backends ?? Object.values(cfg.agents), processEnv, saved);
 }
 
 /** `duo doctor`: a config that does not validate is reported, and the defaults stand in for the remaining checks. */

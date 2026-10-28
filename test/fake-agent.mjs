@@ -1,8 +1,15 @@
 // Stand-in for the codex / claude CLIs in tests: fake-agent.mjs <codex|claude> <cli args...>.
 // The prompt arrives on stdin; its "[orchestrator-role: X]" tag selects the next scripted response for
 // role X from $FAKE_SCENARIO (the last response repeats). Every call is appended to $FAKE_LOG.
+// A conversation prompt ("[agentduo-conversation]") is role "chat_<backend>" (else "chat"); its responses give an
+// `answer` in prose, which comes back as is (default: a short answer naming the backend). A /discuss turn
+// ("[agentduo-discussion: <step>, …]" on its second line) is role "discuss_<step>" (answer, critique, revise, final);
+// an unscripted critique agrees.
 // Claude in host mode (--permission-prompt-tool stdio) reads the prompt as a stream-json user message, asks
 // for each scripted `permissions` entry with a control_request, and applies the answer the way Claude does.
+// `codex doctor --json` prints a report whose config.load model is the last `-c model=…` override, else
+// scenario.doctor.model (null: none), after scenario.doctor.sleep ms; scenario.doctor.exit fails it.
+// `codex debug models` prints scenario.catalog.models as Codex's model catalog; scenario.catalog.exit fails it.
 import { execSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -23,16 +30,21 @@ async function main() {
     process.stdout.write(`${HELP[backend]}\n`);
     return 0;
   }
+  if (backend === "codex" && args[0] === "doctor") return doctor(args);
+  if (backend === "codex" && args[0] === "debug" && args[1] === "models") return catalog(args);
   const host = args.includes("--permission-prompt-tool");
   const stdin = host ? createInterface({ input: process.stdin })[Symbol.asyncIterator]() : null;
   const prompt = host ? JSON.parse((await stdin.next()).value).message.content : readFileSync(0, "utf8");
-  const role = /\[orchestrator-role: (\w+)\]/.exec(prompt)?.[1] ?? "unknown";
+  const chat = prompt.startsWith("[agentduo-conversation]");
+  const step = chat ? /^\[agentduo-discussion: (\w+)/m.exec(prompt)?.[1] : undefined;
+  const role = step ? `discuss_${step}` : chat ? `chat_${backend}` : /\[orchestrator-role: (\w+)\]/.exec(prompt)?.[1] ?? "unknown";
   const scenario = JSON.parse(readFileSync(process.env.FAKE_SCENARIO, "utf8"));
   const counts = existsSync(process.env.FAKE_COUNTS) ? JSON.parse(readFileSync(process.env.FAKE_COUNTS, "utf8")) : {};
   const n = counts[role] ?? 0;
   counts[role] = n + 1;
   writeFileSync(process.env.FAKE_COUNTS, JSON.stringify(counts));
-  const responses = scenario[role] ?? [{ raw: `no scripted response for role ${role}` }];
+  const unscripted = step === "critique" ? [{ answer: "Looks right.\nVERDICT: AGREE" }] : chat ? scenario.chat ?? [{ answer: `Answer from ${backend}.` }] : [{ raw: `no scripted response for role ${role}` }];
+  const responses = scenario[role] ?? unscripted;
   const resp = responses[Math.min(n, responses.length - 1)];
   appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend, role, call: n, args, prompt }) + "\n");
 
@@ -71,7 +83,10 @@ async function main() {
     }
   }
   let text;
-  if ("raw" in resp) {
+  const prose = "raw" in resp || "answer" in resp;
+  if ("answer" in resp) {
+    text = resp.answer;
+  } else if ("raw" in resp) {
     text = resp.raw;
   } else {
     const output = structuredClone(resp.output);
@@ -94,15 +109,17 @@ async function main() {
     emit({ type: "turn.completed", usage: { input_tokens: 1000, output_tokens: 234 } });
     if (!resp.noLastMessage) writeFileSync(args[args.indexOf("--output-last-message") + 1], text);
   } else {
-    emit({ type: "system", subtype: "init", session_id: "fake" });
+    const model = args.includes("--model") ? args[args.lastIndexOf("--model") + 1] : resp.model ?? "claude-fake-default";
+    emit({ type: "system", subtype: "init", session_id: "fake", model });
     const usage = { input_tokens: 10, output_tokens: 5 };
     activities.forEach((a, i) => {
       emit({ type: "assistant", uuid: `u${i}`, message: { id: "m", usage, content: [{ type: "tool_use", id: `t${i}`, name: a.tool, input: a.input ?? {} }] } });
       emit({ type: "user", uuid: `r${i}`, message: { content: [{ type: "tool_result", tool_use_id: `t${i}`, content: a.result ?? "ok", is_error: a.error ?? false }] } });
     });
     await sleep();
+    if ("answer" in resp && text) emit({ type: "assistant", uuid: "final", message: { id: "m-final", usage, content: [{ type: "text", text }] } });
     const envelope = { type: "result", subtype: "success", is_error: false, result: text, total_cost_usd: 0.01, session_id: "fake", num_turns: 1, permission_denials: denials };
-    if (!("raw" in resp)) envelope.structured_output = JSON.parse(text);
+    if (!prose) envelope.structured_output = JSON.parse(text);
     emit(envelope);
     // Real Claude keeps reading stdin in host mode until the host closes it.
     if (host) {
@@ -114,6 +131,36 @@ async function main() {
     }
   }
   return resp.exit ?? 0;
+}
+
+/** `codex doctor --json [-c key=value…]`: a report shaped like codex 0.164's (see fixtures/codex-doctor.json). */
+async function doctor(args) {
+  const scenario = existsSync(process.env.FAKE_SCENARIO ?? "") ? JSON.parse(readFileSync(process.env.FAKE_SCENARIO, "utf8")) : {};
+  const d = scenario.doctor ?? {};
+  if (process.env.FAKE_LOG) appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend: "codex", doctor: true, args }) + "\n");
+  if (d.sleep) await new Promise((r) => setTimeout(r, d.sleep));
+  if (d.exit) {
+    process.stderr.write("doctor failed\n");
+    return d.exit;
+  }
+  const overrides = args.flatMap((a, i) => ((a === "-c" || a === "--config") && args[i + 1]?.startsWith("model=") ? [args[i + 1].slice(6).replace(/^"|"$/g, "")] : []));
+  const model = overrides.at(-1) ?? ("model" in d ? d.model : "gpt-fake-default");
+  const details = { "config.toml parse": "ok", "model provider": "openai", ...(model ? { model } : {}) };
+  process.stdout.write(JSON.stringify({ schemaVersion: 1, overallStatus: "ok", checks: { "config.load": { id: "config.load", status: "ok", summary: "config loaded", details } } }, null, 2) + "\n");
+  return 0;
+}
+
+/** `codex debug models [-c key=value…]`: scenario.catalog as Codex's catalog (see fixtures/codex-models.json); its exit fails it. */
+function catalog(args) {
+  const scenario = existsSync(process.env.FAKE_SCENARIO ?? "") ? JSON.parse(readFileSync(process.env.FAKE_SCENARIO, "utf8")) : {};
+  const c = scenario.catalog ?? { models: [{ slug: "gpt-fake-default", display_name: "GPT Fake", description: "the fake's model", priority: 1 }] };
+  if (process.env.FAKE_LOG) appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend: "codex", catalog: true, args }) + "\n");
+  if (c.exit) {
+    process.stderr.write("catalog failed\n");
+    return c.exit;
+  }
+  process.stdout.write(JSON.stringify({ models: c.models }) + "\n");
+  return 0;
 }
 
 process.exitCode = await main();

@@ -42,7 +42,13 @@ async function dispatch(s: RuntimeSession, request: WorkerRequest): Promise<Work
     case "initialize":
       throw new SessionError("bad_request", "already initialized");
     case "submit":
-      await s.submit(request.text);
+      await s.submit(request.text, request.route);
+      return { accepted: true };
+    case "recipient":
+      await s.selectRecipient(request.backend);
+      return { accepted: true };
+    case "setting":
+      await s.applySetting({ setting: request.setting, save: request.save, yes: request.yes });
       return { accepted: true };
     case "interrupt":
       await s.interrupt();
@@ -99,6 +105,8 @@ async function handle(raw: unknown): Promise<void> {
     });
     try {
       await reply(await session.initialize());
+      // Only once the answer is on its way: a model found later then arrives as an update after it, never before.
+      session.startDiscovery();
     } catch (e) {
       await fail(e);
     }

@@ -10,7 +10,7 @@ const COMMITS = { base: "a".repeat(40), snapshot: "b".repeat(64) };
 
 describe("worker requests", () => {
   it("accepts every request type with its fields, and normalises answers", () => {
-    expect(parseRequestEnvelope(envelope({ type: "submit", text: "Fix it" }))).toEqual({ protocol: 1, generation: 3, id: 7, request: { type: "submit", text: "Fix it" } });
+    expect(parseRequestEnvelope(envelope({ type: "submit", text: "Fix it" }))).toEqual({ protocol: PROTOCOL_VERSION, generation: 3, id: 7, request: { type: "submit", text: "Fix it", route: "message" } });
     expect(parseRequestEnvelope(envelope({ type: "decision", requestId: "decision-1-ab", answer: { decision: "revise", note: "  smaller  " } })).request)
       .toEqual({ type: "decision", requestId: "decision-1-ab", answer: { decision: "revise", note: "smaller" } });
     expect(parseRequestEnvelope(envelope({ type: "permissionAnswer", requestId: "perm-0", answer: { decision: "deny", message: " " } })).request)
@@ -55,7 +55,9 @@ describe("worker requests", () => {
 
 describe("webview messages", () => {
   it("only names things: submit text, answers to pending ids, and commands from a fixed list", () => {
-    expect(parseWebviewMessage({ type: "submit", text: "hi" })).toEqual({ type: "submit", text: "hi" });
+    expect(parseWebviewMessage({ type: "submit", text: "hi" })).toEqual({ type: "submit", text: "hi", route: "message" });
+    expect(parseWebviewMessage({ type: "submit", text: "Which queue?", route: "discuss" })).toEqual({ type: "submit", text: "Which queue?", route: "discuss" });
+    expect(() => parseWebviewMessage({ type: "submit", text: "x", route: "debate" })).toThrow();
     expect(parseWebviewMessage({ type: "command", name: "openChanges" })).toEqual({ type: "command", name: "openChanges" });
     expect(parseWebviewMessage({ type: "decision", generation: 2, id: "decision-1-x", decision: "defer", note: "" }))
       .toEqual({ type: "decision", generation: 2, id: "decision-1-x", decision: "defer", note: null });
@@ -72,10 +74,10 @@ describe("webview messages", () => {
 
 describe("worker messages", () => {
   it("checks the protocol version and the shape the host relies on", () => {
-    expect(parseWorkerMessage({ kind: "hello", protocol: 1, pid: 1, node: "24.0.0", version: "0.4.0" }).kind).toBe("hello");
-    expect(parseWorkerMessage({ kind: "event", protocol: 1, generation: 1, event: { type: "warning", text: "x" } }).kind).toBe("event");
-    expect(() => parseWorkerMessage({ kind: "event", protocol: 2, generation: 1, event: { type: "warning" } })).toThrow(/protocol 2/);
-    expect(() => parseWorkerMessage({ kind: "decision", protocol: 1, generation: 1, requestId: "d", review: {} })).toThrow(ProtocolError);
+    expect(parseWorkerMessage({ kind: "hello", protocol: PROTOCOL_VERSION, pid: 1, node: "24.0.0", version: "0.4.0" }).kind).toBe("hello");
+    expect(parseWorkerMessage({ kind: "event", protocol: PROTOCOL_VERSION, generation: 1, event: { type: "warning", text: "x" } }).kind).toBe("event");
+    expect(() => parseWorkerMessage({ kind: "event", protocol: 1, generation: 1, event: { type: "warning" } })).toThrow(/protocol 1/);
+    expect(() => parseWorkerMessage({ kind: "decision", protocol: PROTOCOL_VERSION, generation: 1, requestId: "d", review: {} })).toThrow(ProtocolError);
     expect(() => parseWorkerMessage({ kind: "shell", protocol: 1 })).toThrow(ProtocolError);
   });
 });

@@ -16,22 +16,53 @@ duo                      # mở chat
 
 ## Chat
 
-Gõ `duo` (hoặc `agentduo`) mà không kèm task trong một terminal, rồi chat như các CLI khác:
-- **Gõ một tin khi chưa có gì chạy** sẽ bắt đầu một việc. Mỗi việc mới đều được biết các việc trước trong phiên chat đã làm gì, và review của nó chỉ xét thay đổi của chính nó.
-- **Gõ trong lúc agent đang làm** thì tin đó thành ghi chú, được đưa vào mọi bước kể từ bước kế tiếp.
-- **Esc** dừng bước đang chạy. Gõ điều cần đổi rồi Enter, bước đó sẽ chạy lại kèm tin nhắn của bạn. Enter trống thì chạy lại như cũ, còn `/new` để bỏ qua nó.
-- **Prompt hỏi quyền và các quyết định** hiện ra thay cho ô nhập.
-- **Lệnh:** `/plan`, `/diff`, `/status`, `/resume` (chạy tiếp một run đang dừng hoặc đang chờ, kể cả từ phiên trước), `/new`, `/help`, `/quit`. Bấm Ctrl-C hai lần cũng thoát; run đang chạy sẽ dừng ở bước hiện tại và vẫn resume được.
+Gõ `duo` (hoặc `agentduo`) mà không kèm task trong một terminal. Chat là cuộc trò chuyện ba người giữa bạn, Claude
+Code và Codex; pipeline đầy đủ chỉ chạy khi bạn yêu cầu:
 
-**Đổi cấu hình ngay trong chat.** Các lệnh cấu hình của Claude Code và Codex dùng được trong chat, chỉ cần thêm tên agent ở trước:
-- Shift+Tab hoặc `/edits auto|ask`: implementer tự sửa file mà không hỏi (`acceptEdits`), hoặc hỏi trước khi sửa.
+- **Gõ một tin** sẽ gửi cho agent ghi dưới ô nhập: Codex khi mới mở chat, sau đó là agent bạn chọn gần nhất.
+  `/claude <câu hỏi>` và `/codex <câu hỏi>` hỏi thẳng một agent; `/claude` hoặc `/codex` đứng một mình thì chuyển người
+  nhận cho các tin tiếp theo. Mỗi câu trả lời hiện đầy đủ, đúng một lần, kèm dấu nhà cung cấp (Anthropic / OpenAI) và
+  model đã dùng. Cả hai agent đều thấy toàn bộ cuộc trò chuyện (tối đa 120.000 ký tự; các lượt cũ bị bỏ nguyên lượt và
+  chat sẽ báo).
+- **`/pipeline <yêu cầu>`** chạy cả workflow (plan → critique → finalize → implement → verify → review). Mọi vai trò
+  đều được biết cuộc trò chuyện trước khi giao việc và các việc pipeline trước trong phiên chat đã làm gì.
+- **`/discuss <câu hỏi>`** cho hai agent thảo luận tới khi đồng ý một câu trả lời. Agent ghi dưới ô nhập trả lời,
+  agent kia phản biện và kết thúc bằng `VERDICT: AGREE` hoặc `VERDICT: REVISE`, rồi agent thứ nhất sửa cho tới khi bên
+  phản biện đồng ý, tối đa `limits.max_discussion_rounds` lần phản biện (mặc định 3; phản biện thiếu verdict tính là
+  REVISE). Nếu lần phản biện cuối vẫn chưa đồng ý, agent trả lời viết câu trả lời cuối có ghi rõ chỗ còn bất đồng. Mỗi
+  lượt hiện ra khi xong (ở terminal là vài dòng đầu; `--verbose` hiện đầy đủ), rồi tới câu trả lời đã thống nhất hoặc
+  câu trả lời cuối, đầy đủ. Chỉ câu trả lời đó được đưa vào cuộc trò chuyện, như một câu trả lời đã thảo luận với agent kia.
+- **Gõ trong lúc pipeline đang chạy** thì tin đó thành ghi chú cho các bước kế tiếp. `/claude`, `/codex`,
+  `/pipeline` và `/discuss` khi đó sẽ báo workspace đang bận; mỗi lúc chỉ có một lần gọi agent.
+- **Esc** dừng việc đang chạy. Câu trả lời hay cuộc thảo luận bị dừng thì kết thúc ở đó, và không phần nào của nó được
+  đưa vào cuộc trò chuyện. Bước pipeline bị dừng vẫn resume được:
+  `/resume [ghi chú]` chạy lại bước đó (Enter trống chỉ nhắc `/resume`). `/pipeline` khi có run đang dừng sẽ tạo run
+  mới; run cũ giữ ID và vẫn resume được. `/new` xóa cuộc trò chuyện và bắt đầu lại.
+- **Model.** Ô nhập luôn hiện model của cả hai agent. Trước câu trả lời đầu tiên, agentduo tra cứu local mà không gọi
+  model: Codex qua `codex doctor --json` (giữ các `-c`/`--enable`/`--disable`; doctor không nhận `--profile`, nên khi
+  đó model hiện là chưa xác định kèm lý do), Claude qua `--model`, `ANTHROPIC_MODEL` và các file settings của Claude
+  Code. Alias trong settings hiện là `default → sonnet (configured alias)` cho tới khi câu trả lời đầu tiên của Claude
+  xác nhận tên model thật. Mỗi câu hỏi và mỗi run đều tra cứu lại, nên khi bạn sửa `~/.codex/config.toml` hoặc file
+  settings của Claude thì model mới hiện từ lượt kế tiếp.
+- **Gõ `/`** sẽ hiện danh sách lệnh kèm chú thích, lọc dần theo những gì bạn gõ: Up/Down để chọn, Tab hoặc Enter để
+  điền, Enter lần nữa để gửi, Esc để đóng danh sách.
+- **Prompt hỏi quyền và các quyết định** hiện ra thay cho ô nhập.
+- **Lệnh:** `/claude`, `/codex`, `/pipeline`, `/discuss`, `/plan`, `/diff`, `/status`, `/resume` (chạy tiếp run đang dừng hoặc
+  đang chờ, kể cả từ phiên trước), `/new`, `/settings`, `/config`, `/help`, `/quit`. Bấm Ctrl-C hai lần cũng thoát; run
+  đang chạy sẽ dừng ở bước hiện tại và vẫn resume được.
+
+**Đổi cấu hình ngay trong chat.** Cú pháp chuẩn là `/settings claude …` và `/settings codex …`; sai cú pháp thì
+agentduo trả về usage. `/claude model …` và các lệnh tương tự là lối tắt, chỉ được hiểu là cấu hình khi đúng hình dạng
+(`/claude model opus`); còn lại, ví dụ `/claude model nào phù hợp nhất cho repo này?`, được gửi nguyên văn cho Claude
+như một câu hỏi, kể cả `--save`. `/claude -- <câu hỏi>` luôn là câu hỏi.
+- Shift+Tab hoặc `/edits auto|ask`: Claude tự sửa file mà không hỏi (`acceptEdits`), cả trong chat lẫn khi làm implementer của pipeline, hoặc hỏi trước khi sửa.
 - `/claude model …`, `/claude effort …`, `/claude permissions allow|deny|remove <rule>`, `/claude add-dir <path>`.
 - `/codex model <tên> [effort]`, `/codex permissions read-only|auto|full-access|default`. Riêng `full-access` phải xác nhận thêm bằng `--yes`.
 - `/config` để xem cấu hình mà hai agent đang chạy.
 
-Thay đổi áp dụng cho các run mới, và cho run đang chạy kể từ lần gọi agent kế tiếp. Thay đổi chỉ giữ trong phiên chat, trừ khi lệnh kết thúc bằng `--save`: khi đó agentduo ghi vào `.agentduo/config.yaml` và giữ nguyên các comment trong file. `/help` liệt kê mọi lệnh kèm giải thích. Ngoài chat, `duo --accept-edits "<task>"` có tác dụng giống `/edits auto`.
+Thay đổi áp dụng từ câu hỏi hoặc lần gọi agent kế tiếp; câu trả lời đang chạy giữ model lúc nó bắt đầu. Thay đổi chỉ giữ trong phiên chat, trừ khi lệnh kết thúc bằng `--save`: khi đó agentduo ghi vào `.agentduo/config.yaml` và giữ nguyên các comment trong file. `/help` liệt kê mọi lệnh kèm giải thích. Ngoài chat, `duo --accept-edits "<task>"` có tác dụng giống `/edits auto`.
 
-`duo "<task>"` vẫn chạy một việc rồi thoát; đây là cách dùng cho script và CI.
+`duo "<task>"` và `duo run "<task>"` vẫn chạy pipeline cho một việc rồi thoát; đây là cách dùng cho script và CI.
 
 ## Extension VS Code
 

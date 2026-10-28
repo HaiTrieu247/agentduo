@@ -6,6 +6,8 @@ agentduo is a TypeScript CLI (`src/`, published to npm as `agentduo` with bins `
 
 A prompt that starts with `[orchestrator-role: <role>]` comes from agentduo. Its role description and output schema are authoritative for that turn. For everything else, follow your own configuration and this file.
 
+A prompt that starts with `[agentduo-conversation]` is a turn of the chat's three-way conversation (the user, Claude Code and Codex). It is not an orchestrated role: it has no schema, so answer in plain text, as the agent it names. When its second line is `[agentduo-discussion: <step>, round <n> of <max>]`, it is a turn of `/discuss`: the prompt says whether you answer, revise or review, and a review ends with its own `VERDICT: AGREE` or `VERDICT: REVISE` line.
+
 ## Conventions
 
 - agentduo enforces nothing. It passes protocol flags only, plus the user's `args` and `role_args`. Unexpected changes become `warning` events, never blocks. Do not add permission flags, guards or rules to prompts; that belongs to each CLI's configuration.

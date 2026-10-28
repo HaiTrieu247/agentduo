@@ -24,6 +24,8 @@ export class CodexParser implements StreamParser {
   tokens = 0;
   lastAgentMessage: string | null = null;
   error: string | null = null;
+  /** The turn itself failed (not just a reported error the CLI recovered from). */
+  failed = false;
 
   usage(): { tokens?: number } {
     return { tokens: this.tokens || undefined };
@@ -45,6 +47,7 @@ export class CodexParser implements StreamParser {
     if (event.type === "turn.failed" || event.type === "error") {
       const err = event.error as { message?: string } | undefined;
       this.error = String(err?.message ?? event.message ?? "codex reported an error");
+      if (event.type === "turn.failed") this.failed = true;
       return [];
     }
     if (typeof event.type !== "string" || !/^item\.(started|updated|completed)$/.test(event.type) || !event.item) return [];
@@ -103,16 +106,17 @@ export class CodexBackend implements AgentBackend {
     return found;
   }
 
-  buildArgs({ schemaName, lastMessageFile, role }: BuildArgs): string[] {
+  /** A conversation turn (text mode) gets no schema and no role_args: only the args every call gets. */
+  buildArgs(a: BuildArgs): string[] {
     return [
       "exec", "--json",
       "--color", "never",
-      "--output-schema", schemaPath(schemaName),
-      "--output-last-message", lastMessageFile,
+      ...(a.mode === "text" ? [] : ["--output-schema", schemaPath(a.schemaName)]),
+      "--output-last-message", a.lastMessageFile,
       "--cd", this.repo,
       ...(this.cfg.model ? ["--model", this.cfg.model] : []),
       ...this.cfg.args,
-      ...(this.cfg.role_args[role] ?? []),
+      ...(a.mode === "text" ? [] : this.cfg.role_args[a.role] ?? []),
       "-", // read the prompt from stdin
     ];
   }
@@ -121,12 +125,15 @@ export class CodexBackend implements AgentBackend {
     return new CodexParser();
   }
 
-  finalize(parser: StreamParser, _stdout: string, lastMessageFile: string): FinalOutput {
+  finalize(parser: StreamParser, _stdout: string, lastMessageFile: string, mode: "structured" | "text" = "structured"): FinalOutput {
     const p = parser as CodexParser;
     const fromFile = lastMessageFile && existsSync(lastMessageFile) ? readFileSync(lastMessageFile, "utf8") : "";
     const text = fromFile.trim() ? fromFile : p.lastAgentMessage ?? "";
     const meta: AgentMeta = { tokens: p.tokens || undefined, permissionDenials: [] };
+    if (mode === "text" && p.failed) throw new AgentFailure(`codex failed: ${p.error}`, meta);
     if (!text.trim()) throw new AgentFailure(p.error ? `codex failed: ${p.error}` : "codex produced no final message", meta);
+    // An answer is shown as Codex wrote it, also when it happens to look like JSON.
+    if (mode === "text") return { data: text, meta };
     try {
       return { data: extractJson(text), meta };
     } catch (e) {

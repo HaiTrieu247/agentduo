@@ -1,0 +1,364 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "1793178102s since unix epoch",
+  "overallStatus": "ok",
+  "codexVersion": "0.164.0",
+  "checks": {
+    "app_server.status": {
+      "id": "app_server.status",
+      "category": "app-server",
+      "status": "ok",
+      "summary": "background server is not running",
+      "details": {
+        "control socket": "/home/user/.codex/app-server-control/app-server-control.sock",
+        "daemon state dir": "/home/user/.codex/app-server-daemon",
+        "dedicated pid file": "/home/user/.codex/app-server-daemon/daemon.pid (missing)",
+        "dedicated update-loop pid file": "/home/user/.codex/app-server-daemon/daemon-updater.pid (missing)",
+        "mode": "ephemeral",
+        "pid file": "/home/user/.codex/app-server-daemon/app-server.pid (missing)",
+        "settings": "/home/user/.codex/app-server-daemon/settings.json (missing)",
+        "status": "not running",
+        "update-loop pid file": "/home/user/.codex/app-server-daemon/app-server-updater.pid (missing)"
+      },
+      "remediation": null,
+      "durationMs": 0
+    },
+    "auth.credentials": {
+      "id": "auth.credentials",
+      "category": "auth",
+      "status": "ok",
+      "summary": "auth is configured",
+      "details": {
+        "auth file": "/home/user/.codex/auth.json",
+        "auth storage mode": "File",
+        "stored API key": "false",
+        "stored ChatGPT tokens": "true",
+        "stored agent identity": "false",
+        "stored auth mode": "chatgpt"
+      },
+      "remediation": null,
+      "durationMs": 0
+    },
+    "config.load": {
+      "id": "config.load",
+      "category": "config",
+      "status": "ok",
+      "summary": "config loaded",
+      "details": {
+        "CODEX_HOME": "/home/user/.codex",
+        "active thread overrides": "not inspected",
+        "config.toml": "/home/user/.codex/config.toml",
+        "config.toml parse": "ok",
+        "configuration load ms": "75",
+        "configuration scope": "invocation config, including cloud-managed policy",
+        "configured TUI mode": "fullscreen",
+        "cwd": "/private/repo",
+        "enabled feature flags": "daemon_auto_start, shell_tool, view_image, sleep_tool, unified_exec, unified_exec_tty, shell_snapshot, content_item_kinds, code_mode_host, code_mode_interrupt, instant_interrupt, terminal_resize_reflow, sqlite, write_stdin_approval, hooks, api_key_model_discovery, cli_daybreak, api_key_cyber_access_programs, enable_request_compression, unbounded_connection_retries, worktrees, system_proxy_fallback, multi_agent, apps, mcp_oauth_refresh_coordination, tool_search_always_defer_mcp_tools, incremental_tools, tool_suggest, plugins, in_app_browser, browser_annotation_api, in_app_chat, in_app_dictation, in_app_voice, in_app_local_automation, in_app_updates, browser_use, browser_use_full_cdp_access, browser_use_external, computer_use, remote_plugin, plugin_sharing, image_generation, resize_all_images, item_ids, skill_mcp_dependency_install, skill_search, mentions_v2, steer, guardian_approval, guardian_reuse_parent_compaction, goals, collaboration_modes, tool_call_mcp_elicitation, auth_elicitation, bedrock_setup_wizard, fast_mode, ultrafast_mode, realtime_conversation, tui_app_server, compaction_image_budget, workspace_dependencies",
+        "feature flag overrides": "none",
+        "feature flags enabled": "62",
+        "log dir": "/home/user/.codex/log",
+        "mcp servers": "0",
+        "model": "gpt-6.1-sol",
+        "model provider": "openai",
+        "sqlite home": "/home/user/.codex"
+      },
+      "remediation": null,
+      "durationMs": 0
+    },
+    "git.environment": {
+      "id": "git.environment",
+      "category": "git",
+      "status": "ok",
+      "summary": "git executable found; execution not verified",
+      "details": {
+        "PATH git #1": "/usr/bin/git",
+        "PATH git entries": "1",
+        "git execution": "not inspected (PATH helpers are not executed)",
+        "repo detected": "false",
+        "selected git": "/usr/bin/git"
+      },
+      "remediation": null,
+      "durationMs": 0
+    },
+    "installation": {
+      "id": "installation",
+      "category": "install",
+      "status": "ok",
+      "summary": "installation looks consistent",
+      "details": {
+        "PATH codex #1": "/home/user/.nvm/versions/node/v24.20.0/bin/codex",
+        "current executable": "/home/user/.nvm/versions/node/v24.20.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex",
+        "install context": "npm (package /home/user/.nvm/versions/node/v24.20.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin, bin /home/user/.nvm/versions/node/v24.20.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin, resources /home/user/.nvm/versions/node/v24.20.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex-resources, path /home/user/.nvm/versions/node/v24.20.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex-path)",
+        "managed by Vite+": "false",
+        "managed by bun": "false",
+        "managed by npm": "true",
+        "managed by pnpm": "false",
+        "managed package root": "/home/user/.nvm/versions/node/v24.20.0/lib/node_modules/@openai/codex",
+        "npm update target": "not inspected (PATH helpers are not executed)"
+      },
+      "remediation": null,
+      "durationMs": 1
+    },
+    "mcp.config": {
+      "id": "mcp.config",
+      "category": "mcp",
+      "status": "ok",
+      "summary": "no MCP servers configured",
+      "details": {},
+      "remediation": null,
+      "durationMs": 0
+    },
+    "network.env": {
+      "id": "network.env",
+      "category": "network",
+      "status": "ok",
+      "summary": "network-related environment looks readable",
+      "details": {
+        "managed proxy": "not configured",
+        "proxy env vars": "none",
+        "respect system proxy": "disabled",
+        "system proxy": "direct"
+      },
+      "remediation": null,
+      "durationMs": 0
+    },
+    "network.provider_reachability": {
+      "id": "network.provider_reachability",
+      "category": "reachability",
+      "status": "ok",
+      "summary": "active provider endpoints are reachable over HTTP",
+      "details": {
+        "ChatGPT inference URL": "https://chatgpt.com/backend-api/<redacted> reachable (HTTP 405)",
+        "reachability mode": "ChatGPT auth"
+      },
+      "remediation": null,
+      "durationMs": 576
+    },
+    "network.websocket_reachability": {
+      "id": "network.websocket_reachability",
+      "category": "websocket",
+      "status": "ok",
+      "summary": "Responses WebSocket handshake succeeded",
+      "details": {
+        "DNS": "2 IPv4, 2 IPv6, first IPv6",
+        "auth mode": "chatgpt",
+        "connect timeout": "15000 ms",
+        "endpoint": "wss://chatgpt.com/backend-api/<redacted>",
+        "handshake result": "HTTP 101 Switching Protocols",
+        "model provider": "openai",
+        "provider name": "OpenAI",
+        "proxy env vars": "none",
+        "reasoning header": "false",
+        "server model present": "false",
+        "supports websockets": "true",
+        "wire API": "responses"
+      },
+      "remediation": null,
+      "durationMs": 1363
+    },
+    "runtime.provenance": {
+      "id": "runtime.provenance",
+      "category": "runtime",
+      "status": "ok",
+      "summary": "running npm on macos-aarch64",
+      "details": {
+        "commit": "unknown",
+        "current executable": "/home/user/.nvm/versions/node/v24.20.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex",
+        "install method": "npm (package /home/user/.nvm/versions/node/v24.20.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin, bin /home/user/.nvm/versions/node/v24.20.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin, resources /home/user/.nvm/versions/node/v24.20.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex-resources, path /home/user/.nvm/versions/node/v24.20.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex-path)",
+        "platform": "macos-aarch64",
+        "version": "0.164.0"
+      },
+      "remediation": null,
+      "durationMs": 0
+    },
+    "runtime.search": {
+      "id": "runtime.search",
+      "category": "search",
+      "status": "ok",
+      "summary": "search command found (bundled); execution not verified",
+      "details": {
+        "search command": "/home/user/.nvm/versions/node/v24.20.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex-path/rg",
+        "search command readiness": "file exists",
+        "search provider": "bundled"
+      },
+      "remediation": null,
+      "durationMs": 0
+    },
+    "sandbox.filesystem_paths": {
+      "id": "sandbox.filesystem_paths",
+      "category": "sandbox",
+      "status": "ok",
+      "summary": "no explicit filesystem paths to probe",
+      "details": {},
+      "remediation": null,
+      "durationMs": 1
+    },
+    "sandbox.helpers": {
+      "id": "sandbox.helpers",
+      "category": "sandbox",
+      "status": "ok",
+      "summary": "sandbox configuration is readable",
+      "details": {
+        "approval policy": "OnRequest",
+        "codex-linux-sandbox helper": "none",
+        "denied-read glob rules": "0",
+        "denied-read rules": "0",
+        "filesystem sandbox": "restricted",
+        "glob scan max depth": "unbounded",
+        "managed filesystem source": "none",
+        "network sandbox": "restricted"
+      },
+      "remediation": null,
+      "durationMs": 0
+    },
+    "security.endpoint": {
+      "id": "security.endpoint",
+      "category": "security",
+      "status": "ok",
+      "summary": "no supported endpoint protection detected",
+      "details": {
+        "endpoint products": "none detected"
+      },
+      "remediation": null,
+      "durationMs": 13
+    },
+    "state.paths": {
+      "id": "state.paths",
+      "category": "state",
+      "status": "ok",
+      "summary": "state paths and databases are inspectable",
+      "details": {
+        "CODEX_HOME": "/home/user/.codex (dir)",
+        "active rollout files": "2 files, 2309544 total bytes, 1154772 average bytes",
+        "archived rollout files": "0 files, 0 total bytes, 0 average bytes",
+        "goals DB": "/home/user/.codex/goals_1.sqlite (file)",
+        "goals DB integrity": "ok",
+        "log DB": "/home/user/.codex/logs_2.sqlite (file)",
+        "log DB integrity": "ok",
+        "log dir": "/home/user/.codex/log (dir)",
+        "memories DB": "/home/user/.codex/memories_1.sqlite (file)",
+        "memories DB integrity": "ok",
+        "memories v2 DB": "/home/user/.codex/memories_v2_1.sqlite (missing)",
+        "memories v2 DB integrity": "skipped (missing)",
+        "queue DB": "/home/user/.codex/queue_1.sqlite (file)",
+        "queue DB integrity": "ok",
+        "sqlite home": "/home/user/.codex (dir)",
+        "state DB": "/home/user/.codex/state_5.sqlite (file)",
+        "state DB integrity": "ok",
+        "thread history DB": "/home/user/.codex/thread_history_1.sqlite (file)",
+        "thread history DB integrity": "ok"
+      },
+      "remediation": null,
+      "durationMs": 133
+    },
+    "state.rollout_db_parity": {
+      "id": "state.rollout_db_parity",
+      "category": "threads",
+      "status": "ok",
+      "summary": "rollout files and state DB thread inventory agree",
+      "details": {
+        "default model provider": "openai",
+        "rollout DB active files": "2",
+        "rollout DB active rows": "2",
+        "rollout DB archive mismatches": "0",
+        "rollout DB archived files": "0",
+        "rollout DB archived rows": "0",
+        "rollout DB duplicate DB paths": "0",
+        "rollout DB duplicate rollout thread ids": "0",
+        "rollout DB malformed file names": "0",
+        "rollout DB missing active rows": "0",
+        "rollout DB missing archived rows": "0",
+        "rollout DB model providers": "openai=2",
+        "rollout DB rows": "2",
+        "rollout DB scan cap reached": "false",
+        "rollout DB scan errors": "0",
+        "rollout DB sources": "vscode=2",
+        "rollout DB stale rows": "0"
+      },
+      "remediation": null,
+      "durationMs": 115
+    },
+    "system.disk": {
+      "id": "system.disk",
+      "category": "disk",
+      "status": "ok",
+      "summary": "sufficient free disk space (328.3 GiB)",
+      "details": {
+        "CODEX_HOME available": "328.3 GiB",
+        "failure threshold": "1.0 GiB",
+        "warning threshold": "5.0 GiB",
+        "worktree available": "328.3 GiB"
+      },
+      "remediation": null,
+      "durationMs": 0
+    },
+    "system.environment": {
+      "id": "system.environment",
+      "category": "system",
+      "status": "ok",
+      "summary": "OS language en-VN",
+      "details": {
+        "EDITOR": "not set",
+        "LANG": "C.UTF-8",
+        "VISUAL": "not set",
+        "os": "Mac OS 27.2.0 [64-bit]",
+        "os language": "en-VN",
+        "os type": "Mac OS",
+        "os version": "27.2.0"
+      },
+      "remediation": null,
+      "durationMs": 23
+    },
+    "terminal.env": {
+      "id": "terminal.env",
+      "category": "terminal",
+      "status": "ok",
+      "summary": "terminal metadata was detected",
+      "details": {
+        "color output": "disabled (stdout is not a terminal)",
+        "effective locale": "C.UTF-8",
+        "stderr is terminal": "false",
+        "stdin is terminal": "false",
+        "stdout is terminal": "false",
+        "terminal": "unknown",
+        "terminal size": "unavailable (Resource temporarily unavailable (os error 35))"
+      },
+      "remediation": null,
+      "durationMs": 4
+    },
+    "terminal.title": {
+      "id": "terminal.title",
+      "category": "title",
+      "status": "ok",
+      "summary": "terminal title default",
+      "details": {
+        "terminal title activity": "true",
+        "terminal title items": "activity, project-name",
+        "terminal title project source": "cwd",
+        "terminal title project value": "duo-fixture",
+        "terminal title source": "default"
+      },
+      "remediation": null,
+      "durationMs": 0
+    },
+    "updates.status": {
+      "id": "updates.status",
+      "category": "updates",
+      "status": "ok",
+      "summary": "update configuration is locally consistent",
+      "details": {
+        "check for update on startup": "true",
+        "latest version": "0.165.0",
+        "latest version status": "newer version is available",
+        "npm update target": "not inspected (PATH helpers are not executed)",
+        "update action": "npm install -g @openai/codex",
+        "version cache": [
+          "/home/user/.codex/version.json",
+          "missing"
+        ]
+      },
+      "remediation": null,
+      "durationMs": 422
+    }
+  }
+}

@@ -1,8 +1,9 @@
+import type { DiscussionStep, Verdict } from "../events.js";
 import type { AgentRole, Backend, GateConfig } from "./config.js";
 import { describeGates, type GateResult } from "./gates.js";
 import type { Approval, Critique, Finding, Implementation, Plan, Review } from "./outputs.js";
 import { findingsMarkdown, issuesMarkdown } from "./render.js";
-import type { EarlierTask, HumanNote } from "./state.js";
+import type { ConversationContext, EarlierTask, Exchange, HumanNote } from "./state.js";
 
 export interface PromptContext {
   repo: string;
@@ -12,7 +13,12 @@ export interface PromptContext {
   gates: GateConfig[];
   notes: HumanNote[];
   earlier?: EarlierTask[];
+  /** The chat's conversation when the run started; every role sees the same one. */
+  conversation?: ConversationContext;
 }
+
+/** The first line of a conversation prompt: not an orchestrator role, so no schema and no role instructions. */
+export const CONVERSATION_MARKER = "[agentduo-conversation]";
 
 export interface PlanFeedback {
   critique?: Critique;
@@ -52,10 +58,112 @@ function gateList(gates: GateConfig[]): string {
   return gates.map((g) => "- `" + g.command + "` (" + g.name + ", " + (g.required === false ? "optional" : "required") + ")").join("\n");
 }
 
-function earlier(list: EarlierTask[] = []): string {
+/** The pipeline tasks of the chat so far; the one place an outcome is told, in pipeline and conversation prompts alike. */
+export function earlierTasks(list: EarlierTask[] = [], current = true): string {
   if (!list.length) return "";
-  return "\n## Earlier in this conversation\nThe user gave these tasks before this one, in this workspace; their changes are already in the working tree.\n" +
-    list.map((t, i) => `${i + 1}. ${t.task} — ${t.outcome}`).join("\n") + "\n";
+  return "\n## Previous pipeline tasks\nThe user gave these tasks to the pipeline " + (current ? "before this one" : "earlier in this chat") +
+    ", in this workspace; their changes are already in the working tree.\n" + list.map((t, i) => `${i + 1}. ${t.task} — ${t.outcome}`).join("\n") + "\n";
+}
+
+function exchangeText(e: Exchange): string {
+  const name = NAMES[e.backend];
+  if (e.discussedWith) {
+    const other = NAMES[e.discussedWith];
+    return `**User → ${name} (discussed with ${other}):**\n${e.question.trim()}\n\n**${name}, after discussing it with ${other}:**\n${e.answer.trim()}`;
+  }
+  return `**User → ${name}:**\n${e.question.trim()}\n\n**${name}:**\n${e.answer.trim()}`;
+}
+
+/** What was said in the chat, oldest first, and how many older exchanges did not fit. */
+export function conversationSection(conversation: ConversationContext | undefined, title: string, intro: string): string {
+  if (!conversation?.exchanges.length) return "";
+  const omitted = conversation.omitted ? `(${conversation.omitted} older exchange(s) are left out.)\n` : "";
+  return `\n## ${title}\n${intro}\n${omitted}\n${conversation.exchanges.map(exchangeText).join("\n\n")}\n`;
+}
+
+function earlier(ctx: PromptContext): string {
+  return earlierTasks(ctx.earlier) + conversationSection(ctx.conversation, "Conversation before this task",
+    "Before giving this task, the user talked about it with Claude Code and Codex in this chat. Use it as context; the task above is what to do.");
+}
+
+/**
+ * A question of the three-way chat for one agent: who is talking, what was said, the pipeline tasks so far, and the
+ * question itself, which appears exactly once, last.
+ */
+export function conversation(o: { workspace: string; backend: Backend; context: ConversationContext; earlier: EarlierTask[]; question: string }): string {
+  const name = NAMES[o.backend];
+  const other = NAMES[o.backend === "codex" ? "claude" : "codex"];
+  return [
+    CONVERSATION_MARKER,
+    `This is a three-way conversation in the workspace \`${o.workspace}\` between the user, Claude Code and Codex; agentduo relays the messages. ` +
+      `You are ${name}. Answer the user's latest message as ${name}; earlier answers may come from ${other}, and the user can read all of them.`,
+    "Follow your own configuration and the repository's instructions (AGENTS.md / CLAUDE.md).",
+    earlierTasks(o.earlier, false) + conversationSection(o.context, "Conversation so far", "Oldest first."),
+    `## The user's message to ${name}\n${o.question}\n`,
+  ].filter(Boolean).join("\n");
+}
+
+/** One message of a discussion so far, as the later prompts of the discussion show it. */
+export interface DiscussionMessage {
+  backend: Backend;
+  step: DiscussionStep;
+  round: number;
+  text: string;
+  verdict: Verdict | null;
+}
+
+const STEP_TITLES: Record<DiscussionStep, (round: number) => string> = {
+  answer: () => "answer, version 1",
+  critique: (round) => `review of version ${round}`,
+  revise: (round) => `answer, version ${round}`,
+  final: (round) => `final answer, version ${round}`,
+};
+
+function discussionHistory(history: DiscussionMessage[]): string {
+  if (!history.length) return "";
+  return "\n## The discussion so far\nOldest first.\n\n" + history.map((m) => {
+    const verdict = m.step === "critique" ? ` (verdict: ${m.verdict ? m.verdict.toUpperCase() : "none given, taken as REVISE"})` : "";
+    return `### ${NAMES[m.backend]}: ${STEP_TITLES[m.step](m.round)}${verdict}\n${m.text.trim()}`;
+  }).join("\n\n") + "\n";
+}
+
+/**
+ * A turn of /discuss for one agent: the conversation so far, the user's question (once), the discussion so far, and
+ * what this step asks. Its second line names the step, so the agent (and a test's fake agent) can tell it.
+ */
+export function discussion(o: {
+  workspace: string; context: ConversationContext; earlier: EarlierTask[]; question: string; answerer: Backend; critic: Backend; maxRounds: number;
+  step: DiscussionStep; round: number; history: DiscussionMessage[];
+}): string {
+  const answerer = NAMES[o.answerer];
+  const critic = NAMES[o.critic];
+  const me = o.step === "critique" ? critic : answerer;
+  const verdicts = "End your review with one line of its own, exactly `VERDICT: AGREE` if the version is correct and complete enough to give the user " +
+    "as it is, or `VERDICT: REVISE` if it needs changes.";
+  const asks: Record<DiscussionStep, string> = {
+    answer: `## Your turn: answer\nAnswer the user's question as ${answerer}. ${critic} will review your answer before the user gets it, and you can revise it then. ` +
+      "Write it for the user.\n",
+    critique: `## Your turn: review version ${o.round}\nCheck ${answerer}'s latest version for errors, gaps and claims it does not support; read the ` +
+      "code or run what you need when the answer depends on it. Say what is wrong and what should change, briefly and concretely, and say what is right " +
+      `only where it matters. Do not rewrite the answer. ${verdicts}\n`,
+    revise: `## Your turn: version ${o.round}\nWrite version ${o.round} of your answer, taking ${critic}'s latest review into account: fix what it got ` +
+      "right; where you disagree, keep your position and say why in a sentence. Give the whole answer again, for the user, not only the changes.\n",
+    final: `## Your turn: the final answer\n${critic} still asks for changes after ${o.maxRounds} review(s), so this version goes to the user as it is, ` +
+      `with no further review. Write the final answer (version ${o.round}), taking the latest review into account where you agree. End with a short ` +
+      `section on the points you and ${critic} still disagree on: each point, and both positions, in a line or two.\n`,
+  };
+  return [
+    CONVERSATION_MARKER,
+    `[agentduo-discussion: ${o.step}, round ${o.round} of ${o.maxRounds}]`,
+    `This is a three-way conversation in the workspace \`${o.workspace}\` between the user, Claude Code and Codex; agentduo relays the messages. ` +
+      `The user asked for a discussion: ${answerer} answers, ${critic} reviews the answer, and ${answerer} revises it until ${critic} agrees, ` +
+      `for at most ${o.maxRounds} review(s). The user reads the whole discussion and gets the last version as the response. You are ${me}.`,
+    "Follow your own configuration and the repository's instructions (AGENTS.md / CLAUDE.md).",
+    earlierTasks(o.earlier, false) + conversationSection(o.context, "Conversation so far", "Oldest first."),
+    `## The user's question\n${o.question}\n`,
+    discussionHistory(o.history),
+    asks[o.step],
+  ].filter(Boolean).join("\n");
 }
 
 function notes(list: HumanNote[]): string {
@@ -81,7 +189,7 @@ export function planner(ctx: PromptContext, round: number, version: number, prev
     header("planner", "Planner / Architect", ctx),
     `- Planning round: ${round} · Producing plan version: v${version}\n`,
     "## Task\n" + ctx.task + "\n",
-    earlier(ctx.earlier),
+    earlier(ctx),
     notes(ctx.notes),
     "## Your job\n" +
       "Study the repository and produce an implementation plan that the implementer can execute without further clarification.\n" +
@@ -113,7 +221,7 @@ export function planReviewer(ctx: PromptContext, round: number, version: number,
     header("plan_reviewer", "Plan Critic", ctx),
     `- Planning round: ${round} · Plan under review: v${version}\n`,
     "## Task\n" + ctx.task + "\n",
-    earlier(ctx.earlier),
+    earlier(ctx),
     notes(ctx.notes),
     "## Plan under review\n" + planMd + "\n",
     "## Your job\n" +
@@ -145,7 +253,7 @@ export function planFinalizer(ctx: PromptContext, round: number, version: number
     header("plan_finalizer", "Planner / Architect (final plan sign-off)", ctx),
     `- Planning round: ${round} · Plan up for sign-off: v${version}\n`,
     "## Task\n" + ctx.task + "\n",
-    earlier(ctx.earlier),
+    earlier(ctx),
     notes(ctx.notes),
     "## Plan\n" + planMd + "\n",
     "## The critic approved this version\n" + critique.summary + "\n\nRemaining suggestions:\n" + issuesMarkdown(critique.issues) + "\n",
@@ -164,7 +272,7 @@ export function implementer(ctx: PromptContext, round: number, planMd: string, f
     header("implementer", "Implementer", ctx),
     `- Implementation round: ${round}\n`,
     "## Task\n" + ctx.task + "\n",
-    earlier(ctx.earlier),
+    earlier(ctx),
     notes(ctx.notes),
     "## Final approved plan\n" + planMd + "\n",
     "## How to work\n" +
@@ -206,7 +314,7 @@ export function codeReviewer(ctx: PromptContext, round: number, planMd: string, 
       "- Revision under review: `" + snapshot + "` (agentduo snapshot of the workspace)\n" +
       "- Base revision: `" + base + "`\n",
     "## Task\n" + ctx.task + "\n",
-    earlier(ctx.earlier),
+    earlier(ctx),
     notes(ctx.notes),
     "## Final approved plan\n" + planMd + "\n",
     "## Quality gate results (run by agentduo on this revision)\n" + describeGates(gateResults) + "\n",

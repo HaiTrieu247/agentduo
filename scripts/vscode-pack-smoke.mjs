@@ -17,7 +17,7 @@ const fail = (message) => {
 /** Every file the VSIX may hold, under extension/. vsce adds the manifest files at the top level. */
 const allowed = [
   /^package\.json$/, /^readme\.md$/i, /^license(\.txt)?$/i, /^media\/agentduo\.svg$/,
-  /^dist\/extension\.cjs$/, /^dist\/webview\/main\.js$/, /^dist\/webview\/styles\.css$/,
+  /^dist\/extension\.cjs$/, /^dist\/webview\/main\.js$/, /^dist\/webview\/styles\.css$/, /^dist\/webview\/codicon(\.css|\.ttf|-LICENSE\.txt)$/,
   /^runtime\/package\.json$/, /^runtime\/worker\.js$/, /^runtime\/schemas\/[a-z_]+\.schema\.json$/,
 ];
 
@@ -74,7 +74,10 @@ try {
   const files = entries.filter((e) => e.startsWith("extension/")).map((e) => e.slice("extension/".length));
   const stray = files.filter((f) => !allowed.some((re) => re.test(f)));
   if (stray.length) fail(`the VSIX holds files it should not:\n  ${stray.join("\n  ")}`);
-  for (const need of ["package.json", "dist/extension.cjs", "dist/webview/main.js", "dist/webview/styles.css", "runtime/package.json", "runtime/worker.js"]) {
+  for (const need of [
+    "package.json", "dist/extension.cjs", "dist/webview/main.js", "dist/webview/styles.css", "dist/webview/codicon.css", "dist/webview/codicon.ttf",
+    "dist/webview/codicon-LICENSE.txt", "runtime/package.json", "runtime/worker.js",
+  ]) {
     if (!files.includes(need)) fail(`the VSIX is missing ${need}`);
   }
   const packed = files.filter((f) => f.startsWith("runtime/schemas/")).map((f) => f.slice("runtime/schemas/".length)).sort();
@@ -90,6 +93,11 @@ try {
   }
   const manifest = JSON.parse(readFileSync(join(ext, "package.json"), "utf8"));
   if (manifest.version !== version) fail(`the extension manifest is version ${manifest.version}, expected ${version}`);
+  // The provider marks are drawn by the bundle itself (no image asset), with the company's name as their text.
+  const webview = readFileSync(join(ext, "dist", "webview", "main.js"), "utf8");
+  for (const need of ["createElementNS", "http://www.w3.org/2000/svg", "Anthropic", "OpenAI", "mark mark-"]) {
+    if (!webview.includes(need)) fail(`the packaged webview bundle has no ${need}, so it cannot draw the provider marks`);
+  }
 
   const repo = join(tmp, "repo");
   mkdirSync(repo);

@@ -117,6 +117,25 @@ describe("Workflow", () => {
     expect(fake.calls("implementer")[0]!.prompt).toContain("C1 is acceptable");
   });
 
+  it("tells every role what the user and both agents said before the task, also after a resume", async () => {
+    fake.setScenario({ ...happy(), plan_reviewer: [{ output: critique(false, [issue("C1")]) }] });
+    h.cfg = testConfig(fake, { limits: { max_planning_rounds: 1 } });
+    const context = { exchanges: [{ backend: "claude" as const, question: "Should the fix keep the old format?", answer: "Yes, keep the old format readable." }], omitted: 0 };
+    const { wf } = newWorkflow(h, "Make app.txt fixed", undefined, (st) => {
+      st.conversationContext = context;
+    });
+    expect(await wf.run()).toBe(2);
+    expect(await resume(h, { decision: "resume", note: "go ahead" })).toBe(0);
+    expect(stateOf(h).conversationContext).toEqual(context);
+    for (const role of ["planner", "plan_reviewer", "implementer", "code_reviewer"]) {
+      for (const call of fake.calls(role)) {
+        expect(call.prompt, role).toContain("Yes, keep the old format readable.");
+        expect(call.prompt.split("Should the fix keep the old format?").length - 1, role).toBe(1);
+      }
+      expect(fake.calls(role).length, role).toBeGreaterThan(0);
+    }
+  });
+
   it("revise re-plans with the operator's note", async () => {
     await start({ ...happy(), plan_reviewer: [{ output: critique(false, [issue("C1")]) }, { output: critique(false, [issue("C1")]) }, { output: critique(true) }] },
       { limits: { max_planning_rounds: 2 } });

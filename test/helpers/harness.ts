@@ -32,9 +32,13 @@ function busFor(h: Harness): EventBus {
   return bus;
 }
 
-export function newWorkflow(h: Harness, task: string, decider: Decider = new ScriptedDecider()): { wf: Workflow; bus: EventBus } {
+export function newWorkflow(h: Harness, task: string, decider: Decider = new ScriptedDecider(), prepare?: (state: RunState) => void): { wf: Workflow; bus: EventBus } {
   const bus = busFor(h);
   const { store, state } = RunStore.create(h.runsDir, task, h.cfg.limits);
+  if (prepare) {
+    prepare(state);
+    store.saveState(state);
+  }
   return { wf: new Workflow({ cfg: h.cfg, repo: h.repo, store, state, bus, decider, permissions: h.permissions }), bus };
 }
 

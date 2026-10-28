@@ -1,8 +1,9 @@
 // Runs inside an Extension Development Host, started by scripts/test-vscode.mjs on a scratch git repository with fake
-// CLIs: activation, command registration, the chat view and the worker it starts, the two content providers, and a
-// two-round run whose diff follows the run to its newer snapshot.
+// CLIs: activation, command registration, the chat view and the worker it starts, the two content providers, questions
+// to Codex and Claude (one stopped before its answer), and a two-round pipeline run whose diff follows the run to its
+// newer snapshot.
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as vscode from "vscode";
 import { approval, critique, finding, impl, plan, review } from "../../../test/helpers/builders.js";
@@ -22,6 +23,12 @@ async function until<T>(what: string, get: () => T | null | undefined | false, t
 }
 
 const read = async (uri: vscode.Uri) => (await vscode.workspace.openTextDocument(uri)).getText();
+
+const answers = (api: TestApi) => (api.state()?.timeline ?? []).flatMap((i) => (i.kind === "answer" ? [i.turn] : []));
+
+/** The fake CLIs' calls so far ($FAKE_LOG). */
+const calls = (): Array<{ role?: string; prompt: string }> =>
+  readFileSync(process.env.FAKE_LOG!, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((c) => typeof c.prompt === "string");
 
 const checks: Array<[string, (api: TestApi, ext: vscode.Extension<TestApi>) => Promise<void>]> = [
   ["activates without starting a worker", async (api) => {
@@ -59,13 +66,47 @@ const checks: Array<[string, (api: TestApi, ext: vscode.Extension<TestApi>) => P
     await vscode.commands.executeCommand("agentduo.openPlan");
     await vscode.commands.executeCommand("agentduo.openChanges");
   }],
+  ["answers a plain message with Codex, then a /claude question with what Codex said, without starting a run", async (api) => {
+    writeFileSync(process.env.FAKE_SCENARIO!, JSON.stringify({
+      chat_codex: [{ answer: "Codex: keep app.txt short.\n\n```\nround 1\n```" }], chat_claude: [{ answer: "Claude: agreed." }],
+    }));
+    await api.submit("How should app.txt look?");
+    const codex = await until("Codex's answer", () => answers(api).find((t) => t.backend === "codex"));
+    assert.equal(codex.status, "success");
+    assert.equal(codex.answer, "Codex: keep app.txt short.\n\n```\nround 1\n```");
+    assert.ok(api.state()!.models?.codex, "the composer knows Codex's model");
+
+    await api.submit("/claude Do you agree?");
+    const claude = await until("Claude's answer", () => answers(api).find((t) => t.backend === "claude"));
+    assert.equal(claude.status, "success");
+    assert.equal(claude.answer, "Claude: agreed.");
+    assert.equal(claude.model.resolved, "claude-fake-default", "Claude's stream names the model of its answer");
+    const asked = calls().filter((c) => c.role === "chat_claude").at(-1);
+    assert.ok(asked?.prompt.includes("Codex: keep app.txt short."), "Claude's prompt carries Codex's answer");
+    assert.equal(api.state()!.run, null, "a question starts no run");
+    assert.equal(api.state()!.recipient, "claude", "the next plain message goes to Claude");
+    await api.selectRecipient("codex");
+  }],
+  ["stops an answer before it arrives, and the chat is idle again", async (api) => {
+    writeFileSync(process.env.FAKE_SCENARIO!, JSON.stringify({ chat_codex: [{ answer: "too late", sleep: 30_000 }] }));
+    const before = answers(api).length;
+    const started = Date.now();
+    await api.submit("A slow question");
+    await until("the answer to start", () => api.state()?.status === "answering");
+    await vscode.commands.executeCommand("agentduo.stop");
+    const stopped = await until("the stopped answer", () => answers(api).slice(before).find((t) => t.backend === "codex"), 15_000);
+    assert.equal(stopped.status, "interrupted");
+    assert.equal(stopped.answer ?? null, null);
+    assert.ok(Date.now() - started < 30_000, "stopped before the agent would have answered");
+    await until("the chat to be idle", () => api.state()?.status === "idle");
+  }],
   ["opens a diff, and after the run's next round shows that round's snapshot, not the editor's cached document", async (api) => {
     writeFileSync(process.env.FAKE_SCENARIO!, JSON.stringify({
       planner: [{ output: plan() }], plan_reviewer: [{ output: critique(true) }], plan_finalizer: [{ output: approval(true) }],
       implementer: [{ write: { "app.txt": "round 1\n" }, output: impl() }, { write: { "app.txt": "round 2\n" }, output: impl("completed", ["F1"]) }],
       code_reviewer: [{ output: review(false, [finding("F1")]) }, { output: review(true, [], ["F1"]) }],
     }));
-    await api.submit("Make app.txt fixed");
+    await api.submit("Make app.txt fixed", "pipeline");
     await until("the decision after round 1", () => api.state()?.decision, 60_000);
     const first = await api.openDiff("app.txt");
     assert.equal(await read(first.base), "");

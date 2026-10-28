@@ -6,7 +6,7 @@ import { Command, CommanderError, Option } from "commander";
 import { killAllActive } from "./agents/process.js";
 import { Chat, newRun } from "./chat.js";
 import { settings } from "./core/settings.js";
-import { configFromSaved, ConfigError, type ConfigData } from "./core/config.js";
+import { configFromSaved, ConfigError, type Backend, type ConfigData } from "./core/config.js";
 import { diagnose, EnvironmentError, prepareEnvironment, runnableProblem, type WorkspaceEnv } from "./core/environment.js";
 import { Git } from "./core/git.js";
 import { initRepo } from "./core/init.js";
@@ -136,8 +136,9 @@ async function prepare(io: CliIO, opts: CommonOptions): Promise<Env> {
   return env;
 }
 
-function requireRunnable(env: Env, cfg: ConfigData, source: string, io: CliIO, saved = false): void {
-  const problem = runnableProblem(env, cfg, source, io.env, saved);
+/** `backends`: the CLIs that must be found (default: those of the pipeline's roles). */
+function requireRunnable(env: Env, cfg: ConfigData, source: string, io: CliIO, saved = false, backends?: Backend[]): void {
+  const problem = runnableProblem(env, cfg, source, io.env, saved, backends);
   if (problem) throw new CliExit(EXIT.ERROR, problem.message);
 }
 
@@ -322,10 +323,13 @@ async function runCommand(io: CliIO, words: string[], opts: RunOptions, explicit
   }
 }
 
-/** `duo` alone: a chat session in this workspace, holding its lock until the user leaves. */
+/**
+ * `duo` alone: a chat session in this workspace, holding its lock until the user leaves. It opens without either CLI
+ * (help and settings need none); each question checks its agent's CLI, and /pipeline those of every role.
+ */
 async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
   const env = await prepare(io, opts);
-  requireRunnable(env, env.cfg, env.sources.join(", "), io);
+  requireRunnable(env, env.cfg, env.sources.join(", "), io, false, []);
   withAcceptEdits(env.cfg, opts);
   const release = lockWorkspace(env.runsDir);
   try {
@@ -349,6 +353,7 @@ async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
     });
     chat = new Chat({
       cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, bus, decider: session.decider, permissions: session.permissions, ui: session.ui,
+      env: io.env,
     });
     const offSignal = io.onSignal?.(() => session.ui.exit());
     await chat.greet();
@@ -462,7 +467,8 @@ export async function main(argv: string[], io: CliIO = processIO()): Promise<num
   let exitCode: number = EXIT.DONE;
   const program = new Command()
     .name("duo")
-    .description("A channel between Codex and Claude Code: Codex plans and reviews, Claude critiques and implements. Start a run with a task description.")
+    .description("A channel between Codex and Claude Code. `duo` alone opens a chat with both (ask either one; /pipeline <task> runs the workflow); " +
+      "`duo <task>` runs the workflow directly: Codex plans and reviews, Claude critiques and implements.")
     .version(packageVersion(), "-V, --version")
     .enablePositionalOptions()
     .exitOverride()

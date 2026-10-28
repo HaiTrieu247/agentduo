@@ -67,13 +67,80 @@ export interface RoundInfo {
   limit: number;
 }
 
+export type Agent = "codex" | "claude";
+
+/**
+ * Which model a backend runs with, and how sure agentduo is: `requested` is an explicit choice (config or args),
+ * `configured` a name or alias from the CLI's own settings, `resolved` a concrete name its doctor or its own stream
+ * confirmed. "default" means agentduo passes no model, so the CLI picks one.
+ */
+export interface ModelIdentity {
+  backend: Agent;
+  requested: string | null;
+  configured: string | null;
+  resolved: string | null;
+  /** Where the name shown comes from. */
+  source: "config" | "args" | "env" | "settings" | "doctor" | "observed" | null;
+  isDefault: boolean;
+  status: "resolving" | "resolved" | "configured" | "unresolved";
+  /** Why the model is not known (yet). */
+  reason: string | null;
+}
+
+export type ModelMap = Record<Agent, ModelIdentity>;
+
+export type TurnStatus = "success" | "error" | "interrupted";
+
+/**
+ * /discuss: one agent answers, the other reviews it, and the first revises until the reviewer agrees or the rounds
+ * run out; then it writes a final answer that says what is still disputed.
+ */
+export type DiscussionStep = "answer" | "critique" | "revise" | "final";
+export type Verdict = "agree" | "revise";
+/** A turn's place in a discussion: an answer step writes version `round`; a critique reviews version `round`. */
+export interface DiscussionPlace {
+  id: string;
+  step: DiscussionStep;
+  round: number;
+}
+/** agreed: the reviewer agreed; disputed: the rounds ran out, and the final answer says what is still disputed. */
+export type DiscussionStatus = "agreed" | "disputed" | "interrupted" | "error";
+
+/**
+ * Who a permission prompt or an activity belongs to: a pipeline role, or a turn of the conversation. A conversation
+ * turn is not a pipeline role, so it has none.
+ */
+export type CallContext = { role: Role; turnId?: undefined } | { role?: undefined; turnId: string };
+
 export type DuoEvent =
   | { type: "run.started"; runId: string; task: string; repo: string; runDir: string }
   | { type: "phase.started"; step: number; phase: Phase; round: number; role?: Role; agent?: Party; planning: RoundInfo; impl: RoundInfo }
   | { type: "agent.activity"; role: Role; agent: Party; activity: Activity }
   | { type: "agent.retry"; role: Role; agent: Party; attempt: number; max: number; reason: string }
-  | { type: "permission.requested"; role: Role; agent: Party; request: PermissionRequest }
-  | { type: "permission.answered"; role: Role; agent: Party; id: string; answer: PermissionAnswer }
+  | ({ type: "permission.requested"; agent: Party; request: PermissionRequest } & CallContext)
+  | ({ type: "permission.answered"; agent: Party; id: string; answer: PermissionAnswer } & CallContext)
+  /** A question of the conversation went to one agent; `model` is what it runs with as the turn starts. */
+  | { type: "turn.started"; conversationId: string; turnId: string; backend: Agent; question: string; model: ModelIdentity; discussion?: DiscussionPlace }
+  | { type: "turn.activity"; conversationId: string; turnId: string; backend: Agent; activity: Activity }
+  | { type: "turn.usage"; turnId: string; backend: Agent; costUsd?: number; tokens?: number }
+  /** The agent's own stream named the model of this turn. */
+  | { type: "turn.model"; turnId: string; backend: Agent; model: string }
+  | {
+    type: "turn.finished"; conversationId: string; turnId: string; backend: Agent; status: TurnStatus; answer: string | null; error: string | null;
+    model: ModelIdentity; durationSec: number; costUsd?: number; tokens?: number; logDir: string;
+    /** A critique's answer comes without its VERDICT line; `verdict` is null when it had none. */
+    discussion?: DiscussionPlace & { verdict?: Verdict | null };
+  }
+  /** A /discuss began; its turns follow, each with its place in it. */
+  | { type: "discussion.started"; conversationId: string; discussionId: string; question: string; answerer: Agent; critic: Agent; maxRounds: number }
+  /**
+   * The discussion is over. `answer` is the agreed or final version (the response); null when it was stopped or failed.
+   * `rounds` counts the reviews; usage and duration add up its turns, which already reported theirs.
+   */
+  | {
+    type: "discussion.finished"; conversationId: string; discussionId: string; status: DiscussionStatus; answerer: Agent; critic: Agent; rounds: number;
+    answer: string | null; error: string | null; durationSec: number; costUsd?: number; tokens?: number; logDir: string;
+  }
   /** Running totals for the current agent call (all attempts so far). */
   | { type: "agent.usage"; agent: Party; costUsd?: number; tokens?: number }
   | { type: "gate.started"; name: string; command: string }
@@ -96,7 +163,7 @@ export interface Decider {
 
 /** Answers an agent's permission prompt; only given to the runner when someone can answer. */
 export interface PermissionDecider {
-  askPermission(ask: { role: Role; agent: Party; request: PermissionRequest }, signal?: AbortSignal): Promise<PermissionAnswer>;
+  askPermission(ask: { agent: Party; request: PermissionRequest } & CallContext, signal?: AbortSignal): Promise<PermissionAnswer>;
 }
 
 export class EventBus {

@@ -1,11 +1,33 @@
 // Messages between the extension host, the engine worker (IPC) and the webview (postMessage). Everything that
 // crosses a boundary is checked here; the webview in particular can only name things, never paths, URIs or commands.
 import type { ChatStatus } from "../../../src/chat.js";
+import {
+  CLAUDE_EFFORTS, CODEX_EFFORTS, CODEX_PRESETS, RULE_KINDS, type Backend, type SettingCommand,
+} from "../../../src/core/commands.js";
 import type { Check } from "../../../src/core/doctor.js";
-import type { DuoEvent, HumanReview, Party, PermissionAnswer, Phase, Role } from "../../../src/events.js";
+import type { CodexCatalog } from "../../../src/core/models.js";
+import type { SettingsView } from "../../../src/core/settings.js";
+import type { DuoEvent, HumanReview, ModelMap, Party, PermissionAnswer, Phase, Role } from "../../../src/events.js";
 import type { ViewAction, ViewState } from "../webview/state.js";
 
-export const PROTOCOL_VERSION = 1;
+/**
+ * 2: the chat is a conversation (direct answers, recipient, models, settings and the Pipeline route).
+ * 3: Codex's model catalog for the settings' model picker (`catalog` updates).
+ */
+export const PROTOCOL_VERSION = 3;
+
+export const BACKENDS = ["codex", "claude"] as const;
+/** How the composer's text is meant: a message (to the recipient, or a slash command), a pipeline task, or a question to discuss. */
+export const ROUTES = ["message", "pipeline", "discuss"] as const;
+export type Route = (typeof ROUTES)[number];
+
+/** A setting changed from the sidebar's controls; the worker applies it as the chat's own command would. */
+export interface SettingRequest {
+  setting: SettingCommand;
+  save: boolean;
+  /** Confirms full access for Codex, as --yes does. */
+  yes: boolean;
+}
 
 /** The run artifacts the extension can show; each maps to fixed files of the run directory, in the worker. */
 export const ARTIFACTS = ["plan", "review", "feedback", "report"] as const;
@@ -36,7 +58,9 @@ export interface Problem {
 // ------------------------------------------------------------------ host → worker
 export type WorkerRequest =
   | { type: "initialize"; workspace: string; configPath: string | null }
-  | { type: "submit"; text: string }
+  | { type: "submit"; text: string; route: Route }
+  | { type: "recipient"; backend: Backend }
+  | ({ type: "setting" } & SettingRequest)
   | { type: "interrupt" }
   | { type: "toggleEdits" }
   | { type: "decision"; requestId: string; answer: DecisionAnswer }
@@ -65,6 +89,11 @@ export interface InitializeResult {
   configSources: string[];
   pipeline: PipelineStep[];
   edits: string;
+  /** Who a plain message goes to. */
+  recipient: Backend;
+  /** As far as known now; codex doctor's answer follows as a `models` update, never holding up initialize. */
+  models: ModelMap;
+  settings: SettingsView | null;
   warnings: string[];
   /** Why a task could not start now (it is checked again when one does). */
   problem: Problem | null;
@@ -115,6 +144,8 @@ export interface SnapshotFile {
 export interface WorkerResults {
   initialize: InitializeResult;
   submit: { accepted: true };
+  recipient: { accepted: true };
+  setting: { accepted: true };
   interrupt: { accepted: true };
   toggleEdits: { accepted: true };
   decision: { applied: true };
@@ -137,9 +168,14 @@ export interface WorkerErrorData {
 }
 
 export type UiUpdate =
-  | { type: "info"; text: string }
+  | { type: "info"; text: string; tone?: "info" | "error" }
   | { type: "status"; status: ChatStatus }
   | { type: "edits"; mode: string }
+  | { type: "recipient"; backend: Backend }
+  | { type: "models"; models: ModelMap }
+  | { type: "settings"; settings: SettingsView }
+  /** The models Codex offers, once `codex debug models` answered (Claude Code's aliases are known without asking). */
+  | { type: "catalog"; codex: CodexCatalog }
   /** dormant: no lock held; active: a chat session holds the workspace lock; ended: /quit released it. */
   | { type: "session"; session: "dormant" | "active" | "ended" }
   | { type: "pipeline"; pipeline: PipelineStep[] };
@@ -162,7 +198,9 @@ export type WebviewCommand = (typeof WEBVIEW_COMMANDS)[number];
 
 export type WebviewMessage =
   | { type: "ready" }
-  | { type: "submit"; text: string }
+  | { type: "submit"; text: string; route: Route }
+  | { type: "recipient"; backend: Backend }
+  | ({ type: "setting" } & SettingRequest)
   | { type: "interrupt" }
   | { type: "toggleEdits" }
   | { type: "decision"; generation: number; id: string; decision: DecisionChoice; note: string | null }
@@ -172,7 +210,9 @@ export type WebviewMessage =
 export type HostMessage =
   | { type: "snapshot"; state: ViewState }
   | { type: "actions"; actions: ViewAction[] }
-  | { type: "focusComposer" };
+  | { type: "focusComposer" }
+  /** The title bar's Settings: open the settings panel above the composer. */
+  | { type: "showSettings" };
 
 // ------------------------------------------------------------------ validation
 export class ProtocolError extends Error {
@@ -248,17 +288,73 @@ function decisionAnswer(v: unknown): DecisionAnswer {
   return { decision: oneOf(o.decision, DECISIONS, "answer.decision"), note: optionalText(o.note, "answer.note")?.trim() || null };
 }
 
+const MAX_SETTING = 4096;
+
+/** A setting value: a non-empty single line (a model name, a rule, a path). */
+function settingText(v: unknown, what: string): string {
+  const s = text(v, what, MAX_SETTING).trim();
+  if (!s || /[\u0000-\u001f\u007f]/.test(s)) throw new ProtocolError(`${what} must be a non-empty line`);
+  return s;
+}
+
+/** A field that is absent (show the setting), null (default) or a value. */
+function present(o: Obj, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(o, key) && o[key] !== undefined;
+}
+
+export function parseSetting(v: unknown): SettingCommand {
+  const o = obj(v, "setting");
+  const target = oneOf(o.target, ["edits", "claude.model", "claude.effort", "claude.permissions", "claude.add-dir", "codex.model", "codex.permissions"] as const, "setting.target");
+  const nullable = <T>(key: string, read: (x: unknown) => T): T | null | undefined => (!present(o, key) ? undefined : o[key] === null ? null : read(o[key]));
+  switch (target) {
+    case "edits":
+      return present(o, "mode") ? { target, mode: oneOf(o.mode, ["auto", "ask"] as const, "setting.mode") } : { target };
+    case "claude.model": {
+      const model = nullable("model", (x) => settingText(x, "setting.model"));
+      return model === undefined ? { target } : { target, model };
+    }
+    case "claude.effort": {
+      const effort = nullable("effort", (x) => oneOf(x, CLAUDE_EFFORTS, "setting.effort"));
+      return effort === undefined ? { target } : { target, effort };
+    }
+    case "claude.permissions": {
+      if (!present(o, "rule")) return { target };
+      const r = obj(o.rule, "setting.rule");
+      return { target, rule: { kind: oneOf(r.kind, RULE_KINDS, "setting.rule.kind"), rule: settingText(r.rule, "setting.rule.rule") } };
+    }
+    case "claude.add-dir":
+      return present(o, "dir") ? { target, dir: settingText(o.dir, "setting.dir") } : { target };
+    case "codex.model": {
+      const model = nullable("model", (x) => settingText(x, "setting.model"));
+      if (model === undefined) return { target };
+      return { target, model, effort: nullable("effort", (x) => oneOf(x, CODEX_EFFORTS, "setting.effort")) ?? null };
+    }
+    case "codex.permissions":
+      return present(o, "preset") ? { target, preset: oneOf(o.preset, CODEX_PRESETS, "setting.preset") } : { target };
+  }
+}
+
+function settingRequest(o: Obj): SettingRequest {
+  return { setting: parseSetting(o.setting), save: o.save === true, yes: o.yes === true };
+}
+
+const route = (v: unknown): Route => (v === undefined ? "message" : oneOf(v, ROUTES, "route"));
+
 export function parseRequest(v: unknown): WorkerRequest {
   const o = obj(v, "request");
   const type = oneOf(o.type, [
-    "initialize", "submit", "interrupt", "toggleEdits", "decision", "permissionAnswer", "inspectFocusedRun", "readArtifact", "listChanges",
-    "readSnapshotFile", "doctor", "shutdown",
+    "initialize", "submit", "recipient", "setting", "interrupt", "toggleEdits", "decision", "permissionAnswer", "inspectFocusedRun", "readArtifact",
+    "listChanges", "readSnapshotFile", "doctor", "shutdown",
   ] as const, "request.type");
   switch (type) {
     case "initialize":
       return { type, workspace: text(o.workspace, "workspace", 4096), configPath: optionalText(o.configPath, "configPath") };
     case "submit":
-      return { type, text: text(o.text, "text") };
+      return { type, text: text(o.text, "text"), route: route(o.route) };
+    case "recipient":
+      return { type, backend: oneOf(o.backend, BACKENDS, "backend") };
+    case "setting":
+      return { type, ...settingRequest(o) };
     case "decision":
       return { type, requestId: requestId(o.requestId, "requestId"), answer: decisionAnswer(o.answer) };
     case "permissionAnswer":
@@ -312,10 +408,14 @@ export function parseWorkerMessage(v: unknown): WorkerMessage {
 
 export function parseWebviewMessage(v: unknown): WebviewMessage {
   const o = obj(v, "webview message");
-  const type = oneOf(o.type, ["ready", "submit", "interrupt", "toggleEdits", "decision", "permission", "command"] as const, "type");
+  const type = oneOf(o.type, ["ready", "submit", "recipient", "setting", "interrupt", "toggleEdits", "decision", "permission", "command"] as const, "type");
   switch (type) {
     case "submit":
-      return { type, text: text(o.text, "text") };
+      return { type, text: text(o.text, "text"), route: route(o.route) };
+    case "recipient":
+      return { type, backend: oneOf(o.backend, BACKENDS, "backend") };
+    case "setting":
+      return { type, ...settingRequest(o) };
     case "decision":
       return {
         type, generation: int(o.generation, "generation"), id: requestId(o.id, "id"), decision: oneOf(o.decision, DECISIONS, "decision"),

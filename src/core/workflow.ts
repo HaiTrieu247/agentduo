@@ -232,7 +232,10 @@ export class Workflow {
 
   private ctx(): prompts.PromptContext {
     const st = this.state;
-    return { repo: this.o.repo, taskId: st.taskId, task: st.task, agents: this.o.cfg.agents, gates: this.o.cfg.gates, notes: st.humanNotes, earlier: st.earlier };
+    return {
+      repo: this.o.repo, taskId: st.taskId, task: st.task, agents: this.o.cfg.agents, gates: this.o.cfg.gates, notes: st.humanNotes, earlier: st.earlier,
+      conversation: st.conversationContext,
+    };
   }
 
   private party(role: AgentRole): Party {

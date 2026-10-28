@@ -1,7 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import YAML from "yaml";
+import { CLAUDE_EFFORTS, CODEX_EFFORTS, type CodexPermission, type EditMode } from "./commands.js";
 import type { ConfigData } from "./config.js";
+
+export { CLAUDE_EFFORTS, CODEX_EFFORTS, type CodexPermission, type EditMode };
 
 /**
  * The settings the chat can change, each mirroring a command of the CLI it configures (Claude's /model, /effort,
@@ -13,11 +16,7 @@ export interface SettingChange {
   paths: string[][];
 }
 
-export type EditMode = "auto" | "ask";
-export const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
-export const CODEX_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export const CODEX_PERMISSIONS = { "read-only": "read-only", auto: "workspace-write", "full-access": "danger-full-access" } as const;
-export type CodexPermission = keyof typeof CODEX_PERMISSIONS | "default";
 
 const name = (arg: string) => arg.split("=")[0]!;
 
@@ -42,7 +41,7 @@ function without(args: string[], names: string[], only?: (value: string) => bool
 }
 
 /** Every value given to the flags, in order. */
-function values(args: string[], names: string[]): string[] {
+export function values(args: string[], names: string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -68,6 +67,16 @@ export function implementerMode(cfg: ConfigData): string | null {
 export function editMode(cfg: ConfigData): EditMode | string {
   const mode = implementerMode(cfg);
   return mode === "acceptEdits" ? "auto" : !mode || mode === "default" ? "ask" : mode;
+}
+
+/**
+ * The one implementer flag a conversation call to Claude also gets: its permission mode, so /edits and Shift+Tab mean
+ * the same for Claude in the chat as for the implementer. Placed after `claude.args`, it wins over them as it does
+ * for the implementer; no other implementer flag comes along.
+ */
+export function implementerPermissionArgs(claude: ConfigData["claude"]): string[] {
+  const mode = values(claude.role_args.implementer ?? [], PERMISSION_MODE).at(-1);
+  return mode ? ["--permission-mode", mode] : [];
 }
 
 function setImplementerArgs(cfg: ConfigData, args: string[]): void {
@@ -152,16 +161,29 @@ const codexPermission = (cfg: ConfigData): string => {
   return preset ?? sandbox ?? "default";
 };
 
+/** The chat's settings as plain values, for a settings panel; "default" = whatever the CLI's own configuration says. */
+export interface SettingsView {
+  claude: { model: string | null; effort: string | null; edits: string; allow: string[]; deny: string[]; addDirs: string[] };
+  codex: { model: string | null; effort: string | null; permissions: string };
+}
+
+export function settingsView(cfg: ConfigData): SettingsView {
+  const { allow, deny } = claudeRules(cfg);
+  return {
+    claude: { model: cfg.claude.model, effort: values(cfg.claude.args, ["--effort"]).at(-1) ?? null, edits: editMode(cfg), allow, deny, addDirs: claudeDirs(cfg) },
+    codex: { model: cfg.codex.model, effort: values(cfg.codex.args, CONFIG).filter(isEffort).at(-1)?.split("=")[1] ?? null, permissions: codexPermission(cfg) },
+  };
+}
+
 /** `/config`: what each agent runs with now ("default" = whatever its own configuration says). */
 export function describeSettings(cfg: ConfigData): string {
   const list = (items: string[]) => (items.length ? items.join(", ") : "—");
-  const { allow, deny } = claudeRules(cfg);
-  const codexEffort = values(cfg.codex.args, CONFIG).filter(isEffort).at(-1)?.split("=")[1];
+  const v = settingsView(cfg);
   const a = cfg.agents;
   return [
-    `Claude  model: ${cfg.claude.model ?? "default"} · effort: ${values(cfg.claude.args, ["--effort"]).at(-1) ?? "default"} · ` +
-      `edits: ${editMode(cfg)} · allow: ${list(allow)} · deny: ${list(deny)} · add-dir: ${list(claudeDirs(cfg))}`,
-    `Codex   model: ${cfg.codex.model ?? "default"} · effort: ${codexEffort ?? "default"} · permissions: ${codexPermission(cfg)}`,
+    `Claude  model: ${v.claude.model ?? "default"} · effort: ${v.claude.effort ?? "default"} · ` +
+      `edits: ${v.claude.edits} · allow: ${list(v.claude.allow)} · deny: ${list(v.claude.deny)} · add-dir: ${list(v.claude.addDirs)}`,
+    `Codex   model: ${v.codex.model ?? "default"} · effort: ${v.codex.effort ?? "default"} · permissions: ${v.codex.permissions}`,
     `Roles   planner: ${a.planner} · plan critic: ${a.plan_reviewer} · implementer: ${a.implementer} · code reviewer: ${a.code_reviewer}`,
   ].join("\n");
 }

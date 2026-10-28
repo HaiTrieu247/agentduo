@@ -31,6 +31,7 @@ describe("loadConfig", () => {
     expect(data.claude.model).toBe("opus");
     expect(data.gates).toEqual([]);
     expect(data.limits.agent_idle_timeout_sec).toBe(900);
+    expect(data.limits.max_discussion_rounds).toBe(3);
     expect(data.codex.args).toEqual(["--ephemeral"]);
     expect(data.claude.args).toEqual(["--no-session-persistence"]);
     expect(data.paths.runs_dir).toBe(".agentduo/runs");
@@ -94,6 +95,7 @@ describe("loadConfig", () => {
       ["codex:\n  args: [1]\n", "codex.args must be a list of strings"],
       ["limits:\n  agent_idle_timeout_sec: -1\n", "limits.agent_idle_timeout_sec must be an integer >= 0"],
       ["limits:\n  max_review_rounds: 0\n", "limits.max_review_rounds must be a positive integer"],
+      ["limits:\n  max_discussion_rounds: 0\n", "limits.max_discussion_rounds must be a positive integer"],
       ["agents:\n  implementer: gemini\n", "agents.implementer must be one of codex, claude"],
       ["gates: [npm test]\n", "gates[0] needs 'name' and 'command'"],
     ];

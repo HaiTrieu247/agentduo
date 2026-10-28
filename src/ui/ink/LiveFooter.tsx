@@ -1,7 +1,29 @@
 import { Box, Text } from "ink";
-import { IMPL_PHASES, PIPELINE, SPINNER, formatClock, partyLabel, roleLabel, usageText } from "../format.js";
-import { ActivityLine } from "./StepBlock.js";
+import { IMPL_PHASES, PIPELINE, SPINNER, discussionDoing, formatClock, partyLabel, roleLabel, usageText } from "../format.js";
+import { ActivityLine, Speaker } from "./StepBlock.js";
 import type { ViewState } from "./store.js";
+
+/** While an agent answers a question: who, with which model, for how long, and its latest activities. */
+export function TurnFooter({ view, now, frame }: { view: ViewState; now: number; frame: number }) {
+  const turn = view.turn;
+  if (!turn) return null;
+  const spinner = SPINNER[frame % SPINNER.length]!;
+  const usage = usageText(view.live.costUsd || undefined, view.live.tokens || undefined);
+  return (
+    <Box flexDirection="column" borderStyle="single" borderLeft={false} borderRight={false} borderBottom={false} borderDimColor>
+      <Box>
+        <Text color="cyan">{`${spinner} `}</Text>
+        <Box flexShrink={1}>
+          <Speaker backend={turn.backend} model={turn.model} />
+        </Box>
+        <Text dimColor>{` · ${turn.discussion ? discussionDoing(turn.discussion) : "answering"} · ${formatClock((now - turn.startedAt) / 1000)}${usage ? ` · ${usage}` : ""}`}</Text>
+      </Box>
+      {turn.activities.filter((a) => a.kind !== "think").slice(-3).map((a) => (
+        <ActivityLine key={a.id} activity={a} spinner={spinner} />
+      ))}
+    </Box>
+  );
+}
 
 function Pipeline({ view }: { view: ViewState }) {
   const current = view.current?.phase;

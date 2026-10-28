@@ -72,7 +72,7 @@ describe("run artifacts and changes (worker)", () => {
     const h = await openWorker(ws);
     expect(await h.client.request({ type: "inspectFocusedRun" })).toBeNull();
     await expect(h.client.request({ type: "listChanges" })).rejects.toMatchObject({ code: "no_run" });
-    await h.client.request({ type: "submit", text: "Make app.txt fixed" });
+    await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
     await h.waitFor(finished("DONE"));
 
     const list = await h.client.request({ type: "listChanges" });
@@ -114,7 +114,7 @@ describe("run artifacts and changes (worker)", () => {
       code_reviewer: [{ output: review(false, [finding("F1")]) }, { output: review(true, [], ["F1"]) }],
     });
     const h = await openWorker(repo);
-    await h.client.request({ type: "submit", text: "Make app.txt fixed" });
+    await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
     const asked = await h.waitFor((m) => m.kind === "decision");
     const first = await h.client.request({ type: "listChanges" });
     const read = (list: ChangeList, side: "base" | "snapshot", path = "app.txt") =>
@@ -143,7 +143,7 @@ describe("run artifacts and changes (worker)", () => {
     writeWorkspaceConfig(repo, fake, { gates: [] });
     fake.setScenario(scenario({ write: { "app.txt": "fixed\n", "README.md": "y\n" } }));
     const h = await openWorker(repo);
-    await h.client.request({ type: "submit", text: "Make app.txt fixed" });
+    await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
     await h.waitFor(finished("DONE"));
     const list = await h.client.request({ type: "listChanges" });
     expect(list.changes.map((c) => `${c.status} ${c.path}`).sort()).toEqual(["A app.txt", "M README.md"]);
@@ -156,7 +156,7 @@ describe("run artifacts and changes (worker)", () => {
     writeWorkspaceConfig(repo, fake, { gates: [], limits: { max_planning_rounds: 1 } });
     fake.setScenario({ planner: [{ output: plan() }], plan_reviewer: [{ output: critique(false, [{ id: "C1", severity: "high", description: "no", suggestion: "x" }]) }] });
     const h = await openWorker(repo);
-    await h.client.request({ type: "submit", text: "Plan only" });
+    await h.client.request({ type: "submit", text: "Plan only", route: "pipeline" });
     const asked = await h.waitFor((m) => m.kind === "decision");
     expect(await h.client.request({ type: "listChanges" })).toMatchObject({ hasSnapshots: false, base: null, snapshot: null, changes: [] });
     if (asked.kind === "decision") await h.client.request({ type: "decision", requestId: asked.requestId, answer: { decision: "abort", note: null } });

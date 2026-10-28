@@ -54,6 +54,7 @@ describe("ClaudeParser", () => {
   it("turns a real stream-json stream into activities", () => {
     const p = new ClaudeParser("/repo");
     expect(summary(feedAll(p, fixture("claude-stream.jsonl")))).toEqual([
+      "model",
       "think:ok:thinking",
       "read:running:Read  a.txt",
       "command:running:Bash  ls",

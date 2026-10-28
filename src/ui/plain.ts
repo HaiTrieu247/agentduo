@@ -1,5 +1,8 @@
-import type { Decider, DuoEvent, EventBus, PermissionAnswer, PermissionDecider } from "../events.js";
-import { activityText, formatDuration, messageHeadline, permissionAnswerText, roleLabel, statusIcon, usageText } from "./format.js";
+import type { Activity, Decider, DuoEvent, EventBus, PermissionAnswer, PermissionDecider } from "../events.js";
+import {
+  activityText, DISCUSSION_LINES, discussionOutcome, discussionStepText, firstLines, formatDuration, messageHeadline, modelText, permissionAnswerText, PROVIDERS, roleLabel,
+  statusIcon, usageText, verdictText,
+} from "./format.js";
 
 export interface TextSink {
   write(text: string): unknown;
@@ -61,9 +64,58 @@ export function attachPlainRenderer(bus: EventBus, out: TextSink, o: PlainOption
   const line = (text: string, agent = ctx.agent, where = ctx.where) => {
     out.write(`${paint("dim", clock())}  ${agent.padEnd(AGENT_WIDTH)} ${where.padEnd(16)} ${text}\n`);
   };
+  const activity = (a: Activity, agent: string, where?: string) => {
+    if (a.status === "running") return;
+    if (!o.verbose && (a.kind === "think" || a.kind === "say")) return;
+    const color = a.status === "ok" ? "green" : a.status === "denied" ? "yellow" : "red";
+    line(`${paint(color, statusIcon(a.status))} ${activityText(a)}`, agent, where);
+  };
 
   return bus.on((e: DuoEvent) => {
     switch (e.type) {
+      case "turn.started": {
+        const p = PROVIDERS[e.backend];
+        const step = e.discussion ? ` · ${discussionStepText(e.discussion)}` : "";
+        line(paint("cyan", `▶ ${p.mark} ${p.agent} (${p.company}) · model ${modelText(e.model)}${step}`), e.backend, e.discussion ? "discuss" : "chat");
+        break;
+      }
+      case "turn.activity":
+        // An answer's prose is printed whole when the turn ends; its stream lines would only repeat it.
+        if (e.activity.kind !== "submit") activity(e.activity, e.backend, "chat");
+        break;
+      case "turn.finished": {
+        const p = PROVIDERS[e.backend];
+        const tail = [formatDuration(e.durationSec), usageText(e.costUsd, e.tokens)].filter(Boolean).join(" · ");
+        const place = e.discussion;
+        const step = place ? ` · ${discussionStepText(place)}${place.step === "critique" ? ` · ${verdictText(place.verdict)}` : ""}` : "";
+        const head = `${p.mark} ${p.agent} (${p.company}) · model ${modelText(e.model)}${step}${tail ? paint("dim", ` (${tail})`) : ""}`;
+        const where = place ? "discuss" : "chat";
+        if (e.status === "success") {
+          line(paint("bold", head), e.backend, where);
+          // The answer as it is, not indented, so its paragraphs and code read and copy as written. A discussion's turn
+          // shows its first lines: its final answer follows, whole.
+          const text = place && !o.verbose ? firstLines(e.answer ?? "", DISCUSSION_LINES) : { shown: (e.answer ?? "").trimEnd(), more: 0 };
+          out.write(`${text.shown}\n${text.more ? paint("dim", `… ${text.more} more line${text.more === 1 ? "" : "s"} (--verbose shows them)\n`) : ""}\n`);
+        } else if (e.status === "interrupted") line(paint("yellow", `■ ${head}: stopped before it answered`), e.backend, where);
+        else line(paint("red", `✗ ${head}: no answer: ${e.error ?? "the call failed"}`), e.backend, where);
+        break;
+      }
+      case "discussion.started": {
+        const n = e.maxRounds;
+        line(paint("cyan", `▶ discussion: ${PROVIDERS[e.answerer].agent} answers, ${PROVIDERS[e.critic].agent} reviews (at most ${n} review${n === 1 ? "" : "s"})`), "", "discuss");
+        break;
+      }
+      case "discussion.finished": {
+        const tail = [formatDuration(e.durationSec), usageText(e.costUsd, e.tokens)].filter(Boolean).join(" · ");
+        const mark = e.status === "agreed" ? paint("green", "✓") : e.status === "error" ? paint("red", "✗") : paint("yellow", e.status === "disputed" ? "▲" : "■");
+        line(`${mark} ${paint("bold", `discussion: ${discussionOutcome(e)}`)}${tail ? paint("dim", ` (${tail})`) : ""}${e.error ? `: ${e.error}` : ""}`, "", "discuss");
+        if (e.answer !== null) {
+          const p = PROVIDERS[e.answerer];
+          line(paint("bold", `${p.mark} Final answer · ${p.agent}`), e.answerer, "discuss");
+          out.write(`${e.answer.trimEnd()}\n\n`);
+        }
+        break;
+      }
       case "run.started":
         out.write(`${paint("bold", `agentduo ${o.version} · run ${e.runId}`)}\n  workspace: ${e.repo}\n  run dir: ${e.runDir}\n`);
         break;
@@ -71,14 +123,9 @@ export function attachPlainRenderer(bus: EventBus, out: TextSink, o: PlainOption
         ctx = { agent: e.agent ?? "", where: `${e.phase} r${e.round}` };
         line(paint("cyan", `▶ ${e.role ? roleLabel(e.role) : e.phase.toLowerCase()}`));
         break;
-      case "agent.activity": {
-        const a = e.activity;
-        if (a.status === "running") break;
-        if (!o.verbose && (a.kind === "think" || a.kind === "say")) break;
-        const color = a.status === "ok" ? "green" : a.status === "denied" ? "yellow" : "red";
-        line(`${paint(color, statusIcon(a.status))} ${activityText(a)}`, e.agent);
+      case "agent.activity":
+        activity(e.activity, e.agent);
         break;
-      }
       case "agent.retry":
         line(paint("yellow", `↻ retry ${e.attempt}/${e.max}: ${e.reason.split("\n")[0]}`), e.agent);
         break;

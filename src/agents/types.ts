@@ -15,6 +15,8 @@ export interface AgentMeta {
   tokens?: number;
   sessionId?: string;
   numTurns?: number;
+  /** The model the CLI's own stream named (Claude's init event). */
+  model?: string;
   permissionDenials: PermissionDenial[];
 }
 
@@ -23,6 +25,8 @@ export type ParsedEvent =
   | { type: "usage"; costUsd?: number; tokens?: number }
   /** A permission prompt in host mode; `raw` is what the backend needs to answer it. */
   | { type: "permission"; request: PermissionRequest; raw: Record<string, unknown> }
+  /** The CLI said which model this call runs on. */
+  | { type: "model"; model: string }
   /** The final result arrived; in host mode the runner closes stdin so the CLI exits. */
   | { type: "end" };
 
@@ -33,16 +37,26 @@ export interface StreamParser {
   usage(): { tokens?: number; costUsd?: number };
 }
 
-export interface BuildArgs {
-  schemaName: SchemaName;
-  lastMessageFile: string;
-  /** Config role of the call (plan sign-off uses "planner"); selects <backend>.role_args. */
-  role: AgentRole;
-  /** Route permission prompts to the runner (host mode) instead of denying them. */
-  askPermissions?: boolean;
-}
+/**
+ * structured: a pipeline role's call, whose final message must match a schema; text: a conversation turn, whose
+ * final message is the answer as it is, with no schema and no role_args.
+ */
+export type CallMode = "structured" | "text";
+
+export type BuildArgs =
+  | {
+    mode?: "structured";
+    schemaName: SchemaName;
+    lastMessageFile: string;
+    /** Config role of the call (plan sign-off uses "planner"); selects <backend>.role_args. */
+    role: AgentRole;
+    /** Route permission prompts to the runner (host mode) instead of denying them. */
+    askPermissions?: boolean;
+  }
+  | { mode: "text"; lastMessageFile: string; askPermissions?: boolean };
 
 export interface FinalOutput {
+  /** structured: the parsed JSON; text: the answer. */
   data: unknown;
   meta: AgentMeta;
 }
@@ -52,8 +66,8 @@ export interface AgentBackend {
   binary(): string;
   buildArgs(args: BuildArgs): string[];
   createParser(): StreamParser;
-  /** Extract the final JSON; throws AgentFailure (carrying whatever meta is known) when unusable. */
-  finalize(parser: StreamParser, stdout: string, lastMessageFile: string): FinalOutput;
+  /** Extract the final JSON (or, in text mode, the answer); throws AgentFailure (carrying whatever meta is known) when unusable. */
+  finalize(parser: StreamParser, stdout: string, lastMessageFile: string, mode?: CallMode): FinalOutput;
   /** Host mode (backends that support it): the prompt as the first stdin message, and the answer to a permission prompt. */
   hostInput?(prompt: string): string;
   permissionReply?(raw: Record<string, unknown>, answer: PermissionAnswer): string;

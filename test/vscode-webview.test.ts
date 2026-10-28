@@ -16,21 +16,24 @@ describe("webview page", () => {
     expect(csp).toContain("default-src 'none'");
     expect(csp).toContain(`script-src 'nonce-${nonce}'`);
     expect(csp).not.toMatch(/unsafe-inline|unsafe-eval|https?:\/\/(?!file\+)/);
-    const html = webviewHtml({ cspSource: "vscode-resource:", scriptUri: "vscode-resource:/main.js", styleUri: "vscode-resource:/styles.css", nonce });
+    const html = webviewHtml({ cspSource: "vscode-resource:", scriptUri: "vscode-resource:/main.js", styleUri: "vscode-resource:/styles.css", iconsUri: "vscode-resource:/codicon.css", nonce });
     expect(html.match(/<script/g)).toHaveLength(1);
     expect(html).toContain(`<script nonce="${nonce}" src="vscode-resource:/main.js"></script>`);
     expect(html).not.toMatch(/<script[^>]*>[^<]+<\/script>/); // no inline code
     expect(html).not.toMatch(/https?:\/\//);
+    // The icon font's stylesheet comes first, so the sidebar's own rules win.
+    expect(html.indexOf('href="vscode-resource:/codicon.css"')).toBeGreaterThan(0);
+    expect(html.indexOf('href="vscode-resource:/codicon.css"')).toBeLessThan(html.indexOf('href="vscode-resource:/styles.css"'));
   });
 
   it("escapes what it puts in attributes", () => {
-    const html = webviewHtml({ cspSource: "x", scriptUri: 'a"><script>alert(1)</script>', styleUri: "s", nonce: "n" });
+    const html = webviewHtml({ cspSource: "x", scriptUri: 'a"><script>alert(1)</script>', styleUri: "s", iconsUri: "i", nonce: "n" });
     expect(html).not.toContain("<script>alert(1)");
   });
 });
 
 describe("webview sources", () => {
-  const files = ["webview/main.ts", "webview/render.ts", "webview/state.ts"];
+  const files = ["webview/main.ts", "webview/render.ts", "webview/state.ts", "webview/markdown.ts"];
 
   it("never turns text into markup or code", () => {
     for (const file of files) {
@@ -43,7 +46,7 @@ describe("webview sources", () => {
   });
 
   it("loads nothing from the network", () => {
-    for (const file of [...files, "webview/styles.css"]) expect(source(file), file).not.toMatch(/https?:\/\/|@import|url\(/);
+    for (const file of [...files, "webview/styles.css"]) expect(source(file).replaceAll('"http://www.w3.org/2000/svg"', ""), file).not.toMatch(/https?:\/\/|@import|url\(/);
   });
 
   it("takes its colours from the theme and covers high contrast and reduced motion", () => {

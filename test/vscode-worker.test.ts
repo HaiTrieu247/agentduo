@@ -3,6 +3,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { PROTOCOL_VERSION } from "../extensions/vscode/src/protocol.js";
 import { WorkerError } from "../extensions/vscode/src/workerClient.js";
 import { main, type CliIO } from "../src/cli.js";
 import { acquireWorkspaceLock, RunStore } from "../src/core/state.js";
@@ -71,6 +72,30 @@ describe("vscode worker", () => {
     expect(fake.calls()).toEqual([]);
   });
 
+  it("sends Codex's model catalog for the settings' model picker once it has read it", async () => {
+    fake.setScenario({ catalog: { models: [{ slug: "gpt-two", display_name: "Two", priority: 2 }, { slug: "gpt-one", display_name: "One", priority: 1, supported_reasoning_levels: [{ effort: "low" }] }] } });
+    const { h } = await open();
+    const m = await h.waitFor((x) => x.kind === "ui" && x.update.type === "catalog");
+    expect(m.kind === "ui" && m.update.type === "catalog" && m.update.codex).toEqual({
+      models: [
+        { id: "gpt-one", label: "One", description: "", efforts: ["low"], defaultEffort: null },
+        { id: "gpt-two", label: "Two", description: "", efforts: null, defaultEffort: null },
+      ],
+      reason: null,
+    });
+  });
+
+  it("discusses a question sent with the Discuss route: the recipient answers, the other reviews, no run", async () => {
+    fake.setScenario({ discuss_answer: [{ answer: "Use Postgres." }], discuss_critique: [{ answer: "Agreed.\nVERDICT: AGREE" }] });
+    const { h } = await open();
+    await h.client.request({ type: "submit", text: "Redis or Postgres?", route: "discuss" });
+    const m = await h.waitFor(isEvent("discussion.finished"));
+    expect(m.kind === "event" && m.event).toMatchObject({ status: "agreed", answerer: "codex", critic: "claude", answer: "Use Postgres.", rounds: 1 });
+    expect(fake.calls().map((c) => `${c.role}:${c.backend}`)).toEqual(["discuss_answer:codex", "discuss_critique:claude"]);
+    expect(existsSync(join(runsDir, ".lock"))).toBe(true); // the chat session holds the workspace, as for any question
+    expect(readdirSync(runsDir).filter((d) => ![".lock", ".gitignore", "conversations"].includes(d))).toEqual([]); // no run
+  });
+
   it("leaves VERIFY out of the flow without gates", async () => {
     const { init } = await open({ overrides: { gates: [] } });
     expect(init.pipeline.map((p) => p.phase)).not.toContain("VERIFY");
@@ -79,7 +104,7 @@ describe("vscode worker", () => {
   it("runs a task to DONE with gates, usage and the report, holding the workspace lock until shutdown", async () => {
     const { h } = await open();
     fake.setScenario(happy());
-    await h.client.request({ type: "submit", text: "Make app.txt fixed" });
+    await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
     expect(readFileSync(lockFile(), "utf8").trim()).toBe(String(h.client.pid));
     const done = await h.waitFor(finished());
     expect(done.event).toMatchObject({ phase: "DONE", summary: "quality gates passed and the review approved" });
@@ -98,27 +123,27 @@ describe("vscode worker", () => {
   it("turns a message sent during a run into a note for the next step", async () => {
     const { h } = await open();
     fake.setScenario({ ...happy(), planner: [{ sleep: 1500, output: plan() }] });
-    await h.client.request({ type: "submit", text: "Make app.txt fixed" });
+    await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
     await h.waitFor(isEvent("phase.started", (e) => e.phase === "PLAN"));
-    await h.client.request({ type: "submit", text: "keep it short" });
+    await h.client.request({ type: "submit", text: "keep it short", route: "message" });
     await h.waitFor(finished("DONE"));
     expect(fake.calls("planner")).toHaveLength(1);
     expect(fake.calls("plan_reviewer")[0]!.prompt).toContain("keep it short");
     expect(h.infos().some((l) => l.includes("from the next step"))).toBe(true);
   });
 
-  it("stops the step on interrupt and re-runs it with the next message", async () => {
+  it("stops the step on interrupt and re-runs it on /resume with a note", async () => {
     const { h } = await open();
     fake.setScenario({
       ...happy(),
       implementer: [{ activities: [{ tool: "Read", input: { file_path: "app.txt" } }], sleep: 20_000, output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }],
     });
-    await h.client.request({ type: "submit", text: "Make app.txt fixed" });
+    await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
     await h.waitFor(isEvent("agent.activity", (e) => e.role === "implementer"));
     await h.client.request({ type: "interrupt" });
     await h.waitFor(finished("INTERRUPTED"));
     await waitUntil(() => h.statuses().at(-1) === "paused", 5000, "paused");
-    await h.client.request({ type: "submit", text: "only touch app.txt" });
+    await h.client.request({ type: "submit", text: "/resume only touch app.txt", route: "message" });
     await waitUntil(() => h.events().filter((e) => e.type === "run.finished").length === 2, 25_000, "second finish");
     expect(fake.calls("implementer")).toHaveLength(2);
     expect(fake.calls("implementer")[1]!.prompt).toContain("only touch app.txt");
@@ -128,7 +153,7 @@ describe("vscode worker", () => {
   it("asks for a HUMAN_REVIEW decision, applies each answer once, and asks again on /resume after a deferral", async () => {
     const { h } = await open({ overrides: { limits: { max_review_rounds: 1 } } });
     fake.setScenario({ ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }] });
-    await h.client.request({ type: "submit", text: "Make app.txt fixed" });
+    await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
     const asked = await h.waitFor((m) => m.kind === "decision");
     if (asked.kind !== "decision") throw new Error("unreachable");
     expect(asked.review.reason).toBe("max_review_rounds");
@@ -140,7 +165,7 @@ describe("vscode worker", () => {
     expect(h.messages.some((m) => m.kind === "decisionClosed" && m.requestId === asked.requestId)).toBe(true);
     expect(latest().phase).toBe("HUMAN_REVIEW");
     await waitUntil(() => h.statuses().at(-1) === "idle", 5000, "idle");
-    await h.client.request({ type: "submit", text: "/resume" });
+    await h.client.request({ type: "submit", text: "/resume", route: "message" });
     const again = await h.nth((m) => m.kind === "decision", 1);
     if (again.kind !== "decision") throw new Error("unreachable");
     expect(again.requestId).not.toBe(asked.requestId);
@@ -163,7 +188,7 @@ describe("vscode worker", () => {
         output: impl(),
       }],
     });
-    await h.client.request({ type: "submit", text: "Make app.txt fixed" });
+    await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
     const answers = [{ decision: "once" }, { decision: "always" }, { decision: "deny", message: "use the npm script" }] as const;
     for (const [i, answer] of answers.entries()) {
       const asked = await h.nth(isEvent("permission.requested"), i);
@@ -182,12 +207,12 @@ describe("vscode worker", () => {
 
   it("refuses requests meant for an earlier worker, from another protocol, or naming paths outside the workspace", async () => {
     const { h } = await open({ generation: 5 });
-    await expect(h.client.request({ type: "submit", text: "/help" })).resolves.toEqual({ accepted: true });
-    expect(await h.raw({ protocol: 1, generation: 4, id: 999, request: { type: "interrupt" } })).toMatchObject({ ok: false, error: { code: "stale" } });
-    expect(await h.raw({ protocol: 2, generation: 5, id: 1000, request: { type: "interrupt" } })).toMatchObject({ ok: false, error: { code: "protocol" } });
-    expect(await h.raw({ protocol: 1, generation: 5, id: 1001, request: { type: "readSnapshotFile", runId: "x", base: "a".repeat(40), snapshot: "b".repeat(40), side: "base", path: "../etc/passwd" } }))
+    await expect(h.client.request({ type: "submit", text: "/help", route: "message" })).resolves.toEqual({ accepted: true });
+    expect(await h.raw({ protocol: PROTOCOL_VERSION, generation: 4, id: 999, request: { type: "interrupt" } })).toMatchObject({ ok: false, error: { code: "stale" } });
+    expect(await h.raw({ protocol: 1, generation: 5, id: 1000, request: { type: "interrupt" } })).toMatchObject({ ok: false, error: { code: "protocol" } });
+    expect(await h.raw({ protocol: PROTOCOL_VERSION, generation: 5, id: 1001, request: { type: "readSnapshotFile", runId: "x", base: "a".repeat(40), snapshot: "b".repeat(40), side: "base", path: "../etc/passwd" } }))
       .toMatchObject({ ok: false, error: { code: "bad_request" } });
-    expect(await h.raw({ protocol: 1, generation: 5, id: 1002, request: { type: "exec", command: "rm -rf /" } })).toMatchObject({ ok: false, error: { code: "bad_request" } });
+    expect(await h.raw({ protocol: PROTOCOL_VERSION, generation: 5, id: 1002, request: { type: "exec", command: "rm -rf /" } })).toMatchObject({ ok: false, error: { code: "bad_request" } });
   });
 
   describe("shutdown", () => {
@@ -200,7 +225,7 @@ describe("vscode worker", () => {
     it("stops a running agent within the grace period; the run stays resumable and the lock is freed", async () => {
       const { h } = await open();
       fake.setScenario({ ...happy(), implementer: [{ shell: [recordPid("agent.pid")], activities: [{ tool: "Read", input: { file_path: "app.txt" } }], sleep: 60_000, output: impl() }] });
-      await h.client.request({ type: "submit", text: "Make app.txt fixed" });
+      await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
       await h.waitFor(isEvent("agent.activity", (e) => e.role === "implementer"));
       const agent = Number(readFileSync(join(repo, "agent.pid"), "utf8"));
       expect(pidAlive(agent)).toBe(true);
@@ -215,7 +240,7 @@ describe("vscode worker", () => {
       const gate = { name: "slow", command: `"${process.execPath}" -e "require('fs').writeFileSync('gate.pid', String(process.pid)); setTimeout(() => {}, 60000)"`, required: true };
       const { h } = await open({ overrides: { gates: [gate] } });
       fake.setScenario(happy());
-      await h.client.request({ type: "submit", text: "Make app.txt fixed" });
+      await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
       await h.waitFor(isEvent("gate.started"));
       await waitUntil(() => existsSync(join(repo, "gate.pid")), 5000, "the gate to start");
       const pid = Number(readFileSync(join(repo, "gate.pid"), "utf8"));
@@ -227,7 +252,7 @@ describe("vscode worker", () => {
     it("denies a permission prompt nobody answered", async () => {
       const { h } = await open();
       fake.setScenario({ ...happy(), implementer: [{ permissions: [{ tool: "Bash", input: { command: "npm test" }, rules: [] }], sleep: 60_000, output: impl() }] });
-      await h.client.request({ type: "submit", text: "Make app.txt fixed" });
+      await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
       const asked = await h.waitFor(isEvent("permission.requested"));
       expect(await within(h)).toBeLessThan(4000);
       // Answered before the agent was stopped: Claude never waits on a prompt nobody will answer.
@@ -241,7 +266,7 @@ describe("vscode worker", () => {
     it("defers a decision nobody made", async () => {
       const { h } = await open({ overrides: { limits: { max_review_rounds: 1 } } });
       fake.setScenario({ ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }] });
-      await h.client.request({ type: "submit", text: "Make app.txt fixed" });
+      await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
       await h.waitFor((m) => m.kind === "decision");
       expect(await within(h)).toBeLessThan(4000);
       expect(latest().phase).toBe("HUMAN_REVIEW");
@@ -251,7 +276,7 @@ describe("vscode worker", () => {
     it("cleans up on its own when the extension host goes away", async () => {
       const { h } = await open();
       fake.setScenario({ ...happy(), implementer: [{ shell: [recordPid("agent.pid")], activities: [{ tool: "Read", input: { file_path: "app.txt" } }], sleep: 60_000, output: impl() }] });
-      await h.client.request({ type: "submit", text: "Make app.txt fixed" });
+      await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
       await h.waitFor(isEvent("agent.activity", (e) => e.role === "implementer"));
       const agent = Number(readFileSync(join(repo, "agent.pid"), "utf8"));
       const started = Date.now();
@@ -267,7 +292,7 @@ describe("vscode worker", () => {
   it("after a worker crash, a new worker reclaims the stale lock and resumes the run", async () => {
     const { h } = await open();
     fake.setScenario({ ...happy(), implementer: [{ activities: [{ tool: "Read", input: { file_path: "app.txt" } }], sleep: 3000, output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }] });
-    await h.client.request({ type: "submit", text: "Make app.txt fixed" });
+    await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
     await h.waitFor(isEvent("agent.activity", (e) => e.role === "implementer"));
     h.client.kill();
     await h.client.whenExited();
@@ -276,7 +301,7 @@ describe("vscode worker", () => {
     await new Promise((r) => setTimeout(r, 3500)); // the orphaned fake agent finishes on its own
     const next = await open({ generation: 2, config: false });
     expect(next.init.hint).toContain("/resume");
-    await next.h.client.request({ type: "submit", text: "/resume" });
+    await next.h.client.request({ type: "submit", text: "/resume", route: "message" });
     await next.h.waitFor(finished("DONE"));
     expect(latest().phase).toBe("DONE");
   });
@@ -284,7 +309,7 @@ describe("vscode worker", () => {
   it("reports a missing CLI, a broken config and a lock held by the CLI, without calling an agent", async () => {
     const missing = await open({ overrides: { codex: { bin: join(t.path, "missing") } } });
     expect(missing.init.problem).toMatchObject({ kind: "missing_cli" });
-    await expect(missing.h.client.request({ type: "submit", text: "Fix" })).rejects.toMatchObject({ code: "missing_cli", message: expect.stringContaining("CLI not found: codex") });
+    await expect(missing.h.client.request({ type: "submit", text: "Fix", route: "pipeline" })).rejects.toMatchObject({ code: "missing_cli", message: expect.stringContaining("CLI not found: codex") });
     expect(existsSync(lockFile())).toBe(false);
     await missing.h.client.shutdown();
 
@@ -303,7 +328,7 @@ describe("vscode worker", () => {
     try {
       const busy = await open({ config: false });
       expect(busy.init.problem).toMatchObject({ kind: "locked", message: expect.stringContaining(`pid ${process.pid}`) });
-      await expect(busy.h.client.request({ type: "submit", text: "Fix" })).rejects.toMatchObject({ code: "locked" });
+      await expect(busy.h.client.request({ type: "submit", text: "Fix", route: "pipeline" })).rejects.toMatchObject({ code: "locked" });
       await busy.h.client.shutdown();
     } finally {
       release();
@@ -313,7 +338,7 @@ describe("vscode worker", () => {
 
   it("holds the lock the CLI checks, so `duo` refuses to start a second writer", async () => {
     const { h } = await open();
-    await h.client.request({ type: "submit", text: "/status" });
+    await h.client.request({ type: "submit", text: "/status", route: "message" });
     let err = "";
     const io: CliIO = {
       stdout: { write: () => true }, stderr: { write: (s: string) => { err += s; } }, stdin: {},
@@ -321,7 +346,7 @@ describe("vscode worker", () => {
     };
     expect(await main(["Another task"], io)).toBe(1);
     expect(err).toContain(`another agentduo run is active in this workspace (pid ${h.client.pid})`);
-    await h.client.request({ type: "submit", text: "/quit" });
+    await h.client.request({ type: "submit", text: "/quit", route: "message" });
     await h.waitFor((m) => m.kind === "ui" && m.update.type === "session" && m.update.session === "ended");
     expect(existsSync(lockFile())).toBe(false);
     acquireWorkspaceLock(runsDir)(); // free for `duo` again

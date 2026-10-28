@@ -10,7 +10,9 @@ let state: ViewState | null = null;
 let frame = 0;
 
 const ui = createUi(document.getElementById("app")!, {
-  submit: (text) => vscode.postMessage({ type: "submit", text }),
+  submit: (text, route) => vscode.postMessage({ type: "submit", text, route }),
+  recipient: (backend) => vscode.postMessage({ type: "recipient", backend }),
+  setting: (request) => vscode.postMessage({ type: "setting", ...request }),
   interrupt: () => vscode.postMessage({ type: "interrupt" }),
   toggleEdits: () => vscode.postMessage({ type: "toggleEdits" }),
   decide: (id, decision, note) => state && vscode.postMessage({ type: "decision", generation: state.generation, id, decision, note }),
@@ -34,6 +36,7 @@ window.addEventListener("message", (e: MessageEvent<HostMessage>) => {
   if (m.type === "snapshot") state = m.state;
   else if (m.type === "actions" && state) for (const action of m.actions) state = reduce(state, action);
   else if (m.type === "focusComposer") ui.focusComposer();
+  else if (m.type === "showSettings") ui.showSettings();
   schedule();
 });
 

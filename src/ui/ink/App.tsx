@@ -1,11 +1,11 @@
 import { Box, Static, Text, useInput, useStdout } from "ink";
 import { useEffect, useReducer, useState } from "react";
 import type { Decision, EventBus, PermissionAnswer } from "../../events.js";
-import { partyLabel, permissionAnswerText, roleLabel } from "../format.js";
+import { permissionAnswerText, whoLabel } from "../format.js";
 import { HumanReviewPrompt, VIEWS, type ViewKind } from "./HumanReviewPrompt.js";
 import { LiveFooter } from "./LiveFooter.js";
 import { PermissionPrompt } from "./PermissionPrompt.js";
-import { StepBlock } from "./StepBlock.js";
+import { AnswerBlock, DiscussionBlock, StepBlock } from "./StepBlock.js";
 import { initialView, reduce, type StaticItem } from "./store.js";
 
 export interface AppProps {
@@ -31,7 +31,9 @@ export function StaticItemView({ item }: { item: StaticItem }) {
         <Box flexDirection="column" marginBottom={1}>
           <Text bold>{`agentduo ${item.version} · chat`}</Text>
           <Text dimColor>{item.repo}</Text>
-          <Text dimColor>Type a task and press Enter. /help lists the commands.</Text>
+          <Text dimColor>Ask Codex or Claude anything: your message goes to the agent named under the input (/claude, /codex switch).</Text>
+          <Text dimColor>{"/pipeline <task> hands a task to both, from plan to review; /discuss <question> has them agree on an answer."}</Text>
+          <Text dimColor>Type / to see every command.</Text>
         </Box>
       ) : (
         <Box flexDirection="column" marginBottom={1}>
@@ -49,6 +51,10 @@ export function StaticItemView({ item }: { item: StaticItem }) {
       return <Text dimColor wrap="wrap">{item.text}</Text>;
     case "step":
       return <StepBlock step={item.step} />;
+    case "answer":
+      return <AnswerBlock turn={item.turn} />;
+    case "discussion":
+      return <DiscussionBlock discussion={item.discussion} />;
     case "note":
       return <Text color="yellow" wrap="truncate-end">{`warning: ${item.text}`}</Text>;
     case "artifact":
@@ -64,7 +70,7 @@ export function StaticItemView({ item }: { item: StaticItem }) {
       return (
         <Text dimColor wrap="truncate-end">
           <Text color={item.answer.decision === "deny" ? "yellow" : "green"}>{item.answer.decision === "deny" ? "⊘" : "✓"}</Text>
-          {` ${partyLabel(item.agent)} (${roleLabel(item.role)}) ${item.label} — ${permissionAnswerText(item.answer, item.rules)}`}
+          {` ${whoLabel(item.agent, item.role)} ${item.label} — ${permissionAnswerText(item.answer, item.rules)}`}
         </Text>
       );
     case "review":

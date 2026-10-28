@@ -11,7 +11,7 @@ export interface ChatInkOptions {
   verbose: boolean;
   workspace: string;
   onSubmit(text: string): void;
-  /** Esc, or the first Ctrl-C while a run is going: stop its current step. */
+  /** Esc, or the first Ctrl-C while something runs: stop the answer, or the run's current step. */
   onEscape(): void;
   /** Shift+Tab: switch the implementer's edit mode. */
   onCycleEdits?(): void;
@@ -50,12 +50,14 @@ export function startChatInk(o: ChatInkOptions): ChatInkSession {
   };
   const broker = permissionBroker(true);
   const ui: ChatUi = {
-    info: (text) => channel.info(text),
+    info: (text, tone) => channel.info(tone === "error" ? `error: ${text}` : text),
     setStatus: (next) => {
       status = next;
       channel.status(next);
     },
     setEdits: (mode) => channel.edits(mode),
+    setRecipient: (backend) => channel.recipient(backend),
+    setModels: (models) => channel.models(models),
     exit: () => exit(),
   };
   let lastCtrlC = 0;
@@ -71,7 +73,7 @@ export function startChatInk(o: ChatInkOptions): ChatInkSession {
       return;
     }
     lastCtrlC = now;
-    if (status === "running") o.onEscape();
+    if (status === "running" || status === "answering") o.onEscape();
     channel.info("Press Ctrl-C again to quit.");
   };
   const onSubmit = (text: string) => {

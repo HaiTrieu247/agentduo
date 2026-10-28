@@ -30,7 +30,7 @@ describe("prompts", () => {
     }
   });
 
-  it("tells every agent what the earlier tasks of the conversation did, and stays quiet without any", () => {
+  it("tells every agent what the previous pipeline tasks did, and stays quiet without any", () => {
     const earlier = [{ task: "Add JWT auth", outcome: "done; files: src/auth.ts" }, { task: "Add refresh tokens", outcome: "stopped" }];
     const withEarlier = { ...ctx, earlier };
     const all = [
@@ -41,11 +41,11 @@ describe("prompts", () => {
       prompts.codeReviewer(withEarlier, 1, "# Plan", "a".repeat(40), "b".repeat(40), [], "", "", false, [], impl()),
     ];
     for (const p of all) {
-      expect(p).toContain("## Earlier in this conversation");
+      expect(p).toContain("## Previous pipeline tasks");
       expect(p).toContain("1. Add JWT auth — done; files: src/auth.ts");
       expect(p).toContain("2. Add refresh tokens — stopped");
     }
-    expect(prompts.planner(ctx, 1, 1, null, null)).not.toContain("Earlier in this conversation");
+    expect(prompts.planner(ctx, 1, 1, null, null)).not.toContain("Previous pipeline tasks");
   });
 
   it("planner v1 states the task, notes and the gates when there are any", () => {
@@ -99,5 +99,42 @@ describe("prompts", () => {
     }
     expect(prompts.fenceFor("no backticks")).toBe("```");
     expect(prompts.fenceFor("a ````` b")).toBe("``````");
+  });
+});
+
+describe("prompts: a discussion", () => {
+  const base = {
+    workspace: "/ws", context: { exchanges: [], omitted: 0 }, earlier: [], question: "Redis hay Postgres cho job queue?", answerer: "codex" as const, critic: "claude" as const, maxRounds: 3,
+  };
+  const v1: prompts.DiscussionMessage = { backend: "codex", step: "answer", round: 1, text: "Use Postgres with SKIP LOCKED.", verdict: null };
+  const c1: prompts.DiscussionMessage = { backend: "claude", step: "critique", round: 1, text: "It misses the retry story.", verdict: "revise" };
+
+  it("opens as a conversation turn, names its step, and carries the question once", () => {
+    const p = prompts.discussion({ ...base, step: "answer", round: 1, history: [] });
+    expect(p.startsWith(`${prompts.CONVERSATION_MARKER}\n[agentduo-discussion: answer, round 1 of 3]`)).toBe(true);
+    expect(p).toContain("You are Codex");
+    expect(p).toContain("Claude Code will review");
+    expect(p.split("Redis hay Postgres cho job queue?")).toHaveLength(2);
+    expect(p).not.toContain("VERDICT");
+  });
+
+  it("gives the reviewer the latest version and asks it to end with its verdict", () => {
+    const p = prompts.discussion({ ...base, step: "critique", round: 1, history: [v1] });
+    expect(p).toContain("[agentduo-discussion: critique, round 1 of 3]");
+    expect(p).toContain("You are Claude Code");
+    expect(p).toContain("Use Postgres with SKIP LOCKED.");
+    expect(p).toContain("VERDICT: AGREE");
+    expect(p).toContain("VERDICT: REVISE");
+  });
+
+  it("asks for the whole answer again with the review addressed, and last for a final one that says what is still disputed", () => {
+    const revise = prompts.discussion({ ...base, step: "revise", round: 2, history: [v1, c1] });
+    expect(revise).toContain("It misses the retry story.");
+    expect(revise).toContain("version 2");
+    expect(revise).not.toContain("VERDICT: AGREE");
+    const final = prompts.discussion({ ...base, maxRounds: 1, step: "final", round: 2, history: [v1, c1] });
+    expect(final).toContain("[agentduo-discussion: final, round 2 of 1]");
+    expect(final).toMatch(/final answer/i);
+    expect(final).toMatch(/still disagree/i);
   });
 });

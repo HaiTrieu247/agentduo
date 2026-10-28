@@ -1,4 +1,5 @@
 import type { ConfigData } from "../core/config.js";
+import { implementerPermissionArgs } from "../core/settings.js";
 import type { Activity, PermissionAnswer } from "../events.js";
 import { resolveBinary } from "./resolve.js";
 import { loadSchema } from "./schema.js";
@@ -18,6 +19,8 @@ const sumUsage = (u: Record<string, unknown>) => USAGE_FIELDS.reduce((sum, k) =>
 
 export class ClaudeParser implements StreamParser {
   result: Record<string, any> | null = null;
+  /** The model Claude's init event names for this call. */
+  model: string | null = null;
   private readonly tools = new Map<string, Activity>();
   private readonly messageTokens = new Map<string, number>();
 
@@ -52,6 +55,10 @@ export class ClaudeParser implements StreamParser {
     if (!event || typeof event !== "object" || Array.isArray(event)) return [];
     if (event.type === "result") return this.onResult(event);
     if (event.type === "control_request") return this.onControlRequest(event);
+    if (event.type === "system" && event.subtype === "init" && typeof event.model === "string" && event.model && !this.model) {
+      this.model = event.model;
+      return [{ type: "model", model: event.model }];
+    }
     const out: ParsedEvent[] = event.type === "assistant" ? this.trackUsage(event.message) : [];
     const content = event.message?.content;
     if (!Array.isArray(content)) return out;
@@ -171,22 +178,26 @@ export class ClaudeBackend implements AgentBackend {
     return found;
   }
 
-  /** Protocol flags only; what Claude may do comes from the user's Claude Code settings plus args/role_args. */
-  buildArgs({ schemaName, role, askPermissions }: BuildArgs): string[] {
+  /**
+   * Protocol flags only; what Claude may do comes from the user's Claude Code settings plus args/role_args. A
+   * conversation turn (text mode) has no schema and no role, but keeps the implementer's permission mode, which is
+   * what /edits sets for Claude in the chat too.
+   */
+  buildArgs(a: BuildArgs): string[] {
     return [
       "-p",
       "--output-format", "stream-json",
       "--verbose",
-      "--json-schema", JSON.stringify(loadSchema(schemaName)),
+      ...(a.mode === "text" ? [] : ["--json-schema", JSON.stringify(loadSchema(a.schemaName))]),
       // Host mode sends permission prompts to agentduo (the user answers them); without a host, "none" denies
       // them automatically, since nobody could answer and the run would hang. Neither grants anything.
-      ...(askPermissions
+      ...(a.askPermissions
         ? ["--input-format", "stream-json", "--permission-prompts", "host", "--permission-prompt-tool", "stdio"]
         : ["--permission-prompts", "none"]),
       ...(this.cfg.model ? ["--model", this.cfg.model] : []),
       ...(this.cfg.max_budget_usd ? ["--max-budget-usd", String(this.cfg.max_budget_usd)] : []),
       ...this.cfg.args,
-      ...(this.cfg.role_args[role] ?? []),
+      ...(a.mode === "text" ? implementerPermissionArgs(this.cfg) : this.cfg.role_args[a.role] ?? []),
     ];
   }
 
@@ -206,7 +217,7 @@ export class ClaudeBackend implements AgentBackend {
     return new ClaudeParser(this.repo);
   }
 
-  finalize(parser: StreamParser, stdout: string, _lastMessageFile = ""): FinalOutput {
+  finalize(parser: StreamParser, stdout: string, _lastMessageFile = "", mode: "structured" | "text" = "structured"): FinalOutput {
     let envelope = (parser as ClaudeParser).result;
     if (!envelope) {
       try {
@@ -222,10 +233,15 @@ export class ClaudeBackend implements AgentBackend {
       costUsd: typeof envelope.total_cost_usd === "number" ? envelope.total_cost_usd : undefined,
       tokens: (parser as ClaudeParser).usage?.().tokens,
       sessionId: envelope.session_id, numTurns: envelope.num_turns,
+      model: (parser as ClaudeParser).model ?? undefined,
       permissionDenials: Array.isArray(envelope.permission_denials) ? envelope.permission_denials : [],
     };
     if (envelope.is_error || (envelope.subtype !== undefined && envelope.subtype !== "success")) {
       throw new AgentFailure(`claude reported an error (subtype=${envelope.subtype}): ${String(envelope.result ?? "").slice(0, 500)}`, meta);
+    }
+    if (mode === "text") {
+      if (typeof envelope.result !== "string" || !envelope.result.trim()) throw new AgentFailure("claude returned no answer", meta);
+      return { data: envelope.result, meta };
     }
     if (envelope.structured_output != null) return { data: envelope.structured_output, meta };
     try {

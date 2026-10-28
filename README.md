@@ -53,30 +53,65 @@ duo                      # opens the chat
 
 ## Chat
 
-Run `duo` (or `agentduo`) without a task in a terminal and type, as in any chat CLI:
+Run `duo` (or `agentduo`) without a task in a terminal. The chat is a three-way conversation between you, Claude Code
+and Codex; the full pipeline runs only when you ask for it:
 
 ```
-agentduo 0.2.0 · chat
-› Add JWT authentication with refresh tokens
-── run 20261027-101500-add-jwt-authentication ──
+agentduo 0.5.0 · chat
+› /claude What would it take to add refresh tokens here?
+◆ Anthropic · Claude Code · default → sonnet (claude-sonnet-…)
+  … Claude's whole answer, paragraphs and code as written …
+› Is that plan safe for the existing sessions?
+⬡ OpenAI · Codex · default → gpt-5.5 (codex doctor)
+  … Codex answers, with Claude's answer in its context …
+› /pipeline Add refresh tokens as discussed
+── run 20261027-101500-add-refresh-tokens ──
   … Codex plans, Claude critiques, Claude implements, Codex reviews …
-✔ DONE the review approved; no quality gates configured.
-› Also cover token expiry with a test
 ```
 
-- **A message when nothing runs** starts a task. Each new task is told what the earlier ones in the chat did, and its review covers only its own changes.
-- **A message while the agents work** is a note: every step from the next one on carries it.
-- **Esc** stops the current step. Type what should change and press Enter, and the step runs again with your message. Enter alone re-runs it as is; `/new` leaves it.
+- **A message** goes to the agent named under the input: Codex in a new chat, then whoever you picked last.
+  `/claude <question>` and `/codex <question>` ask one of them directly; `/claude` or `/codex` alone switches who your
+  next messages go to. Each answer is shown whole, once, with the provider's mark (Anthropic / OpenAI) and the model it
+  ran on. Both agents see the whole conversation (up to 120,000 characters of it; older exchanges are dropped whole, and
+  the chat says so).
+- **`/pipeline <task>`** runs the full workflow (plan → critique → finalize → implement → verify → review). Every role
+  is told what was said in the conversation before the task, and what earlier pipeline tasks of the chat did.
+- **`/discuss <question>`** has both agents agree on an answer. The agent named under the input answers, the other
+  reviews it and ends with `VERDICT: AGREE` or `VERDICT: REVISE`, and the first revises until the reviewer agrees, for
+  at most `limits.max_discussion_rounds` reviews (3 by default; a review without a verdict counts as REVISE). If the
+  last review still asks for changes, the answerer writes a final answer that says what is still disputed. Each turn
+  is shown as it ends (in the terminal by its first lines; `--verbose` shows them whole), then the agreed or final
+  answer, whole. Only that answer joins the conversation, as an answer discussed with the other agent.
+- **A message while the pipeline works** is a note: every step from the next one on carries it. `/claude`, `/codex`,
+  `/pipeline` and `/discuss` say the workspace is busy instead; only one agent call runs at a time.
+- **Esc** stops what runs. A stopped answer or discussion just ends, and nothing of it joins the conversation. A stopped pipeline step stays resumable: `/resume [note]`
+  re-runs it (Enter on an empty line only reminds you). `/pipeline` while a run is stopped starts a new one; the stopped
+  one keeps its id and stays resumable. `/new` forgets the conversation and starts over.
+- **Models.** The input shows both agents' models. Before the first answer agentduo looks them up locally, without a
+  model call: Codex's with `codex doctor --json` (with your `-c`/`--enable`/`--disable` overrides; a `--profile` is not
+  something doctor takes, so the model then shows as unresolved, with the reason), Claude's from `--model`,
+  `ANTHROPIC_MODEL` and Claude Code's settings files. A settings alias shows as `default → sonnet (configured alias)`
+  until Claude's first answer names the exact model. Each question and run looks again, so an edited
+  `~/.codex/config.toml` or Claude settings file shows from the next one.
+- **Typing `/`** opens a list of the commands and their words, each with what it does, filtered as you type: Up/Down
+  picks, Tab or Enter fills it in, Enter again sends, Esc closes the list.
 - **Permission prompts and decisions** appear in place of the input line.
-- **Commands:** `/plan`, `/diff`, `/status`, `/resume` (continue a stopped or waiting run, also from an earlier session), `/new`, `/help`, `/quit`. Ctrl-C twice also quits; a running run stops at its current step and stays resumable.
+- **Commands:** `/claude`, `/codex`, `/pipeline`, `/discuss`, `/plan`, `/diff`, `/status`, `/resume` (continue a stopped or waiting
+  run, also from an earlier session), `/new`, `/settings`, `/config`, `/help`, `/quit`. Ctrl-C twice also quits; a
+  running run stops at its current step and stays resumable.
 
 ### Settings from the chat
 
-The settings commands of Claude Code and Codex work in the chat too, with the agent's name in front. A change applies to new runs, and to the current run from its next agent call. It lasts for this chat only, unless the command ends with `--save`, which writes it to `.agentduo/config.yaml` and keeps the file's comments.
+The settings commands of Claude Code and Codex work in the chat too: `/settings claude …` and `/settings codex …` is
+the canonical form, and gives the usage when the words do not fit. `/claude model …` and the like are shortcuts, taken
+as a setting only when the words fit it exactly (`/claude model opus`); anything else, such as
+`/claude model which is best for this repo?`, goes to Claude as a question, word for word, `--save` included.
+`/claude -- <question>` is always a question. A change applies from the next question or agent call; an answer already
+running keeps the model it started with. It lasts for this chat only, unless the command ends with `--save`, which writes it to `.agentduo/config.yaml` and keeps the file's comments.
 
 | Command | Same as | What it changes |
 |---|---|---|
-| Shift+Tab, `/edits auto\|ask` | Shift+Tab in Claude Code | `auto`: the implementer edits files without asking (`acceptEdits`); the plan critic is not affected |
+| Shift+Tab, `/edits auto\|ask` | Shift+Tab in Claude Code | `auto`: Claude edits files without asking (`acceptEdits`), in the chat and as the pipeline's implementer; the plan critic is not affected |
 | `/claude model <name\|default>` | `/model` | Claude's model |
 | `/claude effort low\|medium\|high\|xhigh\|max\|default` | `/effort` | Claude's effort level |
 | `/claude permissions [allow\|deny\|remove <rule>]` | `/permissions` | tool rules for agentduo's Claude calls, e.g. `Bash(npm test:*)` |
@@ -87,7 +122,7 @@ The settings commands of Claude Code and Codex work in the chat too, with the ag
 
 Outside the chat, `duo --accept-edits "<task>"` does what `/edits auto` does.
 
-`duo "<task>"` still runs a single task and exits; that is the form for scripts and CI.
+`duo "<task>"` and `duo run "<task>"` still run the pipeline on a single task and exit; that is the form for scripts and CI.
 
 ## VS Code extension
 
@@ -190,7 +225,7 @@ Settings are merged in this order, later sources winning: built-in defaults, the
 
 ```yaml
 agents: { planner: codex, plan_reviewer: claude, implementer: claude, code_reviewer: codex }
-limits: { max_planning_rounds: 4, max_review_rounds: 5, agent_timeout_sec: 1800, agent_idle_timeout_sec: 900 }
+limits: { max_planning_rounds: 4, max_review_rounds: 5, max_discussion_rounds: 3, agent_timeout_sec: 1800, agent_idle_timeout_sec: 900 }
 gates:                       # optional
   - name: tests
     command: "npm test"

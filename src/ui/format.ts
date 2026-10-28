@@ -1,4 +1,4 @@
-import type { Activity, Message, Party, PermissionAnswer, Phase, Role } from "../events.js";
+import type { Activity, Agent, DiscussionStatus, DiscussionStep, Message, ModelIdentity, Party, PermissionAnswer, Phase, Role, Verdict } from "../events.js";
 
 export const PIPELINE: Array<{ phase: Phase; label: string }> = [
   { phase: "PLAN", label: "PLAN" },
@@ -65,3 +65,102 @@ export function activityText(a: Activity): string {
 }
 
 export const messageHeadline = (m: Message): string => `${partyLabel(m.from)} → ${partyLabel(m.to)}  ${m.headline}`;
+
+/** Who makes each agent; the name the UI writes beside its mark. */
+export const PROVIDERS: Record<Agent, { agent: string; company: string; mark: string }> = {
+  claude: { agent: "Claude", company: "Anthropic", mark: "✻" },
+  codex: { agent: "Codex", company: "OpenAI", mark: "◎" },
+};
+
+/** "Claude (implementer)", or just "Claude" for a call that belongs to no pipeline role (a chat answer). */
+export const whoLabel = (agent: Party | string, role?: Role): string => `${partyLabel(agent)}${role ? ` (${roleLabel(role)})` : ""}`;
+
+/** The turn's identity once the agent's own stream named its model. */
+export const withObserved = (m: ModelIdentity, model: string): ModelIdentity => ({ ...m, resolved: model, source: "observed", status: "resolved", reason: null });
+
+/**
+ * What an answered turn shows of its activities: what the agent did, not its prose (the answer is shown whole once,
+ * so a "say" line with its first line, or a "submitting result", would only repeat it).
+ */
+export function answerActivities(activities: Activity[], answer: string | null): Activity[] {
+  const first = answer === null ? null : (answer.trim().split("\n")[0] ?? "").trim();
+  return activities.filter((a) => a.kind !== "submit" && !(a.kind === "say" && first !== null && first.startsWith(a.label.replace(/…$/, ""))));
+}
+
+const looksLikeAlias = (name: string) => !/\d/.test(name);
+
+/**
+ * The model as it should be read: an explicit choice as is (with what it resolved to), else "default → …" with the
+ * name the CLI's configuration gives, a note while it is unconfirmed, or why it is not known.
+ */
+export function modelText(m: ModelIdentity | null | undefined, o: { short?: boolean } = {}): string {
+  if (!m) return "unknown";
+  if (!m.isDefault) {
+    const requested = m.requested ?? "?";
+    return m.resolved && m.resolved !== requested ? `${requested} → ${m.resolved}` : requested;
+  }
+  switch (m.status) {
+    case "resolved":
+      return `default → ${m.resolved}`;
+    case "configured":
+      return o.short ? `default → ${m.configured}?` : `default → ${m.configured} (configured${looksLikeAlias(m.configured ?? "") ? " alias" : ""}; awaiting confirmation)`;
+    case "resolving":
+      return "default → resolving…";
+    case "unresolved":
+      return o.short || !m.reason ? "default → unknown" : `default → unknown (${m.reason})`;
+  }
+}
+
+// ------------------------------------------------------------------ /discuss
+/** What a discussion's turn is: "answer, version 2", "review of version 1". */
+export function discussionStepText(place: { step: DiscussionStep; round: number }): string {
+  switch (place.step) {
+    case "answer":
+    case "revise":
+      return `answer, version ${place.round}`;
+    case "critique":
+      return `review of version ${place.round}`;
+    case "final":
+      return `final answer, version ${place.round}`;
+  }
+}
+
+/** What an agent is doing in a discussion turn, while it works. */
+export function discussionDoing(place: { step: DiscussionStep; round: number }): string {
+  switch (place.step) {
+    case "answer":
+      return "answering";
+    case "critique":
+      return `reviewing version ${place.round}`;
+    case "revise":
+      return `revising: version ${place.round}`;
+    case "final":
+      return "writing the final answer";
+  }
+}
+
+/** How many lines of a discussion's turn the terminal shows (the final answer is shown whole; --verbose shows all). */
+export const DISCUSSION_LINES = 8;
+
+/** The first `n` lines of `text`, and how many more it has. */
+export function firstLines(text: string, n: number): { shown: string; more: number } {
+  const lines = text.trimEnd().split("\n");
+  return { shown: lines.slice(0, n).join("\n"), more: Math.max(0, lines.length - n) };
+}
+
+export const verdictText = (v: Verdict | null | undefined): string => (v === "agree" ? "AGREE" : v === "revise" ? "REVISE" : "no verdict, taken as REVISE");
+
+/** How a discussion ended, in a few words. */
+export function discussionOutcome(d: { status: DiscussionStatus; answerer: Agent; critic: Agent; rounds: number }): string {
+  const reviews = `${d.rounds} review${d.rounds === 1 ? "" : "s"}`;
+  switch (d.status) {
+    case "agreed":
+      return `${PROVIDERS[d.critic].agent} agreed after ${reviews}`;
+    case "disputed":
+      return `no agreement after ${reviews}: the final answer says what is still disputed`;
+    case "interrupted":
+      return "stopped";
+    case "error":
+      return "failed";
+  }
+}

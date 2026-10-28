@@ -41,29 +41,55 @@ Worker (ESM: runtime/worker.js, every dependency bundled, runtime/package.json n
 
 ## Sidebar
 
+The sidebar follows the look of VS Code's own chat views (Claude Code, Codex): no header of its own, a conversation on
+a rail of dots, and one box to write in. Session actions live in the view's title bar.
+
 ```
-┌ agentduo ───────────────────────────── ⋯ ┐
-│ MultiAgent · v0.4.0        [New] [Resume] │  header: folder, version, session actions
-│ PLAN ─ CRITIQUE ─ APPROVE ─ IMPLEMENT ─   │  pipeline: phase · role · backend, from config/events
-│   VERIFY ─ REVIEW ─ DONE                  │  (VERIFY only when gates exist; ✓ done, ● active, ⏸ stopped)
+┌ AGENTDUO: CHAT  MultiAgent ──── ＋ ⟲ ⚙ ⋯ ┐  title bar: folder (view description), New, Resume, Settings;
+│                                           │  ⋯ holds Open Plan / Changes / Report, Doctor, Configuration
+│ ✓ Plan › ● Critique › ○ Implement › ○ Rev │  progress: only while a run goes on or waits (runInProgress);
+│                    plan 1/3 · impl 0/2 · $│  ✓ done, ● active, ⏸ stopped, ○ to do; rounds and usage
 ├───────────────────────────────────────────┤
-│ ── Run 20261028-…  "Add a VS Code …"      │  timeline: run divider, user bubbles,
-│ ▸ PLAN r1  Codex · planner   12s · $0.04  │  one card per step and round; activities update by ID
-│    ● ran `rg -n …`   ◌ reading src/…      │  and fold into <details> once the step ends
-│ ⚠ warning: …                              │  warnings, retries, gate results, info and error notes
-│ ✓ DONE  3 files · 41k tokens   [Report]   │  finish summary with Report / Changes; stays at the newest item
-│            [New activity ↓]               │  until you scroll up, then this floats over the timeline
+│                                 → Codex   │  your message: a box, with where it went
+│ ┌───────────────────────────────────────┐ │
+│ │ fix the retry in the runner           │ │
+│ └───────────────────────────────────────┘ │
+│ ✻ Claude Anthropic plan critic  Plan r1 · │  a step or an answer: mark, name, role or model, meta
+│ ● Read  src/agents/runner.ts              │  one row per activity, tool name apart (activityParts);
+│ ● Edit  test/workflow.test.ts  +24 −3     │  folded into "N actions ›" once done
+│ ◌ Bash  npm test                          │
+│ ● Codex → Claude  Plan: 3 steps           │  a handoff, with Open plan / feedback / changes / review
+│ ● The answer, as Markdown                 │  rendered by markdown.ts + render.ts as elements and text
+│ ✓ Done: …              Report   Changes   │  notes, warnings, finish; New activity ↓ when scrolled up
 ├───────────────────────────────────────────┤
-│ ⚠ Your decision is needed · max_rounds    │  pending HUMAN_REVIEW card: Resume / Revise / Abort /
-│   [Plan] [Review] [Changes]   note: ____  │  Defer + note; permission cards: once / always / deny
+│ ⚠ Your decision is needed · plan_ready    │  HUMAN_REVIEW and permission cards, above the composer
 ├───────────────────────────────────────────┤
-│ [Plan] [Changes] [Report]   edits: ask ▾  │  toolbar
-│ ┌───────────────────────────────────────┐ │  composer: Enter sends, Shift+Enter newline, IME-safe,
-│ │ Type a task… (/help lists commands)   │ │  Esc stops; the placeholder follows ChatStatus
-│ └───────────────────────────────────────┘ │  (task / note / re-run)
-│                                  [Stop]   │
+│ ╭───────────────────────────────────────╮ │  composer: Enter sends, Shift+Enter newline, IME-safe;
+│ │ Ask Codex… (/ for commands)           │ │  the placeholder follows ChatStatus
+│ │ /  ⬡ Codex gpt-6.1 ▾  ✎ Edits: ask [↑]│ │  / commands · recipient chip · edits · send, or Stop
+│ ╰───────────────────────────────────────╯ │  (■) while something runs and the input is empty
 └───────────────────────────────────────────┘
 ```
+
+- The recipient chip's menu has Codex, Claude (with their models and effort), Discuss, Pipeline and the settings.
+  Discuss (see `2026-10-28-agentduo-discuss-design.md`) is for the next message only, as Pipeline is; a discussion is
+  one card, live while it goes on, then its outcome, its turns folded and its final answer. Pipeline is
+  for the next message only: it is sent with the `pipeline` route, and the chip goes back to the recipient. It is off
+  while something runs, because the chat would only answer that something is running; messages are notes then.
+- Settings (title bar or the chip's menu, `showSettings` from the host) open as a sheet above the composer. The menus
+  float above the box; a click elsewhere or Esc closes them.
+- The sheet has no Apply buttons: each choice is sent at once as the chat's setting command (`SettingRequest`), and the
+  sheet is rebuilt from the `settings` the worker sends back, keeping the focused control by its `data-key`.
+  - Model, effort, edits, reasoning and permissions are pickers whose list drops down in the sheet's own flow.
+  - Codex's models come from `codex debug models` (with the config overrides codex doctor gets): the models whose
+    `visibility` is `list`, by `priority`, as Codex's /model shows them. The worker reads them once per binary,
+    overrides and config files (`ModelRegistry`'s `onCatalog`, only for a view with a picker) and sends a `catalog`
+    update (protocol 3). Reasoning offers the chosen model's levels that agentduo can set (`CODEX_EFFORTS`, so not
+    `ultra`), and Default only while no effort is set, because `/codex model` keeps an effort once set.
+  - Claude's models are Claude Code's aliases (`CLAUDE_MODELS`, from Claude Code 2.1.31x), with Default first and the
+    model set now even when it is none of them.
+  - Claude's allow and deny rules and extra directories are tags with an input (Enter adds); a rule's × removes it.
+    There is no command to drop an extra directory, so its tags have no ×.
 
 ## Theme tokens
 
@@ -77,18 +103,26 @@ Worker (ESM: runtime/worker.js, every dependency bundled, runtime/package.json n
 | Status | `--vscode-testing-iconPassed` (done), `--vscode-editorWarning-foreground` (warning), `--vscode-editorError-foreground`, `--vscode-inputValidation-error*` (errors) |
 | Fonts | `--vscode-font-family`, `--vscode-font-size`, `--vscode-editor-font-family` |
 
+Icons are [Codicons](https://github.com/microsoft/vscode-codicons), VS Code's own icon font (CC BY 4.0, a
+devDependency): the build copies `codicon.css`, `codicon.ttf` and the licence to `dist/webview`, and the page loads
+that stylesheet before ours. The Claude and Codex marks stay agentduo's own SVG drawings.
+
 Every status also has a text label or an icon, so it never relies on colour alone. The status colours are made for
 icons, and in light themes they are too pale for small text. There, status text mixes them with
 `--vscode-foreground` (`color-mix`). That keeps the hue and gives at least 4.5:1. High-contrast themes get outlines,
-and `prefers-reduced-motion` turns off the spinner. Agent output is rendered with `textContent` only.
-Plans and reports open in a VS Code editor, so no agent-written HTML or Markdown is rendered in the webview.
+and `prefers-reduced-motion` turns off the pulsing dots. Agent output reaches the page as text nodes only. Answers
+and handoffs are Markdown: `webview/markdown.ts` reads a safe subset (headings, paragraphs, fenced code, lists,
+quotes, rules, GFM tables; code spans, strong, emphasis, strikethrough and links inline) into plain data, and
+`render.ts` builds elements from it with `createElement` and text nodes. HTML in an answer stays text. A link is shown
+with its target as a tooltip and is never followed. Plans and reports still open in a VS Code editor.
 
 ## References
 
 These were used for the interaction patterns only. No policy or code was copied.
 
-- [Claude Code in VS Code](https://code.claude.com/docs/en/vs-code): conversation in the sidebar, changes in the
-  native diff editor.
+- [Claude Code in VS Code](https://code.claude.com/docs/en/vs-code): conversation in the sidebar, the rail of tool
+  rows, one composer box with a model chip, changes in the native diff editor.
+- Codex in VS Code: session actions in the view's title bar, finished work folded into one row.
 - [Cline](https://docs.cline.bot/cline-overview): tool activity shown as compact rows, and approvals shown as cards
   above the composer.
 - [Webview API](https://code.visualstudio.com/api/extension-guides/webview) and
@@ -102,6 +136,10 @@ These were used for the interaction patterns only. No policy or code was copied.
   (activation, commands, view, worker, content providers, and a two-round run whose diff moves to the newer snapshot).
   `npm run test:pack:vscode` checks the VSIX contents and runs
   the packaged worker outside the checkout.
+- Sidebar redesign (title bar actions, rail, Markdown, Codicons, recipient chip), 2026-10-28: checked in Chrome with
+  the built webview bundle and the real reducer, in Dark Modern and Light Modern colours at 500 px wide: a Markdown
+  answer, a running pipeline, the recipient menu, a decision card, the settings sheet and the empty sidebar. The
+  desktop check below predates the redesign; its layout, keyboard and high-contrast checks have to be repeated.
 - Desktop check, 2026-10-28, VS Code 1.143.1 on macOS (arm64): 131 of 131 checks passed. A Playwright script drove
   the real workbench over the DevTools protocol, with the extension loaded from `extensions/vscode`. It used a scratch
   repository named `Dự án mẫu`, the fake CLIs and one gate. One run went through every role, a Claude permission prompt,

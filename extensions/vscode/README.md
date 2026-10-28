@@ -31,14 +31,38 @@ Open **agentduo** in the Activity Bar.
 
 - Opening the sidebar starts nothing. It reads the latest run so it can offer **Resume**. The first task you send starts
   a run in the chosen folder. In a multi-root window you choose the folder first (**agentduo: Choose Workspace Folder**).
-- The composer works like the terminal chat. **agentduo: Open Chat** puts the cursor in it. Enter sends and Shift+Enter
-  starts a new line; while an IME is composing, Enter only commits the word. While a step runs, what you type is a note
-  for the next step. **Stop** (or Esc in the composer) interrupts the step, and sending again re-runs it.
-  `/help` lists the slash commands: `/new`, `/resume`, `/edits`, `/claude …`, `/codex …`, and the rest.
+- The view's title bar has **New**, **Resume** and **Settings**, and its `⋯` menu opens the run's plan, changes and
+  report. While a run goes on or waits for you, a line at the top shows its stages and rounds.
+- The composer works like the terminal chat: a three-way conversation with Claude Code and Codex. The chip under the
+  input says who a message goes to and on which model (Codex at first). Its menu switches between **Codex** and
+  **Claude**, or makes the next message a question to **Discuss** (that agent answers, the other reviews, until they
+  agree, as `/discuss` does) or a task for the **Pipeline**. A discussion shows each turn as it ends, with the
+  reviewer's verdict; once it is over its turns fold into one row and the agreed or final answer follows, whole. A slash command typed in the composer always wins
+  over the chip. The chip's tooltip and menu also tell what "default" currently means (for example
+  `default → gpt-5.5 (codex doctor)`, or a Claude settings alias awaiting confirmation). The `/` button lists the
+  commands, and typing `/` shows the same list with a description for each entry.
+- **Settings** changes what the chat's settings commands change, and applies each choice at once. Model, effort,
+  edits, reasoning and permissions are pickers: a click drops the list down. Codex's models are the ones its own
+  `/model` offers (read with `codex debug models`), and its reasoning levels are those the chosen model takes. Claude's
+  models are Claude Code's aliases (Fable, Opus, Sonnet, Haiku, their 1M-context variants, Best, Opus Plan). Claude's
+  allowed and denied tool rules and its extra directories are tags: type one and press Enter to add it, and the × on a
+  rule removes it. A box below saves the changes to `.agentduo/config.yaml`.
+- Each answer and each pipeline step is drawn on a line of dots, as in VS Code's own chat views: one row per tool the
+  agent used (Bash, Read, Edit…), folded once it is done, then the answer. Answers are shown whole, with an Anthropic or
+  OpenAI mark and the model they ran on. Their Markdown (headings, lists, code, tables, quotes) is rendered as text
+  elements, never as HTML, and links show their target as a tooltip without opening it.
+- **agentduo: Open Chat** puts the cursor in the composer. Enter sends and Shift+Enter starts a new line; while an IME
+  is composing, Enter only commits the word. While a pipeline step runs, what you type is a note for the next step.
+  While something runs and the input is empty, the send button becomes **Stop** (Esc in the composer does the same): it
+  interrupts the answer or the step. A stopped step continues with `/resume [note]` (or **Resume**), and an empty Enter
+  only reminds you of it.
+- The sidebar keeps up to 400 entries and about 2,000,000 characters of answers. Older turns (a message and what
+  followed it) are dropped whole and a notice says where the full logs are; the newest answer and its question always
+  stay, however long.
 - HUMAN_REVIEW decisions (resume, revise, abort, defer, with a note) and Claude's permission requests (allow once,
   always allow, deny) appear above the composer. They stay there when you hide the sidebar. **Always allow** saves
   Claude's rule to `.claude/settings.local.json`, the same file the CLI uses.
-- The toolbar opens the plan, review, feedback and report of the run in an editor. **Changes** lists the files
+- The `⋯` menu and the links under each step open the plan, review, feedback and report of the run in an editor. **Changes** lists the files
   the run changed and opens them in VS Code's diff editor. The diff goes from the run's baseline snapshot to its latest
   snapshot, so edits you made before the run are not included. Opening Changes again after another round shows that
   round's snapshot. A diff that is already open keeps the snapshot it was opened at.
@@ -58,3 +82,9 @@ a task on its own. It offers **Resume** instead.
 Desktop VS Code with a local folder only. There is no web build, and Remote SSH, WSL and containers are not
 supported. Each window has one session and runs one task at a time. There is no browser for older runs: **Resume**
 continues the latest run, as `/resume` does in the CLI.
+
+## Credits
+
+The icons are [Codicons](https://github.com/microsoft/vscode-codicons) by Microsoft, licensed under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) and bundled unchanged (`dist/webview/codicon-LICENSE.txt`).
+The Claude and Codex marks are agentduo's own drawings, not either company's logo.

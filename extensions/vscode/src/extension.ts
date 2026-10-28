@@ -54,6 +54,7 @@ class Controller implements vscode.Disposable {
   }
 
   private create(path: string): WorkspaceSession {
+    this.view.setDescription(basename(path));
     return new WorkspaceSession({
       workspace: path, configPath: null, workerScript: this.context.asAbsolutePath(join("runtime", "worker.js")), env: process.env,
       resolveNode: () => findNode({ configured: vscode.workspace.getConfiguration("agentduo").get<string>("nodePath")?.trim() || null, env: process.env }),
@@ -65,7 +66,7 @@ class Controller implements vscode.Disposable {
   }
 
   private onState(state: ViewState): void {
-    void vscode.commands.executeCommand("setContext", "agentduo.running", state.status === "running");
+    void vscode.commands.executeCommand("setContext", "agentduo.running", state.status === "running" || state.status === "answering");
     this.view.setBadge((state.decision ? 1 : 0) + state.permissions.length);
   }
 
@@ -86,6 +87,7 @@ class Controller implements vscode.Disposable {
       await old.dispose();
     }
     if (path) this.session = this.create(path);
+    else this.view.setDescription(undefined);
     if (this.attached) this.viewReady();
   }
 
@@ -116,10 +118,15 @@ class Controller implements vscode.Disposable {
     if (!session) {
       const none = !this.folders().length;
       this.view.post({ type: "snapshot", state: emptyState(none ? "no-folder" : "choose-folder") });
-      return;
+    } else {
+      session.attach((message) => this.view.post(message));
+      void session.start();
     }
-    session.attach((message) => this.view.post(message));
-    void session.start();
+    this.view.ready();
+  }
+
+  get viewAttached(): boolean {
+    return this.attached;
   }
 
   viewHidden(): void {
@@ -135,7 +142,11 @@ class Controller implements vscode.Disposable {
       if (!session) return;
       switch (message.type) {
         case "submit":
-          return session.submit(message.text);
+          return session.submit(message.text, message.route);
+        case "recipient":
+          return session.selectRecipient(message.backend);
+        case "setting":
+          return session.applySetting({ setting: message.setting, save: message.save, yes: message.yes });
         case "interrupt":
           return session.interrupt();
         case "toggleEdits":
@@ -220,7 +231,10 @@ let controller: Controller | undefined;
 
 export interface TestApi {
   state(): ViewState | null;
-  submit(text: string): Promise<void>;
+  /** As the composer sends it: Send ("message") or the Pipeline button ("pipeline"). */
+  submit(text: string, route?: "message" | "pipeline"): Promise<void>;
+  /** As the Claude / Codex buttons do. */
+  selectRecipient(backend: "claude" | "codex"): Promise<void>;
   workerPid(): number | undefined;
   /** Answers the pending HUMAN_REVIEW decision as its buttons do. */
   decide(decision: DecisionChoice): Promise<void>;
@@ -248,11 +262,16 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
       await vscode.commands.executeCommand("agentduo.chat.focus");
       await s.submit("/resume");
     })),
+    // /new: a new conversation; a stopped run keeps its files and stays resumable.
     vscode.commands.registerCommand("agentduo.newTask", withSession(async (s) => {
       await vscode.commands.executeCommand("agentduo.chat.focus");
       await s.submit("/new");
       c.view.post({ type: "focusComposer" });
     })),
+    vscode.commands.registerCommand("agentduo.openSettings", async () => {
+      await vscode.commands.executeCommand("agentduo.chat.focus");
+      c.view.postWhenReady({ type: "showSettings" }, c.viewAttached);
+    }),
     vscode.commands.registerCommand("agentduo.openPlan", () => c.openArtifact("plan")),
     vscode.commands.registerCommand("agentduo.openReport", () => c.openArtifact("report")),
     vscode.commands.registerCommand("agentduo.openChanges", withSession((s) => openChanges(s, c.registry))),
@@ -268,9 +287,13 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
   if (context.extensionMode !== vscode.ExtensionMode.Test) return undefined;
   return {
     state: () => c.session?.state ?? null,
-    submit: async (text) => {
+    submit: async (text, route = "message") => {
       const session = await c.need();
-      await session?.submit(text);
+      await session?.submit(text, route);
+    },
+    selectRecipient: async (backend) => {
+      const session = await c.need();
+      await session?.selectRecipient(backend);
     },
     workerPid: () => c.session?.workerPid,
     decide: async (decision) => {

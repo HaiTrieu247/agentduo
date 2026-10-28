@@ -1,5 +1,41 @@
-import type { Activity, DuoEvent, HistoryEntry, HumanReview, Message, Party, PermissionAnswer, Phase, Role, RoundInfo } from "../../events.js";
+import type {
+  Activity, Agent, DiscussionPlace, DiscussionStatus, DuoEvent, HistoryEntry, HumanReview, Message, ModelIdentity, Party, PermissionAnswer, Phase, Role, RoundInfo, TurnStatus,
+  Verdict,
+} from "../../events.js";
+import { answerActivities, PROVIDERS, withObserved } from "../format.js";
 import type { PermissionAsk } from "./PermissionPrompt.js";
+
+/** A question of the chat and its answer: live while the agent works, then printed once, whole. */
+export interface TurnView {
+  turnId: string;
+  backend: Agent;
+  /** Fixed when the turn starts; only the agent's own stream for this call may confirm it. */
+  model: ModelIdentity;
+  activities: Activity[];
+  startedAt: number;
+  verbose: boolean;
+  status?: TurnStatus;
+  answer?: string | null;
+  error?: string | null;
+  durationSec?: number;
+  costUsd?: number;
+  tokens?: number;
+  /** A /discuss turn: its step, and a review's verdict. */
+  discussion?: DiscussionPlace & { verdict?: Verdict | null };
+}
+
+/** A /discuss once it is over: how it ended, and its answer (the agreed or final version), printed whole. */
+export interface DiscussionView {
+  status: DiscussionStatus;
+  answerer: Agent;
+  critic: Agent;
+  rounds: number;
+  answer: string | null;
+  error: string | null;
+  durationSec: number;
+  costUsd?: number;
+  tokens?: number;
+}
 
 export interface StepView {
   phase: Phase;
@@ -26,13 +62,19 @@ type StaticContent =
   | { kind: "artifact"; title: string; body: string }
   | { kind: "finish"; phase: string; runId: string; reportPath: string; summary?: string; chat?: boolean }
   | { kind: "review"; review: HumanReview }
-  | { kind: "permission"; agent: Party; role: Role; label: string; rules: string[]; answer: PermissionAnswer };
+  | { kind: "answer"; turn: TurnView }
+  | { kind: "discussion"; discussion: DiscussionView }
+  | { kind: "permission"; agent: Party; role?: Role; label: string; rules: string[]; answer: PermissionAnswer };
 export type StaticItem = { id: string } & StaticContent;
 
 export interface ViewState {
   version: string;
   items: StaticItem[];
   current: StepView | null;
+  /** The chat question being answered now. */
+  turn: TurnView | null;
+  /** The /discuss under way, whose turns come one after another. */
+  discussion: { id: string; answerer: Agent; critic: Agent; maxRounds: number } | null;
   planning: RoundInfo;
   impl: RoundInfo;
   reached: Phase[];
@@ -58,7 +100,7 @@ export type ViewAction =
 
 export function initialView(version: string, verbose = false, chat?: { workspace: string }): ViewState {
   const s: ViewState = {
-    version, items: [], current: null, planning: { round: 1, limit: 0 }, impl: { round: 0, limit: 0 }, reached: [],
+    version, items: [], current: null, turn: null, discussion: null, planning: { round: 1, limit: 0 }, impl: { round: 0, limit: 0 }, reached: [],
     totals: { costUsd: 0, tokens: 0 }, live: { costUsd: 0, tokens: 0 }, humanReview: null, permissions: [], finished: null, verbose, stopping: false, seq: 0,
     chat: !!chat,
   };
@@ -139,6 +181,38 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
       return push(s, { kind: "note", text: e.text });
     case "human.required":
       return { ...s, humanReview: e.review, current: null };
+    case "turn.started":
+      return {
+        ...s, turn: { turnId: e.turnId, backend: e.backend, model: e.model, activities: [], startedAt: now, verbose: s.verbose, ...(e.discussion ? { discussion: e.discussion } : {}) },
+        live: { costUsd: 0, tokens: 0 },
+      };
+    case "turn.activity":
+      return s.turn?.turnId === e.turnId ? { ...s, turn: { ...s.turn, activities: upsert(s.turn.activities, e.activity) } } : s;
+    case "turn.usage":
+      return s.turn?.turnId === e.turnId ? { ...s, live: { costUsd: e.costUsd ?? s.live.costUsd, tokens: e.tokens ?? s.live.tokens } } : s;
+    case "turn.model":
+      return s.turn?.turnId === e.turnId ? { ...s, turn: { ...s.turn, model: withObserved(s.turn.model, e.model) } } : s;
+    case "turn.finished": {
+      const base = s.turn?.turnId === e.turnId ? s.turn : { turnId: e.turnId, backend: e.backend, model: e.model, activities: [], startedAt: now, verbose: s.verbose };
+      const turn: TurnView = {
+        ...base, model: e.model, activities: answerActivities(base.activities, e.answer), status: e.status, answer: e.answer, error: e.error,
+        durationSec: e.durationSec, costUsd: e.costUsd, tokens: e.tokens, verbose: s.verbose, ...(e.discussion ? { discussion: e.discussion } : {}),
+      };
+      return {
+        ...push({ ...s, turn: s.turn?.turnId === e.turnId ? null : s.turn }, { kind: "answer", turn }),
+        totals: { costUsd: s.totals.costUsd + (e.costUsd ?? 0), tokens: s.totals.tokens + (e.tokens ?? 0) }, live: { costUsd: 0, tokens: 0 },
+      };
+    }
+    case "discussion.started":
+      return {
+        ...push(s, { kind: "info", text: `── discussion: ${PROVIDERS[e.answerer].agent} answers, ${PROVIDERS[e.critic].agent} reviews (at most ${e.maxRounds} review${e.maxRounds === 1 ? "" : "s"}) ──` }),
+        discussion: { id: e.discussionId, answerer: e.answerer, critic: e.critic, maxRounds: e.maxRounds },
+      };
+    case "discussion.finished": {
+      // Its turns have counted their usage already.
+      const { status, answerer, critic, rounds, answer, error, durationSec, costUsd, tokens } = e;
+      return { ...push(s, { kind: "discussion", discussion: { status, answerer, critic, rounds, answer, error, durationSec, costUsd, tokens } }), discussion: null };
+    }
     case "permission.requested":
       return { ...s, permissions: [...s.permissions, { role: e.role, agent: e.agent, request: e.request }] };
     case "permission.answered": {

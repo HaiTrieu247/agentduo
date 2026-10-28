@@ -6,6 +6,7 @@ import { App } from "../src/ui/ink/App.js";
 import { ChatApp, ChatChannel } from "../src/ui/ink/ChatApp.js";
 import { HumanReviewPrompt } from "../src/ui/ink/HumanReviewPrompt.js";
 import { PermissionPrompt } from "../src/ui/ink/PermissionPrompt.js";
+import { StaticItemView } from "../src/ui/ink/App.js";
 import { StepBlock } from "../src/ui/ink/StepBlock.js";
 import { initialView, reduce, type StepView, type ViewState } from "../src/ui/ink/store.js";
 
@@ -220,7 +221,7 @@ describe("Ink components", () => {
       onEscape={() => { escapes += 1; }} onCtrlC={() => { ctrlC += 1; }} onDecision={noop} onPermission={noop} views={() => []} readView={async () => null} />);
     await wait();
     expect(app.lastFrame()).toContain("agentduo 0.2.0 · chat");
-    expect(app.lastFrame()).toContain("Type a task");
+    expect(app.lastFrame()).toContain("Ask Codex");
     app.stdin.write("Add JWT auth");
     await wait();
     expect(app.lastFrame()).toContain("› Add JWT auth");
@@ -383,5 +384,28 @@ describe("Ink components", () => {
     expect(stops).toBe(1);
     expect(app.lastFrame()).toContain("stopping after this step");
     app.unmount();
+  });
+
+  it("chat: a discussion shows each turn by its step and verdict, then the final answer whole", () => {
+    const model = { backend: "codex", requested: null, configured: null, resolved: "gpt-x", source: "doctor", isDefault: true, status: "resolved", reason: null } as const;
+    const started = (id: string, backend: "codex" | "claude", step: "answer" | "critique", round: number): DuoEvent =>
+      ({ type: "turn.started", conversationId: "c", turnId: id, backend, question: "Q?", model: { ...model, backend }, discussion: { id: "d", step, round } });
+    const finished = (id: string, backend: "codex" | "claude", step: "answer" | "critique", round: number, answer: string, verdict?: "agree"): DuoEvent =>
+      ({ type: "turn.finished", conversationId: "c", turnId: id, backend, status: "success", answer, error: null, model: { ...model, backend }, durationSec: 2, logDir: "/l", discussion: { id: "d", step, round, ...(verdict ? { verdict } : {}) } });
+    let s = play([{ type: "discussion.started", conversationId: "c", discussionId: "d", question: "Q?", answerer: "codex", critic: "claude", maxRounds: 3 }, started("t1", "codex", "answer", 1)],
+      initialView("0.1.0", false, { workspace: "/repo" }));
+    expect(s.discussion).toMatchObject({ answerer: "codex", critic: "claude", maxRounds: 3 });
+    expect(s.turn?.discussion).toMatchObject({ step: "answer", round: 1 });
+    s = play([finished("t1", "codex", "answer", 1, "Use Postgres."), started("t2", "claude", "critique", 1), finished("t2", "claude", "critique", 1, "Right.", "agree"),
+      { type: "discussion.finished", conversationId: "c", discussionId: "d", status: "agreed", answerer: "codex", critic: "claude", rounds: 1, answer: "Use Postgres.", error: null, durationSec: 4, costUsd: 0.2, logDir: "/l" }], s);
+    expect(s.discussion).toBeNull();
+    const frames = s.items.filter((i) => i.kind === "answer" || i.kind === "discussion").map((item) => render(<StaticItemView item={item} />).lastFrame() ?? "");
+    expect(frames).toHaveLength(3);
+    expect(frames[1]).toContain("review of version 1");
+    expect(frames[1]).toContain("AGREE");
+    expect(frames[2]).toContain("Discussion: Claude agreed after 1 review");
+    expect(frames[2]).toContain("Use Postgres.");
+    // The turns' usage counts once: the discussion's total is not added again.
+    expect(s.totals.costUsd).toBe(0);
   });
 });

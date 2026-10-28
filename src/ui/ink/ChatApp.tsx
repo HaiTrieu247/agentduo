@@ -2,16 +2,23 @@ import { EventEmitter } from "node:events";
 import { Box, Static, Text, useInput, useStdout } from "ink";
 import { useEffect, useReducer, useState } from "react";
 import type { ChatStatus } from "../../chat.js";
-import type { Decision, EventBus, PermissionAnswer } from "../../events.js";
+import { AGENT_NAMES, complete, type Backend, type Completion } from "../../core/commands.js";
+import type { Decision, EventBus, ModelMap, PermissionAnswer } from "../../events.js";
+import { modelText, PROVIDERS } from "../format.js";
 import { StaticItemView } from "./App.js";
 import { HumanReviewPrompt, VIEWS, type ViewKind } from "./HumanReviewPrompt.js";
-import { LiveFooter } from "./LiveFooter.js";
+import { LiveFooter, TurnFooter } from "./LiveFooter.js";
 import { PermissionPrompt } from "./PermissionPrompt.js";
 import { initialView, reduce } from "./store.js";
 
-type ChatLine = { type: "user" | "info"; text: string } | { type: "status"; status: ChatStatus } | { type: "edits"; mode: string };
+type ChatLine =
+  | { type: "user" | "info"; text: string }
+  | { type: "status"; status: ChatStatus }
+  | { type: "edits"; mode: string }
+  | { type: "recipient"; backend: Backend }
+  | { type: "models"; models: ModelMap };
 
-/** What the chat controller shows besides the agents' own events: your messages, its lines, and its status. */
+/** What the chat controller shows besides the agents' own events: your messages, its lines, and its state. */
 export class ChatChannel {
   private readonly emitter = new EventEmitter();
 
@@ -31,6 +38,14 @@ export class ChatChannel {
     this.emitter.emit("line", { type: "status", status });
   }
 
+  recipient(backend: Backend): void {
+    this.emitter.emit("line", { type: "recipient", backend });
+  }
+
+  models(models: ModelMap): void {
+    this.emitter.emit("line", { type: "models", models });
+  }
+
   on(listener: (line: ChatLine) => void): () => void {
     this.emitter.on("line", listener);
     return () => {
@@ -48,7 +63,7 @@ export interface ChatAppProps {
   onSubmit(text: string): void;
   onEscape(): void;
   onCtrlC(): void;
-  /** Shift+Tab, as in Claude Code: switch the implementer between asking before edits and editing automatically. */
+  /** Shift+Tab, as in Claude Code: switch Claude between asking before edits and editing automatically. */
   onCycleEdits?(): void;
   onDecision(d: Decision | "defer"): void;
   onPermission(id: string, answer: PermissionAnswer): void;
@@ -56,64 +71,128 @@ export interface ChatAppProps {
   readView(kind: ViewKind): Promise<string | null>;
 }
 
-const PLACEHOLDERS: Record<ChatStatus, string> = {
-  idle: "Type a task…",
-  running: "A message for the agents: they get it from the next step",
-  paused: "What should change? Enter re-runs the stopped step",
-};
-const HINTS: Record<ChatStatus, string> = {
-  idle: "Enter send · /help commands · Ctrl-C twice quit",
-  running: "Enter send a note · Esc stops this step · Ctrl-C twice quit",
-  paused: "Enter re-run · /new leave it · Ctrl-C twice quit",
-};
+function placeholder(status: ChatStatus, to: Backend): string {
+  const name = AGENT_NAMES[to];
+  switch (status) {
+    case "idle":
+      return `Ask ${name}… (/pipeline <task> runs the workflow; / lists commands)`;
+    case "running":
+      return "A note for the agents: they get it from the next step";
+    case "answering":
+      return `${name} is answering… Esc stops it`;
+    case "paused":
+      return `Ask ${name}… or /resume to continue the stopped run`;
+  }
+}
 
-function ChatInput({ status, edits, onSubmit, onEscape, onCycleEdits }: {
-  status: ChatStatus; edits: string | null; onSubmit(text: string): void; onEscape(): void; onCycleEdits?(): void;
+const HINTS: Record<ChatStatus, string> = {
+  idle: "Enter send · / commands · Ctrl-C twice quit",
+  running: "Enter send a note · Esc stops this step · Ctrl-C twice quit",
+  answering: "Esc stops the answer · Ctrl-C twice quit",
+  paused: "Enter ask · /resume continue the run · /new leave it · Ctrl-C twice quit",
+};
+const MENU_ROWS = 8;
+
+/** The completion list under the input: commands, then their words, each with what it does. */
+function Suggestions({ items, selected }: { items: Completion[]; selected: number }) {
+  const start = Math.max(0, Math.min(selected - Math.floor(MENU_ROWS / 2), items.length - MENU_ROWS));
+  const shown = items.slice(start, start + MENU_ROWS);
+  return (
+    <Box flexDirection="column" paddingX={1}>
+      {shown.map((c, i) => {
+        const on = start + i === selected;
+        return (
+          <Text key={`${c.label}-${start + i}`} wrap="truncate-end">
+            <Text color={on ? "cyan" : undefined} bold={on}>{`${on ? "❯ " : "  "}${c.label}`}</Text>
+            <Text dimColor>{`  ${c.description}`}</Text>
+          </Text>
+        );
+      })}
+      <Text dimColor>{`  ↑↓ choose · Tab/Enter fill in · Esc close${items.length > MENU_ROWS ? ` · ${items.length} in all` : ""}`}</Text>
+    </Box>
+  );
+}
+
+function ChatInput({ status, edits, to, models, onSubmit, onEscape, onCycleEdits }: {
+  status: ChatStatus; edits: string | null; to: Backend; models: ModelMap | null; onSubmit(text: string): void; onEscape(): void; onCycleEdits?(): void;
 }) {
   const [text, setText] = useState("");
+  const [selected, setSelected] = useState(0);
+  /** The text the list was closed for (Esc, or filled in with Enter): it stays closed until the text changes. */
+  const [closedFor, setClosedFor] = useState<string | null>(null);
+  const suggestions = text === closedFor ? [] : complete(text);
+  const menu = suggestions.length > 0;
+  useEffect(() => setSelected(0), [text]);
+  const send = (value: string) => {
+    onSubmit(value);
+    setText("");
+    setClosedFor(null);
+  };
+
   useInput((input, key) => {
     if (key.ctrl && input === "c") return; // handled by the app, which counts presses
     if (key.tab && key.shift) {
       onCycleEdits?.();
       return;
     }
+    if (menu) {
+      const choice = suggestions[Math.min(selected, suggestions.length - 1)]!;
+      if (key.upArrow) return setSelected((i) => (i - 1 + suggestions.length) % suggestions.length);
+      if (key.downArrow) return setSelected((i) => (i + 1) % suggestions.length);
+      if (key.escape) return setClosedFor(text);
+      if (key.tab || key.return) {
+        if (choice.insert && choice.insert !== text) {
+          setText(choice.insert);
+          // Enter fills in and closes the list, so the next Enter sends; Tab keeps it open for the next word.
+          if (key.return) setClosedFor(choice.insert);
+          return;
+        }
+        if (key.tab) return;
+      }
+    }
+    if (key.tab) return;
     if (key.escape) {
-      if (status === "running") onEscape();
+      if (status === "running" || status === "answering") onEscape();
       else setText("");
       return;
     }
-    if (key.return) {
-      onSubmit(text);
-      setText("");
-    } else if (key.backspace || key.delete) setText((t) => t.slice(0, -1));
+    if (key.return) send(text);
+    else if (key.backspace || key.delete) setText((t) => t.slice(0, -1));
     else if (input && !key.ctrl && !key.meta) {
       // A paste (or fast typing) arrives as one chunk: line breaks inside it stay, an Enter at its end sends.
       const chunk = input.replace(/\r\n?/g, "\n");
-      if (chunk.endsWith("\n")) {
-        onSubmit(text + chunk.slice(0, -1));
-        setText("");
-      } else setText((t) => t + chunk);
+      if (chunk.endsWith("\n")) send(text + chunk.slice(0, -1));
+      else setText((t) => t + chunk);
     }
   });
+  const model = (b: Backend) => `${PROVIDERS[b].mark} ${PROVIDERS[b].agent} ${models ? modelText(models[b], { short: true }) : "…"}`;
   return (
     <Box flexDirection="column" marginTop={1}>
       <Box borderStyle="round" borderColor={status === "paused" ? "yellow" : "gray"} paddingX={1}>
         <Text wrap="wrap">
           <Text color="cyan">{"› "}</Text>
-          {text ? text : <Text dimColor>{PLACEHOLDERS[status]}</Text>}
+          {text ? text : <Text dimColor>{placeholder(status, to)}</Text>}
           <Text inverse> </Text>
         </Text>
       </Box>
-      <Text dimColor>{`  ${edits ? `edits: ${edits} (Shift+Tab) · ` : ""}${HINTS[status]}`}</Text>
+      {menu ? <Suggestions items={suggestions} selected={Math.min(selected, suggestions.length - 1)} /> : null}
+      <Text dimColor wrap="truncate-end">
+        {"  to: "}
+        <Text bold>{AGENT_NAMES[to]}</Text>
+        {` · ${model("claude")} · ${model("codex")}${edits ? ` · edits: ${edits} (Shift+Tab)` : ""}`}
+      </Text>
+      <Text dimColor wrap="truncate-end">{`  ${HINTS[status]}`}</Text>
     </Box>
   );
 }
 
-/** `duo` with no task: one live UI for a whole session of runs, with an input line at the bottom. */
+/** `duo` with no task: one live UI for a whole session of questions and runs, with an input line at the bottom. */
 export function ChatApp(p: ChatAppProps) {
   const [view, dispatch] = useReducer(reduce, undefined, () => initialView(p.version, p.verbose, { workspace: p.workspace }));
   const [status, setStatus] = useState<ChatStatus>("idle");
   const [edits, setEdits] = useState<string | null>(null);
+  const [to, setTo] = useState<Backend>("codex");
+  const [models, setModels] = useState<ModelMap | null>(null);
   const [frame, setFrame] = useState(0);
   const columns = (useStdout().stdout as NodeJS.WriteStream).columns || 80;
 
@@ -121,6 +200,8 @@ export function ChatApp(p: ChatAppProps) {
   useEffect(() => p.channel.on((line) => {
     if (line.type === "status") setStatus(line.status);
     else if (line.type === "edits") setEdits(line.mode);
+    else if (line.type === "recipient") setTo(line.backend);
+    else if (line.type === "models") setModels(line.models);
     else dispatch({ type: "chat", kind: line.type, text: line.text });
   }), [p.channel]);
   useEffect(() => {
@@ -153,7 +234,8 @@ export function ChatApp(p: ChatAppProps) {
       ) : (
         <>
           {status === "running" && view.current ? <LiveFooter view={view} now={Date.now()} frame={frame} interactive={false} /> : null}
-          <ChatInput status={status} edits={edits} onSubmit={p.onSubmit} onEscape={p.onEscape} onCycleEdits={p.onCycleEdits} />
+          {status === "answering" && view.turn ? <TurnFooter view={view} now={Date.now()} frame={frame} /> : null}
+          <ChatInput status={status} edits={edits} to={to} models={models} onSubmit={p.onSubmit} onEscape={p.onEscape} onCycleEdits={p.onCycleEdits} />
         </>
       )}
     </>

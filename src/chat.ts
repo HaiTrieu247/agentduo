@@ -1,26 +1,39 @@
 import { resolve } from "node:path";
+import { AgentRunner, type AgentResult } from "./agents/runner.js";
 import { firstLine } from "./agents/types.js";
+import { AGENT_NAMES, helpText, parseInput, type Backend, type ChatCommand, type SettingCommand } from "./core/commands.js";
 import { configFromSaved, type ConfigData } from "./core/config.js";
+import { Conversation, type Turn } from "./core/conversation.js";
+import { parseVerdict } from "./core/discussion.js";
+import { missingCli } from "./core/environment.js";
 import { Git } from "./core/git.js";
+import { ModelRegistry, withObserved } from "./core/models.js";
 import {
-  CLAUDE_EFFORTS, CODEX_EFFORTS, CODEX_PERMISSIONS, claudeDirs, claudeRules, describeSettings, editMode, saveSettings, settings,
-  type CodexPermission, type SettingChange,
+  claudeDirs, claudeRules, describeSettings, editMode, saveSettings, settings, settingsView, type SettingChange, type SettingsView,
 } from "./core/settings.js";
-import { nowIso, RunStore, type EarlierTask, type RunState } from "./core/state.js";
+import { nowIso, RunStore, type ConversationContext, type EarlierTask, type RunState } from "./core/state.js";
 import { EXIT, Workflow } from "./core/workflow.js";
-import type { Decider, EventBus, PermissionDecider } from "./events.js";
-import { formatCost, formatTokens } from "./ui/format.js";
+import type {
+  Decider, DiscussionPlace, DiscussionStatus, DiscussionStep, EventBus, ModelMap, PermissionDecider, TurnStatus, Verdict,
+} from "./events.js";
+import { formatCost, formatTokens, modelText } from "./ui/format.js";
 
-export type ChatStatus = "idle" | "running" | "paused";
+/** idle: ready; running: a pipeline run is going; answering: an agent answers a question; paused: a run was stopped with Esc. */
+export type ChatStatus = "idle" | "running" | "answering" | "paused";
 
 /** What the chat needs from the screen; the agents' own activity reaches it through the EventBus. */
 export interface ChatUi {
   /** A line from agentduo itself: command output and hints. */
-  info(text: string): void;
-  /** idle: a message starts a task; running: a message is a note; paused: stopped with Esc, a message re-runs the step. */
+  info(text: string, tone?: "info" | "error"): void;
   setStatus(status: ChatStatus): void;
-  /** The implementer's edit mode, shown beside the input: "ask", "auto", or another Claude permission mode. */
+  /** Claude's edit mode, shown beside the input: "ask", "auto", or another Claude permission mode. */
   setEdits(mode: string): void;
+  /** Who a plain message goes to. */
+  setRecipient(backend: Backend): void;
+  /** The model each agent runs with, as far as it is known. */
+  setModels(models: ModelMap): void;
+  /** Every setting the chat can change, for a settings panel. */
+  setSettings?(settings: SettingsView): void;
   exit(): void;
 }
 
@@ -34,50 +47,35 @@ export interface ChatOptions {
   decider: Decider;
   permissions?: PermissionDecider;
   ui: ChatUi;
+  /** The environment the agents get (and their binaries are looked up in); default: this process's. */
+  env?: NodeJS.ProcessEnv;
+  /** Model lookups to share (the extension starts them before the chat exists); by default the chat has its own. */
+  models?: ModelRegistry;
 }
 
 /** A new run for `task` in this workspace, with the config it starts with saved beside it. */
-export function newRun(runsDir: string, workspace: string, task: string, cfg: ConfigData, earlier: EarlierTask[] = []): { store: RunStore; state: RunState } {
+export function newRun(runsDir: string, workspace: string, task: string, cfg: ConfigData, earlier: EarlierTask[] = [],
+  conversation?: ConversationContext): { store: RunStore; state: RunState } {
   const { store, state } = RunStore.create(runsDir, task, cfg.limits);
   state.workspace = workspace;
   if (earlier.length) state.earlier = earlier;
+  if (conversation?.exchanges.length) state.conversationContext = conversation;
   store.saveState(state);
   store.writeJson("config.json", cfg);
   return { store, state };
 }
 
-const HELP = [
-  "Type a task and press Enter: Codex plans and reviews it, Claude critiques the plan and implements it.",
-  "",
-  "Runs",
-  "  <message>         start a task; while one runs, a note the agents get from the next step",
-  "  Esc               stop the current step; your next message re-runs it with that note",
-  "  /plan             show the final plan of the current run",
-  "  /diff             show what the current run changed",
-  "  /status           show where the current run is, and what it has cost",
-  "  /resume           continue the latest stopped or waiting run, also one from an earlier session",
-  "  /new              leave a stopped run as it is and start a new task",
-  "  /quit             leave; a running run stops at its step and stays resumable (Ctrl-C twice too)",
-  "",
-  "Settings (this chat only; add --save to write one to .agentduo/config.yaml)",
-  "  Shift+Tab         switch Claude's edits between ask and auto",
-  "  /edits auto|ask   auto: the implementer edits files without asking (acceptEdits); ask: it asks first",
-  "  /claude model <name|default>                        Claude's model, as /model in Claude Code",
-  "  /claude effort low|medium|high|xhigh|max|default    Claude's effort level, as /effort",
-  "  /claude permissions [allow|deny|remove <rule>]      Claude's tool rules for these runs, e.g. Bash(npm test:*); as /permissions",
-  "  /claude add-dir <path>                              another directory Claude may work in, as /add-dir",
-  "  /codex model <name|default> [effort]                Codex's model and reasoning effort, as /model in Codex",
-  "  /codex permissions read-only|auto|full-access|default   what Codex may do, as /permissions in Codex",
-  "  /config           show the settings both agents run with now",
-  "  /help             show this list",
-].join("\n");
-
 const OUTCOMES: Partial<Record<RunState["phase"], string>> = { DONE: "done", ABORTED: "aborted", HUMAN_REVIEW: "waiting for a decision" };
+const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /** The latest run of this workspace when it is stopped or waiting for a decision; read-only, so no lock is needed. */
 export function latestResumable(runsDir: string, workspace: string): RunStore | null {
+  return resumableRun(runsDir, workspace);
+}
+
+function resumableRun(runsDir: string, workspace: string, runId?: string): RunStore | null {
   try {
-    const store = RunStore.open(runsDir);
+    const store = RunStore.open(runsDir, runId);
     const st = store.loadState();
     if (st.phase === "DONE" || st.phase === "ABORTED") return null;
     if (st.workspace && resolve(st.workspace) !== resolve(workspace)) return null;
@@ -96,121 +94,411 @@ export function resumeHint(runsDir: string, workspace: string): string | null {
   return `Run ${st.taskId} (${firstLine(st.task, 60)}) ${where}. Type /resume to continue it.`;
 }
 
-/** One chat session in one workspace: every message becomes a run, a note for the running one, or a command. */
+/** The one thing agents do for this chat at a time: a pipeline run, the answer to a question, or a discussion. */
+type Execution =
+  | { kind: "pipeline"; store: RunStore; workflow: Workflow; cfg: ConfigData; done: Promise<void> }
+  | { kind: "conversation"; turnId: string; backend: Backend; abort: AbortController; done: Promise<void> }
+  | { kind: "discussion"; id: string; answerer: Backend; critic: Backend; abort: AbortController; done: Promise<void> };
+
+/** How one agent call of the conversation ended; a review's answer comes without its VERDICT line. */
+interface TurnOutcome {
+  status: TurnStatus;
+  answer: string | null;
+  error: string | null;
+  verdict: Verdict | null;
+  durationSec: number;
+  costUsd: number;
+  tokens: number;
+}
+
+const other = (b: Backend): Backend => (b === "codex" ? "claude" : "codex");
+
+/**
+ * One chat session in one workspace: a conversation with Claude and Codex, from which /pipeline hands a task to both.
+ * A message is a question for the current recipient, a note for the running pipeline, or a command.
+ */
 export class Chat {
-  private current: { store: RunStore; workflow: Workflow; cfg: ConfigData; done: Promise<void> } | null = null;
-  /** The config new runs start with: the loaded one plus this chat's changes. */
+  private active: Execution | null = null;
+  /** The config new runs and questions start with: the loaded one plus this chat's changes. */
   private readonly cfg: ConfigData;
   /** This chat's setting changes, in order; replayed on a run resumed from its saved config (they are idempotent). */
   private readonly changes: SettingChange[] = [];
-  /** Stopped with Esc: the next message re-runs its step. */
+  /** Stopped with Esc: /resume continues it. */
   private paused: RunStore | null = null;
   private last: RunStore | null = null;
   private escaped = false;
-  private readonly earlier: EarlierTask[] = [];
+  private earlier: EarlierTask[] = [];
+  private conversation: Conversation;
+  private runner: AgentRunner | null = null;
+  private recipient: Backend = "codex";
+  /** How many old exchanges the last prompt left out, so the chat says so once each time it grows. */
+  private omitted = 0;
+  private readonly models: ModelRegistry;
+  private readonly ownModels: boolean;
+  private readonly env: NodeJS.ProcessEnv;
   private readonly git: Git;
 
   constructor(private readonly o: ChatOptions) {
     this.git = new Git(o.workspace);
     this.cfg = structuredClone(o.cfg);
+    this.env = o.env ?? process.env;
+    this.conversation = new Conversation(o.runsDir);
+    this.ownModels = !o.models;
+    this.models = o.models ?? new ModelRegistry({ cfg: () => this.cfg, workspace: o.workspace, env: this.env, onChange: (m) => o.ui.setModels(m) });
   }
 
-  /** Shift+Tab: switch the implementer between asking before edits and editing automatically. */
+  /** The config the next agent call gets. */
+  get config(): ConfigData {
+    return this.cfg;
+  }
+
+  /** Who a plain message goes to now. */
+  get to(): Backend {
+    return this.recipient;
+  }
+
+  /** Shift+Tab: switch Claude between asking before edits and editing automatically. */
   toggleEdits(): void {
     this.change(settings.edits(editMode(this.cfg) === "auto" ? "ask" : "auto"), false, () => this.editsText());
   }
 
-  /** Points at a run an earlier session left stopped or waiting. */
+  /** Shows the settings and models, starts looking the models up, and points at a run an earlier session left stopped or waiting. */
   async greet(): Promise<void> {
     this.o.ui.setEdits(editMode(this.cfg));
+    this.o.ui.setRecipient(this.recipient);
+    this.o.ui.setSettings?.(settingsView(this.cfg));
+    this.o.ui.setModels(this.models.current());
+    this.models.refresh();
     const hint = resumeHint(this.o.runsDir, this.o.workspace);
     if (hint) this.o.ui.info(hint);
   }
 
+  /** Reads a line of input and acts on it. Returns once the work it starts has started, never waiting for an answer or a run. */
   async submit(raw: string): Promise<void> {
+    const input = parseInput(raw);
+    const ui = this.o.ui;
+    switch (input.kind) {
+      case "empty":
+        if (this.paused && !this.active) ui.info(`Run ${this.paused.taskId} is stopped: /resume continues it (/resume <note> adds what to change); /new leaves it.`);
+        return;
+      case "message":
+        if (this.active?.kind === "pipeline") {
+          this.active.workflow.addNote(input.text);
+          ui.info("Noted: the agents get this from the next step. Esc stops the current step to apply it now; to ask Claude or Codex, wait until the run stops.");
+          return;
+        }
+        return this.ask(this.recipient, input.text, null);
+      case "ask":
+        return this.ask(input.backend, input.text, input.hint);
+      case "recipient":
+        this.selectRecipient(input.backend);
+        ui.info(`Your messages now go to ${AGENT_NAMES[input.backend]}. /claude or /codex switches; /pipeline <task> hands a task to both.`);
+        return;
+      case "pipeline":
+        return this.startPipeline(input.task);
+      case "discuss":
+        return this.discuss(input.question);
+      case "setting":
+        return this.applySetting(input.setting, { save: input.save, yes: input.yes });
+      case "usage":
+        ui.info(input.text);
+        return;
+      case "unknown":
+        ui.info(`unknown command ${input.name} — /help lists the commands`);
+        return;
+      case "command":
+        return this.command(input.name, input.arg);
+    }
+  }
+
+  /** The Pipeline button: the text is the task, unless it is a slash command, which goes as typed. */
+  async submitPipeline(raw: string): Promise<void> {
     const text = raw.trim();
-    if (text.startsWith("/")) return this.command(text);
-    if (this.current) {
-      if (!text) return;
-      this.current.workflow.addNote(text);
-      this.o.ui.info("Noted: the agents get this from the next step. Esc stops the current step to apply it now.");
+    if (text.startsWith("/")) return this.submit(text);
+    if (!text) {
+      this.o.ui.info("usage: /pipeline <task>, e.g. /pipeline Add JWT auth");
       return;
     }
-    if (this.paused) {
-      const store = this.paused;
-      this.paused = null;
-      const state = store.loadState();
-      if (text) {
-        state.humanNotes.push({ at: nowIso(), phase: state.inProgress?.phase ?? state.phase, note: text });
-        store.saveState(state);
-      }
-      this.start(store, state, this.configOf(store));
-      return;
-    }
-    if (!text) return;
-    const cfg = structuredClone(this.cfg);
-    const { store, state } = newRun(this.o.runsDir, this.o.workspace, text, cfg, [...this.earlier]);
-    this.start(store, state, cfg);
+    this.startPipeline(text);
   }
 
-  /** Esc: stop the running step; it re-runs with the user's next message. */
+  /** The Discuss route of the sidebar: the text is the question, unless it is a slash command, which goes as typed. */
+  async submitDiscuss(raw: string): Promise<void> {
+    const text = raw.trim();
+    if (text.startsWith("/")) return this.submit(text);
+    if (!text) {
+      this.o.ui.info("usage: /discuss <question>, e.g. /discuss Redis or Postgres for the job queue?");
+      return;
+    }
+    this.discuss(text);
+  }
+
+  /** Plain messages go to `backend` from now on. */
+  selectRecipient(backend: Backend): void {
+    if (this.recipient === backend) return;
+    this.recipient = backend;
+    this.o.ui.setRecipient(backend);
+  }
+
+  /** Esc: stop what runs. An answer or a discussion ends there; a pipeline's step stops and /resume continues it. */
   escape(): void {
-    if (!this.current) return;
+    const a = this.active;
+    if (!a) return;
+    if (a.kind !== "pipeline") {
+      a.abort.abort();
+      return;
+    }
     this.escaped = true;
-    this.current.workflow.interrupt();
+    a.workflow.interrupt();
   }
 
-  /** The run the screen talks about (for the decision prompt's views). */
+  /** The run the screen talks about (for the decision prompt's views): asking an agent never changes it. */
   focused(): { store: RunStore; state: RunState } | null {
     const store = this.focus();
     if (!store) return null;
-    return { store, state: this.current?.store === store ? this.current.workflow.state : store.loadState() };
+    const running = this.active?.kind === "pipeline" && this.active.store === store ? this.active : null;
+    return { store, state: running ? running.workflow.state : store.loadState() };
   }
 
-  /** Resolves once no run is going (a stopped one may still wait for the user). */
+  /** Resolves once nothing runs (a stopped run may still wait for the user). */
   async idle(): Promise<void> {
-    while (this.current) await this.current.done;
+    while (this.active) await this.active.done;
   }
 
-  /** Stops a running run, which stays resumable, and waits for it. */
+  /** Stops what runs (a run stays resumable), waits for it, and stops looking models up. */
   async stop(): Promise<void> {
-    this.current?.workflow.interrupt();
+    const a = this.active;
+    if (a && a.kind !== "pipeline") a.abort.abort();
+    else a?.workflow.interrupt();
     await this.idle();
+    if (this.ownModels) this.models.close();
   }
 
-  private start(store: RunStore, state: RunState, cfg: ConfigData): void {
+  // ------------------------------------------------------------------ conversation
+  private busy(): void {
+    const a = this.active!;
+    this.o.ui.info(a.kind === "pipeline"
+      ? "A pipeline run is going: wait for it, or press Esc to stop its current step first. (A plain message is a note for its next step.)"
+      : a.kind === "discussion"
+        ? `${AGENT_NAMES[a.answerer]} and ${AGENT_NAMES[a.critic]} are still discussing: wait for it, or press Esc to stop it. Settings you change apply to its next turn.`
+        : `${AGENT_NAMES[a.backend]} is still answering: wait for it, or press Esc to stop it. Settings you change apply to the next question.`);
+  }
+
+  private ask(backend: Backend, question: string, hint: string | null): void {
+    if (this.active) return this.busy();
+    const problem = missingCli(this.cfg, [backend], this.env);
+    if (problem) {
+      this.o.ui.info(problem.message, "error");
+      return;
+    }
+    this.selectRecipient(backend);
+    if (hint) this.o.ui.info(hint);
+    this.startTurn(backend, question);
+  }
+
+  private directRunner(): AgentRunner {
+    return this.runner ??= new AgentRunner(this.cfg, this.o.workspace, this.conversation.logDir, this.o.bus, { permissions: this.o.permissions });
+  }
+
+  /** Says once each time it grows that the conversation no longer fits what a prompt carries. */
+  private noteOmitted(omitted: number): void {
+    if (omitted > this.omitted) {
+      this.o.ui.info(`The conversation has grown long: its ${omitted} oldest exchange(s) no longer go to the agents (the logs keep them: ${this.conversation.logDir}).`);
+    }
+    this.omitted = omitted;
+  }
+
+  /** Starts the answer in the background: the active record exists before anything can finish, and only it clears itself. */
+  private startTurn(backend: Backend, question: string): void {
+    const { turn, prompt, omitted } = this.conversation.begin(backend, question, this.earlier, this.o.workspace);
+    this.noteOmitted(omitted);
+    const exec: Extract<Execution, { kind: "conversation" }> = { kind: "conversation", turnId: turn.id, backend, abort: new AbortController(), done: Promise.resolve() };
+    this.active = exec;
+    this.o.ui.setStatus("answering");
+    exec.done = this.callTurn(turn, prompt, exec.abort.signal).then(() => undefined).finally(() => this.settled(exec));
+  }
+
+  /** Whatever ran is over: unless something else started meanwhile, the chat is idle (or a run stays stopped). */
+  private settled(exec: Execution): void {
+    if (this.active === exec) this.active = null;
+    if (!this.active) this.o.ui.setStatus(this.paused ? "paused" : "idle");
+  }
+
+  /**
+   * One agent call of the conversation, with its turn's events around it. `turn.started` goes out now; the call itself
+   * starts a microtask later, so the caller's active record exists before anything can finish.
+   */
+  private callTurn(turn: Turn, prompt: string, signal: AbortSignal, place?: DiscussionPlace): Promise<TurnOutcome> {
+    const conversation = this.conversation;
+    const backend = turn.backend;
+    // The CLI's own settings may have changed since the last look.
+    this.models.refresh();
+    const model = this.models.identity(backend);
+    const signature = this.models.signature(backend);
+    const runner = this.directRunner();
+    const ids = { conversationId: conversation.id, turnId: turn.id, backend };
+    this.o.bus.emit({ type: "turn.started", ...ids, question: turn.question, model, ...(place ? { discussion: place } : {}) });
+    return (async () => {
+      await Promise.resolve();
+      let r: AgentResult | null = null;
+      let failure: string | null = null;
+      try {
+        r = await runner.call({ mode: "text", backend, prompt, logPrefix: turn.logPrefix, conversationId: conversation.id, turnId: turn.id, signal });
+      } catch (e) {
+        failure = (e as Error).message;
+      }
+      const status: TurnStatus = r?.interrupted ? "interrupted" : r?.ok ? "success" : "error";
+      let answer = status === "success" ? String(r!.data) : null;
+      let verdict: Verdict | null = null;
+      if (answer !== null && place?.step === "critique") ({ verdict, text: answer } = parseVerdict(answer));
+      if (r?.model) this.models.observe(backend, r.model, signature);
+      conversation.finish(turn.id, status, answer, verdict);
+      // A lookup still going when the call started may have ended since, for this same config.
+      const looked = model.status === "resolving" && this.models.signature(backend) === signature ? this.models.identity(backend) : model;
+      const error = status === "error" ? r?.error ?? failure ?? "the call failed" : null;
+      this.o.bus.emit({
+        type: "turn.finished", ...ids, status, answer, error, model: r?.model ? withObserved(model, r.model) : looked, durationSec: r?.durationSec ?? 0,
+        costUsd: r?.costUsd ?? undefined, tokens: r?.tokens ?? undefined, logDir: conversation.logDir,
+        ...(place ? { discussion: place.step === "critique" ? { ...place, verdict } : place } : {}),
+      });
+      return { status, answer, error, verdict, durationSec: r?.durationSec ?? 0, costUsd: r?.costUsd ?? 0, tokens: r?.tokens ?? 0 };
+    })();
+  }
+
+  // ------------------------------------------------------------------ discussion
+  /**
+   * /discuss: the recipient answers, the other agent reviews it, and the recipient revises until the reviewer agrees.
+   * After the last review that still asks for changes, the recipient writes a final answer that says what is disputed.
+   * The agreed or final version is the response, and the only part of it later prompts carry.
+   */
+  private discuss(question: string): void {
+    if (this.active) return this.busy();
+    const answerer = this.recipient;
+    const critic = other(answerer);
+    const problem = missingCli(this.cfg, [answerer, critic], this.env);
+    if (problem) {
+      this.o.ui.info(problem.message, "error");
+      return;
+    }
+    const conversation = this.conversation;
+    const maxRounds = this.cfg.limits.max_discussion_rounds;
+    const d = conversation.beginDiscussion(answerer, critic, question, maxRounds);
+    this.noteOmitted(d.context.omitted);
+    const exec: Extract<Execution, { kind: "discussion" }> = { kind: "discussion", id: d.id, answerer, critic, abort: new AbortController(), done: Promise.resolve() };
+    this.active = exec;
+    this.o.ui.setStatus("answering");
+    const ids = { conversationId: conversation.id, discussionId: d.id };
+    this.o.bus.emit({ type: "discussion.started", ...ids, question, answerer, critic, maxRounds });
+    const total = { durationSec: 0, costUsd: 0, tokens: 0 };
+    const step = async (kind: DiscussionStep, round: number): Promise<TurnOutcome> => {
+      if (exec.abort.signal.aborted) return { status: "interrupted", answer: null, error: null, verdict: null, durationSec: 0, costUsd: 0, tokens: 0 };
+      const { turn, prompt } = conversation.discussionTurn(d.id, kind, round, this.earlier, this.o.workspace);
+      const out = await this.callTurn(turn, prompt, exec.abort.signal, { id: d.id, step: kind, round });
+      total.durationSec += out.durationSec;
+      total.costUsd += out.costUsd;
+      total.tokens += out.tokens;
+      return out;
+    };
+    exec.done = (async () => {
+      await Promise.resolve();
+      let status: DiscussionStatus = "error";
+      let answer: string | null = null;
+      let error: string | null = null;
+      let rounds = 0;
+      const failed = (out: TurnOutcome) => {
+        status = out.status === "interrupted" ? "interrupted" : "error";
+        error = out.error;
+      };
+      let version = await step("answer", 1);
+      while (version.status === "success") {
+        rounds++;
+        const review = await step("critique", rounds);
+        if (review.status !== "success") {
+          failed(review);
+          break;
+        }
+        if (review.verdict === "agree") {
+          status = "agreed";
+          answer = version.answer;
+          break;
+        }
+        if (review.verdict === null) {
+          this.o.bus.emit({ type: "warning", text: `${AGENT_NAMES[critic]}'s review ${rounds} had no VERDICT line, so agentduo takes it as REVISE.` });
+        }
+        const last = rounds >= maxRounds;
+        version = await step(last ? "final" : "revise", rounds + 1);
+        if (last && version.status === "success") {
+          status = "disputed";
+          answer = version.answer;
+          break;
+        }
+      }
+      if (version.status !== "success") failed(version);
+      conversation.finishDiscussion(d.id, answer);
+      this.o.bus.emit({
+        type: "discussion.finished", ...ids, status, answerer, critic, rounds, answer, error, durationSec: total.durationSec,
+        costUsd: total.costUsd || undefined, tokens: total.tokens || undefined, logDir: conversation.logDir,
+      });
+    })().finally(() => this.settled(exec));
+  }
+
+  // ------------------------------------------------------------------ pipeline
+  private startPipeline(task: string): void {
+    if (this.active) return this.busy();
+    const problem = missingCli(this.cfg, Object.values(this.cfg.agents), this.env);
+    if (problem) {
+      this.o.ui.info(problem.message, "error");
+      return;
+    }
+    const left = this.paused;
+    const cfg = structuredClone(this.cfg);
+    const context = this.conversation.context();
+    const { store, state } = newRun(this.o.runsDir, this.o.workspace, task, cfg, [...this.earlier], context);
+    if (!this.start(store, state, cfg)) return;
+    if (left) {
+      this.paused = null;
+      this.o.ui.info(`Run ${left.taskId} stays stopped and resumable: /resume ${left.taskId} continues it (or duo resume ${left.taskId}).`);
+    }
+  }
+
+  /** Locks and runs `store`'s run in the background; false when it cannot be locked. */
+  private start(store: RunStore, state: RunState, cfg: ConfigData): boolean {
     try {
       store.lock();
     } catch (e) {
-      this.o.ui.info((e as Error).message);
-      return;
+      this.o.ui.info((e as Error).message, "error");
+      return false;
     }
+    this.models.refresh();
     const workflow = new Workflow({ cfg, repo: this.o.workspace, store, state, bus: this.o.bus, decider: this.o.decider, permissions: this.o.permissions });
     this.escaped = false;
+    const exec: Extract<Execution, { kind: "pipeline" }> = { kind: "pipeline", store, workflow, cfg, done: Promise.resolve() };
+    this.active = exec;
     this.o.ui.setStatus("running");
-    const done = (async () => {
+    exec.done = (async () => {
+      await Promise.resolve();
       let code: number = EXIT.ERROR;
       try {
         code = await workflow.run();
       } catch (e) {
-        this.o.ui.info(`error: ${(e as Error).message}`);
+        this.o.ui.info(`error: ${(e as Error).message}`, "error");
       } finally {
         store.unlock();
       }
-      this.current = null;
       this.last = store;
       const st = store.loadState();
       if (code === EXIT.INTERRUPTED && this.escaped) {
         this.paused = store;
-        this.o.ui.info(`Stopped ${st.inProgress?.phase ?? st.phase}. Type what to change and press Enter to re-run it (Enter alone re-runs it as is; /new leaves it).`);
-        this.o.ui.setStatus("paused");
+        this.o.ui.info(`Stopped ${st.inProgress?.phase ?? st.phase}. /resume re-runs it (/resume <what to change> adds a note); /new leaves it. Meanwhile you can ask Claude or Codex.`);
         return;
       }
       if (code === EXIT.HUMAN_REVIEW) this.o.ui.info("The run is waiting for your decision; type /resume to decide.");
       this.earlier.push(await this.outcome(st));
-      this.o.ui.setStatus("idle");
-    })();
-    this.current = { store, workflow, cfg, done };
+    })().finally(() => {
+      if (this.active === exec) this.active = null;
+      if (!this.active) this.o.ui.setStatus(this.paused ? "paused" : "idle");
+    });
+    return true;
   }
 
   private async outcome(st: RunState): Promise<EarlierTask> {
@@ -234,160 +522,173 @@ export class Chat {
     return cfg;
   }
 
+  /** /resume [note | run id]: the stopped run, another resumable run by id, or the latest one. */
+  private resume(arg: string): void {
+    if (this.active) return this.busy();
+    let note = arg.trim();
+    const byId = RUN_ID.test(note) && !note.includes("..") ? resumableRun(this.o.runsDir, this.o.workspace, note) : null;
+    if (byId) note = "";
+    const target = byId ?? this.paused ?? latestResumable(this.o.runsDir, this.o.workspace);
+    if (!target) {
+      this.o.ui.info("Nothing to resume.");
+      return;
+    }
+    const cfg = this.configOf(target);
+    const problem = missingCli(cfg, Object.values(cfg.agents), this.env, target.exists("config.json"));
+    if (problem) {
+      this.o.ui.info(problem.message, "error");
+      return;
+    }
+    const state = target.loadState();
+    if (note) {
+      state.humanNotes.push({ at: nowIso(), phase: state.inProgress?.phase ?? state.phase, note });
+      target.saveState(state);
+    }
+    const paused = this.paused;
+    this.paused = null;
+    if (!this.start(target, state, cfg)) this.paused = paused;
+  }
+
+  /** /new: forget the conversation and the earlier tasks; a stopped run keeps its files and stays resumable. */
+  private reset(): void {
+    if (this.active) {
+      this.o.ui.info("Something is running; press Esc to stop it first.");
+      return;
+    }
+    if (this.paused) this.o.ui.info(`Left run ${this.paused.taskId} as it is; /resume ${this.paused.taskId} continues it.`);
+    this.paused = null;
+    this.earlier = [];
+    this.conversation = new Conversation(this.o.runsDir);
+    this.runner = null;
+    this.omitted = 0;
+    this.selectRecipient("codex");
+    this.o.ui.setStatus("idle");
+    this.o.ui.info("New conversation: the agents no longer see what was said or done before. Your messages go to Codex.");
+  }
+
+  // ------------------------------------------------------------------ settings
   private editsText(): string {
     const mode = editMode(this.cfg);
-    return mode === "auto" ? "Edits: auto — the implementer edits files without asking."
-      : mode === "ask" ? "Edits: ask — the implementer asks before editing files." : `Edits: Claude's permission mode is ${mode}.`;
+    const who = "Claude (in the chat and as the pipeline's implementer)";
+    return mode === "auto" ? `Edits: auto — ${who} edits files without asking.`
+      : mode === "ask" ? `Edits: ask — ${who} asks before editing files.` : `Edits: Claude's permission mode is ${mode}.`;
   }
 
   /**
-   * Applies a setting to new runs and, from its next agent call, to the run that is going (whose saved config
-   * follows, so a resume keeps it); --save also writes it to the config file.
+   * Applies a setting to new runs and questions and, from its next agent call, to the run that is going (whose saved
+   * config follows, so a resume keeps it); --save also writes it to the config file.
    */
   private change(change: SettingChange, save: boolean, text: () => string): void {
     change.apply(this.cfg);
     this.changes.push(change);
-    if (this.current) {
-      change.apply(this.current.cfg);
-      this.current.store.writeJson("config.json", this.current.cfg);
+    const running = this.active?.kind === "pipeline" ? this.active : null;
+    if (running) {
+      change.apply(running.cfg);
+      running.store.writeJson("config.json", running.cfg);
     }
     if (save) saveSettings(this.o.configFile, this.cfg, change.paths);
     this.o.ui.setEdits(editMode(this.cfg));
+    this.o.ui.setSettings?.(settingsView(this.cfg));
+    this.models.refresh();
     const scope = save ? `; saved to ${this.o.configFile}` : " (this chat only; add --save to keep it)";
-    this.o.ui.info(`${text()}${this.current ? " Applies from the next agent call of the current run." : ""}${scope}`);
+    const when = running ? " Applies from the next agent call of the current run." : this.active ? " Applies from the next question." : "";
+    this.o.ui.info(`${text()}${when}${scope}`);
   }
 
-  private settingCommand(words: string[], flags: Set<string>): boolean {
-    const [name, sub, ...rest] = words;
-    const arg = rest.join(" ");
+  /** A setting from a command or the settings panel: shows it when it has no value, changes it otherwise. */
+  applySetting(s: SettingCommand, flags: { save?: boolean; yes?: boolean } = {}): void {
     const ui = this.o.ui;
-    const save = flags.has("--save");
-    const value = (v: string | undefined) => (!v || v === "default" ? null : v);
-    if (name === "/edits") {
-      if (!sub) ui.info(this.editsText());
-      else if (sub === "auto" || sub === "ask") this.change(settings.edits(sub), save, () => this.editsText());
-      else ui.info("usage: /edits auto|ask");
-      return true;
-    }
-    if (name === "/config") {
-      ui.info(`${describeSettings(this.cfg)}\nChanges in this chat are not saved unless a command ends with --save (it writes ${this.o.configFile}).`);
-      return true;
-    }
-    if (name === "/claude") {
-      if (sub === "model") {
-        if (!rest.length) ui.info(`Claude's model: ${this.cfg.claude.model ?? "default"}`);
-        else this.change(settings.claudeModel(value(arg)), save, () => `Claude's model: ${this.cfg.claude.model ?? "default"}.`);
-      } else if (sub === "effort") {
-        const effort = rest[0];
-        if (!effort || ![...CLAUDE_EFFORTS, "default"].includes(effort)) ui.info(`usage: /claude effort ${[...CLAUDE_EFFORTS, "default"].join("|")}`);
-        else this.change(settings.claudeEffort(value(effort)), save, () => `Claude's effort: ${effort}.`);
-      } else if (sub === "permissions") {
-        const [kind, ...ruleWords] = rest;
-        const rule = ruleWords.join(" ");
-        if (!kind) {
+    const save = !!flags.save;
+    const view = settingsView(this.cfg);
+    switch (s.target) {
+      case "edits":
+        if (!s.mode) return ui.info(this.editsText());
+        return this.change(settings.edits(s.mode), save, () => this.editsText());
+      case "claude.model":
+        if (s.model === undefined) return ui.info(`Claude's model: ${modelText(this.models.identity("claude"))}`);
+        return this.change(settings.claudeModel(s.model), save, () => `Claude's model: ${this.cfg.claude.model ?? "default"}.`);
+      case "claude.effort":
+        if (s.effort === undefined) return ui.info(`Claude's effort: ${view.claude.effort ?? "default"}`);
+        return this.change(settings.claudeEffort(s.effort), save, () => `Claude's effort: ${s.effort ?? "default"}.`);
+      case "claude.permissions": {
+        if (!s.rule) {
           const { allow, deny } = claudeRules(this.cfg);
-          ui.info(`Claude's rules for these runs (on top of its own settings)\n  allow: ${allow.join(", ") || "—"}\n  deny: ${deny.join(", ") || "—"}`);
-        } else if ((kind === "allow" || kind === "deny") && rule) {
-          this.change(settings.claudeRule(kind, rule), save, () => `Claude ${kind === "allow" ? "may use" : "may not use"} ${rule}.`);
-        } else if (kind === "remove" && rule) {
-          this.change(settings.claudeRemoveRule(rule), save, () => `Removed the rule ${rule}.`);
-        } else ui.info("usage: /claude permissions [allow|deny|remove <rule>], e.g. /claude permissions allow Bash(npm test:*)");
-      } else if (sub === "add-dir") {
-        if (!arg) ui.info(`Extra directories for Claude: ${claudeDirs(this.cfg).join(", ") || "—"}`);
-        else this.change(settings.claudeAddDir(arg), save, () => `Claude may also work in ${arg}.`);
-      } else ui.info("usage: /claude model|effort|permissions|add-dir … (/help lists them)");
-      return true;
-    }
-    if (name === "/codex") {
-      if (sub === "model") {
-        const [model, effort] = rest;
-        if (!model) ui.info(`Codex's model: ${this.cfg.codex.model ?? "default"}`);
-        else if (effort && !(CODEX_EFFORTS as readonly string[]).includes(effort)) ui.info(`usage: /codex model <name|default> [${CODEX_EFFORTS.join("|")}]`);
-        else this.change(settings.codexModel(value(model), effort ?? null), save,
-          () => `Codex's model: ${this.cfg.codex.model ?? "default"}${effort ? `, reasoning effort ${effort}` : ""}.`);
-      } else if (sub === "permissions") {
-        const preset = rest[0] as CodexPermission | undefined;
-        if (!preset || ![...Object.keys(CODEX_PERMISSIONS), "default"].includes(preset)) {
-          ui.info("usage: /codex permissions read-only|auto|full-access|default");
-        } else if (preset === "full-access" && !flags.has("--yes")) {
-          // Codex itself asks before full access; so does this.
-          ui.info("Full access lets Codex edit any file on this computer and use the network without asking. To go ahead: /codex permissions full-access --yes");
-        } else {
-          this.change(settings.codexPermissions(preset), save, () => `Codex permissions: ${preset}.`);
+          return ui.info(`Claude's rules for agentduo's calls (on top of its own settings)\n  allow: ${allow.join(", ") || "—"}\n  deny: ${deny.join(", ") || "—"}`);
         }
-      } else ui.info("usage: /codex model|permissions … (/help lists them)");
-      return true;
+        const { kind, rule } = s.rule;
+        if (kind === "remove") return this.change(settings.claudeRemoveRule(rule), save, () => `Removed the rule ${rule}.`);
+        return this.change(settings.claudeRule(kind, rule), save, () => `Claude ${kind === "allow" ? "may use" : "may not use"} ${rule}.`);
+      }
+      case "claude.add-dir":
+        if (s.dir === undefined) return ui.info(`Extra directories for Claude: ${claudeDirs(this.cfg).join(", ") || "—"}`);
+        return this.change(settings.claudeAddDir(s.dir), save, () => `Claude may also work in ${s.dir}.`);
+      case "codex.model": {
+        if (s.model === undefined) return ui.info(`Codex's model: ${modelText(this.models.identity("codex"))}${view.codex.effort ? `, reasoning effort ${view.codex.effort}` : ""}`);
+        const effort = s.effort ?? null;
+        return this.change(settings.codexModel(s.model, effort), save, () => `Codex's model: ${this.cfg.codex.model ?? "default"}${effort ? `, reasoning effort ${effort}` : ""}.`);
+      }
+      case "codex.permissions": {
+        if (!s.preset) return ui.info(`Codex permissions: ${view.codex.permissions}`);
+        const preset = s.preset;
+        // Codex itself asks before full access; so does this.
+        if (preset === "full-access" && !flags.yes) {
+          return ui.info("Full access lets Codex edit any file on this computer and use the network without asking. To go ahead: /settings codex permissions full-access --yes");
+        }
+        return this.change(settings.codexPermissions(preset), save, () => `Codex permissions: ${preset}.`);
+      }
     }
-    return false;
   }
 
+  // ------------------------------------------------------------------ commands
   /** The run commands talk about: the one going, the stopped one, or the last one. */
   private focus(): RunStore | null {
-    return this.current?.store ?? this.paused ?? this.last;
+    return (this.active?.kind === "pipeline" ? this.active.store : null) ?? this.paused ?? this.last;
   }
 
-  private async command(text: string): Promise<void> {
-    const tokens = text.split(/\s+/).filter(Boolean);
-    const flags = new Set<string>(tokens.filter((t) => t === "--save" || t === "--yes"));
-    if (this.settingCommand(tokens.filter((t) => !flags.has(t)), flags)) return;
-    const [name] = tokens;
+  private async command(name: ChatCommand, arg: string): Promise<void> {
     const ui = this.o.ui;
     const store = this.focus();
     switch (name) {
-      case "/help":
-        ui.info(HELP);
+      case "help":
+        ui.info(helpText());
         return;
-      case "/plan": {
+      case "config":
+        ui.info(`${describeSettings(this.cfg)}\nModels  Claude: ${modelText(this.models.identity("claude"))} · Codex: ${modelText(this.models.identity("codex"))}\n` +
+          `Changes in this chat are not saved unless a command ends with --save (it writes ${this.o.configFile}).`);
+        return;
+      case "plan": {
         const plan = store && (store.exists("plan.final.md") ? store.readText("plan.final.md") : store.exists("plan.md") ? store.readText("plan.md") : null);
         ui.info(plan ? `── plan ──\n${plan.trimEnd()}` : "There is no plan yet.");
         return;
       }
-      case "/diff": {
+      case "diff": {
         const st = store?.loadState();
         const stat = st?.base && st.lastSnapshot ? (await this.git.diffStat(st.base.commit, st.lastSnapshot.commit)).trimEnd() : "";
         ui.info(stat ? `── diff stat ──\n${stat}` : "No changes yet.");
         return;
       }
-      case "/status": {
+      case "status": {
+        const a = this.active;
+        const answering = a?.kind === "conversation" ? `${AGENT_NAMES[a.backend]} is answering a question.`
+          : a?.kind === "discussion" ? `${AGENT_NAMES[a.answerer]} and ${AGENT_NAMES[a.critic]} are discussing a question.` : "";
         if (!store) {
-          ui.info("No run yet. Type a task to start one.");
+          ui.info([answering, "No run yet. /pipeline <task> starts one."].filter(Boolean).join("\n"));
           return;
         }
         const st = store.loadState();
         const usage = [formatCost(st.costUsd), formatTokens(st.tokens)].filter(Boolean).join(" · ");
-        ui.info(`Run ${st.taskId} — ${st.phase}${this.current ? " (running)" : this.paused ? " (stopped)" : ""} · plan round ${st.planningRound}/${st.limits.planningRounds}` +
-          ` · implementation round ${st.implRound}/${st.limits.reviewRounds}${usage ? ` · ${usage}` : ""}`);
+        const running = this.active?.kind === "pipeline" && this.active.store === store;
+        ui.info([answering, `Run ${st.taskId} — ${st.phase}${running ? " (running)" : this.paused === store ? " (stopped)" : ""} · plan round ${st.planningRound}/${st.limits.planningRounds}` +
+          ` · implementation round ${st.implRound}/${st.limits.reviewRounds}${usage ? ` · ${usage}` : ""}`].filter(Boolean).join("\n"));
         return;
       }
-      case "/resume": {
-        if (this.current) {
-          ui.info("A run is going already.");
-          return;
-        }
-        const target = this.paused ?? latestResumable(this.o.runsDir, this.o.workspace);
-        if (!target) {
-          ui.info("Nothing to resume.");
-          return;
-        }
-        this.paused = null;
-        this.start(target, target.loadState(), this.configOf(target));
-        return;
-      }
-      case "/new":
-        if (this.current) {
-          ui.info("A run is going; Esc stops it first.");
-          return;
-        }
-        if (this.paused) ui.info(`Left run ${this.paused.taskId} as it is; /resume continues it. Type the next task.`);
-        this.paused = null;
-        ui.setStatus("idle");
-        return;
-      case "/quit":
-      case "/exit":
+      case "resume":
+        return this.resume(arg);
+      case "new":
+        return this.reset();
+      case "quit":
         ui.exit();
         return;
-      default:
-        ui.info(`unknown command ${name} — /help lists the commands`);
     }
   }
 }

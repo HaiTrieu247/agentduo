@@ -34,7 +34,7 @@ export class FakeClis {
     return join(this.bin, name);
   }
 
-  setScenario(scenario: Record<string, unknown[]>): void {
+  setScenario(scenario: Record<string, unknown[] | Record<string, unknown>>): void {
     writeFileSync(this.files.FAKE_SCENARIO, JSON.stringify(scenario));
   }
 
@@ -58,8 +58,19 @@ export class FakeClis {
     return readFileSync(this.files.FAKE_LOG, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
   }
 
+  /** Agent calls (not permission answers, not codex doctor or its catalog), optionally of one role ("chat_claude" for a chat answer). */
   calls(role?: string): FakeCall[] {
-    return this.entries().filter((e) => !e.permission).map((e) => e as unknown as FakeCall).filter((c) => !role || c.role === role);
+    return this.entries().filter((e) => !e.permission && !e.doctor && !e.catalog).map((e) => e as unknown as FakeCall).filter((c) => !role || c.role === role);
+  }
+
+  /** The arguments of every `codex doctor` run. */
+  doctorCalls(): string[][] {
+    return this.entries().flatMap((e) => (e.doctor ? [e.args as string[]] : []));
+  }
+
+  /** The arguments of every `codex debug models` run. */
+  catalogCalls(): string[][] {
+    return this.entries().flatMap((e) => (e.catalog ? [e.args as string[]] : []));
   }
 
   /** The answers the fake Claude received to its permission prompts, in order. */

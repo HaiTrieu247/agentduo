@@ -1,9 +1,10 @@
 // One workspace folder's session in the extension host: its worker, and the presentation state the sidebar shows.
 // The worker outlives the view (hiding the sidebar or recreating the webview never stops a run); a reattached view
 // gets a snapshot. No `vscode` import, so it is tested against a real worker.
+import type { Backend } from "../../../src/core/commands.js";
 import type { PermissionAnswer } from "../../../src/events.js";
 import { initialState, reduce, type SessionState, type ViewAction, type ViewState } from "../webview/state.js";
-import type { DecisionChoice, HostMessage, Problem, WorkerRequest, WorkerResults } from "./protocol.js";
+import type { DecisionChoice, HostMessage, Problem, Route, SettingRequest, WorkerRequest, WorkerResults } from "./protocol.js";
 import { WorkerClient, WorkerError, type NodeLookup } from "./workerClient.js";
 
 /** Messages arriving this close together reach the webview in one batch. */
@@ -190,7 +191,10 @@ export class WorkspaceSession {
     try {
       const init = await client.request({ type: "initialize", workspace: this.o.workspace, configPath: this.o.configPath });
       if (this.spawned === client) {
-        this.dispatch({ type: "initialized", version: init.version, workspace: init.workspace, pipeline: init.pipeline, edits: init.edits });
+        this.dispatch({
+          type: "initialized", version: init.version, workspace: init.workspace, pipeline: init.pipeline, edits: init.edits, recipient: init.recipient,
+          models: init.models, settings: init.settings,
+        });
         this.dispatch({ type: "problem", problem: init.problem });
         for (const warning of init.warnings) this.note(`warning: ${warning}`);
         if (init.hint) this.note(init.hint);
@@ -210,10 +214,24 @@ export class WorkspaceSession {
     this.note(message, "error");
   }
 
-  /** A task, a note for the running run, a re-run of a stopped step (even an empty message), or a slash command. */
-  async submit(text: string): Promise<void> {
-    if (text.trim()) this.dispatch({ type: "user", text: text.trim() });
-    await this.send({ type: "submit", text });
+  /**
+   * A question for the recipient, a note for the running run, or a slash command; with the Pipeline route, a task for
+   * the pipeline, and with the Discuss route a question to discuss (a slash command still goes as typed). Resolves once
+   * the worker has started it, not when it is done.
+   */
+  async submit(text: string, route: Route = "message"): Promise<void> {
+    const typed = text.trim();
+    const command = typed.startsWith("/");
+    if (typed) this.dispatch({ type: "user", text: typed, ...(route === "pipeline" && !command ? { pipeline: true } : {}), ...(route === "discuss" && !command ? { discuss: true } : {}) });
+    await this.send({ type: "submit", text, route });
+  }
+
+  async selectRecipient(backend: Backend): Promise<void> {
+    await this.send({ type: "recipient", backend });
+  }
+
+  async applySetting(request: SettingRequest): Promise<void> {
+    await this.send({ type: "setting", ...request });
   }
 
   async interrupt(): Promise<void> {

@@ -80,7 +80,7 @@ describe("WorkspaceSession", () => {
     expect(s.state.pipeline.map((p) => p.phase)).toContain("VERIFY");
     expect(existsSync(join(repo, ".agentduo", "runs"))).toBe(false);
     fake.setScenario(happy());
-    await s.submit("Make app.txt fixed");
+    await s.submit("Make app.txt fixed", "pipeline");
     await until(s, (st) => finishes(st).includes("DONE") && st.status === "idle", "DONE");
     const st = s.state;
     expect(st.session).toBe("active");
@@ -99,7 +99,7 @@ describe("WorkspaceSession", () => {
     const s = session({ overrides: { limits: { max_review_rounds: 1 } } });
     fake.setScenario({ ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }] });
     s.attach(new FakeView().post);
-    await s.submit("Make app.txt fixed");
+    await s.submit("Make app.txt fixed", "pipeline");
     await until(s, (st) => !!st.decision, "the decision");
     s.detach();
     const reopened = new FakeView();
@@ -117,7 +117,7 @@ describe("WorkspaceSession", () => {
   it("keeps a permission prompt across hiding the view, and answers it", async () => {
     const s = session();
     fake.setScenario({ ...happy(), implementer: [{ write: { "app.txt": "fixed\n" }, permissions: [{ tool: "Bash", input: { command: "npm test" }, rules: [] }], output: impl() }] });
-    await s.submit("Make app.txt fixed");
+    await s.submit("Make app.txt fixed", "pipeline");
     await until(s, (st) => st.permissions.length === 1, "the prompt");
     const view = new FakeView();
     s.attach(view.post);
@@ -130,7 +130,7 @@ describe("WorkspaceSession", () => {
   it("survives a dead worker: says so, forgets its questions, and starts a new one that resumes the run", async () => {
     const s = session();
     fake.setScenario({ ...happy(), implementer: [{ permissions: [{ tool: "Bash", input: { command: "npm test" }, rules: [] }], output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }] });
-    await s.submit("Make app.txt fixed");
+    await s.submit("Make app.txt fixed", "pipeline");
     await until(s, (st) => st.permissions.length === 1, "the prompt");
     const first = s.state.generation;
     process.kill(s.workerPid!, "SIGKILL");
@@ -166,7 +166,7 @@ describe("WorkspaceSession", () => {
     fake.setScenario(happy());
     const started = s.start();
     await waitUntil(() => s.workerPid !== undefined, 10_000, "the worker's hello");
-    await Promise.all([s.submit("Make app.txt fixed"), s.toggleEdits(), started]);
+    await Promise.all([s.submit("Make app.txt fixed", "pipeline"), s.toggleEdits(), started]);
     await until(s, (st) => finishes(st).includes("DONE") && st.status === "idle", "DONE");
     expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["initialize", "(initialized)", "submit", "toggleEdits"]);
     expect(s.state.session).toBe("active");
@@ -176,7 +176,7 @@ describe("WorkspaceSession", () => {
 
   it("shows how to fix a missing Node instead of starting the worker", async () => {
     const s = session({ node: false });
-    await s.submit("Fix it");
+    await s.submit("Fix it", "pipeline");
     expect(s.state.problem).toMatchObject({ kind: "node", message: expect.stringContaining("Node >= 22.12") });
     expect(s.state.session).toBe("stopped");
     expect(s.workerPid).toBeUndefined();
@@ -242,7 +242,7 @@ describe("WorkspaceSession", () => {
       await waitUntil(() => worker.requests().some((r) => r.endsWith(" initialize")), 10_000, "initialize to reach the worker");
       const first = s.workerPid!;
       // Waits for the start that hangs.
-      const submitted = s.submit("Make app.txt fixed");
+      const submitted = s.submit("Make app.txt fixed", "pipeline");
       const t0 = Date.now();
       await s.restart();
       expect(Date.now() - t0).toBeLessThan(SHUTDOWN_GRACE_MS);
@@ -296,7 +296,7 @@ describe("WorkspaceSession", () => {
   it("stops within the grace period on dispose, leaving the run resumable", async () => {
     const s = session();
     fake.setScenario({ ...happy(), implementer: [{ activities: [{ tool: "Read", input: { file_path: "app.txt" } }], sleep: 60_000, output: impl() }] });
-    await s.submit("Make app.txt fixed");
+    await s.submit("Make app.txt fixed", "pipeline");
     await until(s, (st) => st.current?.phase === "IMPLEMENT" && st.current.activities.length > 0, "the implementer");
     const started = Date.now();
     await s.dispose();

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { activityText, formatClock, formatCost, formatDuration, formatTokens, messageHeadline, partyLabel, roleLabel, usageText } from "../src/ui/format.js";
+import {
+  activityText, discussionDoing, discussionOutcome, discussionStepText, formatClock, formatCost, formatDuration, formatTokens, messageHeadline, partyLabel, roleLabel,
+  usageText, verdictText,
+} from "../src/ui/format.js";
 
 describe("format", () => {
   it("formats durations, money and tokens", () => {
@@ -16,5 +19,18 @@ describe("format", () => {
     expect(activityText({ id: "2", kind: "command", label: "Bash  npm test", status: "error", exitCode: 1 })).toBe("Bash  npm test (exit 1)");
     expect(activityText({ id: "3", kind: "command", label: "Bash  git push", status: "denied" })).toBe("Bash  git push denied");
     expect(messageHeadline({ from: "codex", to: "claude", kind: "plan", headline: "Plan v1", items: [] })).toBe("Codex → Claude  Plan v1");
+  });
+
+  it("names a discussion's steps, verdicts and outcome", () => {
+    expect([discussionStepText({ step: "answer", round: 1 }), discussionStepText({ step: "critique", round: 2 }), discussionStepText({ step: "revise", round: 3 }),
+      discussionStepText({ step: "final", round: 4 })]).toEqual(["answer, version 1", "review of version 2", "answer, version 3", "final answer, version 4"]);
+    expect([discussionDoing({ step: "critique", round: 1 }), discussionDoing({ step: "final", round: 3 })]).toEqual(["reviewing version 1", "writing the final answer"]);
+    expect([verdictText("agree"), verdictText("revise"), verdictText(null)]).toEqual(["AGREE", "REVISE", "no verdict, taken as REVISE"]);
+    const d = { answerer: "codex", critic: "claude", rounds: 2 } as const;
+    expect(discussionOutcome({ ...d, status: "agreed" })).toBe("Claude agreed after 2 reviews");
+    expect(discussionOutcome({ ...d, rounds: 1, status: "agreed" })).toBe("Claude agreed after 1 review");
+    expect(discussionOutcome({ ...d, status: "disputed" })).toBe("no agreement after 2 reviews: the final answer says what is still disputed");
+    expect(discussionOutcome({ ...d, status: "interrupted" })).toBe("stopped");
+    expect(discussionOutcome({ ...d, status: "error" })).toBe("failed");
   });
 });

@@ -26,6 +26,8 @@ export interface ConfigData {
   limits: {
     max_planning_rounds: number;
     max_review_rounds: number;
+    /** /discuss: how many reviews before the answerer writes its final answer. */
+    max_discussion_rounds: number;
     max_retries: number;
     max_consecutive_gate_failures: number;
     agent_timeout_sec: number;
@@ -55,6 +57,7 @@ const DEFAULTS: ConfigData = {
   limits: {
     max_planning_rounds: 4,
     max_review_rounds: 5,
+    max_discussion_rounds: 3,
     max_retries: 1,
     max_consecutive_gate_failures: 3,
     agent_timeout_sec: 1800,
@@ -182,7 +185,7 @@ export function validateConfig(cfg: ConfigData, source?: string): void {
   for (const role of AGENT_ROLES) {
     if (cfg.agents[role] !== "codex" && cfg.agents[role] !== "claude") errors.push(`agents.${role} must be one of codex, claude`);
   }
-  for (const key of ["max_planning_rounds", "max_review_rounds", "max_consecutive_gate_failures", "agent_timeout_sec",
+  for (const key of ["max_planning_rounds", "max_review_rounds", "max_discussion_rounds", "max_consecutive_gate_failures", "agent_timeout_sec",
     "gate_timeout_sec", "max_diff_chars", "max_gate_output_chars"] as const) {
     if (!isPosInt(cfg.limits[key])) errors.push(`limits.${key} must be a positive integer`);
   }

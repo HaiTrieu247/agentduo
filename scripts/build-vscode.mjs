@@ -29,6 +29,10 @@ execFileSync(process.execPath, [join(root, "node_modules", "tsup", "dist", "cli-
 if (only.includes("webview")) {
   mkdirSync(join(out, "dist", "webview"), { recursive: true });
   copyFileSync(join(ext, "webview", "styles.css"), join(out, "dist", "webview", "styles.css"));
+  // VS Code's icon font: its stylesheet loads the font beside it. The font is CC BY 4.0, so its licence goes along.
+  const codicons = join(root, "node_modules", "@vscode", "codicons");
+  for (const file of ["codicon.css", "codicon.ttf"]) copyFileSync(join(codicons, "dist", file), join(out, "dist", "webview", file));
+  copyFileSync(join(codicons, "LICENSE"), join(out, "dist", "webview", "codicon-LICENSE.txt"));
 }
 if (only.includes("runtime")) {
   writeFileSync(join(out, "runtime", "package.json"), `${JSON.stringify({

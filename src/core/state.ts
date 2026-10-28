@@ -20,6 +20,24 @@ export interface EarlierTask {
   outcome: string;
 }
 
+/** One question of the chat and the answer it got. */
+export interface Exchange {
+  backend: "codex" | "claude";
+  question: string;
+  answer: string;
+  /** /discuss: the agent that reviewed this answer before it was given (the answer is the agreed or final version). */
+  discussedWith?: "codex" | "claude";
+}
+
+/**
+ * The conversation a run was started from, as it stood then: the answered exchanges that fit the context budget,
+ * oldest first, and how many older ones were left out.
+ */
+export interface ConversationContext {
+  exchanges: Exchange[];
+  omitted: number;
+}
+
 export interface RunState {
   version: number;
   taskId: string;
@@ -49,6 +67,8 @@ export interface RunState {
   workspace?: string;
   /** Earlier tasks of the chat this run was started from (empty outside a chat). */
   earlier?: EarlierTask[];
+  /** The chat's conversation when this run started; absent outside a chat and in older runs. */
+  conversationContext?: ConversationContext;
   costUsd: number;
   tokens: number;
   step: number;
@@ -65,7 +85,7 @@ export function nowIso(d = new Date()): string {
     + `${sign}${pad(offset / 60)}:${pad(offset % 60)}`;
 }
 
-function stamp(d: Date): string {
+export function stamp(d: Date): string {
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 

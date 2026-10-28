@@ -1,20 +1,22 @@
 import { resolve } from "node:path";
 import { killAllActive } from "../../../src/agents/process.js";
 import { Chat, resumeHint, type ChatUi } from "../../../src/chat.js";
+import { parseInput, type Backend } from "../../../src/core/commands.js";
 import { ConfigError, type ConfigData } from "../../../src/core/config.js";
 import type { Check } from "../../../src/core/doctor.js";
 import { diagnose, EnvironmentError, prepareEnvironment, runnableProblem, type WorkspaceEnv } from "../../../src/core/environment.js";
+import { ModelRegistry, resolvingModels } from "../../../src/core/models.js";
 import type { Review } from "../../../src/core/outputs.js";
 import { findingsMarkdown } from "../../../src/core/render.js";
-import { editMode } from "../../../src/core/settings.js";
+import { editMode, settingsView, type SettingsView } from "../../../src/core/settings.js";
 import { acquireWorkspaceLock, LockError, RunStore, workspaceBusy, workspaceLockHolder, type RunState } from "../../../src/core/state.js";
-import { EventBus, type DuoEvent, type HumanReview, type PermissionAnswer } from "../../../src/events.js";
+import { EventBus, type DuoEvent, type HumanReview, type ModelMap, type PermissionAnswer } from "../../../src/events.js";
 import { packageVersion } from "../../../src/paths.js";
 import { PIPELINE } from "../../../src/ui/format.js";
 import { DecisionBroker, PermissionBroker } from "./decisionBroker.js";
 import type {
-  ArtifactContent, ArtifactName, ChangeList, DecisionAnswer, FocusedRun, InitializeResult, PipelineStep, Problem, SnapshotFile, SnapshotSide,
-  UiUpdate, WorkerErrorCode,
+  ArtifactContent, ArtifactName, ChangeList, DecisionAnswer, FocusedRun, InitializeResult, PipelineStep, Problem, Route, SettingRequest, SnapshotFile,
+  SnapshotSide, UiUpdate, WorkerErrorCode,
 } from "./protocol.js";
 
 /** After a shutdown asks the agents to stop, give them this long before they are killed outright. */
@@ -61,6 +63,28 @@ function safeEditMode(cfg: ConfigData): string {
   }
 }
 
+function safeSettings(cfg: ConfigData): SettingsView | null {
+  try {
+    return settingsView(cfg);
+  } catch {
+    return null;
+  }
+}
+
+const unknownModels = (reason: string): ModelMap => {
+  const m = resolvingModels();
+  return { codex: { ...m.codex, status: "unresolved", reason }, claude: { ...m.claude, status: "unresolved", reason } };
+};
+
+/** The agents `text` would call, sent with `route`: the pipeline's, both for a discussion, the one asked, or none (a command, a setting). */
+function agentsFor(text: string, route: Route, cfg: ConfigData, recipient: Backend): readonly Backend[] {
+  const input = parseInput(text);
+  if (input.kind === "pipeline" || (route === "pipeline" && input.kind === "message")) return Object.values(cfg.agents);
+  if (input.kind === "discuss" || (route === "discuss" && input.kind === "message")) return ["codex", "claude"];
+  if (input.kind === "ask") return [input.backend];
+  return input.kind === "message" ? [recipient] : [];
+}
+
 const isBinary = (data: Buffer) => data.subarray(0, 8000).includes(0);
 
 /**
@@ -81,6 +105,10 @@ export class RuntimeSession {
   private closing = false;
   private stopped: Promise<void> | null = null;
   private readonly ui: ChatUi;
+  /** Model lookups, from initialize on; the chat shares them once it exists. */
+  private models: ModelRegistry | null = null;
+  /** Who a plain message goes to; kept here too, so the choice made before the session starts is not lost. */
+  private recipient: Backend = "codex";
 
   constructor(private readonly o: { workspace: string; configPath: string | null; env: NodeJS.ProcessEnv; sink: RuntimeSink }) {
     this.bus.on((event) => o.sink.event(event));
@@ -89,12 +117,32 @@ export class RuntimeSession {
       closed: (id) => o.sink.decisionClosed(id),
     });
     this.ui = {
-      info: (text) => o.sink.ui({ type: "info", text }),
+      info: (text, tone) => o.sink.ui({ type: "info", text, ...(tone === "error" ? { tone } : {}) }),
       setStatus: (status) => o.sink.ui({ type: "status", status }),
       setEdits: (mode) => o.sink.ui({ type: "edits", mode }),
+      setRecipient: (backend) => {
+        this.recipient = backend;
+        o.sink.ui({ type: "recipient", backend });
+      },
+      setModels: (models) => o.sink.ui({ type: "models", models }),
+      setSettings: (settings) => o.sink.ui({ type: "settings", settings }),
       // /quit: leave the chat as `duo` does, which here means giving the workspace back.
       exit: () => void this.serial(() => this.endSession()),
     };
+  }
+
+  /** Looks the models up for this workspace's config (the chat's, once it exists): never waited for, never blocking a request. */
+  private modelsFor(env: WorkspaceEnv): ModelRegistry {
+    this.models ??= new ModelRegistry({
+      cfg: () => this.chat?.config ?? this.env?.cfg ?? null, workspace: env.workspace, env: this.o.env, onChange: (m) => this.ui.setModels(m),
+      onCatalog: (codex) => this.o.sink.ui({ type: "catalog", codex }),
+    });
+    return this.models;
+  }
+
+  /** After initialize has answered: start looking the models up; their identities follow as `models` updates. */
+  startDiscovery(): void {
+    if (!this.closing) this.models?.refresh();
   }
 
   get active(): boolean {
@@ -110,7 +158,8 @@ export class RuntimeSession {
   async initialize(): Promise<InitializeResult> {
     const result: InitializeResult = {
       version: packageVersion(), node: process.versions.node, workspace: resolve(this.o.workspace), runsDir: null, configFile: null, configSources: [],
-      pipeline: [], edits: "ask", warnings: [], problem: null, hint: null,
+      pipeline: [], edits: "ask", recipient: this.recipient, models: unknownModels("the configuration could not be loaded"), settings: null, warnings: [],
+      problem: null, hint: null,
     };
     let env: WorkspaceEnv;
     try {
@@ -124,7 +173,7 @@ export class RuntimeSession {
     const locked: Problem | null = holder && holder !== process.pid ? { kind: "locked", message: workspaceBusy(holder) } : null;
     return {
       ...result, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, configSources: env.sources,
-      pipeline: pipelineOf(env.cfg), edits: safeEditMode(env.cfg), warnings: env.warnings,
+      pipeline: pipelineOf(env.cfg), edits: safeEditMode(env.cfg), models: this.modelsFor(env).current(), settings: safeSettings(env.cfg), warnings: env.warnings,
       problem: runnableProblem(env, env.cfg, env.sources.join(", "), this.o.env) ?? locked,
       hint: resumeHint(env.runsDir, env.workspace),
     };
@@ -137,8 +186,11 @@ export class RuntimeSession {
     return next;
   }
 
-  /** The chat session, started on first use: the config is read again, then the workspace lock is taken. */
-  private async ensureSession(): Promise<Chat> {
+  /**
+   * The chat session, started on first use: the config is read again, then the workspace lock is taken. `needs` names
+   * the agents the work that opens it calls, so a missing CLI is refused before the lock is taken for nothing.
+   */
+  private async ensureSession(needs: (cfg: ConfigData) => readonly Backend[] = () => []): Promise<Chat> {
     if (this.closing) throw new SessionError("shutting_down", "agentduo is shutting down");
     if (this.chat) return this.chat;
     let env: WorkspaceEnv;
@@ -150,7 +202,8 @@ export class RuntimeSession {
       throw e;
     }
     for (const warning of env.warnings) this.ui.info(`warning: ${warning}`);
-    const problem = runnableProblem(env, env.cfg, env.sources.join(", "), this.o.env);
+    // As `duo` opens its chat: a git repository and a valid config; each question checks its own agent's CLI.
+    const problem = runnableProblem(env, env.cfg, env.sources.join(", "), this.o.env, false, needs(env.cfg));
     if (problem) throw new SessionError(problem.kind, problem.message);
     let release: () => void;
     try {
@@ -164,31 +217,55 @@ export class RuntimeSession {
       throw new SessionError("shutting_down", "agentduo is shutting down");
     }
     this.release = release;
-    this.chat = new Chat({
+    const models = this.modelsFor(env);
+    const chat = new Chat({
       cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, bus: this.bus,
-      decider: this.decisions, permissions: this.permissions, ui: this.ui,
+      decider: this.decisions, permissions: this.permissions, ui: this.ui, env: this.o.env, models,
     });
+    chat.selectRecipient(this.recipient);
+    this.chat = chat;
+    models.refresh();
     this.o.sink.ui({ type: "pipeline", pipeline: pipelineOf(env.cfg) });
     this.o.sink.ui({ type: "edits", mode: editMode(env.cfg) });
+    this.o.sink.ui({ type: "settings", settings: settingsView(env.cfg) });
+    this.o.sink.ui({ type: "recipient", backend: chat.to });
     this.o.sink.ui({ type: "session", session: "active" });
-    return this.chat;
+    return chat;
   }
 
-  submit(text: string): Promise<void> {
+  /**
+   * A message (to the recipient, or a slash command) or, with the Pipeline route, a task for the pipeline. Resolves
+   * once the work has started: an answer or a run is never waited for, so interrupt is never held up behind it.
+   */
+  submit(text: string, route: Route = "message"): Promise<void> {
     return this.serial(async () => {
       if (!this.chat && /^\/(quit|exit)\b/.test(text.trim())) {
         this.ui.info("No session is open; the workspace is not locked.");
         return;
       }
-      await (await this.ensureSession()).submit(text);
+      const chat = await this.ensureSession((cfg) => agentsFor(text, route, cfg, this.recipient));
+      await (route === "pipeline" ? chat.submitPipeline(text) : route === "discuss" ? chat.submitDiscuss(text) : chat.submit(text));
     });
+  }
+
+  /** Who plain messages go to; chosen before the session starts, it waits for it (no lock is taken just for this). */
+  selectRecipient(backend: Backend): Promise<void> {
+    return this.serial(async () => {
+      if (this.chat) this.chat.selectRecipient(backend);
+      else this.ui.setRecipient(backend);
+    });
+  }
+
+  /** A setting from the sidebar's controls, applied as the chat's own command would apply it. */
+  applySetting(request: SettingRequest): Promise<void> {
+    return this.serial(async () => (await this.ensureSession()).applySetting(request.setting, { save: request.save, yes: request.yes }));
   }
 
   toggleEdits(): Promise<void> {
     return this.serial(async () => (await this.ensureSession()).toggleEdits());
   }
 
-  /** Esc: stops the running step; the next message re-runs it. */
+  /** Esc: stops the answer, or the running step (/resume re-runs it). */
   interrupt(): Promise<void> {
     return this.serial(async () => this.chat?.escape());
   }
@@ -235,7 +312,7 @@ export class RuntimeSession {
     this.release = null;
     this.o.sink.ui({ type: "status", status: "idle" });
     this.o.sink.ui({ type: "session", session: "ended" });
-    this.ui.info("Session ended: the workspace is free for `duo` again. Type a task to start a new session.");
+    this.ui.info("Session ended: the workspace is free for `duo` again. Send a message to start a new session.");
   }
 
   /**
@@ -245,6 +322,7 @@ export class RuntimeSession {
   shutdown(): Promise<void> {
     this.stopped ??= (async () => {
       this.closing = true;
+      this.models?.close();
       this.decisions.deferAll(true);
       const hard = setTimeout(() => killAllActive(), HARD_KILL_MS);
       await this.denyPermissions(true);

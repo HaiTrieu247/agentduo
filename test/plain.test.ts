@@ -75,4 +75,33 @@ describe("plain renderer", () => {
   it("defers every decision", async () => {
     expect(await deferDecider.decide(review)).toBe("defer");
   });
+
+  it("prints a discussion: each turn's step and verdict, its first lines, then the final answer whole", () => {
+    const bus = new EventBus();
+    let text = "";
+    attachPlainRenderer(bus, { write: (s: string) => { text += s; } }, { color: false, verbose: false, version: "0.1.0", now });
+    const model = { backend: "codex", requested: null, configured: null, resolved: "gpt-x", source: "doctor", isDefault: true, status: "resolved", reason: null } as const;
+    const claude = { ...model, backend: "claude" as const };
+    const turn = (id: string, backend: "codex" | "claude", place: { step: "answer" | "critique" | "revise"; round: number; verdict?: "agree" | "revise" | null }, answer: string): DuoEvent[] => [
+      { type: "turn.started", conversationId: "c", turnId: id, backend, question: "Q?", model: backend === "codex" ? model : claude, discussion: { id: "d", step: place.step, round: place.round } },
+      { type: "turn.finished", conversationId: "c", turnId: id, backend, status: "success", answer, error: null, model: backend === "codex" ? model : claude, durationSec: 3, logDir: "/logs", discussion: { id: "d", ...place } },
+    ];
+    const long = Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join("\n");
+    for (const e of [
+      { type: "discussion.started", conversationId: "c", discussionId: "d", question: "Q?", answerer: "codex", critic: "claude", maxRounds: 3 },
+      ...turn("t1", "codex", { step: "answer", round: 1 }, long),
+      ...turn("t2", "claude", { step: "critique", round: 1, verdict: "revise" }, "Missing the retry story."),
+      ...turn("t3", "codex", { step: "revise", round: 2 }, "FINAL TEXT"),
+      ...turn("t4", "claude", { step: "critique", round: 2, verdict: "agree" }, "Good."),
+      { type: "discussion.finished", conversationId: "c", discussionId: "d", status: "agreed", answerer: "codex", critic: "claude", rounds: 2, answer: "FINAL TEXT", error: null, durationSec: 12, logDir: "/logs" },
+    ] as DuoEvent[]) bus.emit(e);
+    expect(text).toContain("discussion: Codex answers, Claude reviews (at most 3 reviews)");
+    expect(text).toContain("answer, version 1");
+    expect(text).toContain("review of version 1 · REVISE");
+    expect(text).toContain("line 8");
+    expect(text).not.toContain("line 9\n");
+    expect(text).toContain("… 4 more lines");
+    expect(text).toContain("✓ discussion: Claude agreed after 2 reviews");
+    expect(text.trimEnd().endsWith("FINAL TEXT")).toBe(true);
+  });
 });
