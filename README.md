@@ -76,12 +76,17 @@ agentduo 0.5.0 · chat
   the chat says so).
 - **`/pipeline <task>`** runs the full workflow (plan → critique → finalize → implement → verify → review). Every role
   is told what was said in the conversation before the task, and what earlier pipeline tasks of the chat did.
-- **`/discuss <question>`** has both agents agree on an answer. The agent named under the input answers, the other
+- **`/discuss <question>`** has both agents work out one answer. The agent named under the input answers, the other
   reviews it and ends with `VERDICT: AGREE` or `VERDICT: REVISE`, and the first revises until the reviewer agrees, for
-  at most `limits.max_discussion_rounds` reviews (3 by default; a review without a verdict counts as REVISE). If the
-  last review still asks for changes, the answerer writes a final answer that says what is still disputed. Each turn
-  is shown as it ends (in the terminal by its first lines; `--verbose` shows them whole), then the agreed or final
-  answer, whole. Only that answer joins the conversation, as an answer discussed with the other agent.
+  at most `limits.max_discussion_rounds` reviews (3 by default; a review without a verdict counts as REVISE). Then
+  Codex, in a call of its own, synthesizes the whole discussion into the final answer. It keeps what holds up from both
+  agents, adds the points of the reviews the last version still misses, and leaves out what the discussion showed to
+  be wrong. If the last review still asked for changes, the answer ends with a short section on what is still
+  disputed. Codex always writes the synthesis, so when Codex also answered, the synthesis comes from the same model, in
+  a fresh call asked to be neutral. A discussion makes 3 to 2N+1 agent calls, N being the review limit. Each turn is
+  shown as it ends (in the terminal by its first lines; `--verbose` shows them whole), then the final answer, whole.
+  Only that answer joins the conversation, as Codex's answer discussed with Claude. If the synthesis fails, a warning
+  says so and the latest version is the answer, from the agent that wrote it.
 - **A message while the pipeline works** is a note: every step from the next one on carries it. `/claude`, `/codex`,
   `/pipeline` and `/discuss` say the workspace is busy instead; only one agent call runs at a time.
 - **Esc** stops what runs. A stopped answer or discussion just ends, and nothing of it joins the conversation. A stopped pipeline step stays resumable: `/resume [note]`
@@ -129,8 +134,9 @@ Outside the chat, `duo --accept-edits "<task>"` does what `/edits auto` does.
 `extensions/vscode` holds the same chat as a VS Code sidebar. It has a timeline of both agents, the HUMAN_REVIEW and
 permission prompts above the composer, and buttons that open the plan, review and report, plus the run's changes in
 the diff editor. It runs this package's engine with your Node (≥ 22.12) and shares the configuration, runs and lock with
-`duo`, so a run started in one can be resumed in the other. It is not on the Marketplace yet. Build a VSIX with
-`npm run package:vscode` and install it with `code --install-extension extensions/vscode/agentduo-vscode-*.vsix`.
+`duo`, so a run started in one can be resumed in the other. Install it from the Marketplace
+(`HaiTrieuThinh.agentduo-vscode`), or build a VSIX with `npm run package:vscode` and install it with
+`code --install-extension extensions/vscode/agentduo-vscode-*.vsix`.
 See [extensions/vscode/README.md](extensions/vscode/README.md) for requirements, usage and current limits.
 
 ## The workspace
@@ -285,7 +291,16 @@ npm run build:vscode       # extensions/vscode/dist (host, webview) and runtime/
 npm run test:vscode        # smoke test in a downloaded VS Code; on Linux run it under xvfb-run
 npm run package:vscode     # extensions/vscode/agentduo-vscode-<version>.vsix (local, not published)
 npm run test:pack:vscode   # package, check the VSIX contents, run its worker outside the checkout
+
+npm version patch          # release: checks, bump both manifests, publish to npm and the Marketplace, push
+npm run release            # finish a release whose publish step failed; what is already out is skipped
 ```
+
+`npm version patch|minor|major` checks first, before the bump: you are on an up-to-date `main`, logged in to npm
+(`npm login`) and to the Marketplace (`VSCE_PAT`, or a token saved by `npx vsce login HaiTrieuThinh`), and the
+typecheck, tests and both pack smokes pass. It then commits and tags the new version, packages the VSIX, publishes the
+npm package (asking for your OTP) and the extension, and pushes the commit and tag to `origin`. Set
+`VSCE_AZURE_CREDENTIAL=1` to publish the extension with Microsoft Entra ID (`az login`) instead of a token.
 
 The extension's design notes are in `docs/superpowers/specs/2026-10-28-agentduo-vscode-design.md`.
 

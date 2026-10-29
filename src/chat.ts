@@ -399,9 +399,9 @@ export class Chat {
 
   // ------------------------------------------------------------------ discussion
   /**
-   * /discuss: the recipient answers, the other agent reviews it, and the recipient revises until the reviewer agrees.
-   * After the last review that still asks for changes, the recipient writes a final answer that says what is disputed.
-   * The agreed or final version is the response, and the only part of it later prompts carry.
+   * /discuss: the recipient answers, the other agent reviews it, and the recipient revises until the reviewer agrees
+   * or the reviews run out. Then Codex, in a call of its own, synthesizes the whole discussion into the response, the
+   * only part of it later prompts carry. If the synthesis fails, the latest version is the response; Esc ends it all.
    */
   private discuss(question: string): void {
     if (this.active) return this.busy();
@@ -436,14 +436,20 @@ export class Chat {
       await Promise.resolve();
       let status: DiscussionStatus = "error";
       let answer: string | null = null;
+      let answerBackend: Backend = answerer;
       let error: string | null = null;
       let rounds = 0;
       const failed = (out: TurnOutcome) => {
         status = out.status === "interrupted" ? "interrupted" : "error";
         error = out.error;
       };
+      // How the reviews ended, once they did; the synthesis comes after.
+      let reviewed: "agreed" | "disputed" | null = null;
+      // The latest version and its number: the response if the synthesis fails.
+      let latest = { text: "", round: 1 };
       let version = await step("answer", 1);
       while (version.status === "success") {
+        latest = { text: version.answer ?? "", round: rounds + 1 };
         rounds++;
         const review = await step("critique", rounds);
         if (review.status !== "success") {
@@ -451,25 +457,41 @@ export class Chat {
           break;
         }
         if (review.verdict === "agree") {
-          status = "agreed";
-          answer = version.answer;
+          reviewed = "agreed";
           break;
         }
         if (review.verdict === null) {
           this.o.bus.emit({ type: "warning", text: `${AGENT_NAMES[critic]}'s review ${rounds} had no VERDICT line, so agentduo takes it as REVISE.` });
         }
-        const last = rounds >= maxRounds;
-        version = await step(last ? "final" : "revise", rounds + 1);
-        if (last && version.status === "success") {
-          status = "disputed";
-          answer = version.answer;
+        if (rounds >= maxRounds) {
+          reviewed = "disputed";
           break;
         }
+        version = await step("revise", rounds + 1);
       }
       if (version.status !== "success") failed(version);
-      conversation.finishDiscussion(d.id, answer);
+      if (reviewed) {
+        const synthesis = await step("synthesis", rounds);
+        // Esc wins, even over a synthesis that finished as it came.
+        if (synthesis.status === "interrupted" || exec.abort.signal.aborted) {
+          status = "interrupted";
+        } else if (synthesis.status === "success") {
+          status = reviewed;
+          answer = synthesis.answer;
+          answerBackend = "codex";
+        } else {
+          // The version the reviews ended on is still a good answer: it stays the response.
+          status = reviewed;
+          answer = latest.text;
+          this.o.bus.emit({
+            type: "warning",
+            text: `Codex could not synthesize the discussion (${synthesis.error ?? "the call failed"}), so the response is ${AGENT_NAMES[answerer]}'s version ${latest.round}.`,
+          });
+        }
+      }
+      conversation.finishDiscussion(d.id, answer, answerBackend);
       this.o.bus.emit({
-        type: "discussion.finished", ...ids, status, answerer, critic, rounds, answer, error, durationSec: total.durationSec,
+        type: "discussion.finished", ...ids, status, answerer, critic, rounds, answer, answerBackend, error, durationSec: total.durationSec,
         costUsd: total.costUsd || undefined, tokens: total.tokens || undefined, logDir: conversation.logDir,
       });
     })().finally(() => this.settled(exec));

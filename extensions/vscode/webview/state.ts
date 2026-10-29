@@ -60,7 +60,7 @@ export interface TurnCard {
   discussion?: DiscussionPlace & { verdict?: Verdict | null };
 }
 
-/** A /discuss: its turns as they finish, then how it ended and its answer (the agreed or final version). */
+/** A /discuss: its turns as they finish, then how it ended and its answer (Codex's synthesis, or the latest version). */
 export interface DiscussionCard {
   id: string;
   question: string;
@@ -72,6 +72,8 @@ export interface DiscussionCard {
   status?: DiscussionStatus;
   rounds?: number;
   answer?: string | null;
+  /** Who wrote `answer`; absent (a card saved before synthesis): the answerer. */
+  answerBackend?: Agent;
   error?: string | null;
   durationSec?: number;
   costUsd?: number;
@@ -348,7 +350,8 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
       const base = s.discussion?.id === e.discussionId ? s.discussion
         : { id: e.discussionId, question: "", answerer: e.answerer, critic: e.critic, maxRounds: e.rounds, startedAt: now, turns: [] };
       const discussion: DiscussionCard = {
-        ...base, status: e.status, rounds: e.rounds, answer: e.answer, error: e.error, durationSec: e.durationSec, costUsd: e.costUsd, tokens: e.tokens,
+        ...base, status: e.status, rounds: e.rounds, answer: e.answer, ...(e.answerBackend ? { answerBackend: e.answerBackend } : {}), error: e.error,
+        durationSec: e.durationSec, costUsd: e.costUsd, tokens: e.tokens,
       };
       // Its turns have counted their usage already.
       return push({ ...s, discussion: null, logs: e.logDir }, { kind: "discussion", discussion });

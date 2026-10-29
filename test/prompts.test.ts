@@ -132,9 +132,50 @@ describe("prompts: a discussion", () => {
     expect(revise).toContain("It misses the retry story.");
     expect(revise).toContain("version 2");
     expect(revise).not.toContain("VERDICT: AGREE");
+    // The step discussions took before synthesis keeps its prompt.
     const final = prompts.discussion({ ...base, maxRounds: 1, step: "final", round: 2, history: [v1, c1] });
     expect(final).toContain("[agentduo-discussion: final, round 2 of 1]");
     expect(final).toMatch(/final answer/i);
     expect(final).toMatch(/still disagree/i);
+  });
+
+  it("tells every step that Codex synthesizes the response", () => {
+    for (const step of ["answer", "critique", "revise"] as const) {
+      expect(prompts.discussion({ ...base, step, round: 1, history: step === "answer" ? [] : [v1] }), step).toContain("Codex, in a turn of its own, synthesizes the discussion");
+    }
+  });
+
+  it("asks Codex for a neutral synthesis of the whole discussion, even when Claude answered", () => {
+    const v2: prompts.DiscussionMessage = { backend: "claude", step: "revise", round: 2, text: "Postgres, with retries.", verdict: null };
+    const c2: prompts.DiscussionMessage = { backend: "codex", step: "critique", round: 2, text: "Right now.", verdict: "agree" };
+    const claudeFirst = { ...base, answerer: "claude" as const, critic: "codex" as const };
+    const p = prompts.discussion({ ...claudeFirst, step: "synthesis", round: 2, history: [{ ...v1, backend: "claude" }, { ...c1, backend: "codex" }, v2, c2] });
+    expect(p.startsWith(`${prompts.CONVERSATION_MARKER}\n[agentduo-discussion: synthesis, round 2 of 3]`)).toBe(true);
+    expect(p).toContain("You are Codex.");
+    expect(p).not.toContain("You are Claude Code.");
+    const order = ["Use Postgres with SKIP LOCKED.", "(verdict: REVISE)", "It misses the retry story.", "Postgres, with retries.", "(verdict: AGREE)", "Right now."].map((x) => p.indexOf(x));
+    expect(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1]!)), order.join(",")).toBe(true);
+    expect(p).toContain("Codex agreed with version 2 after 2 review(s)");
+    expect(p).toMatch(/not defending any version/);
+    expect(p).toMatch(/replaces the last version/);
+    expect(p).toMatch(/do not mention versions, reviews, or who said what/);
+    expect(p).toContain("If a point is still disputed all the same");
+    expect(p.split("Redis hay Postgres cho job queue?")).toHaveLength(2);
+    expect(p).not.toContain("VERDICT: AGREE");
+  });
+
+  it("asks a synthesis after the reviews ran out to end with what is still disputed, titled in the answer's language", () => {
+    const p = prompts.discussion({ ...base, maxRounds: 1, step: "synthesis", round: 1, history: [v1, c1] });
+    expect(p).toContain("Claude Code still asked for changes after 1 review(s)");
+    expect(p).toContain("End with a short closing section on the points still disputed, titled \"Còn bất đồng\" if you answer in Vietnamese");
+    expect(p).toMatch(/both positions put neutrally/);
+  });
+
+  it("carries the conversation and the pipeline tasks into the synthesis as into any step", () => {
+    const context = { exchanges: [{ backend: "codex" as const, question: "Earlier?", answer: "EARLIER-ANSWER" }], omitted: 0 };
+    const p = prompts.discussion({ ...base, context, earlier: [{ task: "Add the queue", outcome: "done" }], step: "synthesis", round: 1, history: [v1, { ...c1, verdict: null }] });
+    expect(p).toContain("EARLIER-ANSWER");
+    expect(p).toContain("Add the queue — done");
+    expect(p).toContain("(verdict: none given, taken as REVISE)");
   });
 });

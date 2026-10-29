@@ -25,7 +25,10 @@ export interface Exchange {
   backend: "codex" | "claude";
   question: string;
   answer: string;
-  /** /discuss: the agent that reviewed this answer before it was given (the answer is the agreed or final version). */
+  /**
+   * /discuss: the other agent of the discussion this answer came from. The answer is Codex's synthesis of the
+   * discussion, or the answerer's latest version when the synthesis failed (before synthesis: its agreed or final one).
+   */
   discussedWith?: "codex" | "claude";
 }
 

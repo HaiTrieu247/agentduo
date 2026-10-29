@@ -116,8 +116,29 @@ const STEP_TITLES: Record<DiscussionStep, (round: number) => string> = {
   answer: () => "answer, version 1",
   critique: (round) => `review of version ${round}`,
   revise: (round) => `answer, version ${round}`,
+  synthesis: () => "final answer (synthesis)",
   final: (round) => `final answer, version ${round}`,
 };
+
+/** The synthesis turn's ask: how the reviews ended, and what to make of the whole discussion. */
+function synthesisAsk(o: { answerer: string; critic: string; round: number; history: DiscussionMessage[] }): string {
+  const review = o.history.findLast((m) => m.step === "critique");
+  const version = o.history.findLast((m) => m.step !== "critique")?.round ?? 1;
+  const agreed = review?.verdict === "agree";
+  const ended = agreed
+    ? `${o.critic} agreed with version ${version} after ${o.round} review(s).`
+    : `${o.critic} still asked for changes after ${o.round} review(s), the most this discussion allows.`;
+  const disputed = "a short closing section on the points still disputed, titled \"Còn bất đồng\" if you answer in Vietnamese, or the same " +
+    "in the language of your answer: each point, with both positions put neutrally, in a line or two.";
+  return `## Your turn: the final answer (synthesis)\nThe reviews are over: ${ended} You are not defending any version, even one you ` +
+    `wrote: synthesize the whole discussion, ${o.answerer}'s versions and ${o.critic}'s reviews, into the final answer the user gets. ` +
+    "It replaces the last version as the response.\n" +
+    "- Keep what holds up, from both agents.\n" +
+    "- Add the points of the reviews that are right and that the last version still misses.\n" +
+    "- Leave out what the discussion showed to be wrong.\n\n" +
+    "Write one direct answer for the user: do not mention versions, reviews, or who said what. " +
+    (agreed ? `If a point is still disputed all the same, end with ${disputed}\n` : `End with ${disputed}\n`);
+}
 
 function discussionHistory(history: DiscussionMessage[]): string {
   if (!history.length) return "";
@@ -129,7 +150,8 @@ function discussionHistory(history: DiscussionMessage[]): string {
 
 /**
  * A turn of /discuss for one agent: the conversation so far, the user's question (once), the discussion so far, and
- * what this step asks. Its second line names the step, so the agent (and a test's fake agent) can tell it.
+ * what this step asks. Its second line names the step, so the agent (and a test's fake agent) can tell it. The
+ * synthesis is always Codex's, whichever agent answered.
  */
 export function discussion(o: {
   workspace: string; context: ConversationContext; earlier: EarlierTask[]; question: string; answerer: Backend; critic: Backend; maxRounds: number;
@@ -137,7 +159,7 @@ export function discussion(o: {
 }): string {
   const answerer = NAMES[o.answerer];
   const critic = NAMES[o.critic];
-  const me = o.step === "critique" ? critic : answerer;
+  const me = o.step === "critique" ? critic : o.step === "synthesis" ? NAMES.codex : answerer;
   const verdicts = "End your review with one line of its own, exactly `VERDICT: AGREE` if the version is correct and complete enough to give the user " +
     "as it is, or `VERDICT: REVISE` if it needs changes.";
   const asks: Record<DiscussionStep, string> = {
@@ -148,6 +170,8 @@ export function discussion(o: {
       `only where it matters. Do not rewrite the answer. ${verdicts}\n`,
     revise: `## Your turn: version ${o.round}\nWrite version ${o.round} of your answer, taking ${critic}'s latest review into account: fix what it got ` +
       "right; where you disagree, keep your position and say why in a sentence. Give the whole answer again, for the user, not only the changes.\n",
+    synthesis: synthesisAsk({ answerer, critic, round: o.round, history: o.history }),
+    // Only discussions from before synthesis asked this; kept so the step keeps a prompt.
     final: `## Your turn: the final answer\n${critic} still asks for changes after ${o.maxRounds} review(s), so this version goes to the user as it is, ` +
       `with no further review. Write the final answer (version ${o.round}), taking the latest review into account where you agree. End with a short ` +
       `section on the points you and ${critic} still disagree on: each point, and both positions, in a line or two.\n`,
@@ -157,7 +181,8 @@ export function discussion(o: {
     `[agentduo-discussion: ${o.step}, round ${o.round} of ${o.maxRounds}]`,
     `This is a three-way conversation in the workspace \`${o.workspace}\` between the user, Claude Code and Codex; agentduo relays the messages. ` +
       `The user asked for a discussion: ${answerer} answers, ${critic} reviews the answer, and ${answerer} revises it until ${critic} agrees, ` +
-      `for at most ${o.maxRounds} review(s). The user reads the whole discussion and gets the last version as the response. You are ${me}.`,
+      `for at most ${o.maxRounds} review(s). Then Codex, in a turn of its own, synthesizes the discussion into the final answer. The user reads ` +
+      `the whole discussion and gets that synthesis as the response. You are ${me}.`,
     "Follow your own configuration and the repository's instructions (AGENTS.md / CLAUDE.md).",
     earlierTasks(o.earlier, false) + conversationSection(o.context, "Conversation so far", "Oldest first."),
     `## The user's question\n${o.question}\n`,

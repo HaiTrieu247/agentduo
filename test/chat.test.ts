@@ -136,74 +136,139 @@ describe("Chat: one of several conversations", () => {
 describe("Chat: /discuss", () => {
   const discussions = () => events.flatMap((e) => (e.type === "discussion.finished" ? [e] : []));
   const steps = () => fake.calls().map((c) => `${c.role}:${c.backend}`);
+  const record = (chat: Chat) => JSON.parse(readFileSync(join(runsDir, "conversations", chat.conversationId, "conversation.json"), "utf8"));
 
-  it("has the recipient answer and the other agent review, and gives the agreed version as the response", async () => {
+  it("has the recipient answer and the other agent review, then Codex synthesize the response", async () => {
     const chat = newChat();
-    fake.setScenario({ discuss_answer: [{ answer: "Use Postgres with SKIP LOCKED." }], discuss_critique: [{ answer: "Right, and it keeps one store.\nVERDICT: AGREE" }] });
+    fake.setScenario({
+      discuss_answer: [{ answer: "Use Postgres with SKIP LOCKED." }], discuss_critique: [{ answer: "Right, and it keeps one store.\nVERDICT: AGREE" }],
+      discuss_synthesis: [{ answer: "SYNTHESIS: Postgres, one store for jobs and data." }],
+    });
     await chat.submit("/discuss Redis or Postgres for the job queue?");
     expect(ui.statuses.at(-1)).toBe("answering");
     await chat.idle();
-    expect(steps()).toEqual(["discuss_answer:codex", "discuss_critique:claude"]);
+    expect(steps()).toEqual(["discuss_answer:codex", "discuss_critique:claude", "discuss_synthesis:codex"]);
     expect(fake.calls("discuss_critique")[0]!.prompt).toContain("Use Postgres with SKIP LOCKED.");
-    expect(discussions()).toEqual([expect.objectContaining({ status: "agreed", answerer: "codex", critic: "claude", rounds: 1, answer: "Use Postgres with SKIP LOCKED.", error: null })]);
+    const synthesis = fake.calls("discuss_synthesis")[0]!.prompt;
+    expect(synthesis).toContain("[agentduo-discussion: synthesis, round 1 of 3]");
+    for (const part of ["You are Codex", "Use Postgres with SKIP LOCKED.", "Right, and it keeps one store.", "(verdict: AGREE)"]) expect(synthesis).toContain(part);
+    expect(discussions()).toEqual([expect.objectContaining({
+      status: "agreed", answerer: "codex", critic: "claude", rounds: 1, answer: "SYNTHESIS: Postgres, one store for jobs and data.", answerBackend: "codex", error: null,
+    })]);
     expect(events.find((e) => e.type === "discussion.started")).toMatchObject({ question: "Redis or Postgres for the job queue?", maxRounds: 3 });
     // A review is shown without its VERDICT line, which its verdict says.
     expect(answers().map((a) => a.discussion)).toEqual([
       expect.objectContaining({ step: "answer", round: 1 }), expect.objectContaining({ step: "critique", round: 1, verdict: "agree" }),
+      expect.objectContaining({ step: "synthesis", round: 1 }),
     ]);
     expect(answers()[1]!.answer).toBe("Right, and it keeps one store.");
+    // The discussion's usage adds up its turns, the synthesis too.
+    expect(discussions()[0]!.tokens).toBe(answers().reduce((n, a) => n + (a.tokens ?? 0), 0));
+    expect(answers()[2]!.tokens).toBeGreaterThan(0);
     expect(ui.statuses.at(-1)).toBe("idle");
 
-    // What came of it is context for what follows; the review is not.
+    // What came of it is context for what follows; the drafts and reviews are not.
     fake.setScenario({ chat_claude: [{ answer: "ok" }] });
     await chat.submit("/claude And the retries?");
     await chat.idle();
     const next = fake.calls("chat_claude")[0]!.prompt;
-    expect(next.split("Use Postgres with SKIP LOCKED.")).toHaveLength(2);
-    expect(next).toContain("discussed with Claude Code");
+    expect(next.split("SYNTHESIS: Postgres, one store for jobs and data.")).toHaveLength(2);
+    expect(next).toContain("**Codex, after discussing it with Claude Code:**");
+    expect(next).not.toContain("Use Postgres with SKIP LOCKED.");
     expect(next).not.toContain("it keeps one store");
   });
 
-  it("revises until the reviewer agrees, each version seeing the discussion so far", async () => {
-    const chat = newChat();
+  it("revises until the reviewer agrees, each version seeing the discussion so far, and Codex synthesizes it all for Claude's question", async () => {
+    let chat = newChat({ conversationId: "conv-d" });
     await chat.submit("/claude");
     fake.setScenario({
       discuss_answer: [{ answer: "v1: Redis." }], discuss_revise: [{ answer: "v2: Postgres." }],
       discuss_critique: [{ answer: "Redis loses jobs on a restart here.\nVERDICT: REVISE" }, { answer: "Good now.\nVERDICT: AGREE" }],
+      discuss_synthesis: [{ answer: "SYNTHESIS: Postgres, since Redis loses jobs on a restart." }], chat_claude: [{ answer: "ok" }],
     });
     await chat.submit("/discuss Which queue?");
     await chat.idle();
-    expect(steps()).toEqual(["discuss_answer:claude", "discuss_critique:codex", "discuss_revise:claude", "discuss_critique:codex"]);
+    // Agreement after r reviews: 2r + 1 calls.
+    expect(steps()).toEqual(["discuss_answer:claude", "discuss_critique:codex", "discuss_revise:claude", "discuss_critique:codex", "discuss_synthesis:codex"]);
     const revise = fake.calls("discuss_revise")[0]!.prompt;
     expect(revise).toContain("v1: Redis.");
     expect(revise).toContain("Redis loses jobs on a restart here.");
     expect(fake.calls("discuss_critique")[1]!.prompt).toContain("v2: Postgres.");
-    expect(discussions()[0]).toMatchObject({ status: "agreed", answerer: "claude", critic: "codex", rounds: 2, answer: "v2: Postgres." });
+    const synthesis = fake.calls("discuss_synthesis")[0]!.prompt;
+    expect(synthesis).toContain("[agentduo-discussion: synthesis, round 2 of 3]");
+    expect(synthesis).toContain("You are Codex");
+    const order = ["v1: Redis.", "(verdict: REVISE)", "Redis loses jobs on a restart here.", "v2: Postgres.", "(verdict: AGREE)", "Good now."].map((x) => synthesis.indexOf(x));
+    expect(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1]!)), order.join(",")).toBe(true);
+    expect(discussions()[0]).toMatchObject({
+      status: "agreed", answerer: "claude", critic: "codex", rounds: 2, answer: "SYNTHESIS: Postgres, since Redis loses jobs on a restart.", answerBackend: "codex",
+    });
+    expect(record(chat).exchanges).toEqual([{ backend: "codex", question: "Which queue?", answer: "SYNTHESIS: Postgres, since Redis loses jobs on a restart.", discussedWith: "claude" }]);
+    await chat.stop();
+
+    // Reopened, the conversation carries the synthesis only, as Codex's.
+    chat = newChat({ conversationId: "conv-d" });
+    await chat.submit("And the retries?");
+    await chat.idle();
+    const next = fake.calls("chat_claude")[0]!.prompt;
+    expect(next).toContain("**Codex, after discussing it with Claude Code:**\nSYNTHESIS: Postgres, since Redis loses jobs on a restart.");
+    for (const draft of ["v1: Redis.", "v2: Postgres.", "Good now."]) expect(next).not.toContain(draft);
   });
 
-  it("when the last review still asks for changes, has the answerer write a final answer with what is still disputed", async () => {
+  it("when the last review still asks for changes, has Codex synthesize the answer with what is still disputed, and no final version", async () => {
     const cfg = testConfig(fake);
     cfg.limits.max_discussion_rounds = 2;
     const chat = newChat({ cfg });
     fake.setScenario({
       discuss_answer: [{ answer: "v1" }], discuss_critique: [{ answer: "No.\nVERDICT: REVISE" }], discuss_revise: [{ answer: "v2" }],
-      discuss_final: [{ answer: "v3, and what we still disagree on" }],
+      discuss_synthesis: [{ answer: "SYNTHESIS, and Còn bất đồng" }],
     });
     await chat.submit("/discuss A hard question?");
     await chat.idle();
-    expect(fake.calls().map((c) => c.role)).toEqual(["discuss_answer", "discuss_critique", "discuss_revise", "discuss_critique", "discuss_final"]);
-    expect(fake.calls("discuss_final")[0]!.prompt).toMatch(/still disagree/);
-    expect(discussions()[0]).toMatchObject({ status: "disputed", rounds: 2, answer: "v3, and what we still disagree on" });
+    // The reviews run out after N: 2N + 1 calls.
+    expect(fake.calls().map((c) => c.role)).toEqual(["discuss_answer", "discuss_critique", "discuss_revise", "discuss_critique", "discuss_synthesis"]);
+    expect(fake.calls("discuss_final")).toHaveLength(0);
+    const synthesis = fake.calls("discuss_synthesis")[0]!.prompt;
+    expect(synthesis).toContain("still asked for changes after 2 review(s)");
+    expect(synthesis).toContain("Còn bất đồng");
+    expect(discussions()[0]).toMatchObject({ status: "disputed", rounds: 2, answer: "SYNTHESIS, and Còn bất đồng", answerBackend: "codex" });
   });
 
-  it("takes a review without a VERDICT line as REVISE, and says so", async () => {
+  it("takes a review without a VERDICT line as REVISE, and says so, to the synthesis too", async () => {
     const chat = newChat();
-    fake.setScenario({ discuss_answer: [{ answer: "v1" }], discuss_critique: [{ answer: "Hmm, maybe." }, { answer: "Fine.\nVERDICT: AGREE" }], discuss_revise: [{ answer: "v2" }] });
+    fake.setScenario({
+      discuss_answer: [{ answer: "v1" }], discuss_critique: [{ answer: "Hmm, maybe." }, { answer: "Fine.\nVERDICT: AGREE" }], discuss_revise: [{ answer: "v2" }],
+      discuss_synthesis: [{ answer: "SYNTHESIS" }],
+    });
     await chat.submit("/discuss Q?");
     await chat.idle();
     expect(events.some((e) => e.type === "warning" && e.text.includes("no VERDICT"))).toBe(true);
     expect(answers()[1]!.discussion).toMatchObject({ step: "critique", verdict: null });
-    expect(discussions()[0]).toMatchObject({ status: "agreed", rounds: 2, answer: "v2" });
+    expect(fake.calls("discuss_synthesis")[0]!.prompt).toContain("Hmm, maybe.\n");
+    expect(fake.calls("discuss_synthesis")[0]!.prompt).toContain("(verdict: none given, taken as REVISE)");
+    expect(discussions()[0]).toMatchObject({ status: "agreed", rounds: 2, answer: "SYNTHESIS" });
+  });
+
+  it("gives the latest version as the response when the synthesis fails, by its own author, and says so", async () => {
+    const cfg = testConfig(fake);
+    cfg.limits.max_discussion_rounds = 1;
+    const chat = newChat({ cfg });
+    await chat.submit("/claude");
+    fake.setScenario({
+      discuss_answer: [{ answer: "v1 from Claude" }], discuss_critique: [{ answer: "Not quite.\nVERDICT: REVISE" }],
+      discuss_synthesis: [{ answer: "HALF-WRITTEN SYNTHESIS", exit: 1 }], chat_codex: [{ answer: "ok" }],
+    });
+    await chat.submit("/discuss Which queue?");
+    await chat.idle();
+    expect(steps()).toEqual(["discuss_answer:claude", "discuss_critique:codex", "discuss_synthesis:codex"]);
+    expect(answers()[2]).toMatchObject({ status: "error", discussion: expect.objectContaining({ step: "synthesis" }) });
+    expect(events.filter((e) => e.type === "warning").map((e) => e.type === "warning" && e.text)).toEqual([expect.stringMatching(/^Codex could not synthesize the discussion \(.+\), so the response is Claude's version 1\.$/)]);
+    expect(discussions()[0]).toMatchObject({ status: "disputed", rounds: 1, answer: "v1 from Claude", answerBackend: "claude", error: null });
+    expect(record(chat).exchanges).toEqual([{ backend: "claude", question: "Which queue?", answer: "v1 from Claude", discussedWith: "codex" }]);
+    await chat.submit("/codex Next?");
+    await chat.idle();
+    const next = fake.calls("chat_codex")[0]!.prompt;
+    expect(next).toContain("**Claude Code, after discussing it with Codex:**\nv1 from Claude");
+    expect(next).not.toContain("HALF-WRITTEN SYNTHESIS");
   });
 
   it("stops at Esc keeping nothing, and turns other questions away meanwhile", async () => {
@@ -218,6 +283,7 @@ describe("Chat: /discuss", () => {
     chat.escape();
     await chat.idle();
     expect(discussions()).toEqual([expect.objectContaining({ status: "interrupted", answer: null, rounds: 1 })]);
+    expect(fake.calls("discuss_synthesis")).toHaveLength(0);
     expect(ui.statuses.at(-1)).toBe("idle");
     await chat.submit("/codex after?");
     await chat.idle();
@@ -225,13 +291,73 @@ describe("Chat: /discuss", () => {
     expect(fake.calls("chat_codex")[0]!.prompt).not.toContain("A slow question?");
   });
 
-  it("ends with the error of a turn that failed, keeping nothing", async () => {
+  it("stops at Esc during the synthesis, keeping neither it nor the agreed version", async () => {
+    const chat = newChat();
+    fake.setScenario({
+      discuss_answer: [{ answer: "AGREED VERSION" }], discuss_critique: [{ answer: "Yes.\nVERDICT: AGREE" }],
+      discuss_synthesis: [{ shell: ["echo $PPID > agent.pid"], sleep: 20_000, answer: "late synthesis" }], chat_codex: [{ answer: "next" }],
+    });
+    await chat.submit("/discuss A slow synthesis?");
+    await waitUntil(() => existsSync(join(repo, "agent.pid")), 10_000, "the synthesis to start");
+    chat.escape();
+    await chat.idle();
+    expect(answers().at(-1)).toMatchObject({ status: "interrupted", discussion: expect.objectContaining({ step: "synthesis" }) });
+    expect(discussions()).toEqual([expect.objectContaining({ status: "interrupted", answer: null, rounds: 1, error: null })]);
+    expect(events.some((e) => e.type === "warning" && e.text.includes("could not synthesize"))).toBe(false);
+    expect(record(chat).exchanges).toEqual([]);
+    await chat.submit("/codex after?");
+    await chat.idle();
+    expect(fake.calls("chat_codex")[0]!.prompt).not.toContain("AGREED VERSION");
+  });
+
+  it("starts no synthesis once Esc came between the last review and it", async () => {
+    const chat = newChat();
+    fake.setScenario({ discuss_answer: [{ answer: "v1" }], discuss_critique: [{ answer: "Yes.\nVERDICT: AGREE" }] });
+    bus.on((e) => {
+      if (e.type === "turn.finished" && e.discussion?.step === "critique") chat.escape();
+    });
+    await chat.submit("/discuss Q?");
+    await chat.idle();
+    expect(steps()).toEqual(["discuss_answer:codex", "discuss_critique:claude"]);
+    expect(discussions()).toEqual([expect.objectContaining({ status: "interrupted", answer: null, rounds: 1 })]);
+  });
+
+  it("keeps no synthesis that finished once Esc came, and ends interrupted", async () => {
+    const chat = newChat();
+    fake.setScenario({
+      discuss_answer: [{ answer: "v1" }], discuss_critique: [{ answer: "Yes.\nVERDICT: AGREE" }],
+      discuss_synthesis: [{ answer: "SYNTHESIS" }], chat_codex: [{ answer: "next" }],
+    });
+    bus.on((e) => {
+      if (e.type === "turn.finished" && e.discussion?.step === "synthesis") chat.escape();
+    });
+    await chat.submit("/discuss Q?");
+    await chat.idle();
+    expect(steps()).toEqual(["discuss_answer:codex", "discuss_critique:claude", "discuss_synthesis:codex"]);
+    expect(answers().at(-1)).toMatchObject({ status: "success", discussion: expect.objectContaining({ step: "synthesis" }) });
+    expect(discussions()).toEqual([expect.objectContaining({ status: "interrupted", answer: null, rounds: 1, error: null })]);
+    expect(record(chat).exchanges).toEqual([]);
+    await chat.submit("/codex after?");
+    await chat.idle();
+    const next = fake.calls("chat_codex")[0]!.prompt;
+    expect(next).not.toContain("SYNTHESIS");
+    expect(next).not.toContain("v1");
+  });
+
+  it("ends with the error of a turn that failed, keeping nothing, and with no synthesis", async () => {
     const chat = newChat();
     fake.setScenario({ discuss_answer: [{ answer: "", exit: 1 }] });
     await chat.submit("/discuss Q?");
     await chat.idle();
     expect(discussions()[0]).toMatchObject({ status: "error", answer: null, rounds: 0, error: expect.any(String) });
     expect(fake.calls("discuss_critique")).toHaveLength(0);
+    expect(fake.calls("discuss_synthesis")).toHaveLength(0);
+
+    fake.setScenario({ discuss_answer: [{ answer: "v1" }], discuss_critique: [{ answer: "", exit: 1 }] });
+    await chat.submit("/discuss Again?");
+    await chat.idle();
+    expect(discussions()[1]).toMatchObject({ status: "error", answer: null, rounds: 1, error: expect.any(String) });
+    expect(fake.calls("discuss_synthesis")).toHaveLength(0);
   });
 });
 

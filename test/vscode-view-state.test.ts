@@ -275,6 +275,34 @@ describe("view state", () => {
     expect(s.timeline[0]).toMatchObject({ kind: "user", discuss: true });
   });
 
+  it("keeps who wrote a discussion's answer: Codex for a synthesis, and nobody named for a card from before synthesis", () => {
+    const synthesis = (id: string): ViewAction[] => [
+      ev({ type: "turn.started", conversationId: "c", turnId: id, backend: "codex", question: "Which queue?", model, discussion: { id: "d", step: "synthesis", round: 1 } }),
+      ev({
+        type: "turn.finished", conversationId: "c", turnId: id, backend: "codex", status: "success", answer: "SYNTHESIS", error: null, model, durationSec: 1, costUsd: 0.4,
+        logDir: "/logs", discussion: { id: "d", step: "synthesis", round: 1 },
+      }),
+    ];
+    let s = run(initialState("active"), { type: "user", text: "Which queue?", discuss: true }, discussStarted, ...discussTurn("t1", "answer", 1, "v1", { costUsd: 0.1 }),
+      ...discussTurn("t2", "critique", 1, "Right.", { verdict: "agree", costUsd: 0.2 }), synthesis("t3")[0]!);
+    expect(s.turn?.discussion).toMatchObject({ step: "synthesis", round: 1 });
+    s = run(s, synthesis("t3")[1]!, ev({
+      type: "discussion.finished", conversationId: "c", discussionId: "d", status: "agreed", answerer: "codex", critic: "claude", rounds: 1, answer: "SYNTHESIS",
+      answerBackend: "codex", error: null, durationSec: 3, costUsd: 0.7, logDir: "/logs",
+    }));
+    const item = s.timeline.at(-1)!;
+    expect(item.kind === "discussion" && item.discussion).toMatchObject({ answer: "SYNTHESIS", answerBackend: "codex", rounds: 1 });
+    expect(item.kind === "discussion" && item.discussion.turns.map((t) => t.discussion?.step)).toEqual(["answer", "critique", "synthesis"]);
+    expect(s.totals.costUsd).toBeCloseTo(0.7); // each turn once, the synthesis too, and not the discussion's total again
+
+    const old = reduce(initialState("active"), ev({
+      type: "discussion.finished", conversationId: "c", discussionId: "e", status: "disputed", answerer: "claude", critic: "codex", rounds: 3, answer: "Old final.", error: null,
+      durationSec: 1, logDir: "/logs",
+    }));
+    const card = old.timeline.at(-1)!;
+    expect(card.kind === "discussion" && "answerBackend" in card.discussion).toBe(false);
+  });
+
   it("says the agents are discussing while a discussion goes on", () => {
     const s = run({ ...initialState("active"), status: "answering" }, discussStarted);
     expect(placeholder(s)).toBe("Codex and Claude are discussing… (Esc stops it)");

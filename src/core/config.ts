@@ -26,7 +26,7 @@ export interface ConfigData {
   limits: {
     max_planning_rounds: number;
     max_review_rounds: number;
-    /** /discuss: how many reviews before the answerer writes its final answer. */
+    /** /discuss: how many reviews at most before Codex synthesizes the final answer. */
     max_discussion_rounds: number;
     max_retries: number;
     max_consecutive_gate_failures: number;

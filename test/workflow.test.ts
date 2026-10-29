@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { Message } from "../src/events.js";
+import { Chat, type ChatUi } from "../src/chat.js";
+import { EventBus, type Message } from "../src/events.js";
 import { approval, critique, finding, impl, issue, plan, review } from "./helpers/builders.js";
 import { testConfig, type ConfigOverrides } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
@@ -396,5 +397,36 @@ describe("Workflow", () => {
     await start(happy());
     const { wf } = resumedWorkflow(h);
     await expect(wf.applyDecision("resume")).rejects.toThrow("not waiting for a decision");
+  });
+});
+
+describe("Workflow after a chat discussion", () => {
+  it("tells every role the discussion's synthesis, as Codex's, and none of its drafts or reviews", async () => {
+    const ui: ChatUi = { info: () => {}, setStatus: () => {}, setEdits: () => {}, setRecipient: () => {}, setModels: () => {}, exit: () => {} };
+    const chat = new Chat({
+      cfg: h.cfg, workspace: h.repo, runsDir: h.runsDir, configFile: join(h.repo, ".agentduo", "config.yaml"), bus: new EventBus(), decider: new ScriptedDecider(), ui,
+    });
+    fake.setScenario({
+      ...happy(), discuss_answer: [{ answer: "DRAFT: keep it." }], discuss_critique: [{ answer: "REVIEW: say why.\nVERDICT: REVISE" }, { answer: "Good.\nVERDICT: AGREE" }],
+      discuss_revise: [{ answer: "DRAFT 2: keep it, old readers need it." }], discuss_synthesis: [{ answer: "SYNTHESIS: keep the old format readable for old readers." }],
+    });
+    try {
+      await chat.submit("/discuss Should the fix keep the old format?");
+      await chat.idle();
+      await chat.submit("/pipeline Make app.txt fixed");
+      await chat.idle();
+    } finally {
+      await chat.stop();
+    }
+    const st = stateOf(h);
+    expect(st.phase).toBe("DONE");
+    expect(st.conversationContext?.exchanges).toEqual([
+      { backend: "codex", question: "Should the fix keep the old format?", answer: "SYNTHESIS: keep the old format readable for old readers.", discussedWith: "claude" },
+    ]);
+    for (const role of ["planner", "plan_reviewer", "plan_finalizer", "implementer", "code_reviewer"]) {
+      const prompt = fake.calls(role)[0]!.prompt;
+      expect(prompt, role).toContain("**Codex, after discussing it with Claude Code:**\nSYNTHESIS: keep the old format readable for old readers.");
+      for (const draft of ["DRAFT: keep it.", "DRAFT 2:", "REVIEW: say why."]) expect(prompt, role).not.toContain(draft);
+    }
   });
 });

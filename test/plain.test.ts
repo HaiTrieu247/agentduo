@@ -104,4 +104,27 @@ describe("plain renderer", () => {
     expect(text).toContain("✓ discussion: Claude agreed after 2 reviews");
     expect(text.trimEnd().endsWith("FINAL TEXT")).toBe(true);
   });
+
+  it("prints a discussion's synthesis as a turn, then the whole final answer as Codex's, and an older discussion's as its answerer's", () => {
+    const bus = new EventBus();
+    let text = "";
+    attachPlainRenderer(bus, { write: (s: string) => { text += s; } }, { color: false, verbose: false, version: "0.1.0", now });
+    const model = { backend: "codex", requested: null, configured: null, resolved: "gpt-x", source: "doctor", isDefault: true, status: "resolved", reason: null } as const;
+    const long = Array.from({ length: 12 }, (_, i) => `synthesis line ${i + 1}`).join("\n");
+    for (const e of [
+      { type: "discussion.started", conversationId: "c", discussionId: "d", question: "Q?", answerer: "claude", critic: "codex", maxRounds: 1 },
+      { type: "turn.started", conversationId: "c", turnId: "t3", backend: "codex", question: "Q?", model, discussion: { id: "d", step: "synthesis", round: 1 } },
+      { type: "turn.finished", conversationId: "c", turnId: "t3", backend: "codex", status: "success", answer: long, error: null, model, durationSec: 3, logDir: "/logs", discussion: { id: "d", step: "synthesis", round: 1 } },
+      { type: "discussion.finished", conversationId: "c", discussionId: "d", status: "disputed", answerer: "claude", critic: "codex", rounds: 1, answer: long, answerBackend: "codex", error: null, durationSec: 9, logDir: "/logs" },
+    ] as DuoEvent[]) bus.emit(e);
+    expect(text).toContain("▶ ◎ Codex (OpenAI) · model default → gpt-x · final answer (synthesis)");
+    expect(text).toContain("… 4 more lines");
+    expect(text).toContain("▲ discussion: no agreement after 1 review");
+    expect(text).toContain("◎ Final answer · Codex");
+    expect(text.trimEnd().endsWith("synthesis line 12")).toBe(true);
+
+    text = "";
+    bus.emit({ type: "discussion.finished", conversationId: "c", discussionId: "e", status: "agreed", answerer: "claude", critic: "codex", rounds: 1, answer: "Old.", error: null, durationSec: 1, logDir: "/logs" });
+    expect(text).toContain("✻ Final answer · Claude");
+  });
 });

@@ -74,8 +74,8 @@ let counter = 0;
 
 /**
  * The chat's conversation with both agents. Only answered turns are context for later prompts; failed and stopped
- * ones are shown, not repeated. A discussion is context only through its final answer, given by the agent that
- * answered and marked as discussed with the other. It lives under <runsDir>/conversations/<id>/: its logs, and once
+ * ones are shown, not repeated. A discussion is context only through its final answer, given by the agent that wrote
+ * it (Codex for a synthesis) and marked as discussed with the other. It lives under <runsDir>/conversations/<id>/: its logs, and once
  * something was said its conversation.json, from which `open` carries it on (the extension's tabs do, after a reload).
  * That directory has no state.json, so it is never a run and never the latest run.
  */
@@ -212,11 +212,11 @@ export class Conversation {
     return d;
   }
 
-  /** A step of discussion `id`: the reviewer writes the critiques, the answerer every version. */
+  /** A step of discussion `id`: the reviewer writes the critiques, the answerer every version, and Codex the synthesis. */
   discussionTurn(id: string, step: DiscussionStep, round: number, earlier: EarlierTask[], workspace: string): { turn: Turn; prompt: string } {
     const d = this.discussions.get(id);
     if (!d) throw new Error(`no discussion ${id}`);
-    const backend = step === "critique" ? d.critic : d.answerer;
+    const backend: Backend = step === "critique" ? d.critic : step === "synthesis" ? "codex" : d.answerer;
     const n = this.before + this.turns.length + 1;
     const turn: Turn = {
       id: `${this.id}-t${n}`, backend, question: d.question, answer: null, status: "running", logPrefix: `${String(n).padStart(3, "0")}-${backend}-${step}${round}`,
@@ -232,13 +232,17 @@ export class Conversation {
     return { turn, prompt };
   }
 
-  /** The discussion is over: its answer, if it has one, is what later prompts carry of it. */
-  finishDiscussion(id: string, answer: string | null): void {
+  /**
+   * The discussion is over: its answer, if it has one, is what later prompts carry of it, from `backend` (Codex for a
+   * synthesis, the answerer for its own version), discussed with the other agent.
+   */
+  finishDiscussion(id: string, answer: string | null, backend?: Backend): void {
     const d = this.discussions.get(id);
     if (!d) return;
     this.discussions.delete(id);
     if (answer === null) return;
-    this.exchanges.push({ backend: d.answerer, question: d.question, answer, discussedWith: d.critic });
+    const by = backend ?? d.answerer;
+    this.exchanges.push({ backend: by, question: d.question, answer, discussedWith: by === d.answerer ? d.critic : d.answerer });
     this.save();
   }
 

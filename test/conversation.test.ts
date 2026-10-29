@@ -80,6 +80,43 @@ describe("Conversation", () => {
     expect(next).not.toContain("REVIEW-ONE");
   });
 
+  it("has Codex write the synthesis, whoever answered, and keeps it as Codex's answer discussed with the other agent", () => {
+    const c = new Conversation(t.path, { id: "conv-s" });
+    const earlier = [{ task: "Add the queue", outcome: "done" }];
+    const q = c.begin("claude", "Earlier question?", [], "/repo");
+    c.finish(q.turn.id, "success", "EARLIER-ANSWER");
+    const d = c.beginDiscussion("claude", "codex", "Which queue?", 3);
+    const first = c.discussionTurn(d.id, "answer", 1, earlier, "/repo");
+    c.finish(first.turn.id, "success", "DRAFT-ONE");
+    const review = c.discussionTurn(d.id, "critique", 1, earlier, "/repo");
+    expect(review.turn.backend).toBe("codex");
+    c.finish(review.turn.id, "success", "REVIEW-ONE", "agree");
+    const synthesis = c.discussionTurn(d.id, "synthesis", 1, earlier, "/repo");
+    expect(synthesis.turn.backend).toBe("codex");
+    expect(synthesis.turn.discussion).toEqual({ id: d.id, step: "synthesis", round: 1 });
+    expect(synthesis.turn.logPrefix).toBe("004-codex-synthesis1");
+    for (const part of ["You are Codex.", "EARLIER-ANSWER", "Add the queue", "DRAFT-ONE", "REVIEW-ONE", "(verdict: AGREE)"]) expect(synthesis.prompt).toContain(part);
+    c.finish(synthesis.turn.id, "success", "SYNTHESIS");
+    c.finishDiscussion(d.id, "SYNTHESIS", "codex");
+    expect(c.context().exchanges.at(-1)).toEqual({ backend: "codex", question: "Which queue?", answer: "SYNTHESIS", discussedWith: "claude" });
+
+    const next = Conversation.open(t.path, "conv-s").begin("claude", "And then?", [], "/repo").prompt;
+    expect(next).toContain("**Codex, after discussing it with Claude Code:**\nSYNTHESIS");
+    for (const draft of ["DRAFT-ONE", "REVIEW-ONE"]) expect(next).not.toContain(draft);
+  });
+
+  it("keeps the answerer's own version, discussed with the reviewer, when the response is not a synthesis", () => {
+    const c = new Conversation(t.path);
+    const d = c.beginDiscussion("claude", "codex", "Which queue?", 3);
+    c.finishDiscussion(d.id, "CLAUDE-VERSION", "claude");
+    const e = c.beginDiscussion("codex", "claude", "And the retries?", 3);
+    c.finishDiscussion(e.id, "CODEX-SYNTHESIS", "codex");
+    expect(c.context().exchanges).toEqual([
+      { backend: "claude", question: "Which queue?", answer: "CLAUDE-VERSION", discussedWith: "codex" },
+      { backend: "codex", question: "And the retries?", answer: "CODEX-SYNTHESIS", discussedWith: "claude" },
+    ]);
+  });
+
   it("keeps nothing of a discussion that ended without an answer", () => {
     const c = new Conversation(t.path);
     const d = c.beginDiscussion("claude", "codex", "Unanswered question?", 3);

@@ -1,7 +1,7 @@
 import { Box, Text } from "ink";
 import type { Activity, Agent, Message, ModelIdentity } from "../../events.js";
 import {
-  activityText, DISCUSSION_LINES, discussionOutcome, discussionStepText, firstLines, formatDuration, messageHeadline, modelText, partyLabel, PROVIDERS, roleLabel,
+  activityText, DISCUSSION_LINES, discussionAuthor, discussionOutcome, discussionStepText, firstLines, formatDuration, messageHeadline, modelText, partyLabel, PROVIDERS, roleLabel,
   statusIcon, usageText, verdictText,
 } from "../format.js";
 import type { DiscussionView, StepView, TurnView } from "./store.js";
@@ -101,7 +101,8 @@ const OUTCOME: Record<DiscussionView["status"], { mark: string; color: string }>
 export function DiscussionBlock({ discussion: d }: { discussion: DiscussionView }) {
   const o = OUTCOME[d.status];
   const right = [formatDuration(d.durationSec), usageText(d.costUsd, d.tokens)].filter(Boolean).join(" · ");
-  const p = PROVIDERS[d.answerer];
+  const by = discussionAuthor(d);
+  const p = PROVIDERS[by];
   return (
     <Box flexDirection="column" marginTop={1} marginBottom={1} width="100%">
       <Box>
@@ -116,7 +117,7 @@ export function DiscussionBlock({ discussion: d }: { discussion: DiscussionView 
       </Box>
       {d.answer !== null ? (
         <Box flexDirection="column">
-          <Text color={AGENT_COLOR[d.answerer]} bold>{`${p.mark} Final answer · ${p.agent}`}</Text>
+          <Text color={AGENT_COLOR[by]} bold>{`${p.mark} Final answer · ${p.agent}`}</Text>
           <Text wrap="wrap">{d.answer}</Text>
         </Box>
       ) : d.error ? <Text color="red" wrap="wrap">{`  ✗ ${d.error}`}</Text> : null}

@@ -112,7 +112,7 @@ export function modelText(m: ModelIdentity | null | undefined, o: { short?: bool
 }
 
 // ------------------------------------------------------------------ /discuss
-/** What a discussion's turn is: "answer, version 2", "review of version 1". */
+/** What a discussion's turn is: "answer, version 2", "review of version 1", "final answer (synthesis)". */
 export function discussionStepText(place: { step: DiscussionStep; round: number }): string {
   switch (place.step) {
     case "answer":
@@ -120,6 +120,8 @@ export function discussionStepText(place: { step: DiscussionStep; round: number 
       return `answer, version ${place.round}`;
     case "critique":
       return `review of version ${place.round}`;
+    case "synthesis":
+      return "final answer (synthesis)";
     case "final":
       return `final answer, version ${place.round}`;
   }
@@ -134,6 +136,8 @@ export function discussionDoing(place: { step: DiscussionStep; round: number }):
       return `reviewing version ${place.round}`;
     case "revise":
       return `revising: version ${place.round}`;
+    case "synthesis":
+      return "synthesizing the final answer";
     case "final":
       return "writing the final answer";
   }
@@ -148,6 +152,9 @@ export function firstLines(text: string, n: number): { shown: string; more: numb
   return { shown: lines.slice(0, n).join("\n"), more: Math.max(0, lines.length - n) };
 }
 
+/** Who wrote a discussion's answer: Codex for a synthesis; the answerer for a discussion from before synthesis, or when it failed. */
+export const discussionAuthor = (d: { answerer: Agent; answerBackend?: Agent }): Agent => d.answerBackend ?? d.answerer;
+
 export const verdictText = (v: Verdict | null | undefined): string => (v === "agree" ? "AGREE" : v === "revise" ? "REVISE" : "no verdict, taken as REVISE");
 
 /** How a discussion ended, in a few words. */
@@ -157,7 +164,7 @@ export function discussionOutcome(d: { status: DiscussionStatus; answerer: Agent
     case "agreed":
       return `${PROVIDERS[d.critic].agent} agreed after ${reviews}`;
     case "disputed":
-      return `no agreement after ${reviews}: the final answer says what is still disputed`;
+      return `no agreement after ${reviews}`;
     case "interrupted":
       return "stopped";
     case "error":

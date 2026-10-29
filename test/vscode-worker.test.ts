@@ -154,13 +154,16 @@ describe("vscode worker", () => {
     });
   });
 
-  it("discusses a question sent with the Discuss route: the recipient answers, the other reviews, no run", async () => {
-    fake.setScenario({ discuss_answer: [{ answer: "Use Postgres." }], discuss_critique: [{ answer: "Agreed.\nVERDICT: AGREE" }] });
+  it("discusses a question sent with the Discuss route: the recipient answers, the other reviews, Codex synthesizes, no run", async () => {
+    fake.setScenario({
+      discuss_answer: [{ answer: "Use Postgres." }], discuss_critique: [{ answer: "Agreed.\nVERDICT: AGREE" }], discuss_synthesis: [{ answer: "Postgres, as agreed." }],
+    });
     const { h } = await open();
     await h.client.request({ type: "submit", conversation: C, text: "Redis or Postgres?", route: "discuss" });
     const m = await h.waitFor(isEvent("discussion.finished"));
-    expect(m.kind === "event" && m.event).toMatchObject({ status: "agreed", answerer: "codex", critic: "claude", answer: "Use Postgres.", rounds: 1 });
-    expect(fake.calls().map((c) => `${c.role}:${c.backend}`)).toEqual(["discuss_answer:codex", "discuss_critique:claude"]);
+    expect(m.kind === "event" && m.event).toMatchObject({ status: "agreed", answerer: "codex", critic: "claude", answer: "Postgres, as agreed.", answerBackend: "codex", rounds: 1 });
+    expect(fake.calls().map((c) => `${c.role}:${c.backend}`)).toEqual(["discuss_answer:codex", "discuss_critique:claude", "discuss_synthesis:codex"]);
+    expect(h.events().filter((e) => e.type === "turn.finished").map((e) => e.type === "turn.finished" && e.discussion?.step)).toEqual(["answer", "critique", "synthesis"]);
     expect(existsSync(join(runsDir, ".lock"))).toBe(true); // the chat session holds the workspace, as for any question
     expect(readdirSync(runsDir).filter((d) => ![".lock", ".gitignore", "conversations"].includes(d))).toEqual([]); // no run
   });

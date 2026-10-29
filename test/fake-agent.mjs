@@ -3,8 +3,8 @@
 // role X from $FAKE_SCENARIO (the last response repeats). Every call is appended to $FAKE_LOG.
 // A conversation prompt ("[agentduo-conversation]") is role "chat_<backend>" (else "chat"); its responses give an
 // `answer` in prose, which comes back as is (default: a short answer naming the backend). A /discuss turn
-// ("[agentduo-discussion: <step>, …]" on its second line) is role "discuss_<step>" (answer, critique, revise, final);
-// an unscripted critique agrees.
+// ("[agentduo-discussion: <step>, …]" on its second line) is role "discuss_<step>" (answer, critique, revise,
+// synthesis); an unscripted critique agrees, and an unscripted synthesis is a chat answer.
 // Claude in host mode (--permission-prompt-tool stdio) reads the prompt as a stream-json user message, asks
 // for each scripted `permissions` entry with a control_request, and applies the answer the way Claude does.
 // `codex doctor --json` prints a report whose config.load model is the last `-c model=…` override, else

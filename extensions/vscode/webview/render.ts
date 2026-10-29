@@ -5,7 +5,7 @@ import {
 } from "../../../src/core/commands.js";
 import type { Activity, Agent, Message, ModelIdentity, Party, PermissionAnswer } from "../../../src/events.js";
 import {
-  discussionDoing, discussionOutcome, discussionStepText, formatClock, formatDuration, modelText, partyLabel, permissionAnswerText, PROVIDERS, roleLabel, usageText,
+  discussionAuthor, discussionDoing, discussionOutcome, discussionStepText, formatClock, formatDuration, modelText, partyLabel, permissionAnswerText, PROVIDERS, roleLabel, usageText,
   verdictText, whoLabel,
 } from "../../../src/ui/format.js";
 import type { DecisionChoice, Route, SettingRequest, WebviewCommand } from "../src/protocol.js";
@@ -266,7 +266,7 @@ function answerCard(t: TurnCard, live: { now: number } | null): HTMLElement {
   const head = place
     ? [h("span", { class: "role", title: modelTitle(t.model) }, live ? discussionDoing(place) : discussionStepText(place)), verdictChip(place)]
     : [h("span", { class: "model", title: modelTitle(t.model) }, shortModel(t.model))];
-  const body = live ? working(t.activities, place?.step === "critique" ? "Reviewing…" : "Thinking…")
+  const body = live ? working(t.activities, place?.step === "critique" ? "Reviewing…" : place?.step === "synthesis" ? "Synthesizing…" : "Thinking…")
     : t.status === "success" ? [row("row-text row-answer", markdownBody(t.answer ?? ""))]
       : t.status === "interrupted" ? [row("row-text s-warn", h("span", { class: "warn-text" }, "Stopped before it answered."))]
         : [row("row-text s-err", h("span", { class: "err-text", role: "alert" }, `No answer: ${t.error ?? "the call failed"}`))];
@@ -296,7 +296,7 @@ function discussionCard(d: DiscussionCard, live: { now: number; turn: TurnCard |
   const status = { status: d.status ?? "error", answerer: d.answerer, critic: d.critic, rounds: d.rounds ?? 0 };
   const meta = [formatDuration(d.durationSec), usageText(d.costUsd, d.tokens)].filter(Boolean).join(" · ");
   const n = d.turns.length;
-  const answerer = PROVIDERS[d.answerer];
+  const by = discussionAuthor(d);
   return h("article", { class: `turn discussion outcome-${o.tone}`, label: `Discussion: ${discussionOutcome(status)}` },
     cardHead(title, [h("span", { class: "role" }, who)], meta),
     h("div", { class: `discussion-outcome note-${o.tone}` }, icon(o.icon, "note-icon"), h("span", {}, discussionOutcome(status)), d.error ? h("span", { class: "err-text" }, `: ${d.error}`) : null),
@@ -304,7 +304,7 @@ function discussionCard(d: DiscussionCard, live: { now: number; turn: TurnCard |
       h("div", { class: "discussion-turns" }, ...d.turns.map((t) => answerCard(t, null)))) : null,
     d.answer !== null && d.answer !== undefined
       ? h("section", { class: "discussion-final", label: "Final answer" },
-        h("div", { class: "final-head" }, providerMark(d.answerer), h("strong", {}, "Final answer"), h("span", { class: "muted" }, `· ${answerer.agent}`)),
+        h("div", { class: "final-head" }, providerMark(by), h("strong", {}, "Final answer"), h("span", { class: "muted" }, `· ${PROVIDERS[by].agent}`)),
         markdownBody(d.answer))
       : null);
 }

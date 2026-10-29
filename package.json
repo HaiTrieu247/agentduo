@@ -45,7 +45,10 @@
     "smoke:real": "npm run build && node scripts/smoke-real.mjs",
     "prepublishOnly": "npm run typecheck && npm test && npm run build",
     "demo:ui": "npm run build && node scripts/demo-ui.mjs",
-    "version": "node scripts/sync-vscode-version.mjs && git add extensions/vscode/package.json"
+    "preversion": "node scripts/release.mjs check",
+    "version": "node scripts/sync-vscode-version.mjs && git add extensions/vscode/package.json",
+    "postversion": "node scripts/release.mjs publish",
+    "release": "node scripts/release.mjs publish"
   },
   "dependencies": {
     "ajv": "^8.20.0",

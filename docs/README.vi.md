@@ -26,12 +26,17 @@ Code và Codex; pipeline đầy đủ chỉ chạy khi bạn yêu cầu:
   chat sẽ báo).
 - **`/pipeline <yêu cầu>`** chạy cả workflow (plan → critique → finalize → implement → verify → review). Mọi vai trò
   đều được biết cuộc trò chuyện trước khi giao việc và các việc pipeline trước trong phiên chat đã làm gì.
-- **`/discuss <câu hỏi>`** cho hai agent thảo luận tới khi đồng ý một câu trả lời. Agent ghi dưới ô nhập trả lời,
-  agent kia phản biện và kết thúc bằng `VERDICT: AGREE` hoặc `VERDICT: REVISE`, rồi agent thứ nhất sửa cho tới khi bên
-  phản biện đồng ý, tối đa `limits.max_discussion_rounds` lần phản biện (mặc định 3; phản biện thiếu verdict tính là
-  REVISE). Nếu lần phản biện cuối vẫn chưa đồng ý, agent trả lời viết câu trả lời cuối có ghi rõ chỗ còn bất đồng. Mỗi
-  lượt hiện ra khi xong (ở terminal là vài dòng đầu; `--verbose` hiện đầy đủ), rồi tới câu trả lời đã thống nhất hoặc
-  câu trả lời cuối, đầy đủ. Chỉ câu trả lời đó được đưa vào cuộc trò chuyện, như một câu trả lời đã thảo luận với agent kia.
+- **`/discuss <câu hỏi>`** cho hai agent cùng đi tới một câu trả lời. Agent ghi dưới ô nhập trả lời, agent kia phản
+  biện và kết thúc bằng `VERDICT: AGREE` hoặc `VERDICT: REVISE`, rồi agent thứ nhất sửa cho tới khi bên phản biện đồng
+  ý, tối đa `limits.max_discussion_rounds` lần phản biện (mặc định 3; phản biện thiếu verdict tính là REVISE). Sau đó
+  Codex, trong một lần gọi riêng, tổng hợp toàn bộ cuộc thảo luận thành câu trả lời cuối. Câu tổng hợp giữ những gì
+  đứng vững từ cả hai agent, thêm các ý đúng trong phản biện mà phiên bản cuối còn thiếu, và bỏ những gì cuộc thảo luận
+  đã chỉ ra là sai. Nếu lần phản biện cuối vẫn chưa đồng ý, câu trả lời kết bằng một mục ngắn "Còn bất đồng". Người
+  tổng hợp luôn là Codex, nên khi Codex cũng là bên trả lời thì câu tổng hợp đến từ cùng một model, trong một lần gọi
+  mới được yêu cầu giữ trung lập. Mỗi cuộc thảo luận tốn từ 3 đến 2N+1 lần gọi agent, với N là số lần phản biện tối đa.
+  Mỗi lượt hiện ra khi xong (ở terminal là vài dòng đầu; `--verbose` hiện đầy đủ), rồi tới câu trả lời cuối, đầy đủ.
+  Chỉ câu trả lời đó được đưa vào cuộc trò chuyện, như câu trả lời của Codex đã thảo luận với Claude. Nếu bước tổng hợp
+  bị lỗi, agentduo báo một warning và câu trả lời là phiên bản gần nhất, ghi tên agent đã viết nó.
 - **Gõ trong lúc pipeline đang chạy** thì tin đó thành ghi chú cho các bước kế tiếp. `/claude`, `/codex`,
   `/pipeline` và `/discuss` khi đó sẽ báo workspace đang bận; mỗi lúc chỉ có một lần gọi agent.
 - **Esc** dừng việc đang chạy. Câu trả lời hay cuộc thảo luận bị dừng thì kết thúc ở đó, và không phần nào của nó được
@@ -68,7 +73,7 @@ Thay đổi áp dụng từ câu hỏi hoặc lần gọi agent kế tiếp; câ
 
 `extensions/vscode` đưa chat này vào sidebar của VS Code. Sidebar có timeline của hai agent, phần trả lời HUMAN_REVIEW và quyền của Claude ngay trên ô nhập, cùng các nút mở plan, review, report và xem thay đổi của run bằng diff editor. Extension chạy engine của agentduo bằng Node của bạn (≥ 22.12). Nó dùng chung cấu hình, thư mục run và lock với `duo`, nên run bắt đầu ở bên này có thể tiếp tục ở bên kia.
 
-Extension chưa có trên Marketplace. Để cài bản build tại máy:
+Extension có trên Marketplace (`HaiTrieuThinh.agentduo-vscode`). Để cài bản build tại máy:
 
 ```sh
 npm ci

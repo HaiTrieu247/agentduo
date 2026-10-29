@@ -408,4 +408,41 @@ describe("Ink components", () => {
     // The turns' usage counts once: the discussion's total is not added again.
     expect(s.totals.costUsd).toBe(0);
   });
+
+  it("chat: a discussion's synthesis is a turn of its own, and its final answer is Codex's, whoever answered", () => {
+    const model = { backend: "codex", requested: null, configured: null, resolved: "gpt-x", source: "doctor", isDefault: true, status: "resolved", reason: null } as const;
+    type Step = "answer" | "critique" | "synthesis";
+    const started = (id: string, backend: "codex" | "claude", step: Step, round: number): DuoEvent =>
+      ({ type: "turn.started", conversationId: "c", turnId: id, backend, question: "Q?", model: { ...model, backend }, discussion: { id: "d", step, round } });
+    const finished = (id: string, backend: "codex" | "claude", step: Step, round: number, answer: string, costUsd: number, verdict?: "agree"): DuoEvent =>
+      ({ type: "turn.finished", conversationId: "c", turnId: id, backend, status: "success", answer, error: null, model: { ...model, backend }, durationSec: 2, costUsd, logDir: "/l", discussion: { id: "d", step, round, ...(verdict ? { verdict } : {}) } });
+    const long = Array.from({ length: 12 }, (_, i) => `synthesis line ${i + 1}`).join("\n");
+    let s = play([
+      { type: "discussion.started", conversationId: "c", discussionId: "d", question: "Q?", answerer: "claude", critic: "codex", maxRounds: 3 },
+      started("t1", "claude", "answer", 1), finished("t1", "claude", "answer", 1, "Use Postgres.", 0.1),
+      started("t2", "codex", "critique", 1), finished("t2", "codex", "critique", 1, "Right.", 0.1, "agree"),
+      started("t3", "codex", "synthesis", 1),
+    ], initialView("0.1.0", false, { workspace: "/repo" }));
+    expect(s.turn?.discussion).toMatchObject({ step: "synthesis", round: 1 });
+    s = play([finished("t3", "codex", "synthesis", 1, long, 0.1), {
+      type: "discussion.finished", conversationId: "c", discussionId: "d", status: "agreed", answerer: "claude", critic: "codex", rounds: 1, answer: long, answerBackend: "codex",
+      error: null, durationSec: 6, costUsd: 0.3, logDir: "/l",
+    }], s);
+    const frames = s.items.filter((i) => i.kind === "answer" || i.kind === "discussion").map((item) => render(<StaticItemView item={item} />).lastFrame() ?? "");
+    expect(frames).toHaveLength(4);
+    expect(frames[2]).toContain("Codex");
+    expect(frames[2]).toContain("final answer (synthesis)");
+    expect(frames[2]).not.toContain("synthesis line 9"); // the turn shows its first lines…
+    expect(frames[3]).toContain("Discussion: Codex agreed after 1 review");
+    expect(frames[3]).toContain("◎ Final answer · Codex");
+    expect(frames[3]).toContain("synthesis line 12"); // …the final answer all of them
+    expect(s.totals.costUsd).toBeCloseTo(0.3);
+
+    // A discussion that names no author (one from before synthesis) is its answerer's.
+    const old = play([{
+      type: "discussion.finished", conversationId: "c", discussionId: "e", status: "disputed", answerer: "claude", critic: "codex", rounds: 3, answer: "Old final.", error: null,
+      durationSec: 1, logDir: "/l",
+    }], initialView("0.1.0", false, { workspace: "/repo" }));
+    expect(render(<StaticItemView item={old.items.at(-1)!} />).lastFrame()).toContain("✻ Final answer · Claude");
+  });
 });

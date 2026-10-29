@@ -93,17 +93,22 @@ export type TurnStatus = "success" | "error" | "interrupted";
 
 /**
  * /discuss: one agent answers, the other reviews it, and the first revises until the reviewer agrees or the rounds
- * run out; then it writes a final answer that says what is still disputed.
+ * run out; then Codex, in a call of its own, synthesizes the discussion into the final answer. `final` (the answerer's
+ * own last version after the rounds ran out) is what discussions did before; new ones never take that step, but
+ * discussions saved by then (an extension tab's view.json) still show it.
  */
-export type DiscussionStep = "answer" | "critique" | "revise" | "final";
+export type DiscussionStep = "answer" | "critique" | "revise" | "synthesis" | "final";
 export type Verdict = "agree" | "revise";
-/** A turn's place in a discussion: an answer step writes version `round`; a critique reviews version `round`. */
+/**
+ * A turn's place in a discussion: an answer step writes version `round`; a critique reviews version `round`; the
+ * synthesis comes after `round` reviews.
+ */
 export interface DiscussionPlace {
   id: string;
   step: DiscussionStep;
   round: number;
 }
-/** agreed: the reviewer agreed; disputed: the rounds ran out, and the final answer says what is still disputed. */
+/** agreed: the reviewer agreed; disputed: the last review still asked for changes. Either way the reviews are over. */
 export type DiscussionStatus = "agreed" | "disputed" | "interrupted" | "error";
 
 /**
@@ -134,12 +139,13 @@ export type DuoEvent =
   /** A /discuss began; its turns follow, each with its place in it. */
   | { type: "discussion.started"; conversationId: string; discussionId: string; question: string; answerer: Agent; critic: Agent; maxRounds: number }
   /**
-   * The discussion is over. `answer` is the agreed or final version (the response); null when it was stopped or failed.
-   * `rounds` counts the reviews; usage and duration add up its turns, which already reported theirs.
+   * The discussion is over. `answer` is the response: Codex's synthesis, or the latest version when the synthesis
+   * failed; null when it was stopped or failed before. `answerBackend` wrote it (absent before synthesis existed: the
+   * answerer did). `rounds` counts the reviews; usage and duration add up its turns, which already reported theirs.
    */
   | {
     type: "discussion.finished"; conversationId: string; discussionId: string; status: DiscussionStatus; answerer: Agent; critic: Agent; rounds: number;
-    answer: string | null; error: string | null; durationSec: number; costUsd?: number; tokens?: number; logDir: string;
+    answer: string | null; answerBackend?: Agent; error: string | null; durationSec: number; costUsd?: number; tokens?: number; logDir: string;
   }
   /** Running totals for the current agent call (all attempts so far). */
   | { type: "agent.usage"; agent: Party; costUsd?: number; tokens?: number }

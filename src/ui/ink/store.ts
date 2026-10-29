@@ -24,13 +24,15 @@ export interface TurnView {
   discussion?: DiscussionPlace & { verdict?: Verdict | null };
 }
 
-/** A /discuss once it is over: how it ended, and its answer (the agreed or final version), printed whole. */
+/** A /discuss once it is over: how it ended, and its answer (Codex's synthesis, or the latest version), printed whole. */
 export interface DiscussionView {
   status: DiscussionStatus;
   answerer: Agent;
   critic: Agent;
   rounds: number;
   answer: string | null;
+  /** Who wrote `answer`; absent: the answerer. */
+  answerBackend?: Agent;
   error: string | null;
   durationSec: number;
   costUsd?: number;
@@ -210,8 +212,9 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
       };
     case "discussion.finished": {
       // Its turns have counted their usage already.
-      const { status, answerer, critic, rounds, answer, error, durationSec, costUsd, tokens } = e;
-      return { ...push(s, { kind: "discussion", discussion: { status, answerer, critic, rounds, answer, error, durationSec, costUsd, tokens } }), discussion: null };
+      const { status, answerer, critic, rounds, answer, answerBackend, error, durationSec, costUsd, tokens } = e;
+      const view: DiscussionView = { status, answerer, critic, rounds, answer, ...(answerBackend ? { answerBackend } : {}), error, durationSec, costUsd, tokens };
+      return { ...push(s, { kind: "discussion", discussion: view }), discussion: null };
     }
     case "permission.requested":
       return { ...s, permissions: [...s.permissions, { role: e.role, agent: e.agent, request: e.request }] };

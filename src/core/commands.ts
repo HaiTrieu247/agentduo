@@ -83,7 +83,7 @@ export const COMMANDS: CommandInfo[] = [
   { name: "/claude", usage: "/claude <question>", description: "ask Claude Code; /claude alone sends your next messages to Claude", args: true },
   { name: "/codex", usage: "/codex <question>", description: "ask Codex; /codex alone sends your next messages to Codex", args: true },
   { name: "/pipeline", usage: "/pipeline <task>", description: "run the full workflow: plan → critique → finalize → implement → verify → review", args: true },
-  { name: "/discuss", usage: "/discuss <question>", description: "the recipient answers, the other agent reviews, and they revise until they agree", args: true },
+  { name: "/discuss", usage: "/discuss <question>", description: "the recipient answers, the other agent reviews, they revise until they agree, then Codex sums it up", args: true },
   { name: "/plan", usage: "/plan", description: "show the final plan of the current run", args: false },
   { name: "/diff", usage: "/diff", description: "show what the current run changed", args: false },
   { name: "/status", usage: "/status", description: "show where the current run is, and what it has cost", args: false },
@@ -256,7 +256,7 @@ export function helpText(): string {
       title: [
         "Type a message and press Enter: it goes to the agent named below the input (Codex at first; /claude or /codex switches).",
         "With /pipeline <task> both take the task on: Codex plans and reviews it, Claude critiques the plan and implements it.",
-        "With /discuss <question> that agent answers, the other reviews the answer, and they revise it until they agree.",
+        "With /discuss <question> that agent answers, the other reviews it until they agree, and Codex sums the discussion up as the answer.",
       ],
       rows: COMMANDS.map((c) => [c.usage, c.description]),
     },

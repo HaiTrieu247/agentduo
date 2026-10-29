@@ -1,6 +1,6 @@
 import type { Activity, Decider, DuoEvent, EventBus, PermissionAnswer, PermissionDecider } from "../events.js";
 import {
-  activityText, DISCUSSION_LINES, discussionOutcome, discussionStepText, firstLines, formatDuration, messageHeadline, modelText, permissionAnswerText, PROVIDERS, roleLabel,
+  activityText, DISCUSSION_LINES, discussionAuthor, discussionOutcome, discussionStepText, firstLines, formatDuration, messageHeadline, modelText, permissionAnswerText, PROVIDERS, roleLabel,
   statusIcon, usageText, verdictText,
 } from "./format.js";
 
@@ -110,8 +110,9 @@ export function attachPlainRenderer(bus: EventBus, out: TextSink, o: PlainOption
         const mark = e.status === "agreed" ? paint("green", "✓") : e.status === "error" ? paint("red", "✗") : paint("yellow", e.status === "disputed" ? "▲" : "■");
         line(`${mark} ${paint("bold", `discussion: ${discussionOutcome(e)}`)}${tail ? paint("dim", ` (${tail})`) : ""}${e.error ? `: ${e.error}` : ""}`, "", "discuss");
         if (e.answer !== null) {
-          const p = PROVIDERS[e.answerer];
-          line(paint("bold", `${p.mark} Final answer · ${p.agent}`), e.answerer, "discuss");
+          const by = discussionAuthor(e);
+          const p = PROVIDERS[by];
+          line(paint("bold", `${p.mark} Final answer · ${p.agent}`), by, "discuss");
           out.write(`${e.answer.trimEnd()}\n\n`);
         }
         break;

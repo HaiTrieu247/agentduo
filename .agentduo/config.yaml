@@ -1,0 +1,5 @@
+claude:
+  role_args:
+    implementer:
+      - --permission-mode
+      - acceptEdits
