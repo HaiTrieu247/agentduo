@@ -51,6 +51,10 @@ export interface ChatOptions {
   env?: NodeJS.ProcessEnv;
   /** Model lookups to share (the extension starts them before the chat exists); by default the chat has its own. */
   models?: ModelRegistry;
+  /** Carries on the conversation saved under this id (an extension tab after a reload), or starts one by that id. */
+  conversationId?: string;
+  /** Why a pipeline cannot start now because another conversation of the workspace runs one; null when none does. */
+  busyElsewhere?: () => string | null;
 }
 
 /** A new run for `task` in this workspace, with the config it starts with saved beside it. */
@@ -127,7 +131,6 @@ export class Chat {
   private paused: RunStore | null = null;
   private last: RunStore | null = null;
   private escaped = false;
-  private earlier: EarlierTask[] = [];
   private conversation: Conversation;
   private runner: AgentRunner | null = null;
   private recipient: Backend = "codex";
@@ -142,7 +145,8 @@ export class Chat {
     this.git = new Git(o.workspace);
     this.cfg = structuredClone(o.cfg);
     this.env = o.env ?? process.env;
-    this.conversation = new Conversation(o.runsDir);
+    this.conversation = o.conversationId ? Conversation.open(o.runsDir, o.conversationId) : new Conversation(o.runsDir);
+    this.recipient = this.conversation.recipient ?? "codex";
     this.ownModels = !o.models;
     this.models = o.models ?? new ModelRegistry({ cfg: () => this.cfg, workspace: o.workspace, env: this.env, onChange: (m) => o.ui.setModels(m) });
   }
@@ -155,6 +159,32 @@ export class Chat {
   /** Who a plain message goes to now. */
   get to(): Backend {
     return this.recipient;
+  }
+
+  get conversationId(): string {
+    return this.conversation.id;
+  }
+
+  /** What the conversation is about: its first question, task or discussion ("" until then). */
+  get title(): string {
+    return this.conversation.title;
+  }
+
+  /** A pipeline run of this chat is going (another conversation of the workspace waits for it to start one). */
+  get runningPipeline(): boolean {
+    return this.active?.kind === "pipeline";
+  }
+
+  /** The conversation is about its first question, task or discussion. */
+  private entitle(text: string): void {
+    if (!this.conversation.title) this.conversation.title = firstLine(text, 80);
+  }
+
+  /** Another conversation of the workspace runs a pipeline: says so, and nothing starts. */
+  private elsewhere(): boolean {
+    const why = this.o.busyElsewhere?.() ?? null;
+    if (why) this.o.ui.info(why);
+    return !!why;
   }
 
   /** Shift+Tab: switch Claude between asking before edits and editing automatically. */
@@ -237,6 +267,7 @@ export class Chat {
   selectRecipient(backend: Backend): void {
     if (this.recipient === backend) return;
     this.recipient = backend;
+    this.conversation.recipient = backend;
     this.o.ui.setRecipient(backend);
   }
 
@@ -310,7 +341,8 @@ export class Chat {
 
   /** Starts the answer in the background: the active record exists before anything can finish, and only it clears itself. */
   private startTurn(backend: Backend, question: string): void {
-    const { turn, prompt, omitted } = this.conversation.begin(backend, question, this.earlier, this.o.workspace);
+    this.entitle(question);
+    const { turn, prompt, omitted } = this.conversation.begin(backend, question, this.conversation.earlier, this.o.workspace);
     this.noteOmitted(omitted);
     const exec: Extract<Execution, { kind: "conversation" }> = { kind: "conversation", turnId: turn.id, backend, abort: new AbortController(), done: Promise.resolve() };
     this.active = exec;
@@ -381,6 +413,7 @@ export class Chat {
       return;
     }
     const conversation = this.conversation;
+    this.entitle(question);
     const maxRounds = this.cfg.limits.max_discussion_rounds;
     const d = conversation.beginDiscussion(answerer, critic, question, maxRounds);
     this.noteOmitted(d.context.omitted);
@@ -392,7 +425,7 @@ export class Chat {
     const total = { durationSec: 0, costUsd: 0, tokens: 0 };
     const step = async (kind: DiscussionStep, round: number): Promise<TurnOutcome> => {
       if (exec.abort.signal.aborted) return { status: "interrupted", answer: null, error: null, verdict: null, durationSec: 0, costUsd: 0, tokens: 0 };
-      const { turn, prompt } = conversation.discussionTurn(d.id, kind, round, this.earlier, this.o.workspace);
+      const { turn, prompt } = conversation.discussionTurn(d.id, kind, round, conversation.earlier, this.o.workspace);
       const out = await this.callTurn(turn, prompt, exec.abort.signal, { id: d.id, step: kind, round });
       total.durationSec += out.durationSec;
       total.costUsd += out.costUsd;
@@ -445,6 +478,7 @@ export class Chat {
   // ------------------------------------------------------------------ pipeline
   private startPipeline(task: string): void {
     if (this.active) return this.busy();
+    if (this.elsewhere()) return;
     const problem = missingCli(this.cfg, Object.values(this.cfg.agents), this.env);
     if (problem) {
       this.o.ui.info(problem.message, "error");
@@ -453,8 +487,9 @@ export class Chat {
     const left = this.paused;
     const cfg = structuredClone(this.cfg);
     const context = this.conversation.context();
-    const { store, state } = newRun(this.o.runsDir, this.o.workspace, task, cfg, [...this.earlier], context);
+    const { store, state } = newRun(this.o.runsDir, this.o.workspace, task, cfg, this.conversation.earlier, context);
     if (!this.start(store, state, cfg)) return;
+    this.entitle(task);
     if (left) {
       this.paused = null;
       this.o.ui.info(`Run ${left.taskId} stays stopped and resumable: /resume ${left.taskId} continues it (or duo resume ${left.taskId}).`);
@@ -473,6 +508,7 @@ export class Chat {
     const workflow = new Workflow({ cfg, repo: this.o.workspace, store, state, bus: this.o.bus, decider: this.o.decider, permissions: this.o.permissions });
     this.escaped = false;
     const exec: Extract<Execution, { kind: "pipeline" }> = { kind: "pipeline", store, workflow, cfg, done: Promise.resolve() };
+    const conversation = this.conversation;
     this.active = exec;
     this.o.ui.setStatus("running");
     exec.done = (async () => {
@@ -493,7 +529,8 @@ export class Chat {
         return;
       }
       if (code === EXIT.HUMAN_REVIEW) this.o.ui.info("The run is waiting for your decision; type /resume to decide.");
-      this.earlier.push(await this.outcome(st));
+      // The conversation that started it keeps what came of it.
+      conversation.addEarlier(await this.outcome(st));
     })().finally(() => {
       if (this.active === exec) this.active = null;
       if (!this.active) this.o.ui.setStatus(this.paused ? "paused" : "idle");
@@ -525,6 +562,7 @@ export class Chat {
   /** /resume [note | run id]: the stopped run, another resumable run by id, or the latest one. */
   private resume(arg: string): void {
     if (this.active) return this.busy();
+    if (this.elsewhere()) return;
     let note = arg.trim();
     const byId = RUN_ID.test(note) && !note.includes("..") ? resumableRun(this.o.runsDir, this.o.workspace, note) : null;
     if (byId) note = "";
@@ -557,7 +595,6 @@ export class Chat {
     }
     if (this.paused) this.o.ui.info(`Left run ${this.paused.taskId} as it is; /resume ${this.paused.taskId} continues it.`);
     this.paused = null;
-    this.earlier = [];
     this.conversation = new Conversation(this.o.runsDir);
     this.runner = null;
     this.omitted = 0;
@@ -578,7 +615,7 @@ export class Chat {
    * Applies a setting to new runs and questions and, from its next agent call, to the run that is going (whose saved
    * config follows, so a resume keeps it); --save also writes it to the config file.
    */
-  private change(change: SettingChange, save: boolean, text: () => string): void {
+  private change(change: SettingChange, save: boolean, text: () => string, quiet = false): void {
     change.apply(this.cfg);
     this.changes.push(change);
     const running = this.active?.kind === "pipeline" ? this.active : null;
@@ -586,55 +623,61 @@ export class Chat {
       change.apply(running.cfg);
       running.store.writeJson("config.json", running.cfg);
     }
-    if (save) saveSettings(this.o.configFile, this.cfg, change.paths);
+    if (save && !quiet) saveSettings(this.o.configFile, this.cfg, change.paths);
     this.o.ui.setEdits(editMode(this.cfg));
     this.o.ui.setSettings?.(settingsView(this.cfg));
     this.models.refresh();
+    if (quiet) return;
     const scope = save ? `; saved to ${this.o.configFile}` : " (this chat only; add --save to keep it)";
     const when = running ? " Applies from the next agent call of the current run." : this.active ? " Applies from the next question." : "";
     this.o.ui.info(`${text()}${when}${scope}`);
   }
 
-  /** A setting from a command or the settings panel: shows it when it has no value, changes it otherwise. */
-  applySetting(s: SettingCommand, flags: { save?: boolean; yes?: boolean } = {}): void {
+  /**
+   * A setting from a command or the settings panel: shows it when it has no value, changes it otherwise. `quiet`: it was
+   * changed in another conversation of the workspace, which said so (and saved it): this one only follows.
+   */
+  applySetting(s: SettingCommand, flags: { save?: boolean; yes?: boolean; quiet?: boolean } = {}): void {
     const ui = this.o.ui;
     const save = !!flags.save;
+    const quiet = !!flags.quiet;
+    const change = (c: SettingChange, text: () => string) => this.change(c, save, text, quiet);
     const view = settingsView(this.cfg);
     switch (s.target) {
       case "edits":
         if (!s.mode) return ui.info(this.editsText());
-        return this.change(settings.edits(s.mode), save, () => this.editsText());
+        return change(settings.edits(s.mode), () => this.editsText());
       case "claude.model":
         if (s.model === undefined) return ui.info(`Claude's model: ${modelText(this.models.identity("claude"))}`);
-        return this.change(settings.claudeModel(s.model), save, () => `Claude's model: ${this.cfg.claude.model ?? "default"}.`);
+        return change(settings.claudeModel(s.model), () => `Claude's model: ${this.cfg.claude.model ?? "default"}.`);
       case "claude.effort":
         if (s.effort === undefined) return ui.info(`Claude's effort: ${view.claude.effort ?? "default"}`);
-        return this.change(settings.claudeEffort(s.effort), save, () => `Claude's effort: ${s.effort ?? "default"}.`);
+        return change(settings.claudeEffort(s.effort), () => `Claude's effort: ${s.effort ?? "default"}.`);
       case "claude.permissions": {
         if (!s.rule) {
           const { allow, deny } = claudeRules(this.cfg);
           return ui.info(`Claude's rules for agentduo's calls (on top of its own settings)\n  allow: ${allow.join(", ") || "—"}\n  deny: ${deny.join(", ") || "—"}`);
         }
         const { kind, rule } = s.rule;
-        if (kind === "remove") return this.change(settings.claudeRemoveRule(rule), save, () => `Removed the rule ${rule}.`);
-        return this.change(settings.claudeRule(kind, rule), save, () => `Claude ${kind === "allow" ? "may use" : "may not use"} ${rule}.`);
+        if (kind === "remove") return change(settings.claudeRemoveRule(rule), () => `Removed the rule ${rule}.`);
+        return change(settings.claudeRule(kind, rule), () => `Claude ${kind === "allow" ? "may use" : "may not use"} ${rule}.`);
       }
       case "claude.add-dir":
         if (s.dir === undefined) return ui.info(`Extra directories for Claude: ${claudeDirs(this.cfg).join(", ") || "—"}`);
-        return this.change(settings.claudeAddDir(s.dir), save, () => `Claude may also work in ${s.dir}.`);
+        return change(settings.claudeAddDir(s.dir), () => `Claude may also work in ${s.dir}.`);
       case "codex.model": {
         if (s.model === undefined) return ui.info(`Codex's model: ${modelText(this.models.identity("codex"))}${view.codex.effort ? `, reasoning effort ${view.codex.effort}` : ""}`);
         const effort = s.effort ?? null;
-        return this.change(settings.codexModel(s.model, effort), save, () => `Codex's model: ${this.cfg.codex.model ?? "default"}${effort ? `, reasoning effort ${effort}` : ""}.`);
+        return change(settings.codexModel(s.model, effort), () => `Codex's model: ${this.cfg.codex.model ?? "default"}${effort ? `, reasoning effort ${effort}` : ""}.`);
       }
       case "codex.permissions": {
         if (!s.preset) return ui.info(`Codex permissions: ${view.codex.permissions}`);
         const preset = s.preset;
         // Codex itself asks before full access; so does this.
-        if (preset === "full-access" && !flags.yes) {
+        if (preset === "full-access" && !flags.yes && !quiet) {
           return ui.info("Full access lets Codex edit any file on this computer and use the network without asking. To go ahead: /settings codex permissions full-access --yes");
         }
-        return this.change(settings.codexPermissions(preset), save, () => `Codex permissions: ${preset}.`);
+        return change(settings.codexPermissions(preset), () => `Codex permissions: ${preset}.`);
       }
     }
   }

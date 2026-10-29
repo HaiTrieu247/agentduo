@@ -5,8 +5,12 @@ import { reduce, type ViewState } from "./state.js";
 declare function acquireVsCodeApi(): { postMessage(message: WebviewMessage): void; getState(): unknown; setState(state: unknown): void };
 
 const vscode = acquireVsCodeApi();
-const saved = vscode.getState() as { draft?: string } | undefined;
+/** Kept by VS Code with the tab: its conversation (given back to the extension when it restores the tab) and the draft. */
+const saved = vscode.getState() as { conversation?: string; draft?: string } | undefined;
+let conversation = saved?.conversation;
+let draft = saved?.draft ?? "";
 let state: ViewState | null = null;
+const keep = () => vscode.setState({ conversation, draft });
 let frame = 0;
 
 const ui = createUi(document.getElementById("app")!, {
@@ -18,9 +22,12 @@ const ui = createUi(document.getElementById("app")!, {
   decide: (id, decision, note) => state && vscode.postMessage({ type: "decision", generation: state.generation, id, decision, note }),
   permit: (id, answer) => state && vscode.postMessage({ type: "permission", generation: state.generation, id, answer }),
   command: (name) => vscode.postMessage({ type: "command", name }),
-  // The webview is recreated whenever the sidebar is shown again; a half-typed message survives that.
-  draft: (text) => vscode.setState({ draft: text }),
-}, saved?.draft ?? "");
+  // The webview is recreated whenever its tab is shown again; a half-typed message survives that.
+  draft: (text) => {
+    draft = text;
+    keep();
+  },
+}, draft);
 
 function schedule(): void {
   if (frame) return;
@@ -33,7 +40,13 @@ function schedule(): void {
 window.addEventListener("message", (e: MessageEvent<HostMessage>) => {
   const m = e.data;
   if (!m || typeof m !== "object") return;
-  if (m.type === "snapshot") state = m.state;
+  if (m.type === "snapshot") {
+    state = m.state;
+    if (m.conversation && m.conversation !== conversation) {
+      conversation = m.conversation;
+      keep();
+    }
+  }
   else if (m.type === "actions" && state) for (const action of m.actions) state = reduce(state, action);
   else if (m.type === "focusComposer") ui.focusComposer();
   else if (m.type === "showSettings") ui.showSettings();

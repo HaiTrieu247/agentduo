@@ -39,6 +39,9 @@ afterEach(async () => {
   t.cleanup();
 });
 
+/** The conversation (the extension tab) a test talks in. */
+const C = "conv-test";
+
 const happy = () => ({
   planner: [{ output: plan() }],
   plan_reviewer: [{ output: critique(true) }],
@@ -47,12 +50,12 @@ const happy = () => ({
   code_reviewer: [{ output: review(true) }],
 });
 
-function session(o: { overrides?: ConfigOverrides; node?: boolean; script?: string; env?: NodeJS.ProcessEnv } = {}): WorkspaceSession {
+function session(o: { overrides?: ConfigOverrides; node?: boolean; script?: string; env?: NodeJS.ProcessEnv; onNewConversation?: () => void } = {}): WorkspaceSession {
   writeWorkspaceConfig(repo, fake, o.overrides);
   const s = new WorkspaceSession({
     workspace: repo, configPath: null, workerScript: o.script ?? worker.script, env: { ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg"), ...o.env },
     resolveNode: () => (o.node === false ? { ok: false, message: "agentduo needs Node >= 22.12; found only /usr/bin/node (18.0.0)" } : { ok: true, path: process.execPath, version: process.versions.node }),
-    nextGeneration: () => ++generation, log: () => undefined,
+    nextGeneration: () => ++generation, log: () => undefined, onNewConversation: o.onNewConversation,
   });
   sessions.push(s);
   return s;
@@ -67,22 +70,69 @@ class FakeView {
   };
 }
 
-const until = (s: WorkspaceSession, check: (st: ViewState) => boolean, what: string, ms = 25_000) => waitUntil(() => check(s.state), ms, what);
+const until = (s: WorkspaceSession, check: (st: ViewState) => boolean, what: string, ms = 25_000) => waitUntil(() => check(s.conversation(C).state), ms, what);
 const finishes = (st: ViewState) => st.timeline.flatMap((i) => (i.kind === "finish" ? [i.phase] : []));
+
+describe("WorkspaceSession: a tab per conversation", () => {
+  const said = (st: ViewState | null) => (st?.timeline ?? []).flatMap((i) => (i.kind === "user" ? [i.text] : i.kind === "answer" ? [i.turn.answer ?? ""] : []));
+
+  it("shows each tab its own conversation, and the workspace's updates in every tab", async () => {
+    const s = session();
+    const a = new FakeView();
+    const b = new FakeView();
+    s.conversation("tab-a").attach(a.post);
+    s.conversation("tab-b").attach(b.post);
+    fake.setScenario({ chat_codex: [{ answer: "for A" }], chat_claude: [{ answer: "for B" }] });
+    await s.conversation("tab-a").submit("Question A");
+    await s.conversation("tab-b").submit("/claude Question B");
+    await waitUntil(() => said(a.state).length === 2 && said(b.state).length === 2, 25_000, "both answers");
+    expect([said(a.state), said(b.state)]).toEqual([["Question A", "for A"], ["/claude Question B", "for B"]]);
+    expect([a.state!.session, b.state!.session]).toEqual(["active", "active"]);
+    expect(a.state!.settings).toEqual(b.state!.settings);
+    expect([a.state!.recipient, b.state!.recipient]).toEqual(["codex", "claude"]);
+    expect(s.conversations.sort()).toEqual(["tab-a", "tab-b"]);
+  });
+
+  it("gives a tab reopened after a reload what it showed, with nothing left pending", async () => {
+    fake.setScenario({ chat_codex: [{ answer: "The answer is 42." }] });
+    let s = session();
+    await s.conversation("tab-a").submit("What is the answer?");
+    await waitUntil(() => said(s.conversation("tab-a").state).length === 2, 25_000, "the answer");
+    await s.dispose();
+
+    s = session();
+    const view = new FakeView();
+    s.conversation("tab-a").attach(view.post); // before the worker has said where conversations live
+    expect(view.state!.timeline).toEqual([]);
+    await s.start();
+    await waitUntil(() => said(view.state).length === 2, 10_000, "the restored tab");
+    expect(said(view.state)).toEqual(["What is the answer?", "The answer is 42."]);
+    expect(view.state).toMatchObject({ session: "dormant", status: "idle", decision: null, permissions: [], turn: null });
+    expect(s.conversation("tab-new").state.timeline).toEqual([]);
+  });
+
+  it("opens a new tab for /new and keeps this one's conversation", async () => {
+    let opened = 0;
+    const s = session({ onNewConversation: () => opened++ });
+    await s.conversation("tab-a").submit("/new");
+    expect(opened).toBe(1);
+    expect(s.conversation("tab-a").state.timeline).toEqual([]);
+  });
+});
 
 describe("WorkspaceSession", () => {
   it("opens without a lock or a run, then shows a whole run: steps, gates, usage, DONE", async () => {
     const s = session();
     const view = new FakeView();
-    s.attach(view.post);
+    s.conversation(C).attach(view.post);
     await s.start();
-    expect(s.state.session).toBe("dormant");
-    expect(s.state.pipeline.map((p) => p.phase)).toContain("VERIFY");
+    expect(s.conversation(C).state.session).toBe("dormant");
+    expect(s.conversation(C).state.pipeline.map((p) => p.phase)).toContain("VERIFY");
     expect(existsSync(join(repo, ".agentduo", "runs"))).toBe(false);
     fake.setScenario(happy());
-    await s.submit("Make app.txt fixed", "pipeline");
+    await s.conversation(C).submit("Make app.txt fixed", "pipeline");
     await until(s, (st) => finishes(st).includes("DONE") && st.status === "idle", "DONE");
-    const st = s.state;
+    const st = s.conversation(C).state;
     expect(st.session).toBe("active");
     expect(st.timeline.map((i) => i.kind)).toEqual(expect.arrayContaining(["user", "run", "step", "finish"]));
     const steps = st.timeline.flatMap((i) => (i.kind === "step" ? [i.step] : []));
@@ -98,18 +148,18 @@ describe("WorkspaceSession", () => {
   it("keeps a decision across hiding and reopening the view, and refuses a stale answer", async () => {
     const s = session({ overrides: { limits: { max_review_rounds: 1 } } });
     fake.setScenario({ ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }] });
-    s.attach(new FakeView().post);
-    await s.submit("Make app.txt fixed", "pipeline");
+    s.conversation(C).attach(new FakeView().post);
+    await s.conversation(C).submit("Make app.txt fixed", "pipeline");
     await until(s, (st) => !!st.decision, "the decision");
-    s.detach();
+    s.conversation(C).detach();
     const reopened = new FakeView();
-    s.attach(reopened.post);
+    s.conversation(C).attach(reopened.post);
     expect(reopened.state?.decision?.review.reason).toBe("max_review_rounds");
-    const { id } = s.state.decision!;
-    await s.answerDecision(s.state.generation - 1, id, "abort", null);
-    expect(s.state.decision?.id).toBe(id);
-    expect(s.state.timeline.at(-1)).toMatchObject({ kind: "info", tone: "error", text: expect.stringContaining("no longer pending") });
-    await s.answerDecision(s.state.generation, id, "revise", "smaller steps");
+    const { id } = s.conversation(C).state.decision!;
+    await s.conversation(C).answerDecision(s.conversation(C).state.generation - 1, id, "abort", null);
+    expect(s.conversation(C).state.decision?.id).toBe(id);
+    expect(s.conversation(C).state.timeline.at(-1)).toMatchObject({ kind: "info", tone: "error", text: expect.stringContaining("no longer pending") });
+    await s.conversation(C).answerDecision(s.conversation(C).state.generation, id, "revise", "smaller steps");
     await until(s, (st) => fake.calls("planner").length === 2, "the re-plan");
     expect(fake.calls("planner")[1]!.prompt).toContain("smaller steps");
   });
@@ -117,29 +167,29 @@ describe("WorkspaceSession", () => {
   it("keeps a permission prompt across hiding the view, and answers it", async () => {
     const s = session();
     fake.setScenario({ ...happy(), implementer: [{ write: { "app.txt": "fixed\n" }, permissions: [{ tool: "Bash", input: { command: "npm test" }, rules: [] }], output: impl() }] });
-    await s.submit("Make app.txt fixed", "pipeline");
+    await s.conversation(C).submit("Make app.txt fixed", "pipeline");
     await until(s, (st) => st.permissions.length === 1, "the prompt");
     const view = new FakeView();
-    s.attach(view.post);
+    s.conversation(C).attach(view.post);
     expect(view.state?.permissions[0]?.request.label).toBe("Bash  npm test");
-    await s.answerPermission(s.state.generation, s.state.permissions[0]!.request.id, { decision: "once" });
+    await s.conversation(C).answerPermission(s.conversation(C).state.generation, s.conversation(C).state.permissions[0]!.request.id, { decision: "once" });
     await until(s, (st) => finishes(st).includes("DONE"), "DONE");
-    expect(s.state.timeline.some((i) => i.kind === "permission" && i.answer.decision === "once")).toBe(true);
+    expect(s.conversation(C).state.timeline.some((i) => i.kind === "permission" && i.answer.decision === "once")).toBe(true);
   });
 
   it("survives a dead worker: says so, forgets its questions, and starts a new one that resumes the run", async () => {
     const s = session();
     fake.setScenario({ ...happy(), implementer: [{ permissions: [{ tool: "Bash", input: { command: "npm test" }, rules: [] }], output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }] });
-    await s.submit("Make app.txt fixed", "pipeline");
+    await s.conversation(C).submit("Make app.txt fixed", "pipeline");
     await until(s, (st) => st.permissions.length === 1, "the prompt");
-    const first = s.state.generation;
+    const first = s.conversation(C).state.generation;
     process.kill(s.workerPid!, "SIGKILL");
     await until(s, (st) => st.session === "stopped", "stopped");
-    expect(s.state.permissions).toEqual([]);
-    expect(s.state.timeline.at(-1)).toMatchObject({ tone: "error", text: expect.stringContaining("worker stopped") });
-    await s.submit("/resume");
+    expect(s.conversation(C).state.permissions).toEqual([]);
+    expect(s.conversation(C).state.timeline.at(-1)).toMatchObject({ tone: "error", text: expect.stringContaining("worker stopped") });
+    await s.conversation(C).submit("/resume");
     await until(s, (st) => finishes(st).includes("DONE"), "DONE after resume", 30_000);
-    expect(s.state.generation).toBeGreaterThan(first);
+    expect(s.conversation(C).state.generation).toBeGreaterThan(first);
     expect(RunStore.open(join(repo, ".agentduo", "runs")).loadState().phase).toBe("DONE");
   });
 
@@ -166,19 +216,19 @@ describe("WorkspaceSession", () => {
     fake.setScenario(happy());
     const started = s.start();
     await waitUntil(() => s.workerPid !== undefined, 10_000, "the worker's hello");
-    await Promise.all([s.submit("Make app.txt fixed", "pipeline"), s.toggleEdits(), started]);
+    await Promise.all([s.conversation(C).submit("Make app.txt fixed", "pipeline"), s.conversation(C).toggleEdits(), started]);
     await until(s, (st) => finishes(st).includes("DONE") && st.status === "idle", "DONE");
     expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["initialize", "(initialized)", "submit", "toggleEdits"]);
-    expect(s.state.session).toBe("active");
-    expect(s.state.edits).toBe("auto");
-    expect(s.state.timeline.filter((i) => i.kind === "info" && i.tone === "error")).toEqual([]);
+    expect(s.conversation(C).state.session).toBe("active");
+    expect(s.conversation(C).state.edits).toBe("auto");
+    expect(s.conversation(C).state.timeline.filter((i) => i.kind === "info" && i.tone === "error")).toEqual([]);
   });
 
   it("shows how to fix a missing Node instead of starting the worker", async () => {
     const s = session({ node: false });
-    await s.submit("Fix it", "pipeline");
-    expect(s.state.problem).toMatchObject({ kind: "node", message: expect.stringContaining("Node >= 22.12") });
-    expect(s.state.session).toBe("stopped");
+    await s.conversation(C).submit("Fix it", "pipeline");
+    expect(s.conversation(C).state.problem).toMatchObject({ kind: "node", message: expect.stringContaining("Node >= 22.12") });
+    expect(s.conversation(C).state.session).toBe("stopped");
     expect(s.workerPid).toBeUndefined();
   });
 
@@ -242,7 +292,7 @@ describe("WorkspaceSession", () => {
       await waitUntil(() => worker.requests().some((r) => r.endsWith(" initialize")), 10_000, "initialize to reach the worker");
       const first = s.workerPid!;
       // Waits for the start that hangs.
-      const submitted = s.submit("Make app.txt fixed", "pipeline");
+      const submitted = s.conversation(C).submit("Make app.txt fixed", "pipeline");
       const t0 = Date.now();
       await s.restart();
       expect(Date.now() - t0).toBeLessThan(SHUTDOWN_GRACE_MS);
@@ -254,9 +304,9 @@ describe("WorkspaceSession", () => {
       await submitted;
       await until(s, (st) => finishes(st).includes("DONE") && st.status === "idle", "DONE");
       expect(worker.requests()).toEqual([`${first} initialize`, `${first} shutdown`, `${second} initialize`, `${second} submit`]);
-      expect(s.state.session).toBe("active");
-      expect(s.state.problem).toBeNull();
-      expect(s.state.timeline.filter((i) => i.kind === "info" && i.tone === "error")).toEqual([]);
+      expect(s.conversation(C).state.session).toBe("active");
+      expect(s.conversation(C).state.problem).toBeNull();
+      expect(s.conversation(C).state.timeline.filter((i) => i.kind === "info" && i.tone === "error")).toEqual([]);
     });
 
     it("starts one worker when a second restart comes while the first is still stopping the old one", async () => {
@@ -269,8 +319,8 @@ describe("WorkspaceSession", () => {
       const second = s.workerPid!;
       expect(pidAlive(first)).toBe(false);
       expect(worker.requests()).toEqual([`${first} initialize`, `${first} shutdown`, `${second} initialize`]);
-      expect(s.state.session).toBe("dormant");
-      expect(s.state.problem).toBeNull();
+      expect(s.conversation(C).state.session).toBe("dormant");
+      expect(s.conversation(C).state.problem).toBeNull();
     });
 
     for (const hello of [false, true]) {
@@ -296,7 +346,7 @@ describe("WorkspaceSession", () => {
   it("stops within the grace period on dispose, leaving the run resumable", async () => {
     const s = session();
     fake.setScenario({ ...happy(), implementer: [{ activities: [{ tool: "Read", input: { file_path: "app.txt" } }], sleep: 60_000, output: impl() }] });
-    await s.submit("Make app.txt fixed", "pipeline");
+    await s.conversation(C).submit("Make app.txt fixed", "pipeline");
     await until(s, (st) => st.current?.phase === "IMPLEMENT" && st.current.activities.length > 0, "the implementer");
     const started = Date.now();
     await s.dispose();

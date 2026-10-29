@@ -1,7 +1,11 @@
-// One workspace folder's session in the extension host: its worker, and the presentation state the sidebar shows.
-// The worker outlives the view (hiding the sidebar or recreating the webview never stops a run); a reattached view
-// gets a snapshot. No `vscode` import, so it is tested against a real worker.
+// One workspace folder's session in the extension host: its worker, and what each conversation's tab shows. The
+// worker outlives the tabs (hiding or recreating a webview never stops a run); a reattached tab gets a snapshot, and a
+// tab reopened after a reload gets what it showed then (view.json beside the conversation). No `vscode` import, so it
+// is tested against a real worker.
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Backend } from "../../../src/core/commands.js";
+import { atomicWrite } from "../../../src/core/state.js";
 import type { PermissionAnswer } from "../../../src/events.js";
 import { initialState, reduce, type SessionState, type ViewAction, type ViewState } from "../webview/state.js";
 import type { DecisionChoice, HostMessage, Problem, Route, SettingRequest, WorkerRequest, WorkerResults } from "./protocol.js";
@@ -9,6 +13,9 @@ import { WorkerClient, WorkerError, type NodeLookup } from "./workerClient.js";
 
 /** Messages arriving this close together reach the webview in one batch. */
 const FLUSH_MS = 16;
+/** What a tab shows is saved at most this often while it changes (and when the tab or the session goes). */
+const SAVE_MS = 1000;
+const VIEW_FILE = "view.json";
 const PROBLEM_CODES = new Set<string>(["environment", "config", "not_repo", "missing_cli", "locked"]);
 
 export type WorkspaceChoice = { kind: "none" } | { kind: "choose"; folders: string[] } | { kind: "folder"; path: string };
@@ -26,6 +33,49 @@ export function emptyState(session: Extract<SessionState, "no-folder" | "choose-
   return initialState(session);
 }
 
+/** Actions that add to a tab's timeline: a broadcast one reaches every tab, never the workspace's own state. */
+const addsToTimeline = (a: ViewAction) => a.type === "note" || a.type === "user" || a.type === "event" || (a.type === "ui" && (a.update.type === "info" || a.update.type === "status" || a.update.type === "recipient"));
+
+/**
+ * What a tab showed before a reload, as it can show it now: its timeline and recipient, with the workspace as it is
+ * now (worker, models, settings). Nothing that waited on the old worker is pending any more, and nothing runs.
+ */
+export function restoredView(saved: ViewState, now: ViewState): ViewState {
+  return {
+    ...saved, generation: now.generation, session: now.session, workspace: now.workspace, version: now.version, pipeline: now.pipeline, edits: now.edits,
+    models: now.models, settings: now.settings, catalog: now.catalog, problem: now.problem, status: "idle", current: null, turn: null, discussion: null,
+    decision: null, permissions: [],
+  };
+}
+
+/** A conversation's tab as the host keeps it: what it shows, and where that goes while the tab is open. */
+interface TabView {
+  state: ViewState;
+  post: ((message: HostMessage) => void) | null;
+  queue: ViewAction[];
+  timer: NodeJS.Timeout | null;
+  saveTimer: NodeJS.Timeout | null;
+  /** Opened before the worker said where conversations live: what it showed before a reload is loaded then. */
+  restore: boolean;
+}
+
+/** The requests and state of one conversation's tab. */
+export interface ConversationHandle {
+  readonly id: string;
+  readonly state: ViewState;
+  attach(post: (message: HostMessage) => void): void;
+  detach(): void;
+  submit(text: string, route?: Route): Promise<void>;
+  selectRecipient(backend: Backend): Promise<void>;
+  applySetting(request: SettingRequest): Promise<void>;
+  interrupt(): Promise<void>;
+  toggleEdits(): Promise<void>;
+  answerDecision(generation: number, id: string, decision: DecisionChoice, note: string | null): Promise<void>;
+  answerPermission(generation: number, id: string, answer: PermissionAnswer): Promise<void>;
+  /** The tab was closed: what it shows is saved, and what runs in it stops. */
+  close(): Promise<void>;
+}
+
 export interface WorkspaceSessionOptions {
   workspace: string;
   configPath: string | null;
@@ -35,13 +85,21 @@ export interface WorkspaceSessionOptions {
   /** Unique across sessions, so an answer meant for an earlier worker is told apart. */
   nextGeneration(): number;
   log(line: string): void;
-  onChange?(state: ViewState): void;
-  /** A question arrived; the host may tell the user when the sidebar is not visible. */
-  onQuestion?(kind: "decision" | "permission", text: string): void;
+  /** A tab's state changed (its title, its questions); the host updates the tab, the list and the badge. */
+  onChange?(conversation: string, state: ViewState): void;
+  /** A question arrived in a tab; the host may tell the user when that tab is not visible. */
+  onQuestion?(conversation: string, kind: "decision" | "permission", text: string): void;
+  /** /new in a tab: the host opens a new tab with a new conversation; the old one keeps its own. */
+  onNewConversation?(): void;
 }
 
 export class WorkspaceSession {
-  private current: ViewState;
+  /** The workspace as every tab shows it (worker, models, settings); a new tab starts from it. */
+  private base: ViewState;
+  private readonly views = new Map<string, TabView>();
+  private readonly handles = new Map<string, ConversationHandle>();
+  /** Where conversations live, once the worker has said: each tab's view.json goes beside its conversation. */
+  private runsDir: string | null = null;
   /** The worker a start has forked, until that start is over: restart and dispose shut it down without waiting for it. */
   private launching: WorkerClient | null = null;
   /** The worker this session owns, from its hello on, initialized or not; its messages and exit are ours. */
@@ -51,56 +109,166 @@ export class WorkspaceSession {
   private starting: Promise<WorkerClient | null> | null = null;
   /** Shutdowns of workers let go of; a restart starts the next worker only once they are over (one lock holder). */
   private stopping: Promise<void> = Promise.resolve();
-  private post: ((message: HostMessage) => void) | null = null;
-  private queue: ViewAction[] = [];
-  private timer: NodeJS.Timeout | null = null;
   private disposed = false;
 
   constructor(private readonly o: WorkspaceSessionOptions) {
-    this.current = initialState("starting", o.workspace, 0);
+    this.base = initialState("starting", o.workspace, 0);
   }
 
   get workspace(): string {
     return this.o.workspace;
   }
 
-  get state(): ViewState {
-    return this.current;
+  /** The workspace's own state, as a new tab would start from it. */
+  get workspaceState(): ViewState {
+    return this.base;
+  }
+
+  /** Where the workspace's conversations live, once the worker has said (null before). */
+  get runsDirectory(): string | null {
+    return this.runsDir;
+  }
+
+  /** The conversations that have a tab in this session. */
+  get conversations(): string[] {
+    return [...this.views.keys()];
   }
 
   get workerPid(): number | undefined {
     return this.spawned?.pid;
   }
 
-  /** The view (re)appeared: it gets the whole state, then batches of actions. */
-  attach(post: (message: HostMessage) => void): void {
-    this.post = post;
-    this.queue = [];
-    post({ type: "snapshot", state: this.current });
+  /** The tab of `id`, its requests and its state; opening a tab that showed something before a reload restores it. */
+  conversation(id: string): ConversationHandle {
+    const known = this.handles.get(id);
+    if (known) return known;
+    const handle: ConversationHandle = {
+      id,
+      get state() {
+        return session.view(id).state;
+      },
+      attach: (post) => this.attach(id, post),
+      detach: () => this.detach(id),
+      submit: (text, route) => this.submit(id, text, route),
+      selectRecipient: (backend) => this.send({ type: "recipient", conversation: id, backend }, id).then(() => undefined),
+      applySetting: (request) => this.send({ type: "setting", conversation: id, ...request }, id).then(() => undefined),
+      interrupt: async () => {
+        if (this.client?.running) await this.send({ type: "interrupt", conversation: id }, id);
+      },
+      toggleEdits: () => this.send({ type: "toggleEdits", conversation: id }, id).then(() => undefined),
+      answerDecision: (generation, requestId, decision, note) => this.answerDecision(id, generation, requestId, decision, note),
+      answerPermission: (generation, requestId, answer) => this.answerPermission(id, generation, requestId, answer),
+      close: () => this.close(id),
+    };
+    const session = this;
+    this.handles.set(id, handle);
+    return handle;
   }
 
-  detach(): void {
-    this.post = null;
-    this.queue = [];
+  private view(id: string): TabView {
+    let view = this.views.get(id);
+    if (view) return view;
+    const saved = this.runsDir ? this.loadView(id) : null;
+    view = { state: saved ? restoredView(saved, this.base) : this.base, post: null, queue: [], timer: null, saveTimer: null, restore: !this.runsDir };
+    this.views.set(id, view);
+    return view;
   }
 
-  private dispatch(action: ViewAction): void {
-    this.current = reduce(this.current, action);
-    this.o.onChange?.(this.current);
-    if (!this.post) return;
-    this.queue.push(action);
-    this.timer ??= setTimeout(() => this.flush(), FLUSH_MS);
+  private viewFile(id: string): string | null {
+    return this.runsDir ? join(this.runsDir, "conversations", id, VIEW_FILE) : null;
   }
 
-  private flush(): void {
-    this.timer = null;
-    const actions = this.queue;
-    this.queue = [];
-    if (actions.length && this.post) this.post({ type: "actions", actions });
+  private loadView(id: string): ViewState | null {
+    const file = this.viewFile(id);
+    try {
+      return file && existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as ViewState) : null;
+    } catch (e) {
+      this.o.log(`could not read ${file}: ${(e as Error).message}`);
+      return null;
+    }
   }
 
-  note(text: string, tone: "info" | "error" = "info"): void {
-    this.dispatch({ type: "note", text, tone });
+  /** Saves what a tab shows, once it shows something: an empty tab leaves no file. */
+  private saveView(id: string): void {
+    const view = this.views.get(id);
+    if (!view) return;
+    if (view.saveTimer) clearTimeout(view.saveTimer);
+    view.saveTimer = null;
+    const file = this.viewFile(id);
+    if (!file || !view.state.timeline.length) return;
+    try {
+      mkdirSync(join(file, ".."), { recursive: true });
+      atomicWrite(file, JSON.stringify(view.state));
+    } catch (e) {
+      this.o.log(`could not save ${file}: ${(e as Error).message}`);
+    }
+  }
+
+  /** The worker said where conversations live: tabs opened before that get what they showed before a reload. */
+  private restoreViews(): void {
+    for (const [id, view] of this.views) {
+      if (!view.restore) continue;
+      view.restore = false;
+      const saved = this.loadView(id);
+      if (!saved || view.state.timeline.length) continue;
+      view.state = restoredView(saved, this.base);
+      view.queue = [];
+      view.post?.({ type: "snapshot", state: view.state, conversation: id });
+      this.o.onChange?.(id, view.state);
+    }
+  }
+
+  /** The tab (re)appeared: it gets its whole state, then batches of actions. */
+  private attach(id: string, post: (message: HostMessage) => void): void {
+    const view = this.view(id);
+    view.post = post;
+    view.queue = [];
+    post({ type: "snapshot", state: view.state, conversation: id });
+  }
+
+  private detach(id: string): void {
+    const view = this.views.get(id);
+    if (!view) return;
+    view.post = null;
+    view.queue = [];
+  }
+
+  private async close(id: string): Promise<void> {
+    const view = this.views.get(id);
+    if (!view) return;
+    this.saveView(id);
+    if (view.timer) clearTimeout(view.timer);
+    this.views.delete(id);
+    this.handles.delete(id);
+    if (this.client?.running) await this.send({ type: "closeConversation", conversation: id }, null);
+  }
+
+  /** An action for one tab, or with `to` null for the whole workspace: every tab, and the state new tabs start from. */
+  private dispatch(action: ViewAction, to: string | null): void {
+    if (to !== null) return this.apply(to, this.view(to), action);
+    if (!addsToTimeline(action)) this.base = reduce(this.base, action);
+    for (const [id, view] of this.views) this.apply(id, view, action);
+  }
+
+  private apply(id: string, view: TabView, action: ViewAction): void {
+    view.state = reduce(view.state, action);
+    this.o.onChange?.(id, view.state);
+    view.saveTimer ??= setTimeout(() => this.saveView(id), SAVE_MS);
+    if (!view.post) return;
+    view.queue.push(action);
+    view.timer ??= setTimeout(() => this.flush(view), FLUSH_MS);
+  }
+
+  private flush(view: TabView): void {
+    view.timer = null;
+    const actions = view.queue;
+    view.queue = [];
+    if (actions.length && view.post) view.post({ type: "actions", actions });
+  }
+
+  /** A line from agentduo itself, in one tab, or with no conversation in every tab. */
+  note(text: string, tone: "info" | "error" = "info", conversation: string | null = null): void {
+    this.dispatch({ type: "note", text, tone }, conversation);
   }
 
   /**
@@ -131,29 +299,29 @@ export class WorkspaceSession {
   private async spawn(): Promise<WorkerClient | null> {
     const node = this.o.resolveNode();
     if (!node.ok) {
-      this.dispatch({ type: "workspace", session: "stopped", workspace: this.o.workspace, generation: this.current.generation });
-      this.dispatch({ type: "problem", problem: { kind: "node", message: node.message } });
+      this.dispatch({ type: "workspace", session: "stopped", workspace: this.o.workspace, generation: this.base.generation }, null);
+      this.dispatch({ type: "problem", problem: { kind: "node", message: node.message } }, null);
       return null;
     }
     const generation = this.o.nextGeneration();
-    this.dispatch({ type: "workspace", session: "starting", workspace: this.o.workspace, generation });
+    this.dispatch({ type: "workspace", session: "starting", workspace: this.o.workspace, generation }, null);
     const client = new WorkerClient({ node: node.path, script: this.o.workerScript, cwd: this.o.workspace, env: this.o.env, generation, log: this.o.log });
     client.onMessage((m) => {
       if (this.spawned !== client) return;
       switch (m.kind) {
         case "event":
-          this.dispatch({ type: "event", event: m.event, now: Date.now() });
-          if (m.event.type === "permission.requested") this.o.onQuestion?.("permission", `${m.event.request.tool}: ${m.event.request.label}`);
+          this.dispatch({ type: "event", event: m.event, now: Date.now() }, m.conversation);
+          if (m.event.type === "permission.requested") this.o.onQuestion?.(m.conversation, "permission", `${m.event.request.tool}: ${m.event.request.label}`);
           break;
         case "ui":
-          this.dispatch({ type: "ui", update: m.update });
+          this.dispatch({ type: "ui", update: m.update }, m.conversation);
           break;
         case "decision":
-          this.dispatch({ type: "decision.open", id: m.requestId, review: m.review, views: m.views });
-          this.o.onQuestion?.("decision", m.review.message);
+          this.dispatch({ type: "decision.open", id: m.requestId, review: m.review, views: m.views }, m.conversation);
+          this.o.onQuestion?.(m.conversation, "decision", m.review.message);
           break;
         case "decisionClosed":
-          this.dispatch({ type: "decision.closed", id: m.requestId });
+          this.dispatch({ type: "decision.closed", id: m.requestId }, m.conversation);
           break;
       }
     });
@@ -162,7 +330,7 @@ export class WorkspaceSession {
       this.spawned = null;
       this.client = null;
       if (this.disposed) return;
-      this.dispatch({ type: "workspace", session: "stopped", workspace: this.o.workspace, generation });
+      this.dispatch({ type: "workspace", session: "stopped", workspace: this.o.workspace, generation }, null);
       this.note(`The agentduo worker stopped (${signal ?? `exit code ${code}`}). A run that was going stays resumable: send a message or /resume to start again.`, "error");
     });
     this.launching = client;
@@ -182,8 +350,8 @@ export class WorkspaceSession {
       this.o.log(`worker ${hello.pid} up: agentduo ${hello.version} on Node ${hello.node}`);
     } catch (e) {
       if (released()) return null;
-      this.dispatch({ type: "workspace", session: "stopped", workspace: this.o.workspace, generation });
-      this.dispatch({ type: "problem", problem: { kind: "worker", message: (e as Error).message } });
+      this.dispatch({ type: "workspace", session: "stopped", workspace: this.o.workspace, generation }, null);
+      this.dispatch({ type: "problem", problem: { kind: "worker", message: (e as Error).message } }, null);
       return null;
     }
     if (released()) return null;
@@ -194,13 +362,15 @@ export class WorkspaceSession {
         this.dispatch({
           type: "initialized", version: init.version, workspace: init.workspace, pipeline: init.pipeline, edits: init.edits, recipient: init.recipient,
           models: init.models, settings: init.settings,
-        });
-        this.dispatch({ type: "problem", problem: init.problem });
+        }, null);
+        this.dispatch({ type: "problem", problem: init.problem }, null);
+        this.runsDir = init.runsDir;
+        this.restoreViews();
         for (const warning of init.warnings) this.note(`warning: ${warning}`);
         if (init.hint) this.note(init.hint);
       }
     } catch (e) {
-      if (this.spawned === client) this.fail(e);
+      if (this.spawned === client) this.fail(e, null);
     }
     // Gone meanwhile (it exited, or restart or dispose let go of it): there is no worker to hand out.
     if (this.spawned !== client) return null;
@@ -208,10 +378,11 @@ export class WorkspaceSession {
     return client;
   }
 
-  private fail(e: unknown): void {
+  /** A request failed: the problem is the workspace's, the message goes to the tab that asked (or every tab). */
+  private fail(e: unknown, to: string | null = null): void {
     const message = e instanceof Error ? e.message : String(e);
-    if (e instanceof WorkerError && PROBLEM_CODES.has(e.code)) this.dispatch({ type: "problem", problem: { kind: e.code as Problem["kind"], message } });
-    this.note(message, "error");
+    if (e instanceof WorkerError && PROBLEM_CODES.has(e.code)) this.dispatch({ type: "problem", problem: { kind: e.code as Problem["kind"], message } }, null);
+    this.note(message, "error", to);
   }
 
   /**
@@ -219,52 +390,43 @@ export class WorkspaceSession {
    * the pipeline, and with the Discuss route a question to discuss (a slash command still goes as typed). Resolves once
    * the worker has started it, not when it is done.
    */
-  async submit(text: string, route: Route = "message"): Promise<void> {
+  private async submit(conversation: string, text: string, route: Route = "message"): Promise<void> {
     const typed = text.trim();
+    // /new keeps this tab's conversation and starts another in a new tab (the terminal chat starts over instead).
+    if (/^\/new$/.test(typed) && this.o.onNewConversation) return this.o.onNewConversation();
     const command = typed.startsWith("/");
-    if (typed) this.dispatch({ type: "user", text: typed, ...(route === "pipeline" && !command ? { pipeline: true } : {}), ...(route === "discuss" && !command ? { discuss: true } : {}) });
-    await this.send({ type: "submit", text, route });
+    if (typed) {
+      this.dispatch({ type: "user", text: typed, ...(route === "pipeline" && !command ? { pipeline: true } : {}), ...(route === "discuss" && !command ? { discuss: true } : {}) }, conversation);
+    }
+    await this.send({ type: "submit", conversation, text, route }, conversation);
   }
 
-  async selectRecipient(backend: Backend): Promise<void> {
-    await this.send({ type: "recipient", backend });
-  }
-
-  async applySetting(request: SettingRequest): Promise<void> {
-    await this.send({ type: "setting", ...request });
-  }
-
-  async interrupt(): Promise<void> {
-    if (this.client?.running) await this.send({ type: "interrupt" });
-  }
-
-  async toggleEdits(): Promise<void> {
-    await this.send({ type: "toggleEdits" });
-  }
-
-  async answerDecision(generation: number, id: string, decision: DecisionChoice, note: string | null): Promise<void> {
-    if (generation !== this.current.generation || this.current.decision?.id !== id) {
-      this.note("That decision is no longer pending.", "error");
+  private async answerDecision(conversation: string, generation: number, id: string, decision: DecisionChoice, note: string | null): Promise<void> {
+    const st = this.view(conversation).state;
+    if (generation !== st.generation || st.decision?.id !== id) {
+      this.note("That decision is no longer pending.", "error", conversation);
       return;
     }
-    await this.send({ type: "decision", requestId: id, answer: { decision, note } });
+    await this.send({ type: "decision", requestId: id, answer: { decision, note } }, conversation);
   }
 
-  async answerPermission(generation: number, id: string, answer: PermissionAnswer): Promise<void> {
-    if (generation !== this.current.generation || !this.current.permissions.some((p) => p.request.id === id)) {
-      this.note("That permission prompt is no longer pending.", "error");
+  private async answerPermission(conversation: string, generation: number, id: string, answer: PermissionAnswer): Promise<void> {
+    const st = this.view(conversation).state;
+    if (generation !== st.generation || !st.permissions.some((p) => p.request.id === id)) {
+      this.note("That permission prompt is no longer pending.", "error", conversation);
       return;
     }
-    await this.send({ type: "permissionAnswer", requestId: id, answer });
+    await this.send({ type: "permissionAnswer", requestId: id, answer }, conversation);
   }
 
-  private async send<T extends WorkerRequest["type"]>(request: WorkerRequestOf<T>): Promise<WorkerResults[T] | null> {
+  /** A request of a tab (`to`), whose failure that tab shows. */
+  private async send<T extends WorkerRequest["type"]>(request: WorkerRequestOf<T>, to: string | null): Promise<WorkerResults[T] | null> {
     const client = await this.start();
     if (!client) return null;
     try {
       return await client.request(request);
     } catch (e) {
-      this.fail(e);
+      this.fail(e, to);
       return null;
     }
   }
@@ -272,7 +434,7 @@ export class WorkspaceSession {
   /** For artifacts, changes and doctor: errors come back to the caller, which shows them where they were asked for. */
   async request<T extends WorkerRequest["type"]>(request: WorkerRequestOf<T>): Promise<WorkerResults[T]> {
     const client = await this.start();
-    if (!client) throw new WorkerError("exited", this.current.problem?.message ?? "the agentduo worker is not running");
+    if (!client) throw new WorkerError("exited", this.base.problem?.message ?? "the agentduo worker is not running");
     return client.request(request);
   }
 
@@ -294,9 +456,12 @@ export class WorkspaceSession {
   /** Bounded by the worker's shutdown grace, whatever the worker is doing, starting included. */
   async dispose(): Promise<void> {
     this.disposed = true;
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
-    this.post = null;
+    for (const [id, view] of this.views) {
+      this.saveView(id);
+      if (view.timer) clearTimeout(view.timer);
+      view.timer = null;
+      view.post = null;
+    }
     await this.stop();
   }
 

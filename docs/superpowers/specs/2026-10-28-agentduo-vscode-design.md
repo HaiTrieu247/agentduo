@@ -8,16 +8,18 @@ sidebar. It adds no workflow, schema, prompt or permission rules. User documenta
 ```
 VS Code (extension host, CJS: dist/extension.cjs)
   Controller ─ workspace choice, commands, OutputChannel, content providers (artifacts, snapshots)
-  WorkspaceSession ─ one per chosen folder; holds the ViewState, pending requests, the worker client
-  ChatViewProvider ─ WebviewView "agentduo.chat"; CSP with nonce, assets only from dist/webview
+  WorkspaceSession ─ one per chosen folder; a ViewState per conversation (view.json beside it), the worker client
+  ConversationPanel ─ WebviewPanel "agentduo.conversation", one editor tab per conversation, restored by a serializer;
+                      CSP with nonce, assets only from dist/webview
+  ConversationsView ─ TreeView "agentduo.conversations" in the Activity Bar: saved conversations and open tabs
         │ postMessage (WebviewMessage / HostMessage, validated in protocol.ts)
   Webview (browser IIFE: dist/webview/main.js) ─ reducer (state.ts) + DOM renderer (render.ts), no framework
         │
         │ child_process.fork, IPC only, execPath = checked Node ≥ 22.12 (PATH or agentduo.nodePath)
         ▼
 Worker (ESM: runtime/worker.js, every dependency bundled, runtime/package.json named agentduo + runtime/schemas)
-  RuntimeSession ─ prepareEnvironment (src/core/environment.ts), acquireWorkspaceLock, Chat, EventBus,
-                   ChatUi adapter, DecisionBroker (HUMAN_REVIEW) and PermissionBroker (Claude host mode)
+  RuntimeSession ─ prepareEnvironment (src/core/environment.ts), acquireWorkspaceLock (once for every tab), and per
+                   conversation a Chat, EventBus, ChatUi adapter, DecisionBroker (HUMAN_REVIEW) and PermissionBroker
 ```
 
 - Each message carries the protocol version and the session generation. Each request has an ID. Replies to an
@@ -39,9 +41,41 @@ Worker (ESM: runtime/worker.js, every dependency bundled, runtime/package.json n
 - The host sends a worker nothing but `initialize` until `initialize` has answered. A request made during startup
   waits for it.
 
+## Tabs and conversations
+
+- The editor title bar has agentduo's button (`agentduo.openChat`, beside Claude Code's and Codex's): it shows the tab
+  last used, or opens a new conversation beside the editors (`ViewColumn.Beside`). In agentduo's own tabs the title
+  bar has ＋ (`agentduo.newTask`), Resume and Settings, and the `⋯` menu the run's artifacts and tools
+  (`activeWebviewPanelId == 'agentduo.conversation'`).
+- A conversation is a tab. Its id is chosen by the host (`<stamp>-tab-<hex>`), checked as a run id, and names its
+  directory, `<runs>/conversations/<id>/`. Every request for a conversation names it (protocol 4), and so do its events,
+  updates and questions. Updates without one (models, settings, edits, the pipeline, the session) are the workspace's:
+  every tab gets them, and a new tab starts from them.
+- In the worker, each conversation has its own Chat, made on first use. Questions and discussions of different tabs
+  run side by side. The workspace lock is taken once, and only one pipeline runs at a time: `Chat.busyElsewhere` makes
+  another tab's `/pipeline` and `/resume` say which conversation runs one. A setting changed in one tab (when it
+  changed the config) is applied quietly to the other chats and to chats opened later. The recipient is per tab.
+- `/new` in a tab never reaches the worker: the host opens a new tab (`onNewConversation`). The terminal chat keeps its
+  `/new`, which starts over in place.
+- A conversation lasts:
+  - `Conversation` writes `conversation.json` (title, recipient, the exchanges later prompts carry, the pipeline tasks,
+    the number of turns so far) once something was said. `Chat` with a `conversationId` carries it on.
+  - The host writes `view.json`, what the tab shows, at most once a second while it changes, and when the tab or the
+    session goes.
+  - The webview keeps its conversation id in `vscode.setState`, so the panel serializer (activation
+    `onWebviewPanel:agentduo.conversation`) gives the restored tab back its conversation. A tab opened before the
+    worker said where conversations live gets its view.json once `initialize` answers.
+  - A restored view keeps its timeline and recipient and takes the workspace as it is now. Nothing that waited on the
+    old worker is pending any more, and nothing runs.
+- Closing a tab stops what runs in it (a run stays resumable), defers its decisions, denies its permission prompts, and
+  lets its chat go (`closeConversation`). The conversation stays in the list, and opening it again carries it on.
+- The Activity Bar's list (`listConversations`) shows saved conversations and open tabs, newest first, with whether
+  each runs or waits for the user. It redraws only when a tab's title, status or questions change, and its badge
+  counts the questions waiting.
+
 ## Sidebar
 
-The sidebar follows the look of VS Code's own chat views (Claude Code, Codex): no header of its own, a conversation on
+(Each conversation tab draws this view.) The view follows the look of VS Code's own chat views (Claude Code, Codex): no header of its own, a conversation on
 a rail of dots, and one box to write in. Session actions live in the view's title bar.
 
 ```
@@ -136,6 +170,11 @@ These were used for the interaction patterns only. No policy or code was copied.
   (activation, commands, view, worker, content providers, and a two-round run whose diff moves to the newer snapshot).
   `npm run test:pack:vscode` checks the VSIX contents and runs
   the packaged worker outside the checkout.
+- Tabs and conversations, 2026-10-29: `test/vscode-worker.test.ts` covers tabs answering side by side, one pipeline at a
+  time, a setting followed by every tab, a closed tab, and a conversation carried on by a new worker.
+  `test/vscode-session.test.ts` covers each tab's own view, a tab restored from view.json, and `/new`. The extension
+  host smoke test opens the chat in an editor tab, then a second conversation, and goes back to the first. The editor
+  title button, the Activity Bar list and a real window reload were not checked by hand.
 - Sidebar redesign (title bar actions, rail, Markdown, Codicons, recipient chip), 2026-10-28: checked in Chrome with
   the built webview bundle and the real reducer, in Dark Modern and Light Modern colours at 500 px wide: a Markdown
   answer, a running pipeline, the recipient menu, a decision card, the settings sheet and the empty sidebar. The

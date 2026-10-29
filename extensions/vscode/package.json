@@ -29,7 +29,9 @@
   "extensionKind": [
     "workspace"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onWebviewPanel:agentduo.conversation"
+  ],
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": false,
@@ -53,19 +55,25 @@
     "views": {
       "agentduo": [
         {
-          "type": "webview",
-          "id": "agentduo.chat",
-          "name": "Chat",
+          "id": "agentduo.conversations",
+          "name": "Conversations",
           "icon": "media/agentduo.svg",
           "contextualTitle": "agentduo"
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "agentduo.conversations",
+        "contents": "No conversations in this workspace yet. Each conversation opens in a tab of its own, beside your editors.\n[New Conversation](command:agentduo.newTask)"
+      }
+    ],
     "commands": [
-      { "command": "agentduo.openChat", "title": "Open Chat", "category": "agentduo" },
+      { "command": "agentduo.openChat", "title": "Open Chat", "category": "agentduo", "icon": { "light": "media/agentduo-light.svg", "dark": "media/agentduo-dark.svg" } },
+      { "command": "agentduo.newTask", "title": "New Conversation", "category": "agentduo", "icon": "$(add)" },
+      { "command": "agentduo.openConversation", "title": "Open Conversation", "category": "agentduo" },
       { "command": "agentduo.stop", "title": "Stop the Current Step", "category": "agentduo", "enablement": "agentduo.running" },
       { "command": "agentduo.resume", "title": "Resume the Latest Run", "category": "agentduo", "icon": "$(debug-continue)" },
-      { "command": "agentduo.newTask", "title": "New Task", "category": "agentduo", "icon": "$(add)" },
       { "command": "agentduo.openSettings", "title": "Settings: Models, Effort and Permissions", "category": "agentduo", "icon": "$(settings-gear)" },
       { "command": "agentduo.openPlan", "title": "Open Plan", "category": "agentduo" },
       { "command": "agentduo.openChanges", "title": "Open Changes", "category": "agentduo" },
@@ -75,16 +83,26 @@
       { "command": "agentduo.chooseWorkspace", "title": "Choose Workspace Folder", "category": "agentduo" }
     ],
     "menus": {
+      "editor/title": [
+        { "command": "agentduo.openChat", "when": "activeWebviewPanelId != 'agentduo.conversation'", "group": "navigation@90" },
+        { "command": "agentduo.newTask", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "navigation@1" },
+        { "command": "agentduo.resume", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "navigation@2" },
+        { "command": "agentduo.openSettings", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "navigation@3" },
+        { "command": "agentduo.openPlan", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "1_run@1" },
+        { "command": "agentduo.openChanges", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "1_run@2" },
+        { "command": "agentduo.openReport", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "1_run@3" },
+        { "command": "agentduo.doctor", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "2_tools@1" },
+        { "command": "agentduo.openConfiguration", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "2_tools@2" },
+        { "command": "agentduo.chooseWorkspace", "when": "activeWebviewPanelId == 'agentduo.conversation' && workspaceFolderCount > 1", "group": "2_tools@3" }
+      ],
       "view/title": [
-        { "command": "agentduo.newTask", "when": "view == agentduo.chat", "group": "navigation@1" },
-        { "command": "agentduo.resume", "when": "view == agentduo.chat", "group": "navigation@2" },
-        { "command": "agentduo.openSettings", "when": "view == agentduo.chat", "group": "navigation@3" },
-        { "command": "agentduo.openPlan", "when": "view == agentduo.chat", "group": "1_run@1" },
-        { "command": "agentduo.openChanges", "when": "view == agentduo.chat", "group": "1_run@2" },
-        { "command": "agentduo.openReport", "when": "view == agentduo.chat", "group": "1_run@3" },
-        { "command": "agentduo.doctor", "when": "view == agentduo.chat", "group": "2_tools@1" },
-        { "command": "agentduo.openConfiguration", "when": "view == agentduo.chat", "group": "2_tools@2" },
-        { "command": "agentduo.chooseWorkspace", "when": "view == agentduo.chat && workspaceFolderCount > 1", "group": "2_tools@3" }
+        { "command": "agentduo.newTask", "when": "view == agentduo.conversations", "group": "navigation@1" },
+        { "command": "agentduo.doctor", "when": "view == agentduo.conversations", "group": "2_tools@1" },
+        { "command": "agentduo.openConfiguration", "when": "view == agentduo.conversations", "group": "2_tools@2" },
+        { "command": "agentduo.chooseWorkspace", "when": "view == agentduo.conversations && workspaceFolderCount > 1", "group": "2_tools@3" }
+      ],
+      "commandPalette": [
+        { "command": "agentduo.openConversation", "when": "false" }
       ]
     },
     "configuration": {

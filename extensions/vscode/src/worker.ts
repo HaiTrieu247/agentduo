@@ -42,20 +42,23 @@ async function dispatch(s: RuntimeSession, request: WorkerRequest): Promise<Work
     case "initialize":
       throw new SessionError("bad_request", "already initialized");
     case "submit":
-      await s.submit(request.text, request.route);
+      await s.submit(request.conversation, request.text, request.route);
       return { accepted: true };
     case "recipient":
-      await s.selectRecipient(request.backend);
+      await s.selectRecipient(request.conversation, request.backend);
       return { accepted: true };
     case "setting":
-      await s.applySetting({ setting: request.setting, save: request.save, yes: request.yes });
+      await s.applySetting(request.conversation, { setting: request.setting, save: request.save, yes: request.yes });
       return { accepted: true };
     case "interrupt":
-      await s.interrupt();
+      await s.interrupt(request.conversation);
       return { accepted: true };
     case "toggleEdits":
-      await s.toggleEdits();
+      await s.toggleEdits(request.conversation);
       return { accepted: true };
+    case "closeConversation":
+      await s.closeConversation(request.conversation);
+      return { closed: true };
     case "decision":
       s.answerDecision(request.requestId, request.answer);
       return { applied: true };
@@ -63,11 +66,11 @@ async function dispatch(s: RuntimeSession, request: WorkerRequest): Promise<Work
       s.answerPermission(request.requestId, request.answer);
       return { applied: true };
     case "inspectFocusedRun":
-      return s.inspectFocusedRun();
+      return s.inspectFocusedRun(request.conversation);
     case "readArtifact":
-      return s.readArtifact(request.artifact);
+      return s.readArtifact(request.artifact, request.conversation);
     case "listChanges":
-      return s.listChanges();
+      return s.listChanges(request.conversation);
     case "readSnapshotFile":
       return s.readSnapshotFile(request.runId, { base: request.base, snapshot: request.snapshot }, request.side, request.path);
     case "doctor":
@@ -97,10 +100,10 @@ async function handle(raw: unknown): Promise<void> {
     session = new RuntimeSession({
       workspace: request.workspace, configPath: request.configPath, env: process.env,
       sink: {
-        event: (event) => void send({ kind: "event", ...tag(), event }),
-        ui: (update) => void send({ kind: "ui", ...tag(), update }),
-        decisionOpened: (requestId, review, views) => void send({ kind: "decision", ...tag(), requestId, review, views }),
-        decisionClosed: (requestId) => void send({ kind: "decisionClosed", ...tag(), requestId }),
+        event: (conversation, event) => void send({ kind: "event", ...tag(), conversation, event }),
+        ui: (update, conversation) => void send({ kind: "ui", ...tag(), conversation, update }),
+        decisionOpened: (conversation, requestId, review, views) => void send({ kind: "decision", ...tag(), conversation, requestId, review, views }),
+        decisionClosed: (conversation, requestId) => void send({ kind: "decisionClosed", ...tag(), conversation, requestId }),
       },
     });
     try {

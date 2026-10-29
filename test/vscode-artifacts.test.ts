@@ -53,6 +53,9 @@ function scenario(implementer: Record<string, unknown>) {
   };
 }
 
+/** The conversation (the extension tab) the runs are started in, and asked about. */
+const C = "conv-test";
+
 describe("run artifacts and changes (worker)", () => {
   it("lists and reads exactly what the run changed in a subdirectory workspace with earlier local edits", async () => {
     const repo = makeRepo(t.path);
@@ -70,12 +73,12 @@ describe("run artifacts and changes (worker)", () => {
       delete: ["old.txt"],
     }));
     const h = await openWorker(ws);
-    expect(await h.client.request({ type: "inspectFocusedRun" })).toBeNull();
-    await expect(h.client.request({ type: "listChanges" })).rejects.toMatchObject({ code: "no_run" });
-    await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
+    expect(await h.client.request({ type: "inspectFocusedRun", conversation: C })).toBeNull();
+    await expect(h.client.request({ type: "listChanges", conversation: C })).rejects.toMatchObject({ code: "no_run" });
+    await h.client.request({ type: "submit", conversation: C, text: "Make app.txt fixed", route: "pipeline" });
     await h.waitFor(finished("DONE"));
 
-    const list = await h.client.request({ type: "listChanges" });
+    const list = await h.client.request({ type: "listChanges", conversation: C });
     expect(list.hasSnapshots).toBe(true);
     expect(list.changes.map((c) => `${c.status} ${c.path}`).sort()).toEqual(["A app.txt", "A logo.bin", "D old.txt", `M ${SPACED}`]);
     const pair = { base: list.base!, snapshot: list.snapshot! };
@@ -90,18 +93,18 @@ describe("run artifacts and changes (worker)", () => {
     await expect(read("snapshot", "README.md")).rejects.toMatchObject({ code: "not_found" });
     await expect(h.client.request({ type: "readSnapshotFile", runId: "no-such-run", ...pair, side: "base", path: "app.txt" })).rejects.toMatchObject({ code: "not_found" });
 
-    const focused = await h.client.request({ type: "inspectFocusedRun" });
+    const focused = await h.client.request({ type: "inspectFocusedRun", conversation: C });
     expect(focused).toMatchObject({ runId: list.runId, phase: "DONE", hasSnapshots: true });
     expect(focused!.artifacts.sort()).toEqual(["feedback", "plan", "report", "review"]);
-    expect((await h.client.request({ type: "readArtifact", artifact: "plan" })).text).toContain("<!-- final plan v1");
-    expect((await h.client.request({ type: "readArtifact", artifact: "review" })).text).toMatch(/^# Code review: approved/);
-    expect((await h.client.request({ type: "readArtifact", artifact: "feedback" })).text).toContain("critique of plan v1");
-    expect((await h.client.request({ type: "readArtifact", artifact: "report" })).text).toContain(list.runId);
+    expect((await h.client.request({ type: "readArtifact", conversation: C, artifact: "plan" })).text).toContain("<!-- final plan v1");
+    expect((await h.client.request({ type: "readArtifact", conversation: C, artifact: "review" })).text).toMatch(/^# Code review: approved/);
+    expect((await h.client.request({ type: "readArtifact", conversation: C, artifact: "feedback" })).text).toContain("critique of plan v1");
+    expect((await h.client.request({ type: "readArtifact", conversation: C, artifact: "report" })).text).toContain(list.runId);
 
     // After a reload: a new worker with no chat session still finds the workspace's latest run, read-only.
     await h.client.shutdown();
     const again = await openWorker(ws, 2);
-    expect((await again.client.request({ type: "inspectFocusedRun" }))?.runId).toBe(list.runId);
+    expect((await again.client.request({ type: "inspectFocusedRun", conversation: C }))?.runId).toBe(list.runId);
     expect((await again.client.request({ type: "readSnapshotFile", runId: list.runId, ...pair, side: "snapshot", path: "app.txt" })).text).toBe("fixed\n");
   });
 
@@ -114,16 +117,16 @@ describe("run artifacts and changes (worker)", () => {
       code_reviewer: [{ output: review(false, [finding("F1")]) }, { output: review(true, [], ["F1"]) }],
     });
     const h = await openWorker(repo);
-    await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
+    await h.client.request({ type: "submit", conversation: C, text: "Make app.txt fixed", route: "pipeline" });
     const asked = await h.waitFor((m) => m.kind === "decision");
-    const first = await h.client.request({ type: "listChanges" });
+    const first = await h.client.request({ type: "listChanges", conversation: C });
     const read = (list: ChangeList, side: "base" | "snapshot", path = "app.txt") =>
       h.client.request({ type: "readSnapshotFile", runId: list.runId, base: list.base!, snapshot: list.snapshot!, side, path });
     expect((await read(first, "snapshot")).text).toBe("round 1\n");
     if (asked.kind === "decision") await h.client.request({ type: "decision", requestId: asked.requestId, answer: { decision: "resume", note: null } });
     await h.waitFor(finished("DONE"));
 
-    const second = await h.client.request({ type: "listChanges" });
+    const second = await h.client.request({ type: "listChanges", conversation: C });
     expect(second.base).toBe(first.base);
     expect(second.snapshot).not.toBe(first.snapshot);
     expect((await read(second, "snapshot")).text).toBe("round 2\n");
@@ -143,9 +146,9 @@ describe("run artifacts and changes (worker)", () => {
     writeWorkspaceConfig(repo, fake, { gates: [] });
     fake.setScenario(scenario({ write: { "app.txt": "fixed\n", "README.md": "y\n" } }));
     const h = await openWorker(repo);
-    await h.client.request({ type: "submit", text: "Make app.txt fixed", route: "pipeline" });
+    await h.client.request({ type: "submit", conversation: C, text: "Make app.txt fixed", route: "pipeline" });
     await h.waitFor(finished("DONE"));
-    const list = await h.client.request({ type: "listChanges" });
+    const list = await h.client.request({ type: "listChanges", conversation: C });
     expect(list.changes.map((c) => `${c.status} ${c.path}`).sort()).toEqual(["A app.txt", "M README.md"]);
     const pair = { base: list.base!, snapshot: list.snapshot! };
     expect((await h.client.request({ type: "readSnapshotFile", runId: list.runId, ...pair, side: "base", path: "README.md" })).text).toBe("x\n");
@@ -156,9 +159,9 @@ describe("run artifacts and changes (worker)", () => {
     writeWorkspaceConfig(repo, fake, { gates: [], limits: { max_planning_rounds: 1 } });
     fake.setScenario({ planner: [{ output: plan() }], plan_reviewer: [{ output: critique(false, [{ id: "C1", severity: "high", description: "no", suggestion: "x" }]) }] });
     const h = await openWorker(repo);
-    await h.client.request({ type: "submit", text: "Plan only", route: "pipeline" });
+    await h.client.request({ type: "submit", conversation: C, text: "Plan only", route: "pipeline" });
     const asked = await h.waitFor((m) => m.kind === "decision");
-    expect(await h.client.request({ type: "listChanges" })).toMatchObject({ hasSnapshots: false, base: null, snapshot: null, changes: [] });
+    expect(await h.client.request({ type: "listChanges", conversation: C })).toMatchObject({ hasSnapshots: false, base: null, snapshot: null, changes: [] });
     if (asked.kind === "decision") await h.client.request({ type: "decision", requestId: asked.requestId, answer: { decision: "abort", note: null } });
   });
 });

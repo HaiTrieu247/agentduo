@@ -16,7 +16,7 @@ const fail = (message) => {
 
 /** Every file the VSIX may hold, under extension/. vsce adds the manifest files at the top level. */
 const allowed = [
-  /^package\.json$/, /^readme\.md$/i, /^license(\.txt)?$/i, /^media\/agentduo\.svg$/,
+  /^package\.json$/, /^readme\.md$/i, /^license(\.txt)?$/i, /^media\/agentduo(-light|-dark)?\.svg$/,
   /^dist\/extension\.cjs$/, /^dist\/webview\/main\.js$/, /^dist\/webview\/styles\.css$/, /^dist\/webview\/codicon(\.css|\.ttf|-LICENSE\.txt)$/,
   /^runtime\/package\.json$/, /^runtime\/worker\.js$/, /^runtime\/schemas\/[a-z_]+\.schema\.json$/,
 ];

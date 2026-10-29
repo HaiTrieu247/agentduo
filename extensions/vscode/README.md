@@ -27,12 +27,26 @@ extension and opens an Extension Development Host on the repository.
 
 ## Using it
 
-Open **agentduo** in the Activity Bar.
+Click the agentduo button in an editor's title bar (beside Claude Code's and Codex's), or run **agentduo: Open Chat**.
 
-- Opening the sidebar starts nothing. It reads the latest run so it can offer **Resume**. The first task you send starts
-  a run in the chosen folder. In a multi-root window you choose the folder first (**agentduo: Choose Workspace Folder**).
-- The view's title bar has **New**, **Resume** and **Settings**, and its `⋯` menu opens the run's plan, changes and
-  report. While a run goes on or waits for you, a line at the top shows its stages and rounds.
+- **Each conversation is an editor tab.** The first one opens beside your editors, and its tab is named after its first
+  message. In a tab's title bar:
+  - **＋** (or `/new` in the composer) opens a new conversation in a tab of its own; the other tabs keep theirs;
+  - **Resume** and **Settings**;
+  - the `⋯` menu opens the run's plan, changes and report.
+- **Tabs work independently.** You can ask in one tab while another is still answering. A workspace runs one pipeline at
+  a time, so `/pipeline` or `/resume` in another tab says which conversation's run is going. Settings (models, effort,
+  edits, permissions) are the workspace's, so a change in one tab applies to every tab. Who a message goes to is each
+  tab's own.
+- **Conversations last.** After a reload or a restart, VS Code reopens the tabs: each shows what it showed, and its next
+  question still carries what was said before. An answer that was still going when the window closed has stopped, as Esc
+  would stop it. Conversations live under the runs directory (`.agentduo/runs/conversations/`).
+- **agentduo in the Activity Bar** lists the workspace's conversations, newest first: open ones, and closed ones you can
+  open again to go on. **＋** starts a new one, and a badge counts the questions waiting for you.
+- Opening a tab starts nothing but the worker, which only reads: it reads the latest run, so it can offer **Resume**. The
+  first task you send starts a run in the chosen folder. In a multi-root window you choose the folder first
+  (**agentduo: Choose Workspace Folder**).
+- While a run goes on or waits for you, a line at the top of its tab shows its stages and rounds.
 - The composer works like the terminal chat: a three-way conversation with Claude Code and Codex. The chip under the
   input says who a message goes to and on which model (Codex at first). Its menu switches between **Codex** and
   **Claude**, or makes the next message a question to **Discuss** (that agent answers, the other reviews, until they
@@ -80,8 +94,8 @@ a task on its own. It offers **Resume** instead.
 ## Limits of this version
 
 Desktop VS Code with a local folder only. There is no web build, and Remote SSH, WSL and containers are not
-supported. Each window has one session and runs one task at a time. There is no browser for older runs: **Resume**
-continues the latest run, as `/resume` does in the CLI.
+supported. Each window has one session; its tabs answer side by side, but run one pipeline at a time. There is no
+browser for older runs: **Resume** continues the latest run, as `/resume` does in the CLI.
 
 ## Credits
 

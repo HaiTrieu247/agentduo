@@ -88,7 +88,7 @@ export const COMMANDS: CommandInfo[] = [
   { name: "/diff", usage: "/diff", description: "show what the current run changed", args: false },
   { name: "/status", usage: "/status", description: "show where the current run is, and what it has cost", args: false },
   { name: "/resume", usage: "/resume [note | run id]", description: "continue the stopped or waiting run, optionally with a note for the agents", args: true },
-  { name: "/new", usage: "/new", description: "start over: forget this conversation; a stopped run stays resumable", args: false },
+  { name: "/new", usage: "/new", description: "start a new conversation (in VS Code, in a tab of its own); a stopped run stays resumable", args: false },
   { name: "/settings", usage: "/settings claude|codex <setting> …", description: "change a setting: model, effort, permissions, add-dir (add --save to keep it)", args: true },
   { name: "/edits", usage: "/edits auto|ask", description: "Claude (chat and pipeline implementer) edits files without asking (auto), or asks first", args: true },
   { name: "/config", usage: "/config", description: "show the settings both agents run with now", args: false },

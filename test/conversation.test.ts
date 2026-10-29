@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Conversation } from "../src/core/conversation.js";
+import { Conversation, listConversations } from "../src/core/conversation.js";
 import { CONVERSATION_MARKER } from "../src/core/prompts.js";
 import { tempDir } from "./helpers/tmp.js";
 
@@ -87,5 +87,42 @@ describe("Conversation", () => {
     c.finish(first.turn.id, "success", "a draft");
     c.finishDiscussion(d.id, null);
     expect(c.begin("codex", "Next?", [], "/repo").prompt).not.toContain("Unanswered question?");
+  });
+
+  it("saves what it needs to go on, and a conversation opened by its id carries on from there", () => {
+    const c = new Conversation(t.path, { id: "conv-a" });
+    expect(c.id).toBe("conv-a");
+    c.title = "Which queue?";
+    const { turn } = c.begin("codex", "Which queue?", [], "/repo");
+    c.finish(turn.id, "success", "Postgres with SKIP LOCKED.");
+    c.recipient = "claude";
+    c.addEarlier({ task: "Add the queue", outcome: "done" });
+    const d = c.beginDiscussion("claude", "codex", "And the retries?", 3);
+    c.finishDiscussion(d.id, "Three, with backoff.");
+
+    const again = Conversation.open(t.path, "conv-a");
+    expect([again.id, again.title, again.recipient]).toEqual(["conv-a", "Which queue?", "claude"]);
+    expect(again.earlier).toEqual([{ task: "Add the queue", outcome: "done" }]);
+    const next = again.begin("claude", "Next?", again.earlier, "/repo");
+    expect(next.prompt).toContain("Postgres with SKIP LOCKED.");
+    expect(next.prompt).toContain("Three, with backoff.");
+    expect(next.prompt).toContain("Add the queue");
+    expect(next.turn.logPrefix).toBe("002-claude"); // its logs go on from the turns it had
+    // A conversation nobody said anything in leaves no file behind.
+    expect(Conversation.open(t.path, "conv-new").title).toBe("");
+    expect(existsSync(join(t.path, "conversations", "conv-new", "conversation.json"))).toBe(false);
+  });
+
+  it("lists the conversations it saved, the most recently changed first", () => {
+    let tick = 0;
+    const clock = () => new Date(2026, 9, 28, 10, 0, tick++);
+    const a = new Conversation(t.path, { id: "conv-a", clock });
+    a.title = "First";
+    const b = new Conversation(t.path, { id: "conv-b", clock });
+    b.title = "Second";
+    a.recipient = "claude"; // a later change moves it up
+    expect(listConversations(t.path).map((x) => x.id)).toEqual(["conv-a", "conv-b"]);
+    expect(listConversations(t.path)[1]).toMatchObject({ id: "conv-b", title: "Second" });
+    expect(listConversations(join(t.path, "missing"))).toEqual([]);
   });
 });

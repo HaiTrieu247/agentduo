@@ -7,6 +7,8 @@ import type { ArtifactName, Change, ChangeList, SnapshotSide } from "./protocol.
 import type { WorkspaceSession } from "./workspaceSession.js";
 
 type SessionOf = () => WorkspaceSession | null;
+/** The conversation whose run a request is about: the tab the user last acted in, or null for the workspace's latest run. */
+type ConversationOf = () => string | null;
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -15,7 +17,7 @@ export class ArtifactContentProvider implements vscode.TextDocumentContentProvid
   private readonly changed = new vscode.EventEmitter<vscode.Uri>();
   readonly onDidChange = this.changed.event;
 
-  constructor(private readonly session: SessionOf) {}
+  constructor(private readonly session: SessionOf, private readonly conversation: ConversationOf) {}
 
   async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
     const location = parseArtifactLocation({ path: uri.path, query: uri.query });
@@ -23,7 +25,7 @@ export class ArtifactContentProvider implements vscode.TextDocumentContentProvid
     if (!location) return "(not an agentduo document)\n";
     if (!session) return "(agentduo has no workspace open)\n";
     try {
-      const doc = await session.request({ type: "readArtifact", artifact: location.artifact });
+      const doc = await session.request({ type: "readArtifact", artifact: location.artifact, conversation: this.conversation() });
       if (doc.runId !== location.runId) return `(this ${ARTIFACT_INFO[location.artifact].title.toLowerCase()} belonged to run ${location.runId}; open it again from agentduo for run ${doc.runId})\n`;
       return doc.text;
     } catch (e) {
@@ -61,9 +63,9 @@ export class SnapshotContentProvider implements vscode.TextDocumentContentProvid
   }
 }
 
-export async function openArtifact(session: WorkspaceSession, provider: ArtifactContentProvider, artifact: ArtifactName): Promise<void> {
+export async function openArtifact(session: WorkspaceSession, provider: ArtifactContentProvider, artifact: ArtifactName, conversation: string | null): Promise<void> {
   try {
-    const run = await session.request({ type: "inspectFocusedRun" });
+    const run = await session.request({ type: "inspectFocusedRun", conversation });
     if (!run) {
       void vscode.window.showInformationMessage("agentduo: there is no run yet. Type a task in the chat to start one.");
       return;
@@ -81,8 +83,8 @@ export async function openArtifact(session: WorkspaceSession, provider: Artifact
 }
 
 /** The focused run's current change list, remembered so its files can be opened; null (after telling why) when empty. */
-export async function changesToShow(session: WorkspaceSession, registry: ChangeRegistry): Promise<(ChangeList & SnapshotPair) | null> {
-  const list = await session.request({ type: "listChanges" });
+export async function changesToShow(session: WorkspaceSession, registry: ChangeRegistry, conversation: string | null): Promise<(ChangeList & SnapshotPair) | null> {
+  const list = await session.request({ type: "listChanges", conversation });
   const pair = snapshotPair(list);
   if (!pair) {
     void vscode.window.showInformationMessage(`agentduo: run ${list.runId} has no changes yet (the implementer has not run).`);
@@ -105,9 +107,9 @@ export async function openDiff(pair: SnapshotPair, change: Change): Promise<{ ba
 }
 
 /** What the run changed: its base snapshot against its last one (not HEAD), one file at a time in the diff editor. */
-export async function openChanges(session: WorkspaceSession, registry: ChangeRegistry): Promise<void> {
+export async function openChanges(session: WorkspaceSession, registry: ChangeRegistry, conversation: string | null): Promise<void> {
   try {
-    const list = await changesToShow(session, registry);
+    const list = await changesToShow(session, registry, conversation);
     if (!list) return;
     const pick = await vscode.window.showQuickPick(
       list.changes.map((change) => ({ label: change.path, description: changeLabel(change.status), change })),

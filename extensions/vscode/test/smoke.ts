@@ -1,7 +1,7 @@
 // Runs inside an Extension Development Host, started by scripts/test-vscode.mjs on a scratch git repository with fake
-// CLIs: activation, command registration, the chat view and the worker it starts, the two content providers, questions
-// to Codex and Claude (one stopped before its answer), and a two-round pipeline run whose diff follows the run to its
-// newer snapshot.
+// CLIs: activation, command registration, the chat in an editor tab and the worker it starts, the two content
+// providers, questions to Codex and Claude (one stopped before its answer), a second conversation in a tab of its own,
+// and a two-round pipeline run whose diff follows the run to its newer snapshot.
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -24,6 +24,9 @@ async function until<T>(what: string, get: () => T | null | undefined | false, t
 
 const read = async (uri: vscode.Uri) => (await vscode.workspace.openTextDocument(uri)).getText();
 
+/** The editor tabs of agentduo's conversations. */
+const conversationTabs = () => vscode.window.tabGroups.all.flatMap((g) => g.tabs).filter((t) => t.input instanceof vscode.TabInputWebview && t.input.viewType.includes("agentduo.conversation"));
+
 const answers = (api: TestApi) => (api.state()?.timeline ?? []).flatMap((i) => (i.kind === "answer" ? [i.turn] : []));
 
 /** The fake CLIs' calls so far ($FAKE_LOG). */
@@ -40,9 +43,10 @@ const checks: Array<[string, (api: TestApi, ext: vscode.Extension<TestApi>) => P
     const registered = new Set(await vscode.commands.getCommands(true));
     assert.deepEqual(contributed.filter((c) => !registered.has(c)), []);
   }],
-  ["opens the chat view, whose worker initializes the folder without creating a run", async (api) => {
+  ["opens the chat in an editor tab, whose worker initializes the folder without creating a run", async (api) => {
     const folder = vscode.workspace.workspaceFolders![0]!.uri.fsPath;
     await vscode.commands.executeCommand("agentduo.openChat");
+    await until("the conversation's tab", () => conversationTabs().length === 1);
     const state = await until("the session to start", () => {
       const s = api.state();
       return s && s.session !== "starting" ? s : null;
@@ -99,6 +103,17 @@ const checks: Array<[string, (api: TestApi, ext: vscode.Extension<TestApi>) => P
     assert.equal(stopped.answer ?? null, null);
     assert.ok(Date.now() - started < 30_000, "stopped before the agent would have answered");
     await until("the chat to be idle", () => api.state()?.status === "idle");
+  }],
+  ["opens a new conversation in a tab of its own, and the first tab keeps its conversation", async (api) => {
+    const [first] = api.conversations();
+    assert.ok(first, "the first conversation has a tab");
+    const said = answers(api).length;
+    await vscode.commands.executeCommand("agentduo.newTask");
+    await until("a second tab", () => conversationTabs().length === 2 && api.conversations().length === 2);
+    assert.notEqual(api.conversations()[1], first);
+    assert.equal(api.state()?.timeline.length ?? 0, 0, "a new conversation starts empty");
+    await vscode.commands.executeCommand("agentduo.openConversation", first);
+    await until("the first conversation again", () => answers(api).length === said);
   }],
   ["opens a diff, and after the run's next round shows that round's snapshot, not the editor's cached document", async (api) => {
     writeFileSync(process.env.FAKE_SCENARIO!, JSON.stringify({

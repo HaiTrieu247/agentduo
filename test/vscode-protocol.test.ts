@@ -10,7 +10,8 @@ const COMMITS = { base: "a".repeat(40), snapshot: "b".repeat(64) };
 
 describe("worker requests", () => {
   it("accepts every request type with its fields, and normalises answers", () => {
-    expect(parseRequestEnvelope(envelope({ type: "submit", text: "Fix it" }))).toEqual({ protocol: PROTOCOL_VERSION, generation: 3, id: 7, request: { type: "submit", text: "Fix it", route: "message" } });
+    expect(parseRequestEnvelope(envelope({ type: "submit", conversation: "c-1", text: "Fix it" })))
+      .toEqual({ protocol: PROTOCOL_VERSION, generation: 3, id: 7, request: { type: "submit", conversation: "c-1", text: "Fix it", route: "message" } });
     expect(parseRequestEnvelope(envelope({ type: "decision", requestId: "decision-1-ab", answer: { decision: "revise", note: "  smaller  " } })).request)
       .toEqual({ type: "decision", requestId: "decision-1-ab", answer: { decision: "revise", note: "smaller" } });
     expect(parseRequestEnvelope(envelope({ type: "permissionAnswer", requestId: "perm-0", answer: { decision: "deny", message: " " } })).request)
@@ -19,16 +20,30 @@ describe("worker requests", () => {
       .toEqual({ type: "permissionAnswer", requestId: "perm-0", answer: { decision: "once" } });
     expect(parseRequestEnvelope(envelope({ type: "readSnapshotFile", runId: "20261028-1-x", ...COMMITS, side: "snapshot", path: "gói pkg/tệp.txt" })).request)
       .toEqual({ type: "readSnapshotFile", runId: "20261028-1-x", ...COMMITS, side: "snapshot", path: "gói pkg/tệp.txt" });
-    for (const type of ["interrupt", "toggleEdits", "inspectFocusedRun", "listChanges", "doctor", "shutdown"]) {
-      expect(parseRequestEnvelope(envelope({ type, extra: "ignored" })).request).toEqual({ type });
+    for (const type of ["interrupt", "toggleEdits", "closeConversation"]) {
+      expect(parseRequestEnvelope(envelope({ type, conversation: "c-1", extra: "ignored" })).request).toEqual({ type, conversation: "c-1" });
     }
+    // What a run's artifacts and changes are asked for: the run of a conversation, or the workspace's latest.
+    for (const type of ["inspectFocusedRun", "listChanges"]) {
+      expect(parseRequestEnvelope(envelope({ type, conversation: "c-1" })).request).toEqual({ type, conversation: "c-1" });
+      expect(parseRequestEnvelope(envelope({ type })).request).toEqual({ type, conversation: null });
+    }
+    expect(parseRequestEnvelope(envelope({ type: "readArtifact", artifact: "plan", conversation: null })).request).toEqual({ type: "readArtifact", artifact: "plan", conversation: null });
+    for (const type of ["doctor", "shutdown"]) expect(parseRequestEnvelope(envelope({ type, extra: "ignored" })).request).toEqual({ type });
+  });
+
+  it("names the conversation each of its requests is for, with an id that is safe as a directory name", () => {
+    for (const conversation of [undefined, "", "../x", "a/b", ".hidden", "x".repeat(201)]) {
+      expect(() => parseRequestEnvelope(envelope({ type: "submit", conversation, text: "hi" })), String(conversation)).toThrow(ProtocolError);
+    }
+    expect(() => parseRequestEnvelope(envelope({ type: "listChanges", conversation: "../x" }))).toThrow(ProtocolError);
   });
 
   it("refuses unknown requests, paths outside the workspace and malformed fields", () => {
     const bad = [
       envelope({ type: "exec", command: "rm -rf /" }),
-      envelope({ type: "submit", text: 5 }),
-      envelope({ type: "submit", text: "x".repeat(100_001) }),
+      envelope({ type: "submit", conversation: "c", text: 5 }),
+      envelope({ type: "submit", conversation: "c", text: "x".repeat(100_001) }),
       envelope({ type: "readArtifact", artifact: "state.json" }),
       envelope({ type: "readSnapshotFile", runId: "r", ...COMMITS, side: "base", path: "../../etc/passwd" }),
       envelope({ type: "readSnapshotFile", runId: "r", ...COMMITS, side: "base", path: "/etc/passwd" }),
@@ -39,8 +54,8 @@ describe("worker requests", () => {
       envelope({ type: "readSnapshotFile", runId: "r", ...COMMITS, snapshot: "--output=x", side: "snapshot", path: "a.txt" }),
       envelope({ type: "decision", requestId: "d1", answer: { decision: "merge" } }),
       envelope({ type: "decision", requestId: "bad\nid", answer: { decision: "abort" } }),
-      { ...envelope({ type: "interrupt" }), generation: -1 },
-      { ...envelope({ type: "interrupt" }), id: "1" },
+      { ...envelope({ type: "interrupt", conversation: "c" }), generation: -1 },
+      { ...envelope({ type: "interrupt", conversation: "c" }), id: "1" },
       [],
       null,
     ];
@@ -75,7 +90,10 @@ describe("webview messages", () => {
 describe("worker messages", () => {
   it("checks the protocol version and the shape the host relies on", () => {
     expect(parseWorkerMessage({ kind: "hello", protocol: PROTOCOL_VERSION, pid: 1, node: "24.0.0", version: "0.4.0" }).kind).toBe("hello");
-    expect(parseWorkerMessage({ kind: "event", protocol: PROTOCOL_VERSION, generation: 1, event: { type: "warning", text: "x" } }).kind).toBe("event");
+    expect(parseWorkerMessage({ kind: "event", protocol: PROTOCOL_VERSION, generation: 1, conversation: "c-1", event: { type: "warning", text: "x" } }).kind).toBe("event");
+    // An event belongs to a conversation; an update may be for the whole workspace (models, settings).
+    expect(() => parseWorkerMessage({ kind: "event", protocol: PROTOCOL_VERSION, generation: 1, event: { type: "warning", text: "x" } })).toThrow(ProtocolError);
+    expect(parseWorkerMessage({ kind: "ui", protocol: PROTOCOL_VERSION, generation: 1, conversation: null, update: { type: "edits", mode: "ask" } }).kind).toBe("ui");
     expect(() => parseWorkerMessage({ kind: "event", protocol: 1, generation: 1, event: { type: "warning" } })).toThrow(/protocol 1/);
     expect(() => parseWorkerMessage({ kind: "decision", protocol: PROTOCOL_VERSION, generation: 1, requestId: "d", review: {} })).toThrow(ProtocolError);
     expect(() => parseWorkerMessage({ kind: "shell", protocol: 1 })).toThrow(ProtocolError);

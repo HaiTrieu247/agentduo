@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Chat, type ChatUi } from "../src/chat.js";
 import type { ConfigData } from "../src/core/config.js";
+import { listConversations } from "../src/core/conversation.js";
 import { RunStore } from "../src/core/state.js";
 import { EventBus, type Decider, type DuoEvent, type ModelMap } from "../src/events.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
@@ -75,10 +76,10 @@ const happy = () => ({
   implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }],
   code_reviewer: [{ output: review(true) }],
 });
-const newChat = (o: { cfg?: ConfigData; decider?: Decider; env?: NodeJS.ProcessEnv } = {}) => {
+const newChat = (o: { cfg?: ConfigData; decider?: Decider; env?: NodeJS.ProcessEnv; conversationId?: string; busyElsewhere?: () => string | null } = {}) => {
   const chat = new Chat({
     cfg: o.cfg ?? testConfig(fake), workspace: repo, runsDir, configFile: join(repo, ".agentduo", "config.yaml"), bus, decider: o.decider ?? new ScriptedDecider(), ui,
-    env: o.env,
+    env: o.env, conversationId: o.conversationId, busyElsewhere: o.busyElsewhere,
   });
   chats.push(chat);
   return chat;
@@ -88,6 +89,49 @@ const after = (args: string[], flag: string) => args[args.lastIndexOf(flag) + 1]
 const latest = () => RunStore.open(runsDir).loadState();
 const answers = () => events.flatMap((e) => (e.type === "turn.finished" ? [e] : []));
 const refs = () => execFileSync("git", ["for-each-ref", "refs/agentduo"], { cwd: repo, encoding: "utf8" }).trim();
+
+describe("Chat: one of several conversations", () => {
+  it("carries a conversation on by its id: what was said, who it went to, and its pipeline tasks", async () => {
+    let chat = newChat({ conversationId: "conv-1" });
+    fake.setScenario({ ...happy(), chat_claude: [{ answer: "Claude says A." }, { answer: "Claude says B." }] });
+    await chat.submit("/claude What about A?");
+    await chat.idle();
+    expect(chat.title).toBe("What about A?");
+    await chat.submit("/pipeline Make app.txt fixed");
+    await chat.idle();
+    await chat.stop();
+
+    chat = newChat({ conversationId: "conv-1" });
+    expect([chat.conversationId, chat.title, chat.to]).toEqual(["conv-1", "What about A?", "claude"]);
+    await chat.submit("And B?");
+    await chat.idle();
+    const prompt = fake.calls("chat_claude")[1]!.prompt;
+    expect(prompt).toContain("Claude says A.");
+    expect(prompt).toContain("Make app.txt fixed — done");
+    expect(listConversations(runsDir)).toEqual([expect.objectContaining({ id: "conv-1", title: "What about A?" })]);
+  });
+
+  it("turns a pipeline or a resume away while another conversation runs one", async () => {
+    const chat = newChat({ busyElsewhere: () => "A run is going in the conversation «Fix the queue»." });
+    fake.setScenario(happy());
+    await chat.submit("/pipeline Make app.txt fixed");
+    expect(ui.lines.at(-1)).toBe("A run is going in the conversation «Fix the queue».");
+    await chat.submit("/resume");
+    expect(ui.lines.at(-1)).toBe("A run is going in the conversation «Fix the queue».");
+    expect(fake.calls()).toEqual([]);
+    expect(chat.runningPipeline).toBe(false);
+  });
+
+  it("applies a setting another conversation changed without a word, and without asking again for full access", () => {
+    const chat = newChat();
+    const before = ui.lines.length;
+    chat.applySetting({ target: "claude.model", model: "opus" }, { quiet: true });
+    chat.applySetting({ target: "codex.permissions", preset: "full-access" }, { quiet: true });
+    expect(chat.config.claude.model).toBe("opus");
+    expect(chat.config.codex.args).toContain("danger-full-access");
+    expect(ui.lines.length).toBe(before);
+  });
+});
 
 describe("Chat: /discuss", () => {
   const discussions = () => events.flatMap((e) => (e.type === "discussion.finished" ? [e] : []));

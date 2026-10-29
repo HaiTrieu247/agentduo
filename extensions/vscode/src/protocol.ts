@@ -13,8 +13,9 @@ import type { ViewAction, ViewState } from "../webview/state.js";
 /**
  * 2: the chat is a conversation (direct answers, recipient, models, settings and the Pipeline route).
  * 3: Codex's model catalog for the settings' model picker (`catalog` updates).
+ * 4: several conversations (the extension's tabs) in one worker: each request, event and question names its own.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 export const BACKENDS = ["codex", "claude"] as const;
 /** How the composer's text is meant: a message (to the recipient, or a slash command), a pipeline task, or a question to discuss. */
@@ -56,18 +57,24 @@ export interface Problem {
 }
 
 // ------------------------------------------------------------------ host → worker
+/**
+ * Requests for a conversation name it: an id the host chose for a tab, which also names the conversation's directory.
+ * A run's artifacts and changes are asked for a conversation's run, or with null for the workspace's latest.
+ */
 export type WorkerRequest =
   | { type: "initialize"; workspace: string; configPath: string | null }
-  | { type: "submit"; text: string; route: Route }
-  | { type: "recipient"; backend: Backend }
-  | ({ type: "setting" } & SettingRequest)
-  | { type: "interrupt" }
-  | { type: "toggleEdits" }
+  | { type: "submit"; conversation: string; text: string; route: Route }
+  | { type: "recipient"; conversation: string; backend: Backend }
+  | ({ type: "setting"; conversation: string } & SettingRequest)
+  | { type: "interrupt"; conversation: string }
+  | { type: "toggleEdits"; conversation: string }
+  /** The tab was closed: what runs in it stops (a run stays resumable), and the worker lets the conversation go. */
+  | { type: "closeConversation"; conversation: string }
   | { type: "decision"; requestId: string; answer: DecisionAnswer }
   | { type: "permissionAnswer"; requestId: string; answer: PermissionAnswer }
-  | { type: "inspectFocusedRun" }
-  | { type: "readArtifact"; artifact: ArtifactName }
-  | { type: "listChanges" }
+  | { type: "inspectFocusedRun"; conversation: string | null }
+  | { type: "readArtifact"; artifact: ArtifactName; conversation: string | null }
+  | { type: "listChanges"; conversation: string | null }
   | { type: "readSnapshotFile"; runId: string; base: string; snapshot: string; side: SnapshotSide; path: string }
   | { type: "doctor" }
   | { type: "shutdown" };
@@ -148,6 +155,7 @@ export interface WorkerResults {
   setting: { accepted: true };
   interrupt: { accepted: true };
   toggleEdits: { accepted: true };
+  closeConversation: { closed: true };
   decision: { applied: true };
   permissionAnswer: { applied: true };
   inspectFocusedRun: FocusedRun | null;
@@ -184,10 +192,11 @@ export type WorkerMessage =
   | { kind: "hello"; protocol: number; pid: number; node: string; version: string }
   | { kind: "response"; protocol: number; generation: number; id: number; ok: true; result: unknown }
   | { kind: "response"; protocol: number; generation: number; id: number; ok: false; error: WorkerErrorData }
-  | { kind: "event"; protocol: number; generation: number; event: DuoEvent }
-  | { kind: "ui"; protocol: number; generation: number; update: UiUpdate }
-  | { kind: "decision"; protocol: number; generation: number; requestId: string; review: HumanReview; views: ArtifactName[] }
-  | { kind: "decisionClosed"; protocol: number; generation: number; requestId: string };
+  | { kind: "event"; protocol: number; generation: number; conversation: string; event: DuoEvent }
+  /** `conversation` null: an update for the whole workspace (models, settings, the session), for every tab. */
+  | { kind: "ui"; protocol: number; generation: number; conversation: string | null; update: UiUpdate }
+  | { kind: "decision"; protocol: number; generation: number; conversation: string; requestId: string; review: HumanReview; views: ArtifactName[] }
+  | { kind: "decisionClosed"; protocol: number; generation: number; conversation: string; requestId: string };
 
 // ------------------------------------------------------------------ webview ↔ host
 export const WEBVIEW_COMMANDS = [
@@ -208,7 +217,8 @@ export type WebviewMessage =
   | { type: "command"; name: WebviewCommand };
 
 export type HostMessage =
-  | { type: "snapshot"; state: ViewState }
+  /** `conversation`: the tab's own, which the webview keeps, so the tab is restored with it after a reload. */
+  | { type: "snapshot"; state: ViewState; conversation?: string }
   | { type: "actions"; actions: ViewAction[] }
   | { type: "focusComposer" }
   /** The title bar's Settings: open the settings panel above the composer. */
@@ -262,6 +272,18 @@ function requestId(v: unknown, what: string): string {
 export function isRunId(v: unknown): v is string {
   return typeof v === "string" && RUN_ID.test(v);
 }
+
+/** A conversation's id: chosen by the host, and the name of its directory, so it is as safe as a run id. */
+export function isConversationId(v: unknown): v is string {
+  return isRunId(v);
+}
+
+function conversationId(v: unknown): string {
+  if (!isConversationId(v)) throw new ProtocolError("conversation is not a conversation id");
+  return v;
+}
+
+const focusedOn = (v: unknown): string | null => (v === undefined || v === null ? null : conversationId(v));
 
 /** A full git object id (SHA-1 or SHA-256), as snapshot commits are recorded. */
 export function isObjectId(v: unknown): v is string {
@@ -343,24 +365,31 @@ const route = (v: unknown): Route => (v === undefined ? "message" : oneOf(v, ROU
 export function parseRequest(v: unknown): WorkerRequest {
   const o = obj(v, "request");
   const type = oneOf(o.type, [
-    "initialize", "submit", "recipient", "setting", "interrupt", "toggleEdits", "decision", "permissionAnswer", "inspectFocusedRun", "readArtifact",
-    "listChanges", "readSnapshotFile", "doctor", "shutdown",
+    "initialize", "submit", "recipient", "setting", "interrupt", "toggleEdits", "closeConversation", "decision", "permissionAnswer", "inspectFocusedRun",
+    "readArtifact", "listChanges", "readSnapshotFile", "doctor", "shutdown",
   ] as const, "request.type");
   switch (type) {
     case "initialize":
       return { type, workspace: text(o.workspace, "workspace", 4096), configPath: optionalText(o.configPath, "configPath") };
     case "submit":
-      return { type, text: text(o.text, "text"), route: route(o.route) };
+      return { type, conversation: conversationId(o.conversation), text: text(o.text, "text"), route: route(o.route) };
     case "recipient":
-      return { type, backend: oneOf(o.backend, BACKENDS, "backend") };
+      return { type, conversation: conversationId(o.conversation), backend: oneOf(o.backend, BACKENDS, "backend") };
     case "setting":
-      return { type, ...settingRequest(o) };
+      return { type, conversation: conversationId(o.conversation), ...settingRequest(o) };
+    case "interrupt":
+    case "toggleEdits":
+    case "closeConversation":
+      return { type, conversation: conversationId(o.conversation) };
+    case "inspectFocusedRun":
+    case "listChanges":
+      return { type, conversation: focusedOn(o.conversation) };
     case "decision":
       return { type, requestId: requestId(o.requestId, "requestId"), answer: decisionAnswer(o.answer) };
     case "permissionAnswer":
       return { type, requestId: requestId(o.requestId, "requestId"), answer: permissionAnswer(o.answer) };
     case "readArtifact":
-      return { type, artifact: oneOf(o.artifact, ARTIFACTS, "artifact") };
+      return { type, artifact: oneOf(o.artifact, ARTIFACTS, "artifact"), conversation: focusedOn(o.conversation) };
     case "readSnapshotFile": {
       if (!isRunId(o.runId)) throw new ProtocolError("runId is not a run id");
       if (!isObjectId(o.base) || !isObjectId(o.snapshot)) throw new ProtocolError("base and snapshot must be commit ids");
@@ -389,17 +418,21 @@ export function parseWorkerMessage(v: unknown): WorkerMessage {
       if (o.ok !== true) obj(o.error, "error");
       break;
     case "event":
+      conversationId(o.conversation);
       text(obj(o.event, "event").type, "event.type", 64);
       break;
     case "ui":
+      focusedOn(o.conversation);
       text(obj(o.update, "update").type, "update.type", 64);
       break;
     case "decision":
+      conversationId(o.conversation);
       requestId(o.requestId, "requestId");
       obj(o.review, "review");
       if (!Array.isArray(o.views)) throw new ProtocolError("views must be a list");
       break;
     case "decisionClosed":
+      conversationId(o.conversation);
       requestId(o.requestId, "requestId");
       break;
   }

@@ -5,6 +5,8 @@
 !README.md
 !LICENSE
 !media/agentduo.svg
+!media/agentduo-light.svg
+!media/agentduo-dark.svg
 !dist/extension.cjs
 !dist/webview/main.js
 !dist/webview/styles.css
