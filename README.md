@@ -292,15 +292,8 @@ npm run test:vscode        # smoke test in a downloaded VS Code; on Linux run it
 npm run package:vscode     # extensions/vscode/agentduo-vscode-<version>.vsix (local, not published)
 npm run test:pack:vscode   # package, check the VSIX contents, run its worker outside the checkout
 
-npm version patch          # release: checks, bump both manifests, publish to npm and the Marketplace, push
-npm run release            # finish a release whose publish step failed; what is already out is skipped
+npm version patch          # bump package.json and extensions/vscode/package.json, commit and tag (publishes nothing)
 ```
-
-`npm version patch|minor|major` checks first, before the bump: you are on an up-to-date `main`, logged in to npm
-(`npm login`) and to the Marketplace (`VSCE_PAT`, or a token saved by `npx vsce login HaiTrieuThinh`), and the
-typecheck, tests and both pack smokes pass. It then commits and tags the new version, packages the VSIX, publishes the
-npm package (asking for your OTP) and the extension, and pushes the commit and tag to `origin`. Set
-`VSCE_AZURE_CREDENTIAL=1` to publish the extension with Microsoft Entra ID (`az login`) instead of a token.
 
 The extension's design notes are in `docs/superpowers/specs/2026-10-28-agentduo-vscode-design.md`.
 
