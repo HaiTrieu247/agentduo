@@ -2,7 +2,7 @@
   "name": "agentduo-vscode",
   "displayName": "agentduo",
   "description": "Codex plans and reviews, Claude Code critiques and implements: the agentduo channel in a VS Code sidebar.",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "publisher": "HaiTrieuThinh",
   "license": "MIT",
   "author": "Thinh Hai Trieu",
