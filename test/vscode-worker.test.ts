@@ -34,10 +34,9 @@ beforeEach(() => {
   fake = new FakeClis(t.path).install();
 });
 afterEach(async () => {
-  for (const h of harnesses.splice(0)) {
-    h.client.kill();
-    await h.client.whenExited();
-  }
+  // Not a kill: a worker killed outright leaves its agents running (each has its own process group), and the model
+  // lookups it starts unasked would still be writing to the directory being removed.
+  for (const h of harnesses.splice(0)) await h.client.shutdown();
   fake.restore();
   t.cleanup();
 });
