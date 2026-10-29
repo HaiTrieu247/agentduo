@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { killAllActive } from "../../../src/agents/process.js";
 import { Chat, resumeHint, type ChatUi } from "../../../src/chat.js";
+import { AttachmentError } from "../../../src/core/attachments.js";
 import { parseInput, type Backend, type SettingCommand } from "../../../src/core/commands.js";
 import { ConfigError, type ConfigData } from "../../../src/core/config.js";
 import { Conversation } from "../../../src/core/conversation.js";
@@ -17,7 +18,7 @@ import { PIPELINE } from "../../../src/ui/format.js";
 import { DecisionBroker, PermissionBroker } from "./decisionBroker.js";
 import type {
   ArtifactContent, ArtifactName, ChangeList, DecisionAnswer, FocusedRun, InitializeResult, PipelineStep, Problem, Route, SettingRequest, SnapshotFile,
-  SnapshotSide, UiUpdate, WorkerErrorCode,
+  SnapshotSide, UiUpdate, WorkerErrorCode, WorkerResults,
 } from "./protocol.js";
 
 /** After a shutdown asks the agents to stop, give them this long before they are killed outright. */
@@ -135,6 +136,9 @@ export class RuntimeSession {
       setRecipient: (backend) => sink.ui({ type: "recipient", backend }, conversation),
       setModels: (models) => sink.ui({ type: "models", models }, null),
       setSettings: (settings) => sink.ui({ type: "settings", settings }, null),
+      usage: (report) => sink.ui({ type: "usage", report }, conversation),
+      setAttachments: (files) => conversation && sink.ui({ type: "attachments", files }, conversation),
+      sent: (files) => conversation && sink.ui({ type: "sent", files }, conversation),
       // /quit: leave the chat as `duo` does, which here means giving the workspace back.
       exit: () => void this.serial(() => this.endSession()),
     };
@@ -288,15 +292,38 @@ export class RuntimeSession {
    * A message of a tab (to its recipient, or a slash command) or, with the Pipeline route, a task for the pipeline.
    * Resolves once the work has started: an answer or a run is never waited for, so interrupt is never held up behind it.
    */
-  submit(conversation: string, text: string, route: Route = "message"): Promise<void> {
+  submit(conversation: string, text: string, route: Route = "message", attachments: string[] = []): Promise<void> {
     return this.serial(async () => {
       if (!this.release && /^\/(quit|exit)\b/.test(text.trim())) {
         this.uiFor(conversation).info("No session is open; the workspace is not locked.");
         return;
       }
-      const chat = await this.ensureSession(conversation, (cfg) => agentsFor(text, route, cfg, this.recipientOf(conversation)));
-      await (route === "pipeline" ? chat.submitPipeline(text) : route === "discuss" ? chat.submitDiscuss(text) : chat.submit(text));
+      const chat = await this.ensureSession(conversation, (cfg) => agentsFor(text || (attachments.length ? "files" : ""), route, cfg, this.recipientOf(conversation)));
+      // The files the tab showed as ready, by id: the chat sends only those, and only its own.
+      const o = { attachments };
+      await (route === "pipeline" ? chat.submitPipeline(text, o) : route === "discuss" ? chat.submitDiscuss(text, o) : chat.submit(text, o));
     });
+  }
+
+  /**
+   * A file for the next message of `conversation`, from a path the host chose: the chat copies it into the conversation
+   * (opened for it, as a message would), and says where it keeps such copies.
+   */
+  stageAttachment(conversation: string, key: string, path: string, name: string): Promise<WorkerResults["stageAttachment"]> {
+    return this.serial(async () => {
+      const chat = await this.ensureSession(conversation);
+      try {
+        return { key, conversation, attachment: chat.attach(path, name), root: chat.attachmentRoot };
+      } catch (e) {
+        if (e instanceof AttachmentError) throw new SessionError("bad_request", e.message);
+        throw e;
+      }
+    });
+  }
+
+  /** A waiting file of `conversation` removed (its ✕), or every one; a tab without a chat has none. */
+  removeAttachment(conversation: string, id: string): Promise<void> {
+    return this.serial(async () => this.tabs.get(conversation)?.chat.detach(id, { quiet: true }));
   }
 
   /** Who plain messages of a tab go to; chosen before its chat exists, it waits for it (no lock is taken just for this). */
@@ -329,6 +356,11 @@ export class RuntimeSession {
       const mode = editMode(chat.config);
       if (mode === "ask" || mode === "auto") this.follow(conversation, { target: "edits", mode });
     });
+  }
+
+  /** The tab's usage, looked up again for its usage panel, as /usage does. */
+  usage(conversation: string): Promise<void> {
+    return this.serial(async () => (await this.ensureSession(conversation)).usage());
   }
 
   /** The other tabs take the setting a tab changed, quietly (that tab said so and saved it); later tabs will too. */

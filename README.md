@@ -101,9 +101,37 @@ agentduo 0.5.0 · chat
 - **Typing `/`** opens a list of the commands and their words, each with what it does, filtered as you type: Up/Down
   picks, Tab or Enter fills it in, Enter again sends, Esc closes the list.
 - **Permission prompts and decisions** appear in place of the input line.
-- **Commands:** `/claude`, `/codex`, `/pipeline`, `/discuss`, `/plan`, `/diff`, `/status`, `/resume` (continue a stopped or waiting
-  run, also from an earlier session), `/new`, `/settings`, `/config`, `/help`, `/quit`. Ctrl-C twice also quits; a
-  running run stops at its current step and stays resumable.
+- **`/usage`** opens a panel in place of the input, like Claude Code's own `/usage`: how much of their plans' limits both
+  agents have used, with a bar per limit and when it resets, then Claude's "What's contributing to your limits usage?".
+  Neither lookup calls a model: Claude's is `claude -p /usage`; Codex's comes from `codex app-server` (`account/read`
+  and `account/rateLimits/read`, as Codex's IDE extension asks it, with your `-c`/`--enable`/`--disable` overrides),
+  because Codex's own `/status` exists only in its TUI. The panel opens at once and each agent's part fills in as it
+  answers (in about two seconds; each gets 15 s); if one fails, only its part says why. ↑↓ scroll it, `r` looks again,
+  and Esc closes it and nothing else: an answer under way goes on. `/status` is unchanged.
+- **Attached files.** `/attach <path>` attaches one file of any kind (images, PDFs, text, code…) to your next message,
+  question, `/discuss`, `/pipeline` task or note. Quote a path with spaces or escape them, the way the shell reads one word:
+  `/attach "~/Desktop/My notes.pdf"`, `/attach shots/bug\ 2.png`. A literal `'` goes in double quotes (`"it's.png"`);
+  `'it''s'` reads as `its`, as in the shell. A relative path starts from the workspace, `~/` from your home directory,
+  quoted or not (`\~` or `./~` for a folder named `~`); nothing is globbed or expanded. `/attachments` lists the waiting files, `/detach <n|all>` removes them. Enter on an
+  empty line sends the files alone (to the agent named under the input, or as a note while the pipeline works). The
+  terminal does not read images from the clipboard: save the image, then `/attach` it.
+  - agentduo copies each file, bytes unchanged, into `.agentduo/runs/conversations/<id>/attachments/` (a pipeline task's
+    into its run's `attachments/`, so `/resume` needs neither the original nor the chat), and never into a snapshot.
+    Limits: 20 files, 20 MB per file and 50 MB per message. A file waiting to be sent is dropped by `/new` and when the
+    chat closes; a sent one stays.
+  - Every prompt lists the files with the paths of their copies, so both agents can read them with their own tools
+    (whether they can make sense of a given binary file is up to them). PNG, JPEG, GIF and WebP images also go to the
+    model as images: to Claude as image blocks of a `stream-json` message, to Codex with `--image=<path>`. Claude takes
+    at most 20 images per call, each up to 8000 pixels on a side and 5 MB once base64-encoded, and 20 MB of them in all;
+    an image past those (or one agentduo cannot read the size of, or an SVG) goes as a path only, and a warning says so.
+  - Images are sent again with every call of a `/discuss` and of a pipeline (each step, retry and repair is a call of
+    its own), which costs tokens and time each time. A later question only lists an earlier message's files by path.
+  - At a HUMAN_REVIEW decision, waiting files do not go with the decision: send them with a message first (a note for
+    the run's next step), or decide later and `/resume` with a note.
+- **Commands:** `/claude`, `/codex`, `/pipeline`, `/discuss`, `/plan`, `/diff`, `/status`, `/usage`, `/attach`,
+  `/attachments`, `/detach`, `/resume` (continue a stopped or waiting run, also from an earlier session), `/new`,
+  `/settings`, `/config`, `/help`, `/quit`. Ctrl-C twice also quits; a running run stops at its current step and stays
+  resumable.
 
 ### Settings from the chat
 

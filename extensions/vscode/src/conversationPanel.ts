@@ -22,10 +22,20 @@ export class ConversationPanel {
   private ready = false;
   /** For the webview once it is ready again (Settings asked for while it loads). */
   private waiting: HostMessage[] = [];
+  private readonly bundle: vscode.Uri;
+  /** Where else the tab may load from: its conversation's attached files, once the host checked where they are. */
+  private readonly roots: string[];
+  /** Roots the tab is to get with its next reload, which waits for its page to hand over its files. */
+  private wanted: string[] = [];
+  /** The page was asked to hand them over (`prepareReload`), and has not answered yet. */
+  private asked = false;
 
-  constructor(readonly conversation: string, readonly panel: vscode.WebviewPanel, extensionUri: vscode.Uri, private readonly host: PanelHost) {
+  /** `roots`: the attachment roots known already, which the page gets from the start (no reload for them). */
+  constructor(readonly conversation: string, readonly panel: vscode.WebviewPanel, extensionUri: vscode.Uri, private readonly host: PanelHost, roots: string[] = []) {
     const root = vscode.Uri.joinPath(extensionUri, "dist", "webview");
-    panel.webview.options = { enableScripts: true, enableCommandUris: false, localResourceRoots: [root] };
+    this.bundle = root;
+    this.roots = [...roots];
+    panel.webview.options = this.options();
     panel.iconPath = { light: vscode.Uri.joinPath(extensionUri, "media", "agentduo-light.svg"), dark: vscode.Uri.joinPath(extensionUri, "media", "agentduo-dark.svg") };
     panel.webview.html = webviewHtml({
       cspSource: panel.webview.cspSource, nonce: makeNonce(),
@@ -41,18 +51,63 @@ export class ConversationPanel {
         host.log(`ignored a message from a conversation tab: ${(e as Error).message}`);
         return;
       }
-      if (message.type === "ready") this.ready = true;
+      if (message.type === "readyToReload") {
+        if (this.asked) this.reload(true);
+        return;
+      }
+      if (message.type === "ready") {
+        this.ready = true;
+        this.asked = false;
+      }
       host.fromWebview(conversation, message);
-      if (message.type === "ready") this.flush();
+      if (message.type === "ready") {
+        this.flush();
+        this.reload();
+      }
     });
     panel.onDidChangeViewState(() => {
       if (panel.active) host.focused(conversation);
       if (!panel.visible) {
         this.ready = false;
+        this.asked = false;
         host.hidden(conversation);
+        // Its page is gone, and the files only it held with it: nothing more to wait for.
+        this.reload();
       }
     });
     panel.onDidDispose(() => host.closed(conversation));
+  }
+
+  /**
+   * Lets the tab load files from `root` (its conversation's attachments) besides its own bundle; true once it may.
+   * VS Code reloads the webview when its options change, and the page holds the files its composer is still reading
+   * (or handing over) and nowhere else: a page that is up is asked to hand them over first, and the options change
+   * once it says it has (`readyToReload`); one that is not up has none. The host grants its URIs as it comes back.
+   */
+  allow(root: string): boolean {
+    if (this.roots.includes(root)) return true;
+    if (!this.wanted.includes(root)) this.wanted.push(root);
+    this.reload();
+    return false;
+  }
+
+  /** The wanted roots take effect: at once when no page is up, or once the page said it may go (`released`). */
+  private reload(released = false): void {
+    if (!this.wanted.length) return;
+    if (this.ready && !released) {
+      if (!this.asked) this.post({ type: "prepareReload" });
+      this.asked = true;
+      return;
+    }
+    this.roots.push(...this.wanted);
+    this.wanted = [];
+    this.asked = false;
+    this.ready = false;
+    this.panel.webview.options = this.options();
+  }
+
+  private options(): vscode.WebviewOptions {
+    return { enableScripts: true, enableCommandUris: false, localResourceRoots: [this.bundle, ...this.roots.map((r) => vscode.Uri.file(r))] };
   }
 
   get visible(): boolean {

@@ -1,0 +1,26 @@
+You are currently using your subscription to power your Claude Code usage
+
+Current session: 46% used · resets Oct 29 at 3pm (Asia/Saigon)
+Current week (all models): 35% used · resets Nov 4 at 7am (Asia/Saigon)
+Current week (Fable): 16% used · resets Nov 4 at 7am (Asia/Saigon)
+
+What's contributing to your limits usage?
+Approximate · sessions on this machine only · shares overlap
+
+Last 24h · 546 requests · 4 sessions
+  93%  Start fresh when you switch tasks · run /clear
+  34%  Review the "superpowers" plugin
+  24%  Give simple subagents a cheaper model
+  19%  Run /superpowers:test-driven-development on a cheaper model
+  Top skills: /superpowers:test-driven-development 19%, /superpowers:brainstorming 8%, /superpowers:systematic-debugging 3%
+  Top subagents: superpowers:test-driven-development 4%
+  Top plugins: superpowers 34%
+
+Last 7d · 2636 requests · 13 sessions
+  90%  Start fresh when you switch tasks · run /clear
+  75%  Give simple subagents a cheaper model
+  53%  Stop sessions you no longer need · some ran 8 hours or more
+  29%  Review the "superpowers" plugin
+  Top skills: /superpowers:test-driven-development 8%, /superpowers:writing-plans 6%, /superpowers:executing-plans 4%, /superpowers:brainstorming 4%, /frontend-design 2%, /superpowers:systematic-debugging 1%
+  Top subagents: general-purpose 6%, superpowers:executing-plans 5%, frontend-design 2%, fork 1%, superpowers:test-driven-development 1%, mattpocock-skills:research 1%
+  Top plugins: superpowers 29%, mattpocock-skills 1%

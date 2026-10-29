@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DecisionBroker, PermissionBroker } from "../extensions/vscode/src/decisionBroker.js";
 import {
-  isWorkspacePath, parseRequestEnvelope, parseWebviewMessage, parseWorkerMessage, PROTOCOL_VERSION, ProtocolError,
+  isWorkspacePath, MAX_UPLOAD_CHARS, parseRequestEnvelope, parseWebviewMessage, parseWorkerMessage, PROTOCOL_VERSION, ProtocolError,
 } from "../extensions/vscode/src/protocol.js";
 import type { HumanReview, PermissionRequest } from "../src/events.js";
 
@@ -11,7 +11,7 @@ const COMMITS = { base: "a".repeat(40), snapshot: "b".repeat(64) };
 describe("worker requests", () => {
   it("accepts every request type with its fields, and normalises answers", () => {
     expect(parseRequestEnvelope(envelope({ type: "submit", conversation: "c-1", text: "Fix it" })))
-      .toEqual({ protocol: PROTOCOL_VERSION, generation: 3, id: 7, request: { type: "submit", conversation: "c-1", text: "Fix it", route: "message" } });
+      .toEqual({ protocol: PROTOCOL_VERSION, generation: 3, id: 7, request: { type: "submit", conversation: "c-1", text: "Fix it", route: "message", attachments: [] } });
     expect(parseRequestEnvelope(envelope({ type: "decision", requestId: "decision-1-ab", answer: { decision: "revise", note: "  smaller  " } })).request)
       .toEqual({ type: "decision", requestId: "decision-1-ab", answer: { decision: "revise", note: "smaller" } });
     expect(parseRequestEnvelope(envelope({ type: "permissionAnswer", requestId: "perm-0", answer: { decision: "deny", message: " " } })).request)
@@ -20,7 +20,7 @@ describe("worker requests", () => {
       .toEqual({ type: "permissionAnswer", requestId: "perm-0", answer: { decision: "once" } });
     expect(parseRequestEnvelope(envelope({ type: "readSnapshotFile", runId: "20261028-1-x", ...COMMITS, side: "snapshot", path: "gói pkg/tệp.txt" })).request)
       .toEqual({ type: "readSnapshotFile", runId: "20261028-1-x", ...COMMITS, side: "snapshot", path: "gói pkg/tệp.txt" });
-    for (const type of ["interrupt", "toggleEdits", "closeConversation"]) {
+    for (const type of ["interrupt", "toggleEdits", "closeConversation", "usage"]) {
       expect(parseRequestEnvelope(envelope({ type, conversation: "c-1", extra: "ignored" })).request).toEqual({ type, conversation: "c-1" });
     }
     // What a run's artifacts and changes are asked for: the run of a conversation, or the workspace's latest.
@@ -68,12 +68,47 @@ describe("worker requests", () => {
   });
 });
 
+describe("attachments", () => {
+  it("is protocol 6: the worker stages files by a path the host chose, and a submit names files by id", () => {
+    expect(PROTOCOL_VERSION).toBe(6);
+    const stage = { type: "stageAttachment", conversation: "c-1", key: "w1a", path: "/tmp/staging/w1a-0/shot.png", name: "shot.png" };
+    expect(parseRequestEnvelope(envelope(stage)).request).toEqual(stage);
+    expect(parseRequestEnvelope(envelope({ type: "stageAttachment", conversation: "c-1", key: "k", path: "C:\\Users\\me\\a.pdf", name: "a.pdf" })).request).toMatchObject({ path: "C:\\Users\\me\\a.pdf" });
+    for (const path of ["relative/a.png", "", "/a\0b"]) expect(() => parseRequestEnvelope(envelope({ ...stage, path }))).toThrow(/path/);
+    for (const key of ["", "../x", "a b", "k".repeat(65)]) expect(() => parseRequestEnvelope(envelope({ ...stage, key }))).toThrow(/key/);
+    expect(() => parseRequestEnvelope(envelope({ ...stage, name: "a\nb" }))).toThrow(/name/);
+    expect(parseRequestEnvelope(envelope({ type: "removeAttachment", conversation: "c-1", id: "all" })).request).toEqual({ type: "removeAttachment", conversation: "c-1", id: "all" });
+    expect(() => parseRequestEnvelope(envelope({ type: "removeAttachment", conversation: "c-1", id: "../x" }))).toThrow();
+    expect(parseRequestEnvelope(envelope({ type: "submit", conversation: "c-1", text: "", attachments: ["lx1-a1b2c3d4"] })).request)
+      .toEqual({ type: "submit", conversation: "c-1", text: "", route: "message", attachments: ["lx1-a1b2c3d4"] });
+    expect(() => parseRequestEnvelope(envelope({ type: "submit", conversation: "c-1", text: "x", attachments: ["/etc/passwd"] }))).toThrow(/attachment/);
+    expect(() => parseRequestEnvelope(envelope({ type: "submit", conversation: "c-1", text: "x", attachments: Array.from({ length: 21 }, (_, i) => `a${i}`) }))).toThrow(/at most 20/);
+  });
+
+  it("takes uploads from the webview only as base64 within the size of one file, never a path", () => {
+    expect(parseWebviewMessage({ type: "attach" })).toEqual({ type: "attach" });
+    expect(parseWebviewMessage({ type: "upload", key: "w1", name: "shot.png", data: "iVBORw0KGgo=" })).toEqual({ type: "upload", key: "w1", name: "shot.png", data: "iVBORw0KGgo=" });
+    expect(parseWebviewMessage({ type: "upload", key: "w1", name: "empty.txt", data: "" })).toMatchObject({ data: "" });
+    expect(() => parseWebviewMessage({ type: "upload", key: "w1", name: "a", data: "not base64!" })).toThrow(/base64/);
+    expect(() => parseWebviewMessage({ type: "upload", key: "w1", name: "a", data: "abc" })).toThrow(/base64/);
+    expect(() => parseWebviewMessage({ type: "upload", key: "w1", name: "a", data: "A".repeat(MAX_UPLOAD_CHARS + 4) })).toThrow(/too large/);
+    expect(parseWebviewMessage({ type: "upload", key: "w1", name: "a", data: "A".repeat(MAX_UPLOAD_CHARS) })).toMatchObject({ type: "upload" });
+    expect(parseWebviewMessage({ type: "upload", key: "w1", name: "a", data: "", path: "/etc/passwd" })).not.toHaveProperty("path");
+    expect(parseWebviewMessage({ type: "detach", key: "w1" })).toEqual({ type: "detach", key: "w1" });
+    expect(() => parseWebviewMessage({ type: "detach", key: "../../x" })).toThrow();
+    expect(parseWebviewMessage({ type: "submit", text: "", attachments: ["lx1-a1b2c3d4"] })).toEqual({ type: "submit", text: "", route: "message", attachments: ["lx1-a1b2c3d4"] });
+    // The page's answer to prepareReload: nothing but its type.
+    expect(parseWebviewMessage({ type: "readyToReload", roots: ["/"] })).toEqual({ type: "readyToReload" });
+  });
+});
+
 describe("webview messages", () => {
   it("only names things: submit text, answers to pending ids, and commands from a fixed list", () => {
-    expect(parseWebviewMessage({ type: "submit", text: "hi" })).toEqual({ type: "submit", text: "hi", route: "message" });
-    expect(parseWebviewMessage({ type: "submit", text: "Which queue?", route: "discuss" })).toEqual({ type: "submit", text: "Which queue?", route: "discuss" });
+    expect(parseWebviewMessage({ type: "submit", text: "hi" })).toEqual({ type: "submit", text: "hi", route: "message", attachments: [] });
+    expect(parseWebviewMessage({ type: "submit", text: "Which queue?", route: "discuss" })).toEqual({ type: "submit", text: "Which queue?", route: "discuss", attachments: [] });
     expect(() => parseWebviewMessage({ type: "submit", text: "x", route: "debate" })).toThrow();
     expect(parseWebviewMessage({ type: "command", name: "openChanges" })).toEqual({ type: "command", name: "openChanges" });
+    expect(parseWebviewMessage({ type: "usage", extra: "ignored" })).toEqual({ type: "usage" });
     expect(parseWebviewMessage({ type: "decision", generation: 2, id: "decision-1-x", decision: "defer", note: "" }))
       .toEqual({ type: "decision", generation: 2, id: "decision-1-x", decision: "defer", note: null });
     expect(parseWebviewMessage({ type: "permission", generation: 2, id: "perm-1", answer: { decision: "always" } }))

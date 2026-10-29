@@ -7,10 +7,17 @@
 // synthesis); an unscripted critique agrees, and an unscripted synthesis is a chat answer.
 // Claude in host mode (--permission-prompt-tool stdio) reads the prompt as a stream-json user message, asks
 // for each scripted `permissions` entry with a control_request, and applies the answer the way Claude does.
+// Claude with --input-format stream-json but no host reads that one message, then stdin must close. A message's
+// content may be blocks: its text blocks are the prompt, and its image blocks are logged as `images` (media type,
+// base64 length, and the sha256 of the bytes). Codex logs each --image=<path> the same way, from the file.
 // `codex doctor --json` prints a report whose config.load model is the last `-c model=…` override, else
 // scenario.doctor.model (null: none), after scenario.doctor.sleep ms; scenario.doctor.exit fails it.
 // `codex debug models` prints scenario.catalog.models as Codex's model catalog; scenario.catalog.exit fails it.
+// `claude -p /usage` prints scenario.usage.claude.text (default: a short /usage); its exit and stderr fail it.
+// `codex app-server` answers initialize, account/read (scenario.usage.codex.account) and account/rateLimits/read
+// (.rateLimits, or the error .rateLimitsError) until stdin closes; .hang never answers, .exit and .stderr fail it.
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline";
@@ -32,9 +39,29 @@ async function main() {
   }
   if (backend === "codex" && args[0] === "doctor") return doctor(args);
   if (backend === "codex" && args[0] === "debug" && args[1] === "models") return catalog(args);
+  if (backend === "claude" && args[0] === "-p" && args[1] === "/usage") return claudeUsage(args);
+  if (backend === "codex" && args[0] === "app-server") return appServer(args);
   const host = args.includes("--permission-prompt-tool");
-  const stdin = host ? createInterface({ input: process.stdin })[Symbol.asyncIterator]() : null;
-  const prompt = host ? JSON.parse((await stdin.next()).value).message.content : readFileSync(0, "utf8");
+  const streamed = backend === "claude" && args.includes("--input-format");
+  const stdin = streamed ? createInterface({ input: process.stdin })[Symbol.asyncIterator]() : null;
+  const content = streamed ? JSON.parse((await stdin.next()).value).message.content : readFileSync(0, "utf8");
+  const blocks = Array.isArray(content) ? content : [{ type: "text", text: content }];
+  const prompt = blocks.filter((b) => b.type === "text").map((b) => b.text).join("\n");
+  const sha = (buf) => createHash("sha256").update(buf).digest("hex");
+  const images = backend === "claude"
+    ? blocks.filter((b) => b.type === "image").map((b) => ({ mediaType: b.source.media_type, base64: b.source.data.length, sha256: sha(Buffer.from(b.source.data, "base64")) }))
+    : args.filter((a) => a.startsWith("--image=")).map((a) => {
+      const file = a.slice("--image=".length);
+      return existsSync(file) ? { file, sha256: sha(readFileSync(file)) } : { file, missing: true };
+    });
+  // Without a host, stdin closes once the message is in, as real Claude expects (it would wait for more otherwise).
+  if (streamed && !host) {
+    const closed = await Promise.race([stdin.next().then((r) => r.done), new Promise((r) => setTimeout(() => r(false), 3000).unref())]);
+    if (!closed) {
+      process.stderr.write("fake-agent: stdin stayed open after the stream-json message\n");
+      return 8;
+    }
+  }
   const chat = prompt.startsWith("[agentduo-conversation]");
   const step = chat ? /^\[agentduo-discussion: (\w+)/m.exec(prompt)?.[1] : undefined;
   const role = step ? `discuss_${step}` : chat ? `chat_${backend}` : /\[orchestrator-role: (\w+)\]/.exec(prompt)?.[1] ?? "unknown";
@@ -46,7 +73,7 @@ async function main() {
   const unscripted = step === "critique" ? [{ answer: "Looks right.\nVERDICT: AGREE" }] : chat ? scenario.chat ?? [{ answer: `Answer from ${backend}.` }] : [{ raw: `no scripted response for role ${role}` }];
   const responses = scenario[role] ?? unscripted;
   const resp = responses[Math.min(n, responses.length - 1)];
-  appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend, role, call: n, args, prompt }) + "\n");
+  appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend, role, call: n, args, prompt, ...(images.length ? { images } : {}) }) + "\n");
 
   const writeFiles = (files) => {
     for (const [path, content] of Object.entries(files ?? {})) {
@@ -160,6 +187,50 @@ function catalog(args) {
     return c.exit;
   }
   process.stdout.write(JSON.stringify({ models: c.models }) + "\n");
+  return 0;
+}
+
+const usageScenario = (backend) => (existsSync(process.env.FAKE_SCENARIO ?? "") ? JSON.parse(readFileSync(process.env.FAKE_SCENARIO, "utf8")).usage?.[backend] : null) ?? {};
+
+/** `claude -p /usage`: Claude Code's /usage as text (see fixtures/claude-usage.txt), with no model call. */
+async function claudeUsage(args) {
+  const u = usageScenario("claude");
+  if (process.env.FAKE_LOG) appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend: "claude", usage: true, args }) + "\n");
+  if (u.sleep) await new Promise((r) => setTimeout(r, u.sleep));
+  if (u.exit) {
+    process.stderr.write(`${u.stderr ?? "usage failed"}\n`);
+    return u.exit;
+  }
+  process.stdout.write(u.text ?? "You are currently using your subscription to power your Claude Code usage\n\nCurrent session: 10% used · resets Oct 29 at 3pm (UTC)\n");
+  return 0;
+}
+
+/** `codex app-server`: JSON-RPC lines on stdin and stdout, as codex 0.164 speaks it (see fixtures/codex-account.json). */
+async function appServer(args) {
+  const u = usageScenario("codex");
+  if (u.exit) {
+    process.stderr.write(`${u.stderr ?? "app-server failed"}\n`);
+    return u.exit;
+  }
+  const account = u.account ?? { account: { type: "chatgpt", email: "fake@example.com", planType: "plus" }, requiresOpenaiAuth: true };
+  const window = (usedPercent, windowDurationMins) => ({ usedPercent, windowDurationMins, resetsAt: null });
+  const rateLimits = u.rateLimits ?? {
+    ordinaryUsageAllowed: true, rateLimitsByLimitId: null,
+    rateLimits: { limitId: "codex", limitName: null, primary: window(5, 300), secondary: window(20, 10080), credits: null, planType: "plus", rateLimitReachedType: null },
+  };
+  const methods = [];
+  const send = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
+  for await (const line of createInterface({ input: process.stdin })) {
+    const m = JSON.parse(line);
+    methods.push(m.method);
+    if (u.hang || m.id === undefined) continue;
+    if (m.method === "initialize") send({ id: m.id, result: { userAgent: "codex-fake" } });
+    else if (m.method === "account/read") send({ id: m.id, result: account });
+    else if (m.method === "account/rateLimits/read") send(u.rateLimitsError ? { id: m.id, error: { code: -32600, message: u.rateLimitsError } } : { id: m.id, result: rateLimits });
+    else send({ id: m.id, error: { code: -32601, message: `unknown method ${m.method}` } });
+  }
+  // The real app server exits as soon as its stdin closes.
+  if (process.env.FAKE_LOG) appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend: "codex", usage: true, args, methods }) + "\n");
   return 0;
 }
 

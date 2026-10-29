@@ -1,12 +1,14 @@
 // Messages between the extension host, the engine worker (IPC) and the webview (postMessage). Everything that
 // crosses a boundary is checked here; the webview in particular can only name things, never paths, URIs or commands.
 import type { ChatStatus } from "../../../src/chat.js";
+import { ATTACHMENT_LIMITS, base64Size, isAttachmentId, type Attachment } from "../../../src/core/attachment-types.js";
 import {
   CLAUDE_EFFORTS, CODEX_EFFORTS, CODEX_PRESETS, RULE_KINDS, type Backend, type SettingCommand,
 } from "../../../src/core/commands.js";
 import type { Check } from "../../../src/core/doctor.js";
 import type { CodexCatalog } from "../../../src/core/models.js";
 import type { SettingsView } from "../../../src/core/settings.js";
+import type { UsageReport } from "../../../src/core/usage.js";
 import type { DuoEvent, HumanReview, ModelMap, Party, PermissionAnswer, Phase, Role } from "../../../src/events.js";
 import type { ViewAction, ViewState } from "../webview/state.js";
 
@@ -14,8 +16,11 @@ import type { ViewAction, ViewState } from "../webview/state.js";
  * 2: the chat is a conversation (direct answers, recipient, models, settings and the Pipeline route).
  * 3: Codex's model catalog for the settings' model picker (`catalog` updates).
  * 4: several conversations (the extension's tabs) in one worker: each request, event and question names its own.
+ * 5: /usage: `usage` updates for a tab's usage panel, and the `usage` request that looks it up again.
+ * 6: attachments: the host stages a file by path (one the user picked, or one it wrote from a paste or a drop) and the
+ *    worker copies it into the conversation; a submit names the files it sends by id. No bytes ever cross IPC.
  */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 6;
 
 export const BACKENDS = ["codex", "claude"] as const;
 /** How the composer's text is meant: a message (to the recipient, or a slash command), a pipeline task, or a question to discuss. */
@@ -63,11 +68,21 @@ export interface Problem {
  */
 export type WorkerRequest =
   | { type: "initialize"; workspace: string; configPath: string | null }
-  | { type: "submit"; conversation: string; text: string; route: Route }
+  /** `attachments`: the ids of the waiting files the message sends (the tab's ready ones); absent: none. */
+  | { type: "submit"; conversation: string; text: string; route: Route; attachments?: string[] }
+  /**
+   * A file for the conversation's next message: `path` is one the host chose (the user picked it, or the host wrote
+   * it from what the tab pasted or dropped), `name` what to call it; `key` is the tab's, and comes back with the result.
+   */
+  | { type: "stageAttachment"; conversation: string; key: string; path: string; name: string }
+  /** A waiting file removed (its ✕), or all of them. */
+  | { type: "removeAttachment"; conversation: string; id: string }
   | { type: "recipient"; conversation: string; backend: Backend }
   | ({ type: "setting"; conversation: string } & SettingRequest)
   | { type: "interrupt"; conversation: string }
   | { type: "toggleEdits"; conversation: string }
+  /** The usage panel's Refresh, and the title bar's Usage: the tab's chat looks the usage up again, as /usage does. */
+  | { type: "usage"; conversation: string }
   /** The tab was closed: what runs in it stops (a run stays resumable), and the worker lets the conversation go. */
   | { type: "closeConversation"; conversation: string }
   | { type: "decision"; requestId: string; answer: DecisionAnswer }
@@ -151,10 +166,14 @@ export interface SnapshotFile {
 export interface WorkerResults {
   initialize: InitializeResult;
   submit: { accepted: true };
+  /** `root`: where the conversation keeps its copies, so the host can let the tab show images from there (once it checked it). */
+  stageAttachment: { key: string; conversation: string; attachment: Attachment; root: string };
+  removeAttachment: { removed: true };
   recipient: { accepted: true };
   setting: { accepted: true };
   interrupt: { accepted: true };
   toggleEdits: { accepted: true };
+  usage: { accepted: true };
   closeConversation: { closed: true };
   decision: { applied: true };
   permissionAnswer: { applied: true };
@@ -184,6 +203,12 @@ export type UiUpdate =
   | { type: "settings"; settings: SettingsView }
   /** The models Codex offers, once `codex debug models` answered (Claude Code's aliases are known without asking). */
   | { type: "catalog"; codex: CodexCatalog }
+  /** /usage in a tab: a report with a new id opens its usage panel; the same id again fills it in. */
+  | { type: "usage"; report: UsageReport }
+  /** The files waiting to go with the conversation's next message, whenever they change. */
+  | { type: "attachments"; files: Attachment[] }
+  /** The files that went with the message just accepted. */
+  | { type: "sent"; files: Attachment[] }
   /** dormant: no lock held; active: a chat session holds the workspace lock; ended: /quit released it. */
   | { type: "session"; session: "dormant" | "active" | "ended" }
   | { type: "pipeline"; pipeline: PipelineStep[] };
@@ -207,14 +232,24 @@ export type WebviewCommand = (typeof WEBVIEW_COMMANDS)[number];
 
 export type WebviewMessage =
   | { type: "ready" }
-  | { type: "submit"; text: string; route: Route }
+  | { type: "submit"; text: string; route: Route; attachments: string[] }
+  /** Attach: the host asks the user for files (its own dialog). */
+  | { type: "attach" }
+  /** A file pasted or dropped on the composer, as base64 (one per message); `key` names it until it is stored. */
+  | { type: "upload"; key: string; name: string; data: string }
+  /** A file of the composer removed: one waiting (by its key), or one that failed. */
+  | { type: "detach"; key: string }
   | { type: "recipient"; backend: Backend }
   | ({ type: "setting" } & SettingRequest)
   | { type: "interrupt" }
   | { type: "toggleEdits" }
+  /** The usage panel's Refresh. */
+  | { type: "usage" }
   | { type: "decision"; generation: number; id: string; decision: DecisionChoice; note: string | null }
   | { type: "permission"; generation: number; id: string; answer: PermissionAnswer }
-  | { type: "command"; name: WebviewCommand };
+  | { type: "command"; name: WebviewCommand }
+  /** The answer to `prepareReload`: the files the page read are all with the host, so a reload loses none. */
+  | { type: "readyToReload" };
 
 export type HostMessage =
   /** `conversation`: the tab's own, which the webview keeps, so the tab is restored with it after a reload. */
@@ -222,7 +257,17 @@ export type HostMessage =
   | { type: "actions"; actions: ViewAction[] }
   | { type: "focusComposer" }
   /** The title bar's Settings: open the settings panel above the composer. */
-  | { type: "showSettings" };
+  | { type: "showSettings" }
+  /**
+   * Where the tab may show attached images from: a webview URI per attachment id, null for a copy that is gone. Sent
+   * after each snapshot and as attachments appear; never saved with the view (a restored tab is granted them again).
+   */
+  | { type: "attachmentUris"; uris: Record<string, string | null> }
+  /**
+   * The host is to reload the page (new resource roots): it answers `readyToReload` once no pasted or dropped file is
+   * left only in the page, and takes no more files until it is reloaded.
+   */
+  | { type: "prepareReload" };
 
 // ------------------------------------------------------------------ validation
 export class ProtocolError extends Error {
@@ -230,6 +275,12 @@ export class ProtocolError extends Error {
 }
 
 const MAX_TEXT = 100_000;
+/** A file of the largest size a message takes, once base64-encoded. */
+export const MAX_UPLOAD_CHARS = base64Size(ATTACHMENT_LIMITS.fileBytes);
+const MAX_NAME = 255;
+const MAX_PATH = 4096;
+/** The tab's own name for a file until the worker gives it an id. */
+const KEY = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const MAX_ID = 200;
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -295,6 +346,41 @@ export function isWorkspacePath(v: unknown): v is string {
   if (typeof v !== "string" || !v || v.length > 4096 || v.includes("\0")) return false;
   if (v.startsWith("/") || v.startsWith("\\") || /^[A-Za-z]:/.test(v)) return false;
   return !v.split(/[\\/]/).some((part) => part === ".." || part === "");
+}
+
+function attachmentIds(v: unknown): string[] {
+  if (v === undefined || v === null) return [];
+  if (!Array.isArray(v) || v.length > ATTACHMENT_LIMITS.files) throw new ProtocolError(`attachments must be a list of at most ${ATTACHMENT_LIMITS.files} ids`);
+  return v.map((id) => {
+    if (!isAttachmentId(id)) throw new ProtocolError("attachments must be attachment ids");
+    return id;
+  });
+}
+
+function uploadKey(v: unknown): string {
+  if (typeof v !== "string" || !KEY.test(v)) throw new ProtocolError("key is not a valid key");
+  return v;
+}
+
+function fileName(v: unknown): string {
+  const name = text(v, "name", MAX_NAME).trim();
+  if (!name || /[\u0000-\u001f\u007f]/.test(name)) throw new ProtocolError("name must be a non-empty line");
+  return name;
+}
+
+/** Base64, at most the size of the largest file a message takes; checked again once decoded. */
+function base64(v: unknown): string {
+  if (typeof v !== "string") throw new ProtocolError("data must be a string");
+  if (v.length > MAX_UPLOAD_CHARS) throw new ProtocolError("the file is too large");
+  if (v.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(v)) throw new ProtocolError("data is not base64");
+  return v;
+}
+
+/** An absolute path the host chose; never one from the webview. */
+function hostPath(v: unknown): string {
+  const path = text(v, "path", MAX_PATH);
+  if (!path || path.includes("\0") || !(path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\"))) throw new ProtocolError("path must be absolute");
+  return path;
 }
 
 function permissionAnswer(v: unknown): PermissionAnswer {
@@ -365,20 +451,27 @@ const route = (v: unknown): Route => (v === undefined ? "message" : oneOf(v, ROU
 export function parseRequest(v: unknown): WorkerRequest {
   const o = obj(v, "request");
   const type = oneOf(o.type, [
-    "initialize", "submit", "recipient", "setting", "interrupt", "toggleEdits", "closeConversation", "decision", "permissionAnswer", "inspectFocusedRun",
-    "readArtifact", "listChanges", "readSnapshotFile", "doctor", "shutdown",
+    "initialize", "submit", "stageAttachment", "removeAttachment", "recipient", "setting", "interrupt", "toggleEdits", "usage", "closeConversation", "decision",
+    "permissionAnswer", "inspectFocusedRun", "readArtifact", "listChanges", "readSnapshotFile", "doctor", "shutdown",
   ] as const, "request.type");
   switch (type) {
     case "initialize":
       return { type, workspace: text(o.workspace, "workspace", 4096), configPath: optionalText(o.configPath, "configPath") };
     case "submit":
-      return { type, conversation: conversationId(o.conversation), text: text(o.text, "text"), route: route(o.route) };
+      return { type, conversation: conversationId(o.conversation), text: text(o.text, "text"), route: route(o.route), attachments: attachmentIds(o.attachments) };
+    case "stageAttachment":
+      return { type, conversation: conversationId(o.conversation), key: uploadKey(o.key), path: hostPath(o.path), name: fileName(o.name) };
+    case "removeAttachment": {
+      if (o.id !== "all" && !isAttachmentId(o.id)) throw new ProtocolError("id must be an attachment id or all");
+      return { type, conversation: conversationId(o.conversation), id: o.id as string };
+    }
     case "recipient":
       return { type, conversation: conversationId(o.conversation), backend: oneOf(o.backend, BACKENDS, "backend") };
     case "setting":
       return { type, conversation: conversationId(o.conversation), ...settingRequest(o) };
     case "interrupt":
     case "toggleEdits":
+    case "usage":
     case "closeConversation":
       return { type, conversation: conversationId(o.conversation) };
     case "inspectFocusedRun":
@@ -441,10 +534,17 @@ export function parseWorkerMessage(v: unknown): WorkerMessage {
 
 export function parseWebviewMessage(v: unknown): WebviewMessage {
   const o = obj(v, "webview message");
-  const type = oneOf(o.type, ["ready", "submit", "recipient", "setting", "interrupt", "toggleEdits", "decision", "permission", "command"] as const, "type");
+  const type = oneOf(o.type, [
+    "ready", "submit", "attach", "upload", "detach", "recipient", "setting", "interrupt", "toggleEdits", "usage", "decision", "permission", "command",
+    "readyToReload",
+  ] as const, "type");
   switch (type) {
     case "submit":
-      return { type, text: text(o.text, "text"), route: route(o.route) };
+      return { type, text: text(o.text, "text"), route: route(o.route), attachments: attachmentIds(o.attachments) };
+    case "upload":
+      return { type, key: uploadKey(o.key), name: fileName(o.name), data: base64(o.data) };
+    case "detach":
+      return { type, key: uploadKey(o.key) };
     case "recipient":
       return { type, backend: oneOf(o.backend, BACKENDS, "backend") };
     case "setting":

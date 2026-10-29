@@ -1,9 +1,11 @@
 // What the sidebar shows, as plain data. The extension host keeps one copy (so a hidden or reloaded view gets a
 // snapshot) and the webview another, both driven by the same actions through `reduce`. No DOM here.
 import type { ChatStatus } from "../../../src/chat.js";
+import type { Attachment } from "../../../src/core/attachment-types.js";
 import { AGENT_NAMES, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS, type Backend } from "../../../src/core/commands.js";
 import type { CodexCatalog } from "../../../src/core/models.js";
 import type { SettingsView } from "../../../src/core/settings.js";
+import type { UsageReport } from "../../../src/core/usage.js";
 import type {
   Activity, Agent, DiscussionPlace, DiscussionStatus, DuoEvent, HistoryEntry, HumanReview, Message, ModelIdentity, ModelMap, Party, PermissionAnswer, PermissionRequest,
   Phase, Role, RoundInfo, TurnStatus, Verdict,
@@ -82,7 +84,7 @@ export interface DiscussionCard {
 
 export type TimelineItem = { id: string } & (
   /** `to`: the agent the message went to as a question; `pipeline`: sent as a task with the Pipeline button; `discuss`: a question to discuss. */
-  | { kind: "user"; text: string; to?: Backend; pipeline?: boolean; discuss?: boolean }
+  | { kind: "user"; text: string; to?: Backend; pipeline?: boolean; discuss?: boolean; attachments?: Attachment[] }
   | { kind: "info"; text: string; tone: "info" | "error" }
   | { kind: "run"; runId: string; task: string }
   | { kind: "step"; step: StepCard }
@@ -93,6 +95,17 @@ export type TimelineItem = { id: string } & (
   | { kind: "review"; review: HumanReview }
   | { kind: "finish"; phase: string; runId: string; summary?: string }
 );
+
+/** A file of the composer: being stored, waiting to go with the next message, or one that could not be attached. */
+export interface AttachmentChip {
+  /** The tab's name for it: its upload's key, or the attachment's id when the worker named it first (/attach). */
+  key: string;
+  status: "uploading" | "ready" | "error";
+  name: string;
+  /** What the worker stored; null until then. */
+  attachment: Attachment | null;
+  error: string | null;
+}
 
 export interface PendingPermission {
   /** Absent when Claude asks while answering a question of the chat. */
@@ -123,6 +136,8 @@ export interface ViewState {
   settings: SettingsView | null;
   /** The models Codex offers, for the settings' picker; null until the worker has read them. */
   catalog: { codex: CodexCatalog } | null;
+  /** The tab's latest /usage, for its usage panel (which the webview opens for a new report); null until there is one. */
+  usage: UsageReport | null;
   problem: Problem | null;
   run: { id: string; task: string } | null;
   /** The phase the run finished in (DONE, ABORTED, HUMAN_REVIEW, INTERRUPTED); null while it runs. */
@@ -143,6 +158,8 @@ export interface ViewState {
   live: { costUsd: number; tokens: number };
   decision: PendingDecision | null;
   permissions: PendingPermission[];
+  /** The composer's files: the worker's waiting ones, those being stored, and those that failed. */
+  attachments: AttachmentChip[];
   timeline: TimelineItem[];
   /** Timeline items dropped from the front. */
   dropped: number;
@@ -161,15 +178,61 @@ export type ViewAction =
   }
   | { type: "problem"; problem: Problem | null }
   | { type: "decision.open"; id: string; review: HumanReview; views: ArtifactName[] }
-  | { type: "decision.closed"; id: string };
+  | { type: "decision.closed"; id: string }
+  /** A file of the composer goes to the worker (key: the upload's), is stored, fails, or is let go. */
+  | { type: "attachment.uploading"; key: string; name: string }
+  | { type: "attachment.ready"; key: string; attachment: Attachment }
+  | { type: "attachment.failed"; key: string; name: string; error: string }
+  | { type: "attachment.dismissed"; key: string };
 
 export function initialState(session: SessionState = "starting", workspace: string | null = null, generation = 0): ViewState {
   return {
-    generation, session, workspace, version: null, pipeline: [], status: "idle", edits: "ask", recipient: "codex", models: null, settings: null, catalog: null, problem: null,
+    generation, session, workspace, version: null, pipeline: [], status: "idle", edits: "ask", recipient: "codex", models: null, settings: null, catalog: null, usage: null, problem: null,
     run: null, ended: null, current: null, turn: null, discussion: null, logs: null, reached: [], stopped: null,
     planning: { round: 1, limit: 0 }, impl: { round: 0, limit: 0 }, totals: { costUsd: 0, tokens: 0 }, live: { costUsd: 0, tokens: 0 },
-    decision: null, permissions: [], timeline: [], dropped: 0, seq: 0,
+    decision: null, permissions: [], attachments: [], timeline: [], dropped: 0, seq: 0,
   };
+}
+
+/**
+ * The worker's waiting files, as the composer shows them: a stored file stays only while it waits; one the worker has
+ * that the tab did not store (an /attach typed in it) is added; files being stored, and failed ones, stay as they are.
+ */
+function reconcile(chips: AttachmentChip[], files: Attachment[]): AttachmentChip[] {
+  const kept = chips.filter((c) => c.status !== "ready" || files.some((f) => f.id === c.attachment?.id));
+  const known = new Set(kept.flatMap((c) => (c.attachment ? [c.attachment.id] : [])));
+  return [...kept, ...files.filter((f) => !known.has(f.id)).map((f): AttachmentChip => ({ key: f.id, status: "ready", name: f.name, attachment: f, error: null }))];
+}
+
+/** The files that went with the message just sent join it, its last message in the timeline. */
+function sentWith(s: ViewState, files: Attachment[]): ViewState {
+  const i = s.timeline.findLastIndex((x) => x.kind === "user");
+  const item = s.timeline[i];
+  if (!item || item.kind !== "user" || !files.length) return s;
+  const timeline = s.timeline.slice();
+  timeline[i] = { ...item, attachments: files };
+  return { ...s, timeline };
+}
+
+function onAttachment(s: ViewState, a: Extract<ViewAction, { type: `attachment.${string}` }>): ViewState {
+  const chips = s.attachments;
+  switch (a.type) {
+    case "attachment.uploading":
+      return chips.some((c) => c.key === a.key) ? s : { ...s, attachments: [...chips, { key: a.key, status: "uploading", name: a.name, attachment: null, error: null }] };
+    case "attachment.ready":
+      // The worker may have said first (its list of waiting files): that chip gives way to the tab's own.
+      if (!chips.some((c) => c.key === a.key)) return s;
+      return {
+        ...s, attachments: chips.filter((c) => c.key === a.key || c.attachment?.id !== a.attachment.id)
+          .map((c) => (c.key === a.key ? { ...c, status: "ready", name: a.attachment.name, attachment: a.attachment, error: null } : c)),
+      };
+    case "attachment.failed": {
+      const chip: AttachmentChip = { key: a.key, status: "error", name: a.name, attachment: null, error: a.error };
+      return { ...s, attachments: chips.some((c) => c.key === a.key) ? chips.map((c) => (c.key === a.key ? chip : c)) : [...chips, chip] };
+    }
+    case "attachment.dismissed":
+      return { ...s, attachments: chips.filter((c) => c.key !== a.key) };
+  }
 }
 
 type ItemContent = TimelineItem extends infer T ? (T extends { id: string } ? Omit<T, "id"> : never) : never;
@@ -394,6 +457,12 @@ function onUi(s: ViewState, u: UiUpdate): ViewState {
       return { ...s, settings: u.settings, edits: u.settings.claude.edits };
     case "catalog":
       return { ...s, catalog: { codex: u.codex } };
+    case "usage":
+      return { ...s, usage: u.report };
+    case "attachments":
+      return { ...s, attachments: reconcile(s.attachments, u.files) };
+    case "sent":
+      return sentWith(s, u.files);
     case "pipeline":
       return { ...s, pipeline: u.pipeline };
     case "session":
@@ -413,7 +482,9 @@ export function reduce(s: ViewState, a: ViewAction): ViewState {
       return push(s, { kind: "info", text: a.text, tone: a.tone });
     case "workspace": {
       // A new worker: whatever the old one was asking or answering is gone, and it says again what it knows.
-      const next = { ...s, session: a.session, generation: a.generation, decision: null, permissions: [], current: null, turn: null, discussion: null, models: null };
+      // Its files waiting to be sent went with it; a file still on its way goes to the new one.
+      const attachments = a.generation === s.generation ? s.attachments : s.attachments.filter((c) => c.status === "uploading");
+      const next = { ...s, session: a.session, generation: a.generation, decision: null, permissions: [], current: null, turn: null, discussion: null, models: null, attachments };
       if (a.workspace === s.workspace) return a.session === "stopped" ? { ...next, status: "idle" } : next;
       return initialState(a.session, a.workspace, a.generation);
     }
@@ -429,8 +500,25 @@ export function reduce(s: ViewState, a: ViewAction): ViewState {
       return { ...s, decision: { id: a.id, review: a.review, views: a.views } };
     case "decision.closed":
       return s.decision?.id === a.id ? { ...s, decision: null } : s;
+    case "attachment.uploading":
+    case "attachment.ready":
+    case "attachment.failed":
+    case "attachment.dismissed":
+      return onAttachment(s, a);
   }
 }
+
+/** The attached images the tab shows (in its messages and its composer), whose copies it needs URIs for. */
+export function shownImages(s: ViewState): Attachment[] {
+  const all = [...s.timeline.flatMap((i) => (i.kind === "user" ? i.attachments ?? [] : [])), ...s.attachments.flatMap((c) => (c.attachment ? [c.attachment] : []))];
+  return all.filter((a, i) => a.image && all.findIndex((b) => b.id === a.id) === i);
+}
+
+/** Files are still being stored: the message waits for them. */
+export const uploading = (s: ViewState): boolean => s.attachments.some((c) => c.status === "uploading");
+
+/** The ids of the files a message sent now takes: those stored and waiting. */
+export const readyAttachments = (s: ViewState): string[] => s.attachments.flatMap((c) => (c.status === "ready" && c.attachment ? [c.attachment.id] : []));
 
 // ------------------------------------------------------------------ view model (pure, shared by render.ts and tests)
 /** `next`: the composer's next message is a task for the pipeline, or a question to discuss (picked in its recipient menu). */
@@ -458,6 +546,15 @@ export function placeholder(s: ViewState, next: "pipeline" | "discuss" | null = 
 
 /** Something runs that Esc or Stop can stop: a pipeline step, or an answer. */
 export const isBusy = (s: ViewState): boolean => s.status === "running" || s.status === "answering";
+
+/**
+ * The send control stops what runs instead of sending: something runs, and the composer has nothing for it, neither
+ * text nor files (waiting, or still being read or attached), which Enter would send as a note or wait for.
+ * `reading`: the files the webview is still reading or handing to the host.
+ */
+export function sendStops(s: ViewState, text: string, reading: number): boolean {
+  return isBusy(s) && !text.trim() && !reading && !uploading(s) && !readyAttachments(s).length;
+}
 
 export function canSubmit(s: ViewState): boolean {
   return s.session !== "no-folder" && s.session !== "choose-folder";

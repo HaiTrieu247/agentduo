@@ -3,10 +3,12 @@
 // providers, questions to Codex and Claude (one stopped before its answer), a second conversation in a tab of its own,
 // and a two-round pipeline run whose diff follows the run to its newer snapshot.
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as vscode from "vscode";
 import { approval, critique, finding, impl, plan, review } from "../../../test/helpers/builders.js";
+import { png } from "../../../test/helpers/images.js";
 import { ARTIFACT_SCHEME, artifactLocation, SNAPSHOT_SCHEME, snapshotLocation } from "../src/artifacts.js";
 import type { TestApi } from "../src/extension.js";
 
@@ -90,6 +92,48 @@ const checks: Array<[string, (api: TestApi, ext: vscode.Extension<TestApi>) => P
     assert.equal(api.state()!.run, null, "a question starts no run");
     assert.equal(api.state()!.recipient, "claude", "the next plain message goes to Claude");
     await api.selectRecipient("codex");
+  }],
+  ["shows /usage in the tab's usage panel, and looks it up again from the title bar's Usage, with no line in the conversation", async (api) => {
+    const items = api.state()!.timeline.length;
+    await api.submit("/usage");
+    const first = await until("the usage", () => {
+      const u = api.state()?.usage;
+      return u && u.claude.status !== "loading" && u.codex.status !== "loading" ? u : null;
+    }, 15_000);
+    assert.equal(first.claude.status, "ready", JSON.stringify(first.claude));
+    assert.equal(first.codex.status, "ready", JSON.stringify(first.codex));
+    await vscode.commands.executeCommand("agentduo.usage");
+    const again = await until("the usage looked up again", () => {
+      const u = api.state()?.usage;
+      return u && u.id > first.id && u.claude.status === "ready" && u.codex.status === "ready" ? u : null;
+    }, 15_000);
+    assert.ok(again.id > first.id);
+    // Only what was typed (/usage) joins the conversation; the report stays in the panel.
+    assert.deepEqual(api.state()!.timeline.slice(items).map((i) => i.kind), ["user"]);
+  }],
+  ["attaches a picked file and a pasted image, and sends both with a message: Codex gets the images, the tab keeps no bytes", async (api) => {
+    writeFileSync(process.env.FAKE_SCENARIO!, JSON.stringify({ chat_codex: [{ answer: "Two grey squares." }] }));
+    const picked = join(mkdtempSync(join(tmpdir(), "agentduo-smoke-")), "picked.png");
+    writeFileSync(picked, png(32, 32));
+    const before = calls().length;
+    await api.attach(picked);
+    await api.upload("pasted.png", png(16, 16));
+    const ready = await until("both files", () => {
+      const a = api.state()?.attachments ?? [];
+      return a.length === 2 && a.every((c) => c.status === "ready") ? a : null;
+    });
+    assert.deepEqual(ready.map((c) => c.name), ["picked.png", "pasted.png"]);
+    await api.submitWithFiles("What are these?");
+    await until("Codex's answer", () => answers(api).some((t) => t.answer === "Two grey squares."));
+    const call = calls().slice(before).find((c) => c.role === "chat_codex") as { args: string[]; prompt: string } | undefined;
+    assert.ok(call, "Codex was asked");
+    assert.equal(call.args.filter((a) => a.startsWith("--image=")).length, 2, call.args.join(" "));
+    assert.equal(call.args.at(-1), "-", "the prompt still goes on stdin");
+    assert.ok(call.prompt.includes("pasted.png") && call.prompt.includes("picked.png"), "the prompt lists the files");
+    const user = api.state()!.timeline.filter((i) => i.kind === "user").at(-1);
+    assert.equal(user?.kind === "user" ? user.attachments?.length : 0, 2);
+    assert.deepEqual(api.state()!.attachments, []);
+    assert.ok(!JSON.stringify(api.state()).includes(png(16, 16).toString("base64").slice(0, 40)), "the tab's state has no file bytes");
   }],
   ["stops an answer before it arrives, and the chat is idle again", async (api) => {
     writeFileSync(process.env.FAKE_SCENARIO!, JSON.stringify({ chat_codex: [{ answer: "too late", sleep: 30_000 }] }));

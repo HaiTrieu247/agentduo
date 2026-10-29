@@ -7,9 +7,11 @@ import { PROTOCOL_VERSION } from "../extensions/vscode/src/protocol.js";
 import { WorkerError } from "../extensions/vscode/src/workerClient.js";
 import { main, type CliIO } from "../src/cli.js";
 import { acquireWorkspaceLock, RunStore } from "../src/core/state.js";
+import type { Attachment } from "../src/core/attachment-types.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
 import type { ConfigOverrides } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
+import { png } from "./helpers/images.js";
 import { makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
 import { buildWorker, finished, isEvent, pidAlive, waitUntil, WorkerHarness, writeWorkspaceConfig } from "./helpers/vscode.js";
@@ -166,6 +168,20 @@ describe("vscode worker", () => {
     expect(h.events().filter((e) => e.type === "turn.finished").map((e) => e.type === "turn.finished" && e.discussion?.step)).toEqual(["answer", "critique", "synthesis"]);
     expect(existsSync(join(runsDir, ".lock"))).toBe(true); // the chat session holds the workspace, as for any question
     expect(readdirSync(runsDir).filter((d) => ![".lock", ".gitignore", "conversations"].includes(d))).toEqual([]); // no run
+  });
+
+  it("shows a tab's /usage in its usage panel, part by part, and looks it up again on a refresh; no agent answers", async () => {
+    const { h } = await open();
+    await h.client.request({ type: "submit", conversation: C, text: "/usage", route: "message" });
+    const usage = () => h.messages.flatMap((m) => (m.kind === "ui" && m.update.type === "usage" ? [{ conversation: m.conversation, report: m.update.report }] : []));
+    await waitUntil(() => usage().some((u) => u.report.claude.status !== "loading" && u.report.codex.status !== "loading"), 10_000, "the usage");
+    const first = usage()[0]!.report.id;
+    expect(usage()[0]).toEqual({ conversation: C, report: { id: first, claude: { status: "loading" }, codex: { status: "loading" } } });
+    expect(usage().at(-1)!.report).toMatchObject({ id: first, claude: { status: "ready", usage: { account: "subscription" } }, codex: { status: "ready" } });
+    await h.client.request({ type: "usage", conversation: C });
+    await waitUntil(() => usage().some((u) => u.report.id > first && u.report.codex.status === "ready" && u.report.claude.status === "ready"), 10_000, "the refreshed usage");
+    expect(fake.calls()).toEqual([]);
+    expect(h.messages.some((m) => m.kind === "ui" && m.update.type === "info")).toBe(false);
   });
 
   it("leaves VERIFY out of the flow without gates", async () => {
@@ -422,5 +438,46 @@ describe("vscode worker", () => {
     await h.waitFor((m) => m.kind === "ui" && m.update.type === "session" && m.update.session === "ended");
     expect(existsSync(lockFile())).toBe(false);
     acquireWorkspaceLock(runsDir)(); // free for `duo` again
+  });
+});
+
+describe("vscode worker: attached files", () => {
+  const files = (h: WorkerHarness, conversation: string) => h.messages.flatMap((m) => (m.kind === "ui" && m.conversation === conversation && m.update.type === "attachments" ? [m.update.files] : []));
+
+  it("copies a file the host names into its tab's conversation, and sends it only with that tab's message", async () => {
+    const { h } = await open();
+    const file = join(t.path, "Ảnh chụp.png");
+    writeFileSync(file, png(64, 32));
+    const r = await h.client.request({ type: "stageAttachment", conversation: "tab-a", key: "w1", path: file, name: "Ảnh chụp.png" });
+    expect(r).toMatchObject({ key: "w1", conversation: "tab-a", attachment: { name: "Ảnh chụp.png", mediaType: "image/png", image: { format: "png", width: 64, height: 32 } } });
+    expect(r.root.endsWith(join("conversations", "tab-a", "attachments"))).toBe(true);
+    expect(r.attachment.path).toBe(`conversations/tab-a/attachments/${r.attachment.id}/Ảnh chụp.png`);
+    expect(files(h, "tab-a").at(-1)!.map((a: Attachment) => a.id)).toEqual([r.attachment.id]);
+    // Another tab names it: not its file, so nothing is sent.
+    await h.client.request({ type: "submit", conversation: "tab-b", text: "What is it?", route: "message", attachments: [r.attachment.id] });
+    await h.waitFor((m) => m.kind === "ui" && m.conversation === "tab-b" && m.update.type === "info" && m.update.text.includes("no longer waiting"));
+    expect(fake.calls()).toEqual([]);
+    await h.client.request({ type: "submit", conversation: "tab-a", text: "", route: "message", attachments: [r.attachment.id] });
+    await h.waitFor((m) => m.kind === "event" && m.conversation === "tab-a" && m.event.type === "turn.finished");
+    const call = fake.calls("chat_codex")[0]!;
+    expect(call.args.at(-2)!.endsWith(`/${r.attachment.path}`)).toBe(true);
+    expect(call.prompt).toContain("Look at the attached file(s).");
+    expect(h.messages.some((m) => m.kind === "ui" && m.conversation === "tab-a" && m.update.type === "sent" && m.update.files.length === 1)).toBe(true);
+    expect(files(h, "tab-a").at(-1)).toEqual([]);
+  });
+
+  it("refuses what is not a regular file, removes a file on request, and drops the waiting ones when the tab closes", async () => {
+    const { h } = await open();
+    await expect(h.client.request({ type: "stageAttachment", conversation: "tab-a", key: "w1", path: t.path, name: "dir" })).rejects.toMatchObject({ code: "bad_request", message: expect.stringMatching(/is a directory/) });
+    const file = join(t.path, "a.txt");
+    writeFileSync(file, "a");
+    const a = await h.client.request({ type: "stageAttachment", conversation: "tab-a", key: "w2", path: file, name: "a.txt" });
+    const b = await h.client.request({ type: "stageAttachment", conversation: "tab-a", key: "w3", path: file, name: "b.txt" });
+    await h.client.request({ type: "removeAttachment", conversation: "tab-a", id: a.attachment.id });
+    expect(files(h, "tab-a").at(-1)!.map((x: Attachment) => x.name)).toEqual(["b.txt"]);
+    expect(existsSync(join(b.root, a.attachment.id))).toBe(false);
+    expect(existsSync(join(b.root, b.attachment.id))).toBe(true);
+    await h.client.request({ type: "closeConversation", conversation: "tab-a" });
+    expect(existsSync(join(b.root, b.attachment.id))).toBe(false);
   });
 });

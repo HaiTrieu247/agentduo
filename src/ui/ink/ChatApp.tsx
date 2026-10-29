@@ -1,8 +1,10 @@
 import { EventEmitter } from "node:events";
 import { Box, Static, Text, useInput, useStdout } from "ink";
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import type { ChatStatus } from "../../chat.js";
+import { attachmentDetail, type Attachment } from "../../core/attachment-types.js";
 import { AGENT_NAMES, complete, type Backend, type Completion } from "../../core/commands.js";
+import type { UsageReport } from "../../core/usage.js";
 import type { Decision, EventBus, ModelMap, PermissionAnswer } from "../../events.js";
 import { modelText, PROVIDERS } from "../format.js";
 import { StaticItemView } from "./App.js";
@@ -10,13 +12,16 @@ import { HumanReviewPrompt, VIEWS, type ViewKind } from "./HumanReviewPrompt.js"
 import { LiveFooter, TurnFooter } from "./LiveFooter.js";
 import { PermissionPrompt } from "./PermissionPrompt.js";
 import { initialView, reduce } from "./store.js";
+import { UsagePanel } from "./UsagePanel.js";
 
 type ChatLine =
   | { type: "user" | "info"; text: string }
   | { type: "status"; status: ChatStatus }
   | { type: "edits"; mode: string }
   | { type: "recipient"; backend: Backend }
-  | { type: "models"; models: ModelMap };
+  | { type: "models"; models: ModelMap }
+  | { type: "usage"; report: UsageReport }
+  | { type: "attachments"; files: Attachment[] };
 
 /** What the chat controller shows besides the agents' own events: your messages, its lines, and its state. */
 export class ChatChannel {
@@ -46,6 +51,16 @@ export class ChatChannel {
     this.emitter.emit("line", { type: "models", models });
   }
 
+  /** /usage: a new report opens the usage panel; the same report again updates it. */
+  usage(report: UsageReport): void {
+    this.emitter.emit("line", { type: "usage", report });
+  }
+
+  /** The files waiting to go with the next message. */
+  attachments(files: Attachment[]): void {
+    this.emitter.emit("line", { type: "attachments", files });
+  }
+
   on(listener: (line: ChatLine) => void): () => void {
     this.emitter.on("line", listener);
     return () => {
@@ -65,6 +80,8 @@ export interface ChatAppProps {
   onCtrlC(): void;
   /** Shift+Tab, as in Claude Code: switch Claude between asking before edits and editing automatically. */
   onCycleEdits?(): void;
+  /** r in the usage panel: look the usage up again. */
+  onUsageRefresh?(): void;
   onDecision(d: Decision | "defer"): void;
   onPermission(id: string, answer: PermissionAnswer): void;
   views(): ViewKind[];
@@ -113,8 +130,24 @@ function Suggestions({ items, selected }: { items: Completion[]; selected: numbe
   );
 }
 
-function ChatInput({ status, edits, to, models, onSubmit, onEscape, onCycleEdits }: {
-  status: ChatStatus; edits: string | null; to: Backend; models: ModelMap | null; onSubmit(text: string): void; onEscape(): void; onCycleEdits?(): void;
+/** The files waiting to go with the next message, numbered as /detach takes them. */
+function Attachments({ files }: { files: Attachment[] }) {
+  return (
+    <Box flexDirection="column" paddingX={1}>
+      {files.map((a, i) => (
+        <Text key={a.id} wrap="truncate-end">
+          <Text color="cyan">{`📎 ${i + 1}. `}</Text>
+          {a.name}
+          <Text dimColor>{`  ${attachmentDetail(a)}`}</Text>
+        </Text>
+      ))}
+      <Text dimColor>{`  ${files.length === 1 ? "goes" : "go"} with your next message (Enter alone sends ${files.length === 1 ? "it" : "them"}) · /detach <n|all> removes`}</Text>
+    </Box>
+  );
+}
+
+function ChatInput({ status, edits, to, models, files, onSubmit, onEscape, onCycleEdits }: {
+  status: ChatStatus; edits: string | null; to: Backend; models: ModelMap | null; files: Attachment[]; onSubmit(text: string): void; onEscape(): void; onCycleEdits?(): void;
 }) {
   const [text, setText] = useState("");
   const [selected, setSelected] = useState(0);
@@ -168,6 +201,7 @@ function ChatInput({ status, edits, to, models, onSubmit, onEscape, onCycleEdits
   const model = (b: Backend) => `${PROVIDERS[b].mark} ${PROVIDERS[b].agent} ${models ? modelText(models[b], { short: true }) : "…"}`;
   return (
     <Box flexDirection="column" marginTop={1}>
+      {files.length ? <Attachments files={files} /> : null}
       <Box borderStyle="round" borderColor={status === "paused" ? "yellow" : "gray"} paddingX={1}>
         <Text wrap="wrap">
           <Text color="cyan">{"› "}</Text>
@@ -193,6 +227,12 @@ export function ChatApp(p: ChatAppProps) {
   const [edits, setEdits] = useState<string | null>(null);
   const [to, setTo] = useState<Backend>("codex");
   const [models, setModels] = useState<ModelMap | null>(null);
+  const [usage, setUsage] = useState<UsageReport | null>(null);
+  const [usageTop, setUsageTop] = useState(0);
+  const [files, setFiles] = useState<Attachment[]>([]);
+  /** The report the usage panel shows, and the one it was closed on: what still arrives for that one stays closed. */
+  const shownUsage = useRef(0);
+  const closedUsage = useRef(0);
   const [frame, setFrame] = useState(0);
   const columns = (useStdout().stdout as NodeJS.WriteStream).columns || 80;
 
@@ -202,7 +242,14 @@ export function ChatApp(p: ChatAppProps) {
     else if (line.type === "edits") setEdits(line.mode);
     else if (line.type === "recipient") setTo(line.backend);
     else if (line.type === "models") setModels(line.models);
-    else dispatch({ type: "chat", kind: line.type, text: line.text });
+    else if (line.type === "attachments") setFiles(line.files);
+    else if (line.type === "usage") {
+      if (line.report.id <= closedUsage.current) return;
+      // A new report (a refresh) starts at its top.
+      if (line.report.id !== shownUsage.current) setUsageTop(0);
+      shownUsage.current = line.report.id;
+      setUsage(line.report);
+    } else dispatch({ type: "chat", kind: line.type, text: line.text });
   }), [p.channel]);
   useEffect(() => {
     const timer = setInterval(() => setFrame((f) => f + 1), 100);
@@ -235,7 +282,14 @@ export function ChatApp(p: ChatAppProps) {
         <>
           {status === "running" && view.current ? <LiveFooter view={view} now={Date.now()} frame={frame} interactive={false} /> : null}
           {status === "answering" && view.turn ? <TurnFooter view={view} now={Date.now()} frame={frame} /> : null}
-          <ChatInput status={status} edits={edits} to={to} models={models} onSubmit={p.onSubmit} onEscape={p.onEscape} onCycleEdits={p.onCycleEdits} />
+          {usage ? (
+            <UsagePanel report={usage} top={usageTop} setTop={setUsageTop} onRefresh={() => p.onUsageRefresh?.()} onClose={() => {
+              closedUsage.current = usage.id;
+              setUsage(null);
+            }} />
+          ) : (
+            <ChatInput status={status} edits={edits} to={to} models={models} files={files} onSubmit={p.onSubmit} onEscape={p.onEscape} onCycleEdits={p.onCycleEdits} />
+          )}
         </>
       )}
     </>

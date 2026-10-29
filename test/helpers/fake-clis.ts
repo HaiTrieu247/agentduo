@@ -10,6 +10,8 @@ export interface FakeCall {
   call: number;
   args: string[];
   prompt: string;
+  /** The images the call got as images: Claude's blocks (media type, base64 length), Codex's --image files; and their bytes' sha256. */
+  images?: Array<{ mediaType?: string; base64?: number; file?: string; missing?: boolean; sha256?: string }>;
 }
 
 /** Executables named codex/claude that run fake-agent.mjs against a scripted scenario. */
@@ -58,9 +60,14 @@ export class FakeClis {
     return readFileSync(this.files.FAKE_LOG, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
   }
 
-  /** Agent calls (not permission answers, not codex doctor or its catalog), optionally of one role ("chat_claude" for a chat answer). */
+  /** Agent calls (not permission answers, not codex doctor, its catalog or a usage lookup), optionally of one role ("chat_claude" for a chat answer). */
   calls(role?: string): FakeCall[] {
-    return this.entries().filter((e) => !e.permission && !e.doctor && !e.catalog).map((e) => e as unknown as FakeCall).filter((c) => !role || c.role === role);
+    return this.entries().filter((e) => !e.permission && !e.doctor && !e.catalog && !e.usage).map((e) => e as unknown as FakeCall).filter((c) => !role || c.role === role);
+  }
+
+  /** Every `claude -p /usage` and finished `codex app-server` run: its arguments, and the methods the app server was asked. */
+  usageCalls(): Array<{ backend: string; args: string[]; methods?: string[] }> {
+    return this.entries().flatMap((e) => (e.usage ? [{ backend: e.backend as string, args: e.args as string[], ...(e.methods ? { methods: e.methods as string[] } : {}) }] : []));
   }
 
   /** The arguments of every `codex doctor` run. */

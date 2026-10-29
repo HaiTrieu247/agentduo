@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
+import type { AgentUsage } from "../src/core/usage.js";
 import {
   activityText, discussionAuthor, discussionDoing, discussionOutcome, discussionStepText, formatClock, formatCost, formatDuration, formatTokens, messageHeadline, partyLabel, roleLabel,
-  usageText, verdictText,
+  usageBar, usageReportText, usageRows, usageText, verdictText,
 } from "../src/ui/format.js";
 
 describe("format", () => {
@@ -36,5 +37,75 @@ describe("format", () => {
     expect([discussionAuthor({ answerer: "claude", answerBackend: "codex" }), discussionAuthor({ answerer: "claude" })]).toEqual(["codex", "claude"]);
     expect(discussionOutcome({ ...d, status: "interrupted" })).toBe("stopped");
     expect(discussionOutcome({ ...d, status: "error" })).toBe("failed");
+  });
+});
+
+describe("format: /usage", () => {
+  const claude: AgentUsage = {
+    account: "subscription",
+    groups: [{ title: null, limits: [{ label: "Current session", usedPercent: 46, resets: "Resets Oct 29 at 3pm (Asia/Saigon)" }] }],
+    notes: [],
+    details: { title: "What's contributing to your limits usage?", lines: ["Last 24h · 546 requests", "  93%  Start fresh when you switch tasks"] },
+  };
+  const codex: AgentUsage = {
+    account: "ChatGPT Plus · user@example.com",
+    groups: [{ title: null, limits: [{ label: "5h limit", usedPercent: 0, resets: null }] }, { title: "GPT-Spark", limits: [{ label: "5h limit", usedPercent: 100, resets: null }] }],
+    notes: ["Credits: 12.5"],
+    details: null,
+  };
+
+  it("draws a bar of blocks as wide as asked, full at 100% and empty at 0%", () => {
+    expect([usageBar(46, 10), usageBar(0, 4), usageBar(100, 4), usageBar(130, 4)]).toEqual(["█████░░░░░", "░░░░", "████", "████"]);
+  });
+
+  it("lays out both agents' limits first, then what contributes to Claude's usage", () => {
+    const rows = usageRows({ id: 1, claude: { status: "ready", usage: claude }, codex: { status: "ready", usage: codex } });
+    expect(rows).toEqual([
+      { kind: "agent", text: "Claude Code · subscription", indent: 0 },
+      { kind: "limit", text: "Current session", indent: 2 },
+      { kind: "bar", text: "46% used", percent: 46, indent: 2 },
+      { kind: "muted", text: "Resets Oct 29 at 3pm (Asia/Saigon)", indent: 2 },
+      { kind: "blank", text: "", indent: 0 },
+      { kind: "agent", text: "Codex · ChatGPT Plus · user@example.com", indent: 0 },
+      { kind: "limit", text: "5h limit", indent: 2 },
+      { kind: "bar", text: "0% used", percent: 0, indent: 2 },
+      { kind: "group", text: "GPT-Spark", indent: 2 },
+      { kind: "limit", text: "5h limit", indent: 4 },
+      { kind: "bar", text: "100% used", percent: 100, indent: 4 },
+      { kind: "text", text: "Credits: 12.5", indent: 2 },
+      { kind: "blank", text: "", indent: 0 },
+      { kind: "heading", text: "Claude Code · What's contributing to your limits usage?", indent: 0 },
+      { kind: "text", text: "Last 24h · 546 requests", indent: 0 },
+      { kind: "text", text: "  93%  Start fresh when you switch tasks", indent: 0 },
+    ]);
+  });
+
+  it("says which part is still loading and which failed, each on its own", () => {
+    const rows = usageRows({ id: 2, claude: { status: "loading" }, codex: { status: "error", error: "codex app-server did not answer within 15s" } });
+    expect(rows).toEqual([
+      { kind: "agent", text: "Claude Code", indent: 0 },
+      { kind: "muted", text: "loading…", indent: 2 },
+      { kind: "blank", text: "", indent: 0 },
+      { kind: "agent", text: "Codex", indent: 0 },
+      { kind: "error", text: "codex app-server did not answer within 15s", indent: 2 },
+    ]);
+  });
+
+  it("writes the report as text for a screen without a usage panel", () => {
+    const text = usageReportText({ id: 1, claude: { status: "ready", usage: claude }, codex: { status: "error", error: "Codex is not signed in: run codex login" } });
+    expect(text.split("\n")).toEqual([
+      "── usage ──",
+      "Claude Code · subscription",
+      "  Current session",
+      `  ${"█".repeat(9)}${"░".repeat(11)}  46% used`,
+      "  Resets Oct 29 at 3pm (Asia/Saigon)",
+      "",
+      "Codex",
+      "  Codex is not signed in: run codex login",
+      "",
+      "Claude Code · What's contributing to your limits usage?",
+      "Last 24h · 546 requests",
+      "  93%  Start fresh when you switch tasks",
+    ]);
   });
 });

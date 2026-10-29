@@ -43,17 +43,28 @@ export interface StreamParser {
  */
 export type CallMode = "structured" | "text";
 
+/** An attached image the call sends as an image (not only as a path): its copy, and its media type. */
+export interface NativeImage {
+  file: string;
+  mediaType: string;
+}
+
+interface CallArgs {
+  lastMessageFile: string;
+  /** Route permission prompts to the runner (host mode) instead of denying them. */
+  askPermissions?: boolean;
+  /** Images to attach to the prompt, in order. */
+  images?: NativeImage[];
+}
+
 export type BuildArgs =
-  | {
+  | ({
     mode?: "structured";
     schemaName: SchemaName;
-    lastMessageFile: string;
     /** Config role of the call (plan sign-off uses "planner"); selects <backend>.role_args. */
     role: AgentRole;
-    /** Route permission prompts to the runner (host mode) instead of denying them. */
-    askPermissions?: boolean;
-  }
-  | { mode: "text"; lastMessageFile: string; askPermissions?: boolean };
+  } & CallArgs)
+  | ({ mode: "text" } & CallArgs);
 
 export interface FinalOutput {
   /** structured: the parsed JSON; text: the answer. */
@@ -68,8 +79,12 @@ export interface AgentBackend {
   createParser(): StreamParser;
   /** Extract the final JSON (or, in text mode, the answer); throws AgentFailure (carrying whatever meta is known) when unusable. */
   finalize(parser: StreamParser, stdout: string, lastMessageFile: string, mode?: CallMode): FinalOutput;
-  /** Host mode (backends that support it): the prompt as the first stdin message, and the answer to a permission prompt. */
-  hostInput?(prompt: string): string;
+  /**
+   * Backends that read their input as a stream of messages (Claude, in host mode or with images): the prompt, and the
+   * images, as the first stdin message. Without it, a backend gets images through buildArgs and the prompt as is.
+   */
+  hostInput?(prompt: string, images?: NativeImage[]): string;
+  /** Host mode: the answer to a permission prompt. */
   permissionReply?(raw: Record<string, unknown>, answer: PermissionAnswer): string;
 }
 

@@ -179,3 +179,46 @@ describe("prompts: a discussion", () => {
     expect(p).toContain("(verdict: none given, taken as REVISE)");
   });
 });
+
+describe("attachment manifests", () => {
+  const file = (id: string, name: string, image: boolean) => ({
+    id, name, mediaType: image ? "image/png" : "application/pdf", size: 2048, image: image ? { format: "png" as const, width: 64, height: 32 } : null,
+    path: `conversations/c1/attachments/${id}/${name}`,
+  });
+  const shot = file("a1", "shot `1`.png", true);
+  const spec = file("a2", "spec.pdf", false);
+  const locate: prompts.Locate = (a) => (a.id === "gone" ? null : `/ws/.agentduo/runs/${a.path}`);
+  const count = (text: string, part: string) => text.split(part).length - 1;
+
+  it("list each file of the message once, with its path, after the message; history lists paths only", () => {
+    const context = { exchanges: [{ backend: "codex" as const, question: "What is this?", answer: "A chart.", attachments: [shot] }], omitted: 0 };
+    const p = prompts.conversation({ workspace: "/ws", backend: "claude", context, earlier: [], question: "And this one?", attachments: [spec], locate });
+    expect(count(p, "/attachments/a2/")).toBe(1);
+    expect(p).toContain("- `spec.pdf` (application/pdf, 2 KB): `/ws/.agentduo/runs/conversations/c1/attachments/a2/spec.pdf`");
+    expect(p.indexOf("And this one?")).toBeLessThan(p.indexOf("### Files the user attached to this message"));
+    expect(p).toContain("The images your CLI can take are also attached to this message as images");
+    // An earlier message's file: named with its path, never as attached to this message.
+    expect(p).toContain("Files attached to that message (not attached again; read them at their paths if you need them):\n- ``shot `1`.png`` (PNG 64×32, 2 KB)");
+    expect(count(p, "/attachments/a1/")).toBe(1);
+    expect(prompts.conversation({ workspace: "/ws", backend: "claude", context: { exchanges: [], omitted: 0 }, earlier: [], question: "hi" })).not.toContain("Files");
+  });
+
+  it("give every discussion step the question's files, and the pipeline the task's and the notes'", () => {
+    const steps = (["answer", "critique", "revise", "synthesis"] as const).map((step) => prompts.discussion({
+      workspace: "/ws", context: { exchanges: [], omitted: 0 }, earlier: [], question: "Is the chart right?", answerer: "codex", critic: "claude", maxRounds: 2,
+      step, round: 1, history: [], attachments: [shot], locate,
+    }));
+    for (const p of steps) expect(count(p, "/attachments/a1/")).toBe(1);
+    const withFiles: prompts.PromptContext = {
+      ...ctx, attachments: [spec], locate,
+      notes: [{ at: "2026-10-29T10:00:00+07:00", phase: "IMPLEMENT", note: "match this mockup", attachments: [shot] }, { ...ctx.notes[0]!, attachments: [{ ...shot, id: "gone" }] }],
+    };
+    for (const p of [prompts.planner(withFiles, 1, 1, null, null), prompts.implementer(withFiles, 1, "# Plan", [], null, [], null)]) {
+      expect(count(p, "/attachments/a2/spec.pdf")).toBe(1);
+      expect(p.indexOf("### Files the user attached to the task")).toBeGreaterThan(p.indexOf("## Task"));
+      expect(p).toContain("- (2026-10-29T10:00:00+07:00, during IMPLEMENT) match this mockup\n  Files:\n  - ``shot `1`.png``");
+      expect(p).toContain("no longer available");
+    }
+    expect(prompts.planner(ctx, 1, 1, null, null)).not.toContain("Files");
+  });
+});

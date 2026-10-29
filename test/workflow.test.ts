@@ -2,11 +2,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Chat, type ChatUi } from "../src/chat.js";
+import { AttachmentStore } from "../src/core/attachments.js";
 import { EventBus, type Message } from "../src/events.js";
 import { approval, critique, finding, impl, issue, plan, review } from "./helpers/builders.js";
 import { testConfig, type ConfigOverrides } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { makeHarness, newWorkflow, resume, resumedWorkflow, runDirOf, ScriptedDecider, stateOf, type Harness } from "./helpers/harness.js";
+import { png } from "./helpers/images.js";
 import { git, makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
 
@@ -103,6 +105,30 @@ describe("Workflow", () => {
     expect(implCalls[2]!.prompt).toContain("`F1`");
     expect(fake.calls("planner")[1]!.prompt).toContain("C1");
     expect(fake.calls("code_reviewer")[1]!.prompt).toContain("`F1`");
+  });
+
+  it("gives every call the task's files, retries too, and a note's files from the step after it", async () => {
+    fake.setScenario({ ...happy(), planner: [{ raw: "not json" }, { output: plan(), sleep: 600 }] });
+    const { wf, bus } = newWorkflow(h, "Make app.txt match the mockup", undefined, (state) => {
+      const files = new AttachmentStore(h.runsDir, join(h.runsDir, state.taskId));
+      state.attachments = [files.importBytes("mockup.png", png(32, 32))];
+    });
+    const files = new AttachmentStore(h.runsDir, join(h.runsDir, wf.state.taskId));
+    // A note while the planner works: the critic gets it with its file, the planner did not.
+    let noted = false;
+    bus.on((e) => {
+      if (e.type === "agent.retry" && !noted) {
+        noted = true;
+        wf.addNote("and this detail", [files.importBytes("detail.png", png(8, 8)), files.importBytes("notes.txt", Buffer.from("n"))]);
+      }
+    });
+    expect(await wf.run()).toBe(0);
+    const calls = fake.calls().map((c) => [c.role, c.call, c.images?.length ?? 0]);
+    expect(calls).toEqual([["planner", 0, 1], ["planner", 1, 1], ["plan_reviewer", 0, 2], ["plan_finalizer", 0, 2], ["implementer", 0, 2], ["code_reviewer", 0, 2]]);
+    expect(fake.calls("plan_reviewer")[0]!.prompt).toContain("and this detail\n  Files:");
+    expect(fake.calls("plan_reviewer")[0]!.prompt).toContain("notes.txt");
+    expect(fake.calls("planner")[1]!.prompt).not.toContain("and this detail");
+    expect(stateOf(h).humanNotes[0]!.attachments!.map((a) => a.name)).toEqual(["detail.png", "notes.txt"]);
   });
 
   it("escalates after max planning rounds; resume implements the latest plan", async () => {

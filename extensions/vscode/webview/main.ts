@@ -14,11 +14,15 @@ const keep = () => vscode.setState({ conversation, draft });
 let frame = 0;
 
 const ui = createUi(document.getElementById("app")!, {
-  submit: (text, route) => vscode.postMessage({ type: "submit", text, route }),
+  submit: (text, route, attachments) => vscode.postMessage({ type: "submit", text, route, attachments }),
+  attach: () => vscode.postMessage({ type: "attach" }),
+  upload: (file) => vscode.postMessage({ type: "upload", ...file }),
+  removeFile: (key) => vscode.postMessage({ type: "detach", key }),
   recipient: (backend) => vscode.postMessage({ type: "recipient", backend }),
   setting: (request) => vscode.postMessage({ type: "setting", ...request }),
   interrupt: () => vscode.postMessage({ type: "interrupt" }),
   toggleEdits: () => vscode.postMessage({ type: "toggleEdits" }),
+  usage: () => vscode.postMessage({ type: "usage" }),
   decide: (id, decision, note) => state && vscode.postMessage({ type: "decision", generation: state.generation, id, decision, note }),
   permit: (id, answer) => state && vscode.postMessage({ type: "permission", generation: state.generation, id, answer }),
   command: (name) => vscode.postMessage({ type: "command", name }),
@@ -50,6 +54,8 @@ window.addEventListener("message", (e: MessageEvent<HostMessage>) => {
   else if (m.type === "actions" && state) for (const action of m.actions) state = reduce(state, action);
   else if (m.type === "focusComposer") ui.focusComposer();
   else if (m.type === "showSettings") ui.showSettings();
+  else if (m.type === "attachmentUris") ui.setUris(m.uris);
+  else if (m.type === "prepareReload") ui.release(() => vscode.postMessage({ type: "readyToReload" }));
   schedule();
 });
 

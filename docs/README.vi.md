@@ -52,9 +52,39 @@ Code và Codex; pipeline đầy đủ chỉ chạy khi bạn yêu cầu:
 - **Gõ `/`** sẽ hiện danh sách lệnh kèm chú thích, lọc dần theo những gì bạn gõ: Up/Down để chọn, Tab hoặc Enter để
   điền, Enter lần nữa để gửi, Esc để đóng danh sách.
 - **Prompt hỏi quyền và các quyết định** hiện ra thay cho ô nhập.
-- **Lệnh:** `/claude`, `/codex`, `/pipeline`, `/discuss`, `/plan`, `/diff`, `/status`, `/resume` (chạy tiếp run đang dừng hoặc
-  đang chờ, kể cả từ phiên trước), `/new`, `/settings`, `/config`, `/help`, `/quit`. Bấm Ctrl-C hai lần cũng thoát; run
-  đang chạy sẽ dừng ở bước hiện tại và vẫn resume được.
+- **`/usage`** mở một popup thay cho ô nhập, giống `/usage` của Claude Code. Popup cho biết mỗi agent đã dùng bao nhiêu
+  phần trăm hạn mức của gói, mỗi hạn mức có một thanh tiến độ và thời điểm reset. Bên dưới là phần "What's contributing
+  to your limits usage?" của Claude. Cả hai đều không gọi model. Phía Claude là `claude -p /usage`. Phía Codex lấy từ
+  `codex app-server` (`account/read` và `account/rateLimits/read`, giống cách extension IDE của Codex hỏi, kèm các
+  `-c`/`--enable`/`--disable` của bạn), vì `/status` của Codex chỉ có trong giao diện TUI của nó. Popup hiện ngay, và
+  phần của mỗi agent được điền khi agent đó trả lời (khoảng 2 giây, tối đa 15 giây). Bên nào lỗi thì chỉ phần của bên
+  đó ghi lý do. ↑↓ để cuộn, `r` để lấy lại số liệu, Esc chỉ đóng popup, còn câu trả lời đang chạy vẫn chạy tiếp.
+  `/status` giữ nguyên như cũ.
+- **Đính kèm file.** `/attach <đường dẫn>` đính kèm một file thuộc bất kỳ loại nào (ảnh, PDF, text, code…) vào tin kế
+  tiếp của bạn: câu hỏi, `/discuss`, task `/pipeline` hoặc ghi chú. Đường dẫn có dấu cách thì đặt trong nháy hoặc escape,
+  theo cách shell đọc một từ: `/attach "~/Desktop/Ghi chú.pdf"`, `/attach shots/loi\ 2.png`. Dấu nháy đơn literal thì
+  đặt trong nháy kép (`"it's.png"`); `'it''s'` được đọc thành `its`, giống shell. Đường dẫn tương đối tính từ workspace,
+  `~/` tính từ thư mục home, dù có nằm trong nháy hay không (thư mục tên `~` thì viết `\~` hoặc `./~`); agentduo không
+  glob hay mở rộng biến. `/attachments` liệt kê các file đang chờ, `/detach
+  <n|all>` bỏ file. Enter trên dòng trống sẽ gửi riêng các file (cho agent ghi dưới ô nhập, hoặc thành ghi chú khi
+  pipeline đang chạy). Terminal không đọc ảnh từ clipboard: hãy lưu ảnh ra file rồi `/attach`.
+  - agentduo chép nguyên bytes của từng file vào `.agentduo/runs/conversations/<id>/attachments/` (file của task pipeline
+    được chép vào `attachments/` của run, nên `/resume` không cần file gốc hay cuộc trò chuyện), và không bao giờ đưa vào
+    snapshot. Giới hạn: 20 file, 20 MB mỗi file và 50 MB mỗi tin. File đang chờ gửi sẽ bị bỏ khi `/new` hoặc khi đóng
+    chat; file đã gửi thì được giữ.
+  - Mọi prompt đều liệt kê các file kèm đường dẫn bản sao, nên cả hai agent đọc được bằng tool của chính mình (agent có
+    hiểu được một file nhị phân cụ thể hay không là tùy agent). Ảnh PNG, JPEG, GIF và WebP còn được gửi thẳng cho model
+    dưới dạng ảnh: cho Claude là image block trong tin `stream-json`, cho Codex là `--image=<đường dẫn>`. Mỗi lần gọi,
+    Claude nhận tối đa 20 ảnh, mỗi ảnh tối đa 8000 pixel mỗi cạnh và 5 MB sau khi mã hóa base64, tổng cộng 20 MB. Ảnh
+    vượt các mức đó (hoặc ảnh agentduo không đọc được kích thước, hoặc SVG) chỉ được gửi dưới dạng đường dẫn, kèm warning.
+  - Ảnh được gửi lại ở mọi lần gọi của `/discuss` và của pipeline (mỗi bước, mỗi lần retry hay repair là một lần gọi
+    riêng), nên mỗi lần đều tốn thêm token và thời gian. Câu hỏi sau chỉ liệt kê đường dẫn file của tin trước.
+  - Lúc cần quyết định HUMAN_REVIEW, file đang chờ không đi kèm quyết định: hãy gửi chúng trong một tin trước (thành ghi
+    chú cho bước kế tiếp của run), hoặc chọn quyết định sau rồi `/resume` kèm ghi chú.
+- **Lệnh:** `/claude`, `/codex`, `/pipeline`, `/discuss`, `/plan`, `/diff`, `/status`, `/usage`, `/attach`,
+  `/attachments`, `/detach`, `/resume` (chạy tiếp run đang dừng hoặc đang chờ, kể cả từ phiên trước), `/new`,
+  `/settings`, `/config`, `/help`, `/quit`. Bấm Ctrl-C hai lần cũng thoát; run đang chạy sẽ dừng ở bước hiện tại và vẫn
+  resume được.
 
 **Đổi cấu hình ngay trong chat.** Cú pháp chuẩn là `/settings claude …` và `/settings codex …`; sai cú pháp thì
 agentduo trả về usage. `/claude model …` và các lệnh tương tự là lối tắt, chỉ được hiểu là cấu hình khi đúng hình dạng
@@ -85,6 +115,7 @@ Không cần cài gói npm `agentduo`. Máy chỉ cần Node, git, Codex CLI và
 
 - Mở sidebar không chạy gì cả. Run chỉ bắt đầu khi bạn gửi task. Với workspace nhiều thư mục, bạn chọn thư mục trước (**agentduo: Choose Workspace Folder**).
 - Enter để gửi, Shift+Enter để xuống dòng. Khi agent đang chạy, nội dung bạn gửi là ghi chú cho bước kế tiếp. **Stop** (hoặc Esc trong ô nhập) dừng bước hiện tại; gửi lại sẽ chạy lại bước đó. Các lệnh `/new`, `/resume`, `/edits`, `/claude …`, `/codex …` giống hệt trong terminal.
+- **Đính kèm file:** nút kẹp giấy dưới ô nhập chọn được nhiều file bất kỳ. Bạn cũng có thể dán ảnh (Cmd/Ctrl+V), hoặc **giữ Shift** khi kéo file từ Finder/Explorer của hệ điều hành vào ô nhập (VS Code cần Shift mới cho webview nhận file thả vào). Kéo từ Explorer của chính VS Code hay từ editor thì tab không đọc được file, nên hãy dùng nút kẹp giấy. File chờ hiện phía trên ô nhập (ảnh có thumbnail), có ✕ để bỏ; gửi với ô nhập trống thì chỉ gửi file. File chờ gửi bị bỏ khi `/new` hoặc khi đóng tab. Giới hạn và cách gửi ảnh giống chat trên terminal.
 - Reload cửa sổ hay đóng VS Code sẽ dừng bước đang chạy. Quyết định đang chờ được hoãn, yêu cầu quyền chưa trả lời bị từ chối, và run vẫn tiếp tục được. Extension không bao giờ tự chạy lại task; nó hiện nút **Resume** để bạn bấm.
 - Bản đầu chỉ hỗ trợ VS Code desktop với thư mục local. Chưa hỗ trợ Remote SSH, WSL, container hay VS Code web.
 

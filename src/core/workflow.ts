@@ -3,6 +3,8 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { AgentRunner, type AgentResult } from "../agents/runner.js";
 import type { SchemaName } from "../agents/schema.js";
 import type { PermissionDenial } from "../agents/types.js";
+import type { Attachment } from "./attachment-types.js";
+import { attachmentFile } from "./attachments.js";
 import type { Decider, DuoEvent, EventBus, HistoryEntry, Message, Party, PermissionDecider, Phase, Role } from "../events.js";
 import type { AgentRole, Backend, ConfigData } from "./config.js";
 import { GatesInterrupted, requiredPassed, runGates, type GateResult } from "./gates.js";
@@ -112,7 +114,7 @@ export class Workflow {
 
   constructor(private readonly o: WorkflowOptions) {
     this.git = new Git(o.repo);
-    this.runner = o.runner ?? new AgentRunner(o.cfg, o.repo, o.store.path("logs"), o.bus, { permissions: o.permissions });
+    this.runner = o.runner ?? new AgentRunner(o.cfg, o.repo, o.store.path("logs"), o.bus, { permissions: o.permissions, runsDir: o.store.runsDir });
     const runsRel = relativeInside(o.store.runsDir, o.repo);
     this.snapshotExclude = runsRel ? [runsRel] : [];
   }
@@ -131,10 +133,13 @@ export class Workflow {
     this.abort.abort();
   }
 
-  /** A note from the user while the run goes on: the prompts of every later step carry it (a running agent does not see it). */
-  addNote(note: string): void {
+  /**
+   * A note from the user while the run goes on: the prompts of every later step carry it (a running agent does not see
+   * it), with its files, which must already be copies of this run (RunStore attachments).
+   */
+  addNote(note: string, attachments: Attachment[] = []): void {
     const st = this.state;
-    st.humanNotes.push({ at: nowIso(), phase: st.phase, note });
+    st.humanNotes.push({ at: nowIso(), phase: st.phase, note, ...(attachments.length ? { attachments } : {}) });
     this.save();
   }
 
@@ -234,8 +239,18 @@ export class Workflow {
     const st = this.state;
     return {
       repo: this.o.repo, taskId: st.taskId, task: st.task, agents: this.o.cfg.agents, gates: this.o.cfg.gates, notes: st.humanNotes, earlier: st.earlier,
-      conversation: st.conversationContext,
+      conversation: st.conversationContext, attachments: st.attachments, locate: (a) => attachmentFile(this.o.store.runsDir, a),
     };
+  }
+
+  /**
+   * The files every agent call of the run gets: the task's, then the notes' so far. Each call is a CLI run of its own,
+   * so each sends the images again (within the backend's budget for one call).
+   */
+  private files(): Attachment[] {
+    const st = this.state;
+    const all = [...(st.attachments ?? []), ...st.humanNotes.flatMap((n) => n.attachments ?? [])];
+    return all.filter((a, i) => all.findIndex((b) => b.id === a.id) === i);
   }
 
   private party(role: AgentRole): Party {
@@ -342,7 +357,7 @@ export class Workflow {
     round: number, check?: (data: T) => string[]): Promise<AgentResult | null> {
     const beforeTree = await this.tree();
     const beforeOutside = await this.outsideTree();
-    const r = await this.runner.call({ role, agentRole, prompt, schemaName, logPrefix: this.logPrefix(label, round), check, signal: this.abort.signal });
+    const r = await this.runner.call({ role, agentRole, prompt, schemaName, logPrefix: this.logPrefix(label, round), check, signal: this.abort.signal, attachments: this.files() });
     this.addUsage(r);
     if (r.interrupted) throw new Interrupted();
     const afterTree = await this.tree();
@@ -519,7 +534,7 @@ export class Workflow {
       rep.status === "blocked" && !(rep.blocking_reason ?? "").trim() ? ["status is 'blocked' but blocking_reason is empty"] : [];
     const res = await this.runner.call({
       role: "implementer", agentRole: "implementer", prompt, schemaName: "implementation", logPrefix: this.logPrefix("implement", k),
-      check, signal: this.abort.signal,
+      check, signal: this.abort.signal, attachments: this.files(),
     });
     this.addUsage(res);
     const post = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}`), `agentduo ${st.taskId}: implementation round ${k}`);

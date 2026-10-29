@@ -42,8 +42,13 @@ async function dispatch(s: RuntimeSession, request: WorkerRequest): Promise<Work
     case "initialize":
       throw new SessionError("bad_request", "already initialized");
     case "submit":
-      await s.submit(request.conversation, request.text, request.route);
+      await s.submit(request.conversation, request.text, request.route, request.attachments);
       return { accepted: true };
+    case "stageAttachment":
+      return s.stageAttachment(request.conversation, request.key, request.path, request.name);
+    case "removeAttachment":
+      await s.removeAttachment(request.conversation, request.id);
+      return { removed: true };
     case "recipient":
       await s.selectRecipient(request.conversation, request.backend);
       return { accepted: true };
@@ -55,6 +60,9 @@ async function dispatch(s: RuntimeSession, request: WorkerRequest): Promise<Work
       return { accepted: true };
     case "toggleEdits":
       await s.toggleEdits(request.conversation);
+      return { accepted: true };
+    case "usage":
+      await s.usage(request.conversation);
       return { accepted: true };
     case "closeConversation":
       await s.closeConversation(request.conversation);

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { ConfigData } from "../core/config.js";
 import { implementerPermissionArgs } from "../core/settings.js";
 import type { Activity, PermissionAnswer } from "../events.js";
@@ -5,7 +6,7 @@ import { resolveBinary } from "./resolve.js";
 import { loadSchema } from "./schema.js";
 import {
   AgentFailure, BinaryNotFound, extractJson, firstLine, relPath,
-  type AgentBackend, type AgentMeta, type BuildArgs, type FinalOutput, type ParsedEvent, type StreamParser,
+  type AgentBackend, type AgentMeta, type BuildArgs, type FinalOutput, type NativeImage, type ParsedEvent, type StreamParser,
 } from "./types.js";
 
 const DENIAL_RE = /permission|denied|haven't granted|not allowed/i;
@@ -189,11 +190,12 @@ export class ClaudeBackend implements AgentBackend {
       "--output-format", "stream-json",
       "--verbose",
       ...(a.mode === "text" ? [] : ["--json-schema", JSON.stringify(loadSchema(a.schemaName))]),
+      // Images go as content blocks of a stream-json message, in host mode or not; the input format is only how the
+      // prompt is read, so it never changes who answers permission prompts.
+      ...(a.askPermissions || a.images?.length ? ["--input-format", "stream-json"] : []),
       // Host mode sends permission prompts to agentduo (the user answers them); without a host, "none" denies
       // them automatically, since nobody could answer and the run would hang. Neither grants anything.
-      ...(a.askPermissions
-        ? ["--input-format", "stream-json", "--permission-prompts", "host", "--permission-prompt-tool", "stdio"]
-        : ["--permission-prompts", "none"]),
+      ...(a.askPermissions ? ["--permission-prompts", "host", "--permission-prompt-tool", "stdio"] : ["--permission-prompts", "none"]),
       ...(this.cfg.model ? ["--model", this.cfg.model] : []),
       ...(this.cfg.max_budget_usd ? ["--max-budget-usd", String(this.cfg.max_budget_usd)] : []),
       ...this.cfg.args,
@@ -201,8 +203,15 @@ export class ClaudeBackend implements AgentBackend {
     ];
   }
 
-  hostInput(prompt: string): string {
-    return `${JSON.stringify({ type: "user", message: { role: "user", content: prompt }, parent_tool_use_id: null, session_id: "" })}\n`;
+  /** The prompt as one stream-json user message; images come first, as base64 image blocks (Anthropic's advice). */
+  hostInput(prompt: string, images: NativeImage[] = []): string {
+    const content = images.length
+      ? [
+        ...images.map((img) => ({ type: "image", source: { type: "base64", media_type: img.mediaType, data: readFileSync(img.file).toString("base64") } })),
+        { type: "text", text: prompt },
+      ]
+      : prompt;
+    return `${JSON.stringify({ type: "user", message: { role: "user", content }, parent_tool_use_id: null, session_id: "" })}\n`;
   }
 
   permissionReply(raw: Record<string, unknown>, answer: PermissionAnswer): string {

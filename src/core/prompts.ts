@@ -1,9 +1,13 @@
 import type { DiscussionStep, Verdict } from "../events.js";
+import { attachmentDetail, type Attachment } from "./attachment-types.js";
 import type { AgentRole, Backend, GateConfig } from "./config.js";
 import { describeGates, type GateResult } from "./gates.js";
 import type { Approval, Critique, Finding, Implementation, Plan, Review } from "./outputs.js";
 import { findingsMarkdown, issuesMarkdown } from "./render.js";
 import type { ConversationContext, EarlierTask, Exchange, HumanNote } from "./state.js";
+
+/** Where an attachment's copy is, as a prompt names it: its absolute path, or null when its reference is unusable. */
+export type Locate = (a: Attachment) => string | null;
 
 export interface PromptContext {
   repo: string;
@@ -15,6 +19,10 @@ export interface PromptContext {
   earlier?: EarlierTask[];
   /** The chat's conversation when the run started; every role sees the same one. */
   conversation?: ConversationContext;
+  /** Files attached to the task. */
+  attachments?: Attachment[];
+  /** Where attached files are (the task's, the notes', the conversation's); without it no file is listed. */
+  locate?: Locate;
 }
 
 /** The first line of a conversation prompt: not an orchestrator role, so no schema and no role instructions. */
@@ -65,32 +73,66 @@ export function earlierTasks(list: EarlierTask[] = [], current = true): string {
     ", in this workspace; their changes are already in the working tree.\n" + list.map((t, i) => `${i + 1}. ${t.task} — ${t.outcome}`).join("\n") + "\n";
 }
 
-function exchangeText(e: Exchange): string {
+/** `text` as inline code that a backtick of its own cannot close. */
+function inlineCode(text: string): string {
+  const ticks = "`".repeat(Math.max(0, ...[...text.matchAll(/`+/g)].map((m) => m[0].length)) + 1);
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `${ticks}${pad}${text}${pad}${ticks}`;
+}
+
+/** The files of one message, a line each: what each is, and where its copy is. Every prompt lists files with this. */
+export function attachmentLines(list: Attachment[], locate: Locate, indent = ""): string {
+  return list.map((a) => {
+    const file = locate(a);
+    return `${indent}- ${inlineCode(a.name)} (${attachmentDetail(a)}): ${file ? inlineCode(file) : "no longer available"}`;
+  }).join("\n");
+}
+
+const CURRENT_FILES = "agentduo keeps a copy of each file at the path given. The images your CLI can take are also attached to this message as " +
+  "images; read any other file (text, code, PDF…) at its path, and an image there too if you were not shown it. If you cannot read a file, say so.";
+
+/** The files of the message the prompt is about: listed once, where that message is. */
+function filesSection(title: string, list: Attachment[] | undefined, locate: Locate | undefined): string {
+  if (!list?.length || !locate) return "";
+  return `\n### ${title}\n${CURRENT_FILES}\n${attachmentLines(list, locate)}\n`;
+}
+
+function exchangeText(e: Exchange, locate?: Locate): string {
   const name = NAMES[e.backend];
+  // Files of an earlier message go by path only: they were attached to that message, not to this one.
+  const files = e.attachments?.length && locate
+    ? `\n\nFiles attached to that message (not attached again; read them at their paths if you need them):\n${attachmentLines(e.attachments, locate)}` : "";
   if (e.discussedWith) {
     const other = NAMES[e.discussedWith];
-    return `**User → ${name} (discussed with ${other}):**\n${e.question.trim()}\n\n**${name}, after discussing it with ${other}:**\n${e.answer.trim()}`;
+    return `**User → ${name} (discussed with ${other}):**\n${e.question.trim()}${files}\n\n**${name}, after discussing it with ${other}:**\n${e.answer.trim()}`;
   }
-  return `**User → ${name}:**\n${e.question.trim()}\n\n**${name}:**\n${e.answer.trim()}`;
+  return `**User → ${name}:**\n${e.question.trim()}${files}\n\n**${name}:**\n${e.answer.trim()}`;
 }
 
 /** What was said in the chat, oldest first, and how many older exchanges did not fit. */
-export function conversationSection(conversation: ConversationContext | undefined, title: string, intro: string): string {
+export function conversationSection(conversation: ConversationContext | undefined, title: string, intro: string, locate?: Locate): string {
   if (!conversation?.exchanges.length) return "";
   const omitted = conversation.omitted ? `(${conversation.omitted} older exchange(s) are left out.)\n` : "";
-  return `\n## ${title}\n${intro}\n${omitted}\n${conversation.exchanges.map(exchangeText).join("\n\n")}\n`;
+  return `\n## ${title}\n${intro}\n${omitted}\n${conversation.exchanges.map((e) => exchangeText(e, locate)).join("\n\n")}\n`;
 }
 
 function earlier(ctx: PromptContext): string {
   return earlierTasks(ctx.earlier) + conversationSection(ctx.conversation, "Conversation before this task",
-    "Before giving this task, the user talked about it with Claude Code and Codex in this chat. Use it as context; the task above is what to do.");
+    "Before giving this task, the user talked about it with Claude Code and Codex in this chat. Use it as context; the task above is what to do.", ctx.locate);
+}
+
+/** The task, then the files attached to it. */
+function taskSection(ctx: PromptContext): string {
+  return "## Task\n" + ctx.task + "\n" + filesSection("Files the user attached to the task", ctx.attachments, ctx.locate);
 }
 
 /**
  * A question of the three-way chat for one agent: who is talking, what was said, the pipeline tasks so far, and the
  * question itself, which appears exactly once, last.
  */
-export function conversation(o: { workspace: string; backend: Backend; context: ConversationContext; earlier: EarlierTask[]; question: string }): string {
+export function conversation(o: {
+  workspace: string; backend: Backend; context: ConversationContext; earlier: EarlierTask[]; question: string; attachments?: Attachment[]; locate?: Locate;
+}): string {
   const name = NAMES[o.backend];
   const other = NAMES[o.backend === "codex" ? "claude" : "codex"];
   return [
@@ -98,8 +140,8 @@ export function conversation(o: { workspace: string; backend: Backend; context: 
     `This is a three-way conversation in the workspace \`${o.workspace}\` between the user, Claude Code and Codex; agentduo relays the messages. ` +
       `You are ${name}. Answer the user's latest message as ${name}; earlier answers may come from ${other}, and the user can read all of them.`,
     "Follow your own configuration and the repository's instructions (AGENTS.md / CLAUDE.md).",
-    earlierTasks(o.earlier, false) + conversationSection(o.context, "Conversation so far", "Oldest first."),
-    `## The user's message to ${name}\n${o.question}\n`,
+    earlierTasks(o.earlier, false) + conversationSection(o.context, "Conversation so far", "Oldest first.", o.locate),
+    `## The user's message to ${name}\n${o.question}\n` + filesSection("Files the user attached to this message", o.attachments, o.locate),
   ].filter(Boolean).join("\n");
 }
 
@@ -155,7 +197,7 @@ function discussionHistory(history: DiscussionMessage[]): string {
  */
 export function discussion(o: {
   workspace: string; context: ConversationContext; earlier: EarlierTask[]; question: string; answerer: Backend; critic: Backend; maxRounds: number;
-  step: DiscussionStep; round: number; history: DiscussionMessage[];
+  step: DiscussionStep; round: number; history: DiscussionMessage[]; attachments?: Attachment[]; locate?: Locate;
 }): string {
   const answerer = NAMES[o.answerer];
   const critic = NAMES[o.critic];
@@ -184,16 +226,21 @@ export function discussion(o: {
       `for at most ${o.maxRounds} review(s). Then Codex, in a turn of its own, synthesizes the discussion into the final answer. The user reads ` +
       `the whole discussion and gets that synthesis as the response. You are ${me}.`,
     "Follow your own configuration and the repository's instructions (AGENTS.md / CLAUDE.md).",
-    earlierTasks(o.earlier, false) + conversationSection(o.context, "Conversation so far", "Oldest first."),
-    `## The user's question\n${o.question}\n`,
+    earlierTasks(o.earlier, false) + conversationSection(o.context, "Conversation so far", "Oldest first.", o.locate),
+    `## The user's question\n${o.question}\n` + filesSection("Files the user attached to the question", o.attachments, o.locate),
     discussionHistory(o.history),
     asks[o.step],
   ].filter(Boolean).join("\n");
 }
 
-function notes(list: HumanNote[]): string {
+const NOTE_FILES = "agentduo keeps a copy of each file that came with a note at the path given. The images your CLI can take are also attached " +
+  "to this message as images; read the other files at their paths.";
+
+function notes(list: HumanNote[], locate?: Locate): string {
   if (!list.length) return "";
-  return "\n## Notes from the human operator (highest priority)\n" + list.map((n) => `- (${n.at}, during ${n.phase}) ${n.note}`).join("\n") + "\n";
+  const files = (n: HumanNote) => (n.attachments?.length && locate ? `\n  Files:\n${attachmentLines(n.attachments, locate, "  ")}` : "");
+  const intro = locate && list.some((n) => n.attachments?.length) ? `${NOTE_FILES}\n` : "";
+  return "\n## Notes from the human operator (highest priority)\n" + intro + list.map((n) => `- (${n.at}, during ${n.phase}) ${n.note}${files(n)}`).join("\n") + "\n";
 }
 
 function feedbackSection(feedback: PlanFeedback | null): string {
@@ -213,9 +260,9 @@ export function planner(ctx: PromptContext, round: number, version: number, prev
   const out = [
     header("planner", "Planner / Architect", ctx),
     `- Planning round: ${round} · Producing plan version: v${version}\n`,
-    "## Task\n" + ctx.task + "\n",
+    taskSection(ctx),
     earlier(ctx),
-    notes(ctx.notes),
+    notes(ctx.notes, ctx.locate),
     "## Your job\n" +
       "Study the repository and produce an implementation plan that the implementer can execute without further clarification.\n" +
       "- Goals and explicit scope (in / out). Keep the scope to what the task needs.\n" +
@@ -245,9 +292,9 @@ export function planReviewer(ctx: PromptContext, round: number, version: number,
   const out = [
     header("plan_reviewer", "Plan Critic", ctx),
     `- Planning round: ${round} · Plan under review: v${version}\n`,
-    "## Task\n" + ctx.task + "\n",
+    taskSection(ctx),
     earlier(ctx),
-    notes(ctx.notes),
+    notes(ctx.notes, ctx.locate),
     "## Plan under review\n" + planMd + "\n",
     "## Your job\n" +
       "Judge whether this plan is feasible in THIS codebase; the implementer must be able to execute it without guessing:\n" +
@@ -277,9 +324,9 @@ export function planFinalizer(ctx: PromptContext, round: number, version: number
   return [
     header("plan_finalizer", "Planner / Architect (final plan sign-off)", ctx),
     `- Planning round: ${round} · Plan up for sign-off: v${version}\n`,
-    "## Task\n" + ctx.task + "\n",
+    taskSection(ctx),
     earlier(ctx),
-    notes(ctx.notes),
+    notes(ctx.notes, ctx.locate),
     "## Plan\n" + planMd + "\n",
     "## The critic approved this version\n" + critique.summary + "\n\nRemaining suggestions:\n" + issuesMarkdown(critique.issues) + "\n",
     "## Your job\n" +
@@ -296,9 +343,9 @@ export function implementer(ctx: PromptContext, round: number, planMd: string, f
   const out = [
     header("implementer", "Implementer", ctx),
     `- Implementation round: ${round}\n`,
-    "## Task\n" + ctx.task + "\n",
+    taskSection(ctx),
     earlier(ctx),
-    notes(ctx.notes),
+    notes(ctx.notes, ctx.locate),
     "## Final approved plan\n" + planMd + "\n",
     "## How to work\n" +
       "- Implement the plan and stay within its scope.\n" +
@@ -338,9 +385,9 @@ export function codeReviewer(ctx: PromptContext, round: number, planMd: string, 
     `- Review round: ${round}\n` +
       "- Revision under review: `" + snapshot + "` (agentduo snapshot of the workspace)\n" +
       "- Base revision: `" + base + "`\n",
-    "## Task\n" + ctx.task + "\n",
+    taskSection(ctx),
     earlier(ctx),
-    notes(ctx.notes),
+    notes(ctx.notes, ctx.locate),
     "## Final approved plan\n" + planMd + "\n",
     "## Quality gate results (run by agentduo on this revision)\n" + describeGates(gateResults) + "\n",
     "## Implementer's report\n" + implReport.summary + "\n\nTests the implementer says it ran:\n" + tests + "\n",

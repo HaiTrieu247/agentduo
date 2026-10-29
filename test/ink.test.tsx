@@ -1,6 +1,7 @@
 import { Box } from "ink";
 import { render } from "ink-testing-library";
 import { describe, expect, it } from "vitest";
+import type { AgentUsage } from "../src/core/usage.js";
 import { EventBus, type Activity, type DuoEvent, type HistoryEntry, type PermissionAnswer, type PermissionRequest, type Phase, type Role } from "../src/events.js";
 import { App } from "../src/ui/ink/App.js";
 import { ChatApp, ChatChannel } from "../src/ui/ink/ChatApp.js";
@@ -30,6 +31,9 @@ const ask = (id: string, rules = ["Bash(npm test:*)"]): PermissionRequest =>
   ({ id, tool: "Bash", label: "Bash  npm test", description: "Run the test suite", blockedPath: null, rules });
 const requested = (request: PermissionRequest): DuoEvent => ({ type: "permission.requested", role: "implementer", agent: "claude", request });
 const answered = (id: string, answer: PermissionAnswer): DuoEvent => ({ type: "permission.answered", role: "implementer", agent: "claude", id, answer });
+const usageOf = (percent: number): AgentUsage => ({
+  account: "subscription", groups: [{ title: null, limits: [{ label: "Current session", usedPercent: percent, resets: "Resets Oct 29 at 3pm (Asia/Saigon)" }] }], notes: [], details: null,
+});
 
 describe("view reducer", () => {
   it("collects activities into the current step and finalizes it", () => {
@@ -277,6 +281,81 @@ describe("Ink components", () => {
     app.stdin.write("\r");
     await wait();
     expect(sent).toEqual(["Add JWT auth", "line one\nline two"]);
+    app.unmount();
+  });
+
+  it("chat: /usage opens a panel in place of the input, with a bar per limit; r refreshes, Esc only closes it", async () => {
+    const bus = new EventBus();
+    const channel = new ChatChannel();
+    let escapes = 0;
+    let refreshes = 0;
+    const app = render(<ChatApp bus={bus} channel={channel} version="0.2.0" workspace="/ws" verbose={false} onSubmit={noop} onEscape={() => { escapes += 1; }}
+      onCtrlC={noop} onUsageRefresh={() => { refreshes += 1; }} onDecision={noop} onPermission={noop} views={() => []} readView={async () => null} />);
+    channel.status("answering");
+    channel.usage({ id: 1, claude: { status: "loading" }, codex: { status: "loading" } });
+    await wait();
+    expect(app.lastFrame()).toContain("Usage");
+    expect(app.lastFrame()).toContain("loading…");
+    expect(app.lastFrame()).not.toContain("is answering…"); // the input line's placeholder
+    channel.usage({ id: 1, claude: { status: "ready", usage: usageOf(46) }, codex: { status: "error", error: "Codex is not signed in: run codex login" } });
+    await wait();
+    const frame = app.lastFrame()!;
+    for (const text of ["Claude Code · subscription", "Current session", `${"█".repeat(18)}${"░".repeat(22)}  46% used`, "Resets Oct 29 at 3pm", "Codex is not signed in", "r refresh · Esc close"]) {
+      expect(frame).toContain(text);
+    }
+    app.stdin.write("r");
+    await wait();
+    expect(refreshes).toBe(1);
+    app.stdin.write("\u001B");
+    await wait();
+    expect(escapes).toBe(0);
+    expect(app.lastFrame()).not.toContain("Current session");
+    expect(app.lastFrame()).toContain("is answering…");
+    // What was still on its way for the closed report stays closed; a new /usage opens it again.
+    channel.usage({ id: 1, claude: { status: "ready", usage: usageOf(46) }, codex: { status: "loading" } });
+    await wait();
+    expect(app.lastFrame()).not.toContain("Current session");
+    channel.usage({ id: 2, claude: { status: "loading" }, codex: { status: "loading" } });
+    await wait();
+    expect(app.lastFrame()).toContain("loading…");
+    app.unmount();
+  });
+
+  it("chat: the usage panel keeps the blank lines Claude prints between its blocks", async () => {
+    const channel = new ChatChannel();
+    const app = render(<ChatApp bus={new EventBus()} channel={channel} version="0.2.0" workspace="/ws" verbose={false} onSubmit={noop} onEscape={noop} onCtrlC={noop}
+      onDecision={noop} onPermission={noop} views={() => []} readView={async () => null} />);
+    const usage = { ...usageOf(10), details: { title: "What's contributing to your limits usage?", lines: ["Last 24h · 546 requests", "", "Last 7d · 2636 requests"] } };
+    channel.usage({ id: 1, claude: { status: "ready", usage }, codex: { status: "loading" } });
+    await wait();
+    const lines = app.lastFrame()!.split("\n");
+    const at = (text: string) => lines.findIndex((l) => l.includes(text));
+    expect(at("Last 7d") - at("Last 24h")).toBe(2);
+    app.unmount();
+  });
+
+  it("chat: a usage panel taller than the terminal scrolls with ↑↓, and a permission prompt goes before it", async () => {
+    const bus = new EventBus();
+    const channel = new ChatChannel();
+    const app = render(<ChatApp bus={bus} channel={channel} version="0.2.0" workspace="/ws" verbose={false} onSubmit={noop} onEscape={noop} onCtrlC={noop}
+      onDecision={noop} onPermission={noop} views={() => []} readView={async () => null} />);
+    const usage = { ...usageOf(10), details: { title: "What's contributing to your limits usage?", lines: Array.from({ length: 60 }, (_, i) => `detail line ${i + 1}`) } };
+    channel.usage({ id: 1, claude: { status: "ready", usage }, codex: { status: "loading" } });
+    await wait();
+    expect(app.lastFrame()).toContain("Claude Code · subscription");
+    expect(app.lastFrame()).not.toContain("detail line 60");
+    expect(app.lastFrame()).toMatch(/↑↓ scroll/);
+    for (let i = 0; i < 80; i++) app.stdin.write("\u001B[B");
+    await wait(150);
+    expect(app.lastFrame()).toContain("detail line 60");
+    expect(app.lastFrame()).not.toContain("Claude Code · subscription");
+    bus.emit(requested(ask("p1")));
+    await wait();
+    expect(app.lastFrame()).toContain("asks to use Bash");
+    expect(app.lastFrame()).not.toContain("detail line 60");
+    bus.emit(answered("p1", { decision: "once" }));
+    await wait();
+    expect(app.lastFrame()).toContain("detail line 60");
     app.unmount();
   });
 

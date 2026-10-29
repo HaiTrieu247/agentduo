@@ -1,16 +1,22 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Chat, type ChatUi } from "../src/chat.js";
+import type { Attachment } from "../src/core/attachment-types.js";
+import { existingAttachmentFile } from "../src/core/attachments.js";
+import { Conversation } from "../src/core/conversation.js";
 import type { ConfigData } from "../src/core/config.js";
 import { listConversations } from "../src/core/conversation.js";
 import { RunStore } from "../src/core/state.js";
-import { EventBus, type Decider, type DuoEvent, type ModelMap } from "../src/events.js";
+import type { UsageReport } from "../src/core/usage.js";
+import { EventBus, type Decider, type Decision, type DuoEvent, type ModelMap } from "../src/events.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
 import { testConfig } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { ScriptedDecider } from "./helpers/harness.js";
+import { png } from "./helpers/images.js";
 import { makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
 import { waitUntil } from "./helpers/vscode.js";
@@ -23,6 +29,15 @@ class FakeUi implements ChatUi {
   readonly recipients: string[] = [];
   models: ModelMap | null = null;
   exited = false;
+  /** The waiting files after each change, and those that went with each message, by name. */
+  readonly waiting: string[][] = [];
+  readonly sentFiles: string[][] = [];
+  setAttachments(files: Attachment[]): void {
+    this.waiting.push(files.map((f) => f.name));
+  }
+  sent(files: Attachment[]): void {
+    this.sentFiles.push(files.map((f) => f.name));
+  }
   setEdits(mode: string): void {
     this.edits.push(mode);
   }
@@ -358,6 +373,88 @@ describe("Chat: /discuss", () => {
     await chat.idle();
     expect(discussions()[1]).toMatchObject({ status: "error", answer: null, rounds: 1, error: expect.any(String) });
     expect(fake.calls("discuss_synthesis")).toHaveLength(0);
+  });
+});
+
+describe("Chat: /usage", () => {
+  /** A screen with a usage panel: it gets every state of the report. */
+  class PanelUi extends FakeUi {
+    readonly reports: UsageReport[] = [];
+    usage(report: UsageReport): void {
+      this.reports.push(report);
+    }
+  }
+  const settled = (r?: UsageReport) => !!r && r.claude.status !== "loading" && r.codex.status !== "loading";
+
+  it("opens the panel at once, fills in each agent's part as it answers, and calls no model", async () => {
+    const panel = new PanelUi();
+    ui = panel;
+    const chat = newChat();
+    await chat.submit("/usage");
+    expect(panel.reports[0]).toEqual({ id: expect.any(Number), claude: { status: "loading" }, codex: { status: "loading" } });
+    await waitUntil(() => settled(panel.reports.at(-1)), 10_000, "both parts of the usage");
+    const last = panel.reports.at(-1)!;
+    expect(last.id).toBe(panel.reports[0]!.id);
+    expect(last.claude).toMatchObject({ status: "ready", usage: { account: "subscription", groups: [{ limits: [{ label: "Current session", usedPercent: 10 }] }] } });
+    expect(last.codex).toMatchObject({ status: "ready", usage: { account: "ChatGPT Plus · fake@example.com" } });
+    expect(panel.reports).toHaveLength(3);
+    expect(fake.calls()).toEqual([]);
+    expect(ui.lines).toEqual([]);
+  });
+
+  it("shows why one part is missing, and the other part still", async () => {
+    const panel = new PanelUi();
+    ui = panel;
+    const chat = newChat();
+    fake.setScenario({ usage: { claude: { exit: 1, stderr: "Not logged in" } } });
+    await chat.submit("/usage");
+    await waitUntil(() => settled(panel.reports.at(-1)), 10_000, "both parts of the usage");
+    expect(panel.reports.at(-1)).toMatchObject({ claude: { status: "error", error: "claude -p /usage failed (exit code 1): Not logged in" }, codex: { status: "ready" } });
+  });
+
+  it("gives a screen without a usage panel the report as text once both parts are in", async () => {
+    const chat = newChat();
+    await chat.submit("/usage");
+    await waitUntil(() => ui.lines.length > 0, 10_000, "the usage text");
+    expect(ui.lines).toHaveLength(1);
+    expect(ui.lines[0]).toMatch(/^── usage ──\nClaude Code · subscription\n {2}Current session\n[\s\S]*Codex · ChatGPT Plus · fake@example\.com\n {2}5h limit/);
+  });
+
+  it("asks again on a refresh, whose report replaces the earlier one, which never shows again", async () => {
+    const panel = new PanelUi();
+    ui = panel;
+    const chat = newChat();
+    fake.setScenario({ usage: { claude: { sleep: 1500 } } });
+    await chat.submit("/usage");
+    chat.usage();
+    await waitUntil(() => settled(panel.reports.at(-1)), 10_000, "both parts of the usage");
+    await new Promise((r) => setTimeout(r, 300));
+    const [first, second] = [panel.reports[0]!.id, panel.reports[1]!.id];
+    expect(second).toBeGreaterThan(first);
+    expect(panel.reports.slice(1).map((r) => r.id)).toEqual(panel.reports.slice(1).map(() => second));
+    expect(panel.reports.at(-1)).toMatchObject({ claude: { status: "ready" }, codex: { status: "ready" } });
+  });
+
+  it("gives each report an id later than any earlier chat's, so a view never takes a new one for an old one", async () => {
+    const panel = new PanelUi();
+    ui = panel;
+    newChat().usage();
+    newChat().usage();
+    const [a, b] = panel.reports.map((r) => r.id);
+    expect(b).toBeGreaterThan(a!);
+  });
+
+  it("leaves an answer that is going alone", async () => {
+    const panel = new PanelUi();
+    ui = panel;
+    const chat = newChat();
+    fake.setScenario({ chat_codex: [{ sleep: 1500, answer: "done thinking" }] });
+    await chat.submit("Think about it");
+    await chat.submit("/usage");
+    await waitUntil(() => settled(panel.reports.at(-1)), 10_000, "both parts of the usage");
+    expect(panel.statuses.at(-1)).toBe("answering");
+    await chat.idle();
+    expect(answers()).toEqual([expect.objectContaining({ status: "success", answer: "done thinking" })]);
   });
 });
 
@@ -769,7 +866,7 @@ describe("Chat: the pipeline", () => {
     const chat = newChat();
     await chat.submit("/help");
     const help = ui.lines.at(-1)!;
-    for (const command of ["/claude", "/codex", "/pipeline", "/plan", "/diff", "/status", "/resume", "/new", "/quit", "Esc", "Shift+Tab", "/edits",
+    for (const command of ["/claude", "/codex", "/pipeline", "/plan", "/diff", "/status", "/usage", "/resume", "/new", "/quit", "Esc", "Shift+Tab", "/edits",
       "/settings claude model", "/settings claude effort", "/settings claude permissions", "/settings claude add-dir", "/settings codex model",
       "/settings codex permissions", "/claude -- <question>", "/config", "/help", "--save"]) {
       expect(help, command).toContain(command);
@@ -792,5 +889,214 @@ describe("Chat: the pipeline", () => {
     await second.idle();
     expect(decider.seen).toEqual(["max_review_rounds"]);
     expect(latest().phase).toBe("ABORTED");
+  });
+});
+
+describe("Chat: attached files", () => {
+  /** A file of the user's, outside the workspace: a 64×32 PNG, or text. */
+  const userFile = (name: string, data: Buffer | string = png(64, 32)) => {
+    mkdirSync(join(t.path, "home"), { recursive: true });
+    const path = join(t.path, "home", name);
+    writeFileSync(path, data);
+    return path;
+  };
+  const sha = (data: Buffer) => createHash("sha256").update(data).digest("hex");
+  const shot = png(64, 32);
+  const deciding = (act: () => Promise<void>, decision: Decision | "defer"): Decider => ({ decide: async () => {
+    await act();
+    return decision;
+  } });
+
+  it("sends the waiting files with the next message, natively and listed once, and keeps them with the exchange", async () => {
+    const chat = newChat();
+    await chat.submit(`/attach "${userFile("Ảnh chụp.png")}"`);
+    await chat.submit(`/attach ${userFile("notes.md", "# notes\n").replace(/ /g, "\\ ")}`);
+    expect(ui.lines.at(-1)).toMatch(/^Attached notes\.md \(text\/markdown, 8 B\)\. The 2 files go with your next message/);
+    await chat.submit("/attachments");
+    expect(ui.lines.at(-1)).toBe("2 files go with your next message:\n  1. Ảnh chụp.png (PNG 64×32, " + shot.length + " B)\n  2. notes.md (text/markdown, 8 B)\n/detach <n|all> removes one, or all.");
+    await chat.submit("What is in these?");
+    await chat.idle();
+    const call = fake.calls("chat_codex")[0]!;
+    expect(call.images).toEqual([expect.objectContaining({ sha256: sha(shot) })]);
+    expect(call.prompt.split("/attachments/").length - 1).toBe(2);
+    expect(call.prompt).toContain("### Files the user attached to this message");
+    expect(chat.pending).toEqual([]);
+    expect(ui.sentFiles).toEqual([["Ảnh chụp.png", "notes.md"]]);
+    expect(ui.waiting.at(-1)).toEqual([]);
+    // The next question lists them as files of that earlier message, and attaches nothing.
+    await chat.submit("And the second one?");
+    await chat.idle();
+    const next = fake.calls("chat_codex")[1]!;
+    expect(next.images).toBeUndefined();
+    expect(next.prompt).toContain("Files attached to that message (not attached again");
+    const saved = JSON.parse(readFileSync(join(runsDir, "conversations", chat.conversationId, "conversation.json"), "utf8"));
+    expect(saved.exchanges[0].attachments.map((a: Attachment) => a.name)).toEqual(["Ảnh chụp.png", "notes.md"]);
+    expect(JSON.stringify(saved)).not.toContain(join(t.path, "home"));
+  });
+
+  it("sends files alone on Enter, and keeps them waiting through commands, a busy agent and a missing CLI", async () => {
+    const chat = newChat();
+    fake.setScenario({ chat: [{ answer: "slow", sleep: 1500 }, { answer: "ok" }] });
+    await chat.submit("First?");
+    await chat.submit(`/attach "${userFile("a.png")}"`);
+    await chat.submit("/status");
+    await chat.submit("Second?");
+    expect(ui.lines.at(-1)).toContain("is still answering");
+    expect(chat.pending.map((a) => a.name)).toEqual(["a.png"]);
+    await chat.idle();
+    await chat.submit("/claude look", { attachments: ["zz-not-here"] });
+    expect(ui.errors.at(-1)).toContain("no longer waiting to be sent in this conversation");
+    await chat.submit("");
+    await chat.idle();
+    const call = fake.calls("chat_codex")[1]!;
+    expect(call.prompt).toContain("## The user's message to Codex\nLook at the attached file(s).\n");
+    expect(call.images).toHaveLength(1);
+    expect(chat.pending).toEqual([]);
+    expect(chat.title).toBe("First?");
+  });
+
+  it("sends only the files a submit names (the extension's), leaving the others waiting", async () => {
+    const chat = newChat();
+    const a = chat.attach(userFile("a.png"));
+    const b = chat.attach(userFile("b.txt", "b"));
+    await chat.submit("Only the text file", { attachments: [b.id] });
+    await chat.idle();
+    expect(fake.calls("chat_codex")[0]!.images).toBeUndefined();
+    expect(fake.calls("chat_codex")[0]!.prompt).toContain("b.txt");
+    expect(chat.pending).toEqual([a]);
+    await chat.submit("Nothing attached", { attachments: [] });
+    await chat.idle();
+    expect(fake.calls("chat_codex")[1]!.prompt).not.toContain("a.png");
+    chat.detach(a.id, { quiet: true });
+    expect(chat.pending).toEqual([]);
+    expect(() => existingAttachmentFile(runsDir, a)).toThrow();
+  });
+
+  it("reads ~/ as the home directory, in quotes too, as /attach's usage line writes it", async () => {
+    const chat = newChat();
+    const home = process.env.HOME;
+    process.env.HOME = join(t.path, "home");
+    try {
+      userFile("My notes.pdf", "%PDF-1.4\n");
+      await chat.submit('/attach "~/My notes.pdf"');
+      await chat.submit("/attach ~/'My notes.pdf'");
+      expect(chat.pending.map((a) => a.name)).toEqual(["My notes.pdf", "My notes.pdf"]);
+      // An escaped ~ is a folder of the workspace.
+      await chat.submit("/attach \\~/a.png");
+      expect(ui.errors.at(-1)).toMatch(/~\/a\.png: no such file/);
+      expect(ui.errors.at(-1)).not.toContain(join(t.path, "home"));
+    } finally {
+      if (home === undefined) delete process.env.HOME;
+      else process.env.HOME = home;
+    }
+  });
+
+  it("refuses directories and names what was wrong, and /detach and /new remove waiting files from disk", async () => {
+    const chat = newChat();
+    await chat.submit(`/attach "${t.path}"`);
+    expect(ui.errors.at(-1)).toMatch(/is a directory/);
+    await chat.submit("/attach 'missing.png'");
+    expect(ui.errors.at(-1)).toMatch(/missing\.png: no such file/);
+    const a = chat.attach(userFile("a.png"));
+    const b = chat.attach(userFile("b.png"));
+    await chat.submit("/detach 1");
+    expect(ui.lines.at(-1)).toBe("Removed a.png.");
+    expect(() => existingAttachmentFile(runsDir, a)).toThrow();
+    await chat.submit("/new");
+    expect(ui.lines.some((l) => l.startsWith("Removed 1 attached file that was not sent: b.png"))).toBe(true);
+    expect(() => existingAttachmentFile(runsDir, b)).toThrow();
+    expect(chat.pending).toEqual([]);
+  });
+
+  it("removes the files a crashed session left waiting, when its conversation is opened again, and keeps those sent", async () => {
+    const before = new Conversation(runsDir, { id: "conv-crash" });
+    const sent = before.stage(userFile("sent.png"));
+    before.sent([sent]);
+    const left = before.stage(userFile("left.png"));
+    const chat = newChat({ conversationId: "conv-crash" });
+    expect(chat.pending).toEqual([]);
+    expect(() => existingAttachmentFile(runsDir, left)).toThrow();
+    expect(existsSync(existingAttachmentFile(runsDir, sent))).toBe(true);
+    await chat.stop();
+  });
+
+  it("gives every step of a discussion the question's files", async () => {
+    const chat = newChat();
+    chat.attach(userFile("chart.png"));
+    await chat.submit("/discuss Is this chart right?");
+    await chat.idle();
+    const steps = fake.calls().map((c) => [c.backend, c.role, c.images?.length ?? 0]);
+    expect(steps).toEqual([["codex", "discuss_answer", 1], ["claude", "discuss_critique", 1], ["codex", "discuss_synthesis", 1]]);
+    expect(fake.calls("discuss_critique")[0]!.images![0]!.mediaType).toBe("image/png");
+    expect(chat.pending).toEqual([]);
+  });
+
+  it("copies a task's files into its run, gives them to every role, and resumes without the original file or chat", async () => {
+    const chat = newChat();
+    const source = userFile("mockup.png");
+    chat.attach(source);
+    fake.setScenario({ ...happy(), implementer: [{ activities: [{ tool: "Read", input: { file_path: "app.txt" } }], sleep: 10_000, output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }] });
+    let escaped = false;
+    bus.on((e) => {
+      if (e.type === "agent.activity" && e.role === "implementer" && !escaped) {
+        escaped = true;
+        chat.escape();
+      }
+    });
+    await chat.submit("/pipeline Make app.txt match the mockup");
+    await chat.idle();
+    const st = latest();
+    expect(st.attachments).toEqual([expect.objectContaining({ name: "mockup.png", path: expect.stringMatching(new RegExp(`^${st.taskId}/attachments/`)) })]);
+    rmSync(source);
+    rmSync(join(runsDir, "conversations", chat.conversationId), { recursive: true });
+    await chat.submit("/resume");
+    await chat.idle();
+    expect(latest().phase).toBe("DONE");
+    const roles = fake.calls().map((c) => [c.role, c.images?.length ?? 0, c.images?.[0]?.sha256 === sha(shot)]);
+    expect(roles).toEqual([
+      ["planner", 1, true], ["plan_reviewer", 1, true], ["plan_finalizer", 1, true], ["implementer", 1, true], ["implementer", 1, true], ["code_reviewer", 1, true],
+    ]);
+    for (const c of fake.calls()) expect(c.prompt).toContain("### Files the user attached to the task");
+  });
+
+  it("gives a note's files to the steps after it, never to a decision, which leaves them waiting", async () => {
+    const cfg = testConfig(fake, { limits: { max_review_rounds: 1 } });
+    fake.setScenario({ ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }, { output: review(true) }] });
+    let chat: Chat;
+    // At the decision: a file attached, then a message (a note, with it), then another file, then the decision.
+    const decider = deciding(async () => {
+      chat.attach(userFile("fix.png"));
+      expect(ui.lines.at(-1)).toContain("do not go with a decision");
+      await chat.submit("Make it look like this");
+      chat.attach(userFile("later.txt", "later"));
+    }, { decision: "resume", note: "go on" });
+    chat = newChat({ cfg, decider });
+    await chat.submit("/pipeline Make app.txt fixed");
+    await chat.idle();
+    expect(latest().phase).toBe("DONE");
+    const notes = latest().humanNotes;
+    expect(notes.map((n) => [n.note, n.attachments?.map((a) => a.name)])).toEqual([["Make it look like this", ["fix.png"]], ["go on", undefined]]);
+    expect(fake.calls("implementer")[0]!.images).toBeUndefined();
+    expect(fake.calls("implementer")[1]!.images).toHaveLength(1);
+    expect(fake.calls("implementer")[1]!.prompt).toContain("Make it look like this\n  Files:");
+    // The file attached after the note did not go with the decision.
+    expect(chat.pending.map((a) => a.name)).toEqual(["later.txt"]);
+  });
+
+  it("gives /resume's note the waiting files, after a decision was put off", async () => {
+    const cfg = testConfig(fake, { limits: { max_review_rounds: 1 } });
+    fake.setScenario({ ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }, { output: review(true) }] });
+    const chat = newChat({ cfg, decider: new ScriptedDecider(["defer", { decision: "resume" }]) });
+    await chat.submit("/pipeline Make app.txt fixed");
+    await chat.idle();
+    expect(latest().phase).toBe("HUMAN_REVIEW");
+    chat.attach(userFile("spec.pdf", "%PDF-1.4\nMARKER\n"));
+    await chat.submit("/resume follow the spec");
+    await chat.idle();
+    expect(latest().phase).toBe("DONE");
+    const note = latest().humanNotes.at(-1)!;
+    expect(note).toMatchObject({ note: "follow the spec", attachments: [expect.objectContaining({ name: "spec.pdf", path: expect.stringContaining(`${latest().taskId}/attachments/`) })] });
+    expect(fake.calls("implementer")[1]!.prompt).toContain("spec.pdf");
+    expect(chat.pending).toEqual([]);
   });
 });

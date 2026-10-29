@@ -78,6 +78,7 @@
       { "command": "agentduo.openPlan", "title": "Open Plan", "category": "agentduo" },
       { "command": "agentduo.openChanges", "title": "Open Changes", "category": "agentduo" },
       { "command": "agentduo.openReport", "title": "Open Report", "category": "agentduo" },
+      { "command": "agentduo.usage", "title": "Usage: Claude Code and Codex Plan Limits", "category": "agentduo" },
       { "command": "agentduo.doctor", "title": "Doctor: Check CLIs, Config and Workspace", "category": "agentduo" },
       { "command": "agentduo.openConfiguration", "title": "Open Configuration", "category": "agentduo" },
       { "command": "agentduo.chooseWorkspace", "title": "Choose Workspace Folder", "category": "agentduo" }
@@ -91,9 +92,10 @@
         { "command": "agentduo.openPlan", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "1_run@1" },
         { "command": "agentduo.openChanges", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "1_run@2" },
         { "command": "agentduo.openReport", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "1_run@3" },
-        { "command": "agentduo.doctor", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "2_tools@1" },
-        { "command": "agentduo.openConfiguration", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "2_tools@2" },
-        { "command": "agentduo.chooseWorkspace", "when": "activeWebviewPanelId == 'agentduo.conversation' && workspaceFolderCount > 1", "group": "2_tools@3" }
+        { "command": "agentduo.usage", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "2_tools@1" },
+        { "command": "agentduo.doctor", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "2_tools@2" },
+        { "command": "agentduo.openConfiguration", "when": "activeWebviewPanelId == 'agentduo.conversation'", "group": "2_tools@3" },
+        { "command": "agentduo.chooseWorkspace", "when": "activeWebviewPanelId == 'agentduo.conversation' && workspaceFolderCount > 1", "group": "2_tools@4" }
       ],
       "view/title": [
         { "command": "agentduo.newTask", "when": "view == agentduo.conversations", "group": "navigation@1" },

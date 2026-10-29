@@ -2,6 +2,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync
 import { basename, dirname, join } from "node:path";
 import type { PermissionDenial } from "../agents/types.js";
 import type { HistoryEntry, HumanReview, Phase } from "../events.js";
+import type { Attachment } from "./attachment-types.js";
 import type { GateResult } from "./gates.js";
 import type { Snapshot } from "./git.js";
 import type { Approval, Critique, Finding } from "./outputs.js";
@@ -12,6 +13,8 @@ export interface HumanNote {
   at: string;
   phase: Phase;
   note: string;
+  /** Files that came with the note, copied into the run; absent in older runs and for notes without files. */
+  attachments?: Attachment[];
 }
 
 /** A task given earlier in the same chat, and how it ended; later runs are told about it. */
@@ -30,6 +33,8 @@ export interface Exchange {
    * discussion, or the answerer's latest version when the synthesis failed (before synthesis: its agreed or final one).
    */
   discussedWith?: "codex" | "claude";
+  /** The files the question came with: later prompts list them (their paths), never attach them again. */
+  attachments?: Attachment[];
 }
 
 /**
@@ -72,6 +77,8 @@ export interface RunState {
   earlier?: EarlierTask[];
   /** The chat's conversation when this run started; absent outside a chat and in older runs. */
   conversationContext?: ConversationContext;
+  /** Files attached to the task, copied into the run (so a resume needs neither the originals nor the chat); absent: none. */
+  attachments?: Attachment[];
   costUsd: number;
   tokens: number;
   step: number;

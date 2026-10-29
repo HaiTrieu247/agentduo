@@ -1,17 +1,20 @@
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import * as vscode from "vscode";
+import { ATTACHMENT_LIMITS, formatBytes } from "../../../src/core/attachment-types.js";
+import { safeFileName } from "../../../src/core/attachments.js";
 import { listConversations } from "../../../src/core/conversation.js";
 import { stamp } from "../../../src/core/state.js";
-import type { ViewState } from "../webview/state.js";
+import { shownImages, type ViewState } from "../webview/state.js";
 import { ARTIFACT_SCHEME, ChangeRegistry, SNAPSHOT_SCHEME } from "./artifacts.js";
 import { ConversationPanel, PANEL_TYPE, type PanelHost } from "./conversationPanel.js";
 import { ConversationsView, type ConversationEntry } from "./conversationsView.js";
 import { ArtifactContentProvider, changesToShow, openArtifact, openChanges, openDiff, SnapshotContentProvider } from "./diffProvider.js";
 import { isConversationId, type ArtifactName, type DecisionChoice, type WebviewCommand, type WebviewMessage } from "./protocol.js";
 import { findNode } from "./workerClient.js";
-import { emptyState, pickWorkspace, WorkspaceSession } from "./workspaceSession.js";
+import { emptyState, pickWorkspace, WorkspaceSession, type ConversationHandle } from "./workspaceSession.js";
 
 const REMEMBERED_FOLDER = "agentduo.workspaceFolder";
 const CONFIG_TEMPLATE = `# agentduo configuration for this workspace; the keys and their defaults are listed in the agentduo README.
@@ -20,12 +23,16 @@ const CONFIG_TEMPLATE = `# agentduo configuration for this workspace; the keys a
 
 /** A new conversation's id: also the name of its directory, so safe as a run id. */
 const newConversationId = () => `${stamp(new Date())}-tab-${randomBytes(4).toString("hex")}`;
+/** The host's name for a file it picked, until the worker gives it an id. */
+const newFileKey = () => `h${Date.now().toString(36)}${randomBytes(4).toString("hex")}`;
 
 /** A tab's title: what its conversation is about (its first message, without a leading /claude, /codex…). */
 export function titleOf(state: ViewState): string {
   const first = state.timeline.find((i) => i.kind === "user");
   if (!first || first.kind !== "user") return "agentduo";
-  const text = first.text.replace(/^\/(claude|codex|discuss|pipeline)\s+/, "").split("\n")[0]!.trim();
+  // A message of files alone is about the files.
+  const said = first.text || (first.attachments ?? []).map((a) => a.name).join(", ");
+  const text = said.replace(/^\/(claude|codex|discuss|pipeline)\s+/, "").split("\n")[0]!.trim();
   return text.length > 32 ? `${text.slice(0, 31)}…` : text || "agentduo";
 }
 
@@ -43,6 +50,8 @@ class Controller implements vscode.Disposable, PanelHost {
   private refreshTimer: NodeJS.Timeout | null = null;
   /** What each tab's title, status and questions were, so that streaming activity does not redraw the list. */
   private readonly shown = new Map<string, string>();
+  /** The URIs each tab was given for its attached images (null: the copy is gone), so each goes once per webview. */
+  private readonly granted = new Map<string, Map<string, string | null>>();
 
   constructor(private readonly context: vscode.ExtensionContext, readonly output: vscode.OutputChannel) {
     this.artifacts = new ArtifactContentProvider(() => this.session, () => this.active());
@@ -114,7 +123,9 @@ class Controller implements vscode.Disposable, PanelHost {
 
   /** A tab of `conversation`: new, or one VS Code restored after a reload. */
   adopt(conversation: string, panel: vscode.WebviewPanel): void {
-    this.panels.set(conversation, new ConversationPanel(conversation, panel, this.context.extensionUri, this));
+    // Where its attached files are, when the session knows already: the page may show them from the start.
+    const root = this.session?.attachmentRoot(conversation);
+    this.panels.set(conversation, new ConversationPanel(conversation, panel, this.context.extensionUri, this, root ? [root] : []));
     this.lastActive = conversation;
     this.refreshList();
   }
@@ -133,7 +144,13 @@ class Controller implements vscode.Disposable, PanelHost {
       const c = session.conversation(conversation);
       switch (message.type) {
         case "submit":
-          return c.submit(message.text, message.route);
+          return c.submit(message.text, message.route, message.attachments);
+        case "attach":
+          return this.pickFiles(c);
+        case "upload":
+          return this.upload(c, message);
+        case "detach":
+          return c.removeFile(message.key);
         case "recipient":
           return c.selectRecipient(message.backend);
         case "setting":
@@ -142,6 +159,8 @@ class Controller implements vscode.Disposable, PanelHost {
           return c.interrupt();
         case "toggleEdits":
           return c.toggleEdits();
+        case "usage":
+          return c.usage();
         case "decision":
           return c.answerDecision(message.generation, message.id, message.decision, message.note);
         case "permission":
@@ -159,8 +178,83 @@ class Controller implements vscode.Disposable, PanelHost {
       panel.post({ type: "snapshot", state: emptyState(this.folders().length ? "choose-folder" : "no-folder"), conversation });
       return;
     }
-    session.conversation(conversation).attach((message) => panel.post(message));
+    session.conversation(conversation).attach((message) => {
+      panel.post(message);
+      // A new webview knows no URI: it gets those of what it shows.
+      if (message.type === "snapshot") this.grantImages(conversation, message.state, true);
+    });
     void session.start();
+  }
+
+  // ------------------------------------------------------------------ attachments
+  /** Attach: the user picks files on this computer; the worker copies each from where it is. */
+  private async pickFiles(c: ConversationHandle): Promise<void> {
+    const uris = await vscode.window.showOpenDialog({ canSelectMany: true, canSelectFiles: true, canSelectFolders: false, openLabel: "Attach", title: "Attach files to your next message" });
+    for (const uri of uris ?? []) {
+      if (uri.scheme !== "file") c.failed(newFileKey(), basename(uri.path), "only files on this computer can be attached");
+      else void c.stage({ key: newFileKey(), path: uri.fsPath, name: basename(uri.fsPath) });
+    }
+  }
+
+  /** Where pasted and dropped files are written for the worker to copy: the extension's storage, or the temporary directory. */
+  private stagingRoot(): vscode.Uri {
+    const base = this.context.globalStorageUri.scheme === "file" ? this.context.globalStorageUri : vscode.Uri.file(join(tmpdir(), "agentduo-vscode"));
+    return vscode.Uri.joinPath(base, "attachment-staging");
+  }
+
+  /** Removes every staged file (at start, a crash may have left some). */
+  async clearStaging(): Promise<void> {
+    await Promise.resolve(vscode.workspace.fs.delete(this.stagingRoot(), { recursive: true, useTrash: false })).catch(() => undefined);
+  }
+
+  /**
+   * A file the tab pasted or dropped, as base64: decoded and checked here, written to a file of its own in the staging
+   * directory, which the worker copies by path (bytes never go to the worker), then removed whatever happened. Its chip
+   * comes first, before anything is awaited, so files keep the order the tab sent them in and a message waits for them.
+   */
+  async upload(c: ConversationHandle, m: Extract<WebviewMessage, { type: "upload" }>): Promise<void> {
+    c.uploading(m.key, m.name);
+    const data = Buffer.from(m.data, "base64");
+    if (data.length > ATTACHMENT_LIMITS.fileBytes) {
+      return c.failed(m.key, m.name, `it is ${formatBytes(data.length)}; a file can be at most ${formatBytes(ATTACHMENT_LIMITS.fileBytes)}`);
+    }
+    const dir = vscode.Uri.joinPath(this.stagingRoot(), `${m.key}-${randomBytes(4).toString("hex")}`);
+    const file = vscode.Uri.joinPath(dir, safeFileName(m.name));
+    try {
+      await vscode.workspace.fs.writeFile(file, data);
+      // Removed while it was written: nothing to stage.
+      if (c.state.attachments.some((x) => x.key === m.key)) await c.stage({ key: m.key, path: file.fsPath, name: m.name });
+    } catch (e) {
+      c.failed(m.key, m.name, (e as Error).message);
+    } finally {
+      await Promise.resolve(vscode.workspace.fs.delete(dir, { recursive: true, useTrash: false })).catch(() => undefined);
+    }
+  }
+
+  /**
+   * The tab may show its attached images: their copies under its conversation's attachment root (checked by the
+   * session) become webview URIs, each sent once per webview; a copy that is gone gets null (a placeholder). A tab
+   * that may not load from that root yet reloads first (once its page has handed over its files), and gets them then.
+   */
+  private grantImages(conversation: string, state: ViewState, fresh: boolean): void {
+    const panel = this.panels.get(conversation);
+    const session = this.session;
+    if (!panel || !session) return;
+    if (fresh) this.granted.delete(conversation);
+    const images = shownImages(state);
+    const root = images.length ? session.attachmentRoot(conversation) : null;
+    if (!root || !panel.allow(root)) return;
+    const known = this.granted.get(conversation) ?? new Map<string, string | null>();
+    this.granted.set(conversation, known);
+    const uris: Record<string, string | null> = {};
+    for (const a of images) {
+      if (known.has(a.id)) continue;
+      const file = session.attachmentPath(conversation, a);
+      const uri = file ? panel.panel.webview.asWebviewUri(vscode.Uri.file(file)).toString() : null;
+      known.set(a.id, uri);
+      uris[a.id] = uri;
+    }
+    if (Object.keys(uris).length) panel.post({ type: "attachmentUris", uris });
   }
 
   hidden(conversation: string): void {
@@ -174,6 +268,7 @@ class Controller implements vscode.Disposable, PanelHost {
   closed(conversation: string): void {
     this.panels.delete(conversation);
     this.shown.delete(conversation);
+    this.granted.delete(conversation);
     if (this.lastActive === conversation) this.lastActive = null;
     void this.session?.conversation(conversation).close();
     this.refreshList();
@@ -185,6 +280,7 @@ class Controller implements vscode.Disposable, PanelHost {
   }
 
   private onState(conversation: string, state: ViewState): void {
+    this.grantImages(conversation, state, false);
     const title = titleOf(state);
     const seen = `${title}\n${state.status}\n${state.decision?.id ?? ""}\n${state.permissions.length}\n${state.timeline.length > 0}`;
     if (this.shown.get(conversation) === seen) return;
@@ -321,6 +417,15 @@ class Controller implements vscode.Disposable, PanelHost {
     panel?.postWhenReady({ type: "showSettings" });
   }
 
+  /** The title bar's Usage: the tab's usage panel opens, as /usage opens it. */
+  async usage(): Promise<void> {
+    const session = await this.need();
+    if (!session) return;
+    const id = await this.target();
+    this.panels.get(id)?.reveal();
+    await session.conversation(id).usage();
+  }
+
   async doctor(): Promise<void> {
     const session = await this.need();
     if (!session) return;
@@ -388,12 +493,19 @@ export interface TestApi {
   decide(decision: DecisionChoice): Promise<void>;
   /** Open Changes, with `path` picked from its list; the two sides' URIs. */
   openDiff(path: string): Promise<{ base: vscode.Uri; snapshot: vscode.Uri }>;
+  /** As Attach does with a file the user picked: the active tab's next message gets a copy of the file at `path`. */
+  attach(path: string): Promise<void>;
+  /** As the composer does with a pasted or dropped file: its bytes go to the host as base64, which stages them. */
+  upload(name: string, data: Buffer): Promise<void>;
+  /** As the composer sends a message with every file that is ready. */
+  submitWithFiles(text: string): Promise<void>;
 }
 
 export function activate(context: vscode.ExtensionContext): TestApi | undefined {
   const output = vscode.window.createOutputChannel("agentduo");
   const c = new Controller(context, output);
   controller = c;
+  void c.clearStaging();
   c.tree = vscode.window.createTreeView("agentduo.conversations", { treeDataProvider: c.list });
   context.subscriptions.push(
     output,
@@ -422,6 +534,7 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
     vscode.commands.registerCommand("agentduo.openPlan", () => c.openArtifact("plan")),
     vscode.commands.registerCommand("agentduo.openReport", () => c.openArtifact("report")),
     vscode.commands.registerCommand("agentduo.openChanges", () => c.command("openChanges")),
+    vscode.commands.registerCommand("agentduo.usage", () => c.usage()),
     vscode.commands.registerCommand("agentduo.doctor", () => c.doctor()),
     vscode.commands.registerCommand("agentduo.openConfiguration", () => c.openConfiguration()),
     vscode.commands.registerCommand("agentduo.chooseWorkspace", () => c.chooseWorkspace()),
@@ -450,6 +563,22 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
       const pending = t?.state.decision;
       if (!t || !pending) throw new Error("no decision is pending");
       await t.answerDecision(t.state.generation, pending.id, decision, null);
+    },
+    attach: async (path) => {
+      const session = await c.need();
+      const id = c.active() ?? (await c.openConversation(null));
+      await session?.conversation(id).stage({ key: newFileKey(), path, name: basename(path) });
+    },
+    upload: async (name, data) => {
+      const session = await c.need();
+      const id = c.active() ?? (await c.openConversation(null));
+      if (session) await c.upload(session.conversation(id), { type: "upload", key: newFileKey(), name, data: data.toString("base64") });
+    },
+    submitWithFiles: async (text) => {
+      const t = tab();
+      if (!t) throw new Error("no tab is open");
+      const ids = t.state.attachments.flatMap((a) => (a.status === "ready" && a.attachment ? [a.attachment.id] : []));
+      await t.submit(text, "message", ids);
     },
     openDiff: async (path) => {
       const session = await c.need();

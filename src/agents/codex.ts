@@ -117,6 +117,8 @@ export class CodexBackend implements AgentBackend {
       ...(this.cfg.model ? ["--model", this.cfg.model] : []),
       ...this.cfg.args,
       ...(a.mode === "text" ? [] : this.cfg.role_args[a.role] ?? []),
+      // One token per image: `--image` takes several values, so in `--image a.png -` the `-` could be read as one more.
+      ...(a.images ?? []).map((img) => `--image=${img.file}`),
       "-", // read the prompt from stdin
     ];
   }

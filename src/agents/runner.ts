@@ -1,15 +1,25 @@
 import { appendFileSync, createWriteStream, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { IMAGE_MEDIA_TYPES, selectNative, type Attachment } from "../core/attachment-types.js";
+import { AttachmentError, existingAttachmentFile } from "../core/attachments.js";
 import type { AgentRole, Backend, ConfigData } from "../core/config.js";
 import type { Activity, CallContext, EventBus, Party, PermissionAnswer, PermissionDecider, Role } from "../events.js";
 import { ClaudeBackend } from "./claude.js";
 import { CodexBackend } from "./codex.js";
 import { runProcess, type ChildIO, type RunResult } from "./process.js";
 import { validateOutput, type SchemaName } from "./schema.js";
-import { AgentFailure, BinaryNotFound, type AgentBackend, type AgentMeta, type ParsedEvent } from "./types.js";
+import { AgentFailure, BinaryNotFound, type AgentBackend, type AgentMeta, type NativeImage, type ParsedEvent } from "./types.js";
+
+/**
+ * The files attached to what the call answers. Its prompt already lists them with their paths (prompts.ts does); the
+ * runner checks their copies before each attempt and sends the images the backend takes as images too.
+ */
+interface WithAttachments {
+  attachments?: Attachment[];
+}
 
 /** A pipeline role's call: its final message must match `schemaName` (and `check`), with retries. */
-export interface StructuredCall {
+export interface StructuredCall extends WithAttachments {
   mode?: "structured";
   role: Role;
   agentRole: AgentRole;
@@ -21,7 +31,7 @@ export interface StructuredCall {
 }
 
 /** A conversation turn: `backend` answers in prose; no schema, no role, one attempt (the user asks again if it fails). */
-export interface TextCall {
+export interface TextCall extends WithAttachments {
   mode: "text";
   backend: Backend;
   prompt: string;
@@ -53,6 +63,8 @@ export interface RunnerOptions {
   backends?: Record<"codex" | "claude", AgentBackend>;
   /** Who answers permission prompts; absent when nobody can (CI, background), so prompts are denied by the CLI. */
   permissions?: PermissionDecider;
+  /** Where attachments' copies are (their paths are relative to it); needed only by calls with attachments. */
+  runsDir?: string;
 }
 
 type PermissionEvent = Extract<ParsedEvent, { type: "permission" }>;
@@ -68,11 +80,44 @@ interface Channel {
 export class AgentRunner {
   readonly backends: Record<"codex" | "claude", AgentBackend>;
   private readonly permissions?: PermissionDecider;
+  private readonly runsDir?: string;
+  /** Images already said to go only as paths, so each call of a run does not say it again. */
+  private readonly warned = new Set<string>();
 
   constructor(private readonly cfg: ConfigData, private readonly repo: string, private readonly logDir: string,
     private readonly bus: EventBus, o: RunnerOptions = {}) {
     this.backends = o.backends ?? { codex: new CodexBackend(cfg.codex, repo), claude: new ClaudeBackend(cfg.claude, repo) };
     this.permissions = o.permissions;
+    this.runsDir = o.runsDir;
+  }
+
+  /**
+   * The copies of a call's attachments, as they are now, and the images it sends as images; an error when a copy is
+   * gone (nothing is sent then: the agent would read a path that does not exist).
+   */
+  private located(backend: AgentBackend, attachments: Attachment[]): { files: Map<string, string>; images: NativeImage[] } | string {
+    if (!attachments.length) return { files: new Map(), images: [] };
+    if (!this.runsDir) return "the call has attachments but agentduo does not know where their copies are";
+    const files = new Map<string, string>();
+    try {
+      for (const a of attachments) files.set(a.id, existingAttachmentFile(this.runsDir, a));
+    } catch (e) {
+      if (e instanceof AttachmentError) return e.message;
+      throw e;
+    }
+    const { native } = selectNative(backend.name, attachments);
+    return { files, images: native.map((a) => ({ file: files.get(a.id)!, mediaType: IMAGE_MEDIA_TYPES[a.image!.format] })) };
+  }
+
+  /** Says, before the call and once per image, which images go to this backend as paths only, and why. */
+  private warnFallback(backend: AgentBackend, attachments: Attachment[]): void {
+    const name = backend.name === "codex" ? "Codex" : "Claude";
+    for (const { attachment, reason } of selectNative(backend.name, attachments).fallback) {
+      const key = `${backend.name} ${attachment.id} ${reason}`;
+      if (this.warned.has(key)) continue;
+      this.warned.add(key);
+      this.bus.emit({ type: "warning", text: `${attachment.name} goes to ${name} as a file to read, not as an image: ${reason}.` });
+    }
   }
 
   /** Host mode: the backend can relay permission prompts, the config asks for it, and someone can answer. */
@@ -143,6 +188,8 @@ export class AgentRunner {
       costUsd: costSeen ? cost : null, tokens: tokensSeen ? tokens : null, meta, backend: backend.name, interrupted, model,
     });
 
+    const attachments = o.attachments ?? [];
+    this.warnFallback(backend, attachments);
     for (let attempt = 1; attempt <= attemptsAllowed; attempt++) {
       if (attempt > 1 && o.mode !== "text") this.bus.emit({ type: "agent.retry", role: o.role, agent, attempt, max: attemptsAllowed, reason: lastError ?? "" });
       const stem = join(this.logDir, `${prefix}.a${attempt}`);
@@ -151,19 +198,32 @@ export class AgentRunner {
         : o.prompt;
       const lastMessageFile = `${stem}.last.${text ? "md" : "json"}`;
       const host = this.hosts(backend);
+      // Checked before every attempt: a copy removed meanwhile fails the call before it starts.
+      const located = this.located(backend, attachments);
+      if (typeof located === "string") return finish(false, attempt, null, located);
+      const { images } = located;
+      // Stream input carries the images (Claude); a backend without it takes them as arguments (Codex).
+      const stream = host || (images.length > 0 && !!backend.hostInput);
       let binary: string;
       let args: string[];
       try {
         binary = backend.binary();
         args = o.mode === "text"
-          ? backend.buildArgs({ mode: "text", lastMessageFile, askPermissions: host })
-          : backend.buildArgs({ schemaName: o.schemaName, lastMessageFile, role: o.agentRole, askPermissions: host });
+          ? backend.buildArgs({ mode: "text", lastMessageFile, askPermissions: host, images })
+          : backend.buildArgs({ schemaName: o.schemaName, lastMessageFile, role: o.agentRole, askPermissions: host, images });
       } catch (e) {
         if (e instanceof BinaryNotFound) return finish(false, attempt, null, e.message);
         throw e;
       }
       rmSync(lastMessageFile, { force: true }); // never let Codex's previous answer stand in for this one
+      // The prompt as the agent gets it; the images it got as images are listed beside it, never their bytes.
       writeFileSync(`${stem}.prompt.md`, prompt);
+      if (attachments.length) {
+        const sent = new Set(images.map((i) => i.file));
+        writeFileSync(`${stem}.attachments.json`, JSON.stringify(attachments.map((a) => ({
+          id: a.id, name: a.name, mediaType: a.mediaType, size: a.size, file: located.files.get(a.id), image: sent.has(located.files.get(a.id)!),
+        })), null, 1));
+      }
       writeFileSync(`${stem}.cmd.json`, JSON.stringify([binary, ...args], null, 1));
       const eventsLog = createWriteStream(`${stem}.events.jsonl`);
       const parser = backend.createParser();
@@ -173,8 +233,10 @@ export class AgentRunner {
       const deniedByUser = new Set<string>();
       let run: RunResult;
       try {
+        // Only host mode keeps stdin open (for the permission answers); otherwise it closes after the input.
+        const input = stream ? backend.hostInput!(prompt, images) : prompt;
         run = await runProcess(binary, args, {
-          cwd: this.repo, input: host ? backend.hostInput!(prompt) : prompt, holdStdin: host, timeoutMs, idleTimeoutMs, signal: o.signal,
+          cwd: this.repo, input, holdStdin: host, timeoutMs, idleTimeoutMs, signal: o.signal,
           onSpawn: (child) => {
             io = child;
           },

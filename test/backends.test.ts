@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ClaudeBackend, ClaudeParser } from "../src/agents/claude.js";
@@ -24,6 +24,39 @@ describe("ClaudeBackend", () => {
     for (const flag of PERMISSION_FLAGS) expect(critic).not.toContain(flag);
     const impl = backend.buildArgs({ schemaName: "implementation", lastMessageFile: "/tmp/x", role: "implementer" });
     expect(impl.slice(-3)).toEqual(["--no-session-persistence", "--permission-mode", "acceptEdits"]);
+  });
+
+  it("reads stream-json input whenever it gets images, without changing who answers permission prompts", () => {
+    const t = tempDir();
+    try {
+      const file = join(t.path, "a.png");
+      writeFileSync(file, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      const backend = new ClaudeBackend(defaultConfig().claude, "/ws");
+      const images = [{ file, mediaType: "image/png" }];
+      const quiet = backend.buildArgs({ mode: "text", lastMessageFile: "", images });
+      expect(quiet).toEqual(expect.arrayContaining(["--input-format", "stream-json"]));
+      expect(quiet[quiet.indexOf("--permission-prompts") + 1]).toBe("none");
+      expect(quiet).not.toContain("--permission-prompt-tool");
+      const host = backend.buildArgs({ mode: "text", lastMessageFile: "", images, askPermissions: true });
+      expect(host.filter((a) => a === "--input-format")).toHaveLength(1);
+      expect(host[host.indexOf("--permission-prompts") + 1]).toBe("host");
+      // The images first, then the prompt; the same message shape Claude Code 2.1.311 answered (test/fixtures/claude-attachment-stream.jsonl).
+      expect(JSON.parse(backend.hostInput("What colour?", images))).toEqual({
+        type: "user", parent_tool_use_id: null, session_id: "",
+        message: { role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw==" } }, { type: "text", text: "What colour?" }] },
+      });
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("parses the stream of a real call that had an image", () => {
+    const p = new ClaudeParser("/repo");
+    for (const line of readFileSync(join(import.meta.dirname, "fixtures", "claude-attachment-stream.jsonl"), "utf8").split("\n").filter(Boolean)) p.feed(line);
+    expect(new ClaudeBackend(defaultConfig().claude, "/repo").finalize(p, "", "", "text").data).toBe("red");
+    const c = new CodexParser();
+    for (const line of readFileSync(join(import.meta.dirname, "fixtures", "codex-attachment-stream.jsonl"), "utf8").split("\n").filter(Boolean)) c.feed(line);
+    expect(c.lastAgentMessage).toBe("red, blue");
   });
 
   it("speaks the host protocol when permission prompts go to the user", () => {
@@ -83,6 +116,16 @@ describe("CodexBackend", () => {
     for (const flag of PERMISSION_FLAGS) expect(planner).not.toContain(flag);
     const reviewer = backend.buildArgs({ schemaName: "review", lastMessageFile: "/tmp/last.json", role: "code_reviewer" });
     expect(reviewer.slice(-3)).toEqual(["--sandbox", "read-only", "-"]);
+  });
+
+  it("passes each image as one --image=<path> token, so the - that reads the prompt from stdin stays last", () => {
+    const backend = new CodexBackend(defaultConfig().codex, "/ws");
+    const images = [{ file: "/ws/.agentduo/runs/a/x.png", mediaType: "image/png" }, { file: "/ws/.agentduo/runs/b/y z.jpg", mediaType: "image/jpeg" }];
+    const args = backend.buildArgs({ mode: "text", lastMessageFile: "/tmp/last.md", images });
+    expect(args.slice(-3)).toEqual(["--image=/ws/.agentduo/runs/a/x.png", "--image=/ws/.agentduo/runs/b/y z.jpg", "-"]);
+    expect(args).not.toContain("--image");
+    expect(args).not.toContain("-i");
+    expect(backend.buildArgs({ mode: "text", lastMessageFile: "/tmp/last.md" }).at(-1)).toBe("-");
   });
 
   it("finalizes from the last-message file, then from the stream", () => {

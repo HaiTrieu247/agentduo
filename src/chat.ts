@@ -1,6 +1,9 @@
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { AgentRunner, type AgentResult } from "./agents/runner.js";
 import { firstLine } from "./agents/types.js";
+import { attachmentDetail, attachmentsText, type Attachment } from "./core/attachment-types.js";
+import { AttachmentError, AttachmentStore } from "./core/attachments.js";
 import { AGENT_NAMES, helpText, parseInput, type Backend, type ChatCommand, type SettingCommand } from "./core/commands.js";
 import { configFromSaved, type ConfigData } from "./core/config.js";
 import { Conversation, type Turn } from "./core/conversation.js";
@@ -12,11 +15,12 @@ import {
   claudeDirs, claudeRules, describeSettings, editMode, saveSettings, settings, settingsView, type SettingChange, type SettingsView,
 } from "./core/settings.js";
 import { nowIso, RunStore, type ConversationContext, type EarlierTask, type RunState } from "./core/state.js";
+import { readClaudeUsage, readCodexUsage, type UsageReport, type UsageState } from "./core/usage.js";
 import { EXIT, Workflow } from "./core/workflow.js";
 import type {
   Decider, DiscussionPlace, DiscussionStatus, DiscussionStep, EventBus, ModelMap, PermissionDecider, TurnStatus, Verdict,
 } from "./events.js";
-import { formatCost, formatTokens, modelText } from "./ui/format.js";
+import { formatCost, formatTokens, modelText, usageReportText } from "./ui/format.js";
 
 /** idle: ready; running: a pipeline run is going; answering: an agent answers a question; paused: a run was stopped with Esc. */
 export type ChatStatus = "idle" | "running" | "answering" | "paused";
@@ -34,8 +38,32 @@ export interface ChatUi {
   setModels(models: ModelMap): void;
   /** Every setting the chat can change, for a settings panel. */
   setSettings?(settings: SettingsView): void;
+  /**
+   * /usage, for a screen with a usage panel: a report with a new id opens it (both parts loading), and the same id
+   * comes again as each part arrives. A screen without one gets the report as text through `info`, once it is whole.
+   */
+  usage?(report: UsageReport): void;
+  /** The files waiting to go with the next message, whenever they change (empty once they went, or were removed). */
+  setAttachments?(files: Attachment[]): void;
+  /** The files that went with the message just accepted; the screen shows them with it. */
+  sent?(files: Attachment[]): void;
   exit(): void;
 }
+
+/** What goes with a line of input besides its text. */
+export interface SubmitOptions {
+  /**
+   * The waiting files it sends, by id (the extension names those its tab shows); absent: every file waiting. A line
+   * that sends nothing (a command, a setting) leaves them waiting.
+   */
+  attachments?: string[];
+}
+
+/** What a message with files and no words asks, and what such a note for a run says. */
+const FILES_QUESTION = "Look at the attached file(s).";
+const FILES_NOTE = "See the attached file(s).";
+const DECISION_FILES = "The files waiting to be sent do not go with a decision. To give them to the run, send them with a message before you " +
+  "decide (it becomes a note for the run's next step), or decide later and /resume with a note: the files go with it.";
 
 export interface ChatOptions {
   cfg: ConfigData;
@@ -57,13 +85,20 @@ export interface ChatOptions {
   busyElsewhere?: () => string | null;
 }
 
-/** A new run for `task` in this workspace, with the config it starts with saved beside it. */
+/**
+ * A new run for `task` in this workspace, with the config it starts with saved beside it, and copies of the files
+ * attached to the task (so the run needs neither the originals nor the chat they came from).
+ */
 export function newRun(runsDir: string, workspace: string, task: string, cfg: ConfigData, earlier: EarlierTask[] = [],
-  conversation?: ConversationContext): { store: RunStore; state: RunState } {
+  conversation?: ConversationContext, attachments: Attachment[] = []): { store: RunStore; state: RunState } {
   const { store, state } = RunStore.create(runsDir, task, cfg.limits);
   state.workspace = workspace;
   if (earlier.length) state.earlier = earlier;
   if (conversation?.exchanges.length) state.conversationContext = conversation;
+  if (attachments.length) {
+    const files = new AttachmentStore(runsDir, store.dir);
+    state.attachments = attachments.map((a) => files.adopt(a));
+  }
   store.saveState(state);
   store.writeJson("config.json", cfg);
   return { store, state };
@@ -117,6 +152,13 @@ interface TurnOutcome {
 
 const other = (b: Backend): Backend => (b === "codex" ? "claude" : "codex");
 
+let lastUsageId = 0;
+/**
+ * A /usage report's id: later than any earlier one, also of another chat or of an earlier worker (a tab's chat starts
+ * over after a reload), so a view that opens its panel for a new id never takes a new report for one it has seen.
+ */
+const nextUsageId = () => (lastUsageId = Math.max(Date.now(), lastUsageId + 1));
+
 /**
  * One chat session in one workspace: a conversation with Claude and Codex, from which /pipeline hands a task to both.
  * A message is a question for the current recipient, a note for the running pipeline, or a command.
@@ -140,15 +182,23 @@ export class Chat {
   private readonly ownModels: boolean;
   private readonly env: NodeJS.ProcessEnv;
   private readonly git: Git;
+  /** What stops the latest /usage's lookups: a refresh, or the chat stopping. */
+  private usageAbort: AbortController | null = null;
+  private readonly offBus: () => void;
 
   constructor(private readonly o: ChatOptions) {
     this.git = new Git(o.workspace);
     this.cfg = structuredClone(o.cfg);
     this.env = o.env ?? process.env;
     this.conversation = o.conversationId ? Conversation.open(o.runsDir, o.conversationId) : new Conversation(o.runsDir);
+    // Files an earlier process left waiting (it crashed) were never sent, and no screen shows them any more.
+    if (o.conversationId) this.conversation.recoverFiles();
     this.recipient = this.conversation.recipient ?? "codex";
     this.ownModels = !o.models;
     this.models = o.models ?? new ModelRegistry({ cfg: () => this.cfg, workspace: o.workspace, env: this.env, onChange: (m) => o.ui.setModels(m) });
+    this.offBus = o.bus.on((e) => {
+      if (e.type === "human.required" && this.conversation.pending.length) o.ui.info(DECISION_FILES);
+    });
   }
 
   /** The config the next agent call gets. */
@@ -203,31 +253,36 @@ export class Chat {
     if (hint) this.o.ui.info(hint);
   }
 
-  /** Reads a line of input and acts on it. Returns once the work it starts has started, never waiting for an answer or a run. */
-  async submit(raw: string): Promise<void> {
+  /**
+   * Reads a line of input and acts on it. Returns once the work it starts has started, never waiting for an answer or a
+   * run. A line that sends something takes the waiting files with it, once it is accepted; anything else leaves them.
+   */
+  async submit(raw: string, o: SubmitOptions = {}): Promise<void> {
     const input = parseInput(raw);
     const ui = this.o.ui;
     switch (input.kind) {
-      case "empty":
+      case "empty": {
+        // Enter with files and no words: the files go on their own.
+        if (o.attachments ? o.attachments.length : this.conversation.pending.length) return this.withFiles(o, (files) => this.message("", files));
         if (this.paused && !this.active) ui.info(`Run ${this.paused.taskId} is stopped: /resume continues it (/resume <note> adds what to change); /new leaves it.`);
         return;
+      }
       case "message":
-        if (this.active?.kind === "pipeline") {
-          this.active.workflow.addNote(input.text);
-          ui.info("Noted: the agents get this from the next step. Esc stops the current step to apply it now; to ask Claude or Codex, wait until the run stops.");
-          return;
-        }
-        return this.ask(this.recipient, input.text, null);
+        return this.withFiles(o, (files) => this.message(input.text, files));
       case "ask":
-        return this.ask(input.backend, input.text, input.hint);
+        return this.withFiles(o, (files) => this.ask(input.backend, input.text, input.hint, files));
       case "recipient":
         this.selectRecipient(input.backend);
         ui.info(`Your messages now go to ${AGENT_NAMES[input.backend]}. /claude or /codex switches; /pipeline <task> hands a task to both.`);
         return;
       case "pipeline":
-        return this.startPipeline(input.task);
+        return this.withFiles(o, (files) => this.startPipeline(input.task, files));
       case "discuss":
-        return this.discuss(input.question);
+        return this.withFiles(o, (files) => this.discuss(input.question, files));
+      case "attach":
+        return this.attachTyped(input.home ? join(homedir(), input.path) : resolve(this.o.workspace, input.path));
+      case "detach":
+        return this.detach(input.target);
       case "setting":
         return this.applySetting(input.setting, { save: input.save, yes: input.yes });
       case "usage":
@@ -237,30 +292,143 @@ export class Chat {
         ui.info(`unknown command ${input.name} — /help lists the commands`);
         return;
       case "command":
-        return this.command(input.name, input.arg);
+        return this.command(input.name, input.arg, o);
     }
   }
 
   /** The Pipeline button: the text is the task, unless it is a slash command, which goes as typed. */
-  async submitPipeline(raw: string): Promise<void> {
+  async submitPipeline(raw: string, o: SubmitOptions = {}): Promise<void> {
     const text = raw.trim();
-    if (text.startsWith("/")) return this.submit(text);
+    if (text.startsWith("/")) return this.submit(text, o);
     if (!text) {
       this.o.ui.info("usage: /pipeline <task>, e.g. /pipeline Add JWT auth");
       return;
     }
-    this.startPipeline(text);
+    this.withFiles(o, (files) => this.startPipeline(text, files));
   }
 
   /** The Discuss route of the sidebar: the text is the question, unless it is a slash command, which goes as typed. */
-  async submitDiscuss(raw: string): Promise<void> {
+  async submitDiscuss(raw: string, o: SubmitOptions = {}): Promise<void> {
     const text = raw.trim();
-    if (text.startsWith("/")) return this.submit(text);
-    if (!text) {
-      this.o.ui.info("usage: /discuss <question>, e.g. /discuss Redis or Postgres for the job queue?");
+    if (text.startsWith("/")) return this.submit(text, o);
+    this.withFiles(o, (files) => {
+      if (!text && !files.length) {
+        this.o.ui.info("usage: /discuss <question>, e.g. /discuss Redis or Postgres for the job queue?");
+        return;
+      }
+      this.discuss(text || FILES_QUESTION, files);
+    });
+  }
+
+  /** The waiting files `o` names (every one by default), for `send`; an id that does not wait here sends nothing. */
+  private withFiles(o: SubmitOptions, send: (files: Attachment[]) => void): void {
+    let files: Attachment[];
+    try {
+      files = this.conversation.select(o.attachments);
+    } catch (e) {
+      if (!(e instanceof AttachmentError)) throw e;
+      this.o.ui.info(e.message, "error");
       return;
     }
-    this.discuss(text);
+    send(files);
+  }
+
+  /** A plain message: a note for the running pipeline, or a question for the recipient. */
+  private message(text: string, files: Attachment[]): void {
+    if (this.active?.kind === "pipeline") return this.note(this.active, text, files);
+    this.ask(this.recipient, text || FILES_QUESTION, null, files);
+  }
+
+  private note(exec: Extract<Execution, { kind: "pipeline" }>, text: string, files: Attachment[]): void {
+    const copies = this.copyInto(exec.store, files);
+    if (!copies) return;
+    exec.workflow.addNote(text || FILES_NOTE, copies);
+    this.sentFiles(files);
+    const with_ = files.length ? ` (with ${files.length} file${files.length === 1 ? "" : "s"})` : "";
+    this.o.ui.info(`Noted${with_}: the agents get this from the next step. Esc stops the current step to apply it now; to ask Claude or Codex, wait until the run stops.`);
+  }
+
+  /** Copies of `files` in a run's directory, for its notes; null (and said) when one cannot be copied. */
+  private copyInto(store: RunStore, files: Attachment[]): Attachment[] | null {
+    if (!files.length) return [];
+    try {
+      const target = new AttachmentStore(this.o.runsDir, store.dir);
+      return files.map((a) => target.adopt(a));
+    } catch (e) {
+      if (!(e instanceof AttachmentError)) throw e;
+      this.o.ui.info(e.message, "error");
+      return null;
+    }
+  }
+
+  /** `files` went with a message that was accepted: they wait no more, and the screen shows them with it. */
+  private sentFiles(files: Attachment[]): void {
+    if (!files.length) return;
+    this.conversation.sent(files);
+    this.o.ui.setAttachments?.(this.conversation.pending);
+    this.o.ui.sent?.(files);
+  }
+
+  // ------------------------------------------------------------------ attachments
+  /** The files waiting to go with the next message. */
+  get pending(): Attachment[] {
+    return this.conversation.pending;
+  }
+
+  /** Where this conversation keeps the copies of its files (the extension lets its tab show images from there). */
+  get attachmentRoot(): string {
+    return this.conversation.files.root;
+  }
+
+  /**
+   * /attach, and the extension's Attach: a copy of the file at `source` waits to go with the next message, whatever
+   * runs now. Throws AttachmentError when it cannot (a directory, too large, a message's limits).
+   */
+  attach(source: string, name?: string): Attachment {
+    const a = this.conversation.stage(source, name);
+    this.o.ui.setAttachments?.(this.conversation.pending);
+    if (this.active?.kind === "pipeline" && this.active.workflow.state.phase === "HUMAN_REVIEW") this.o.ui.info(DECISION_FILES);
+    return a;
+  }
+
+  private attachTyped(path: string): void {
+    try {
+      const a = this.attach(path);
+      const n = this.conversation.pending.length;
+      this.o.ui.info(`Attached ${a.name} (${attachmentDetail(a)}). ${n === 1 ? "It goes" : `The ${n} files go`} with your next message ` +
+        "(/attachments lists them, /detach removes one).");
+    } catch (e) {
+      if (!(e instanceof AttachmentError)) throw e;
+      this.o.ui.info(e.message, "error");
+    }
+  }
+
+  /**
+   * /detach <n|id|all>, and a file's ✕ in the extension (`quiet`: the tab shows the change itself): a waiting file is
+   * removed, its copy too.
+   */
+  detach(target: string, o: { quiet?: boolean } = {}): void {
+    const ui = this.o.ui;
+    const say = (text: string, tone?: "error") => (o.quiet ? undefined : ui.info(text, tone));
+    const pending = this.conversation.pending;
+    if (target === "all") {
+      const gone = this.conversation.discardPending();
+      ui.setAttachments?.([]);
+      say(gone.length ? `Removed ${gone.length} file${gone.length === 1 ? "" : "s"}; nothing waits to be sent.` : "No file waits to be sent.");
+      return;
+    }
+    const byNumber = /^\d+$/.test(target) ? pending[Number(target) - 1] : undefined;
+    const gone = this.conversation.unstage(byNumber?.id ?? target);
+    ui.setAttachments?.(this.conversation.pending);
+    if (!gone) say(pending.length ? `No waiting file is ${target}: /attachments lists them.` : "No file waits to be sent.", "error");
+    else say(`Removed ${gone.name}.`);
+  }
+
+  private attachmentsText(): string {
+    const pending = this.conversation.pending;
+    if (!pending.length) return "No file waits to be sent. /attach <path> attaches one (an image, a PDF, text, code…).";
+    return [`${pending.length} file${pending.length === 1 ? "" : "s"} go${pending.length === 1 ? "es" : ""} with your next message:`,
+      ...pending.map((a, i) => `  ${i + 1}. ${a.name} (${attachmentDetail(a)})`), "/detach <n|all> removes one, or all."].join("\n");
   }
 
   /** Plain messages go to `backend` from now on. */
@@ -296,12 +464,41 @@ export class Chat {
     while (this.active) await this.active.done;
   }
 
-  /** Stops what runs (a run stays resumable), waits for it, and stops looking models up. */
+  /**
+   * /usage, and the usage panel's refresh: how much of their plans' limits both agents have used, as `claude -p /usage`
+   * and Codex's app server say it (neither calls a model). Runs beside whatever else runs, and a refresh stops the
+   * lookups it replaces.
+   */
+  usage(): void {
+    this.usageAbort?.abort();
+    const abort = new AbortController();
+    this.usageAbort = abort;
+    const show = this.o.ui.usage?.bind(this.o.ui);
+    let report: UsageReport = { id: nextUsageId(), claude: { status: "loading" }, codex: { status: "loading" } };
+    show?.(report);
+    const o = { cfg: this.cfg, workspace: this.o.workspace, env: this.env, signal: abort.signal };
+    const part = (backend: Backend, read: Promise<UsageState>) => read.then((state) => {
+      if (abort.signal.aborted) return;
+      report = { ...report, [backend]: state };
+      show?.(report);
+    });
+    void Promise.all([part("claude", readClaudeUsage(o)), part("codex", readCodexUsage(o))]).then(() => {
+      if (!show && !abort.signal.aborted) this.o.ui.info(usageReportText(report));
+    });
+  }
+
+  /**
+   * Stops what runs (a run stays resumable), waits for it, and stops looking models and usage up. The files waiting
+   * to be sent go: nothing could send them any more.
+   */
   async stop(): Promise<void> {
+    this.usageAbort?.abort();
     const a = this.active;
     if (a && a.kind !== "pipeline") a.abort.abort();
     else a?.workflow.interrupt();
     await this.idle();
+    this.offBus();
+    this.conversation.discardPending();
     if (this.ownModels) this.models.close();
   }
 
@@ -315,7 +512,7 @@ export class Chat {
         : `${AGENT_NAMES[a.backend]} is still answering: wait for it, or press Esc to stop it. Settings you change apply to the next question.`);
   }
 
-  private ask(backend: Backend, question: string, hint: string | null): void {
+  private ask(backend: Backend, question: string, hint: string | null, files: Attachment[] = []): void {
     if (this.active) return this.busy();
     const problem = missingCli(this.cfg, [backend], this.env);
     if (problem) {
@@ -324,11 +521,16 @@ export class Chat {
     }
     this.selectRecipient(backend);
     if (hint) this.o.ui.info(hint);
-    this.startTurn(backend, question);
+    this.startTurn(backend, question, files);
   }
 
   private directRunner(): AgentRunner {
-    return this.runner ??= new AgentRunner(this.cfg, this.o.workspace, this.conversation.logDir, this.o.bus, { permissions: this.o.permissions });
+    return this.runner ??= new AgentRunner(this.cfg, this.o.workspace, this.conversation.logDir, this.o.bus, { permissions: this.o.permissions, runsDir: this.o.runsDir });
+  }
+
+  /** What a conversation is about when its first message was files with no words: their names. */
+  private titleOf(text: string, files: Attachment[]): string {
+    return files.length && text === FILES_QUESTION ? files.map((f) => f.name).join(", ") : text;
   }
 
   /** Says once each time it grows that the conversation no longer fits what a prompt carries. */
@@ -340,9 +542,10 @@ export class Chat {
   }
 
   /** Starts the answer in the background: the active record exists before anything can finish, and only it clears itself. */
-  private startTurn(backend: Backend, question: string): void {
-    this.entitle(question);
-    const { turn, prompt, omitted } = this.conversation.begin(backend, question, this.conversation.earlier, this.o.workspace);
+  private startTurn(backend: Backend, question: string, files: Attachment[]): void {
+    this.entitle(this.titleOf(question, files));
+    const { turn, prompt, omitted } = this.conversation.begin(backend, question, this.conversation.earlier, this.o.workspace, files);
+    this.sentFiles(files);
     this.noteOmitted(omitted);
     const exec: Extract<Execution, { kind: "conversation" }> = { kind: "conversation", turnId: turn.id, backend, abort: new AbortController(), done: Promise.resolve() };
     this.active = exec;
@@ -375,7 +578,9 @@ export class Chat {
       let r: AgentResult | null = null;
       let failure: string | null = null;
       try {
-        r = await runner.call({ mode: "text", backend, prompt, logPrefix: turn.logPrefix, conversationId: conversation.id, turnId: turn.id, signal });
+        r = await runner.call({
+          mode: "text", backend, prompt, logPrefix: turn.logPrefix, conversationId: conversation.id, turnId: turn.id, signal, attachments: turn.attachments,
+        });
       } catch (e) {
         failure = (e as Error).message;
       }
@@ -403,7 +608,7 @@ export class Chat {
    * or the reviews run out. Then Codex, in a call of its own, synthesizes the whole discussion into the response, the
    * only part of it later prompts carry. If the synthesis fails, the latest version is the response; Esc ends it all.
    */
-  private discuss(question: string): void {
+  private discuss(question: string, files: Attachment[] = []): void {
     if (this.active) return this.busy();
     const answerer = this.recipient;
     const critic = other(answerer);
@@ -413,9 +618,10 @@ export class Chat {
       return;
     }
     const conversation = this.conversation;
-    this.entitle(question);
+    this.entitle(this.titleOf(question, files));
     const maxRounds = this.cfg.limits.max_discussion_rounds;
-    const d = conversation.beginDiscussion(answerer, critic, question, maxRounds);
+    const d = conversation.beginDiscussion(answerer, critic, question, maxRounds, files);
+    this.sentFiles(files);
     this.noteOmitted(d.context.omitted);
     const exec: Extract<Execution, { kind: "discussion" }> = { kind: "discussion", id: d.id, answerer, critic, abort: new AbortController(), done: Promise.resolve() };
     this.active = exec;
@@ -498,7 +704,7 @@ export class Chat {
   }
 
   // ------------------------------------------------------------------ pipeline
-  private startPipeline(task: string): void {
+  private startPipeline(task: string, files: Attachment[] = []): void {
     if (this.active) return this.busy();
     if (this.elsewhere()) return;
     const problem = missingCli(this.cfg, Object.values(this.cfg.agents), this.env);
@@ -509,8 +715,18 @@ export class Chat {
     const left = this.paused;
     const cfg = structuredClone(this.cfg);
     const context = this.conversation.context();
-    const { store, state } = newRun(this.o.runsDir, this.o.workspace, task, cfg, this.conversation.earlier, context);
+    let run: { store: RunStore; state: RunState };
+    try {
+      run = newRun(this.o.runsDir, this.o.workspace, task, cfg, this.conversation.earlier, context, files);
+    } catch (e) {
+      if (!(e instanceof AttachmentError)) throw e;
+      this.o.ui.info(e.message, "error");
+      return;
+    }
+    const { store, state } = run;
     if (!this.start(store, state, cfg)) return;
+    this.sentFiles(files);
+    if (files.length) this.o.ui.info(`The task goes to the agents with ${files.length} file${files.length === 1 ? "" : "s"}, copied into run ${store.taskId}.`);
     this.entitle(task);
     if (left) {
       this.paused = null;
@@ -581,10 +797,21 @@ export class Chat {
     return cfg;
   }
 
-  /** /resume [note | run id]: the stopped run, another resumable run by id, or the latest one. */
-  private resume(arg: string): void {
+  /**
+   * /resume [note | run id]: the stopped run, another resumable run by id, or the latest one. The waiting files go
+   * with the note (a note of their own when there is none), copied into the run.
+   */
+  private resume(arg: string, o: SubmitOptions = {}): void {
     if (this.active) return this.busy();
     if (this.elsewhere()) return;
+    let files: Attachment[];
+    try {
+      files = this.conversation.select(o.attachments);
+    } catch (e) {
+      if (!(e instanceof AttachmentError)) throw e;
+      this.o.ui.info(e.message, "error");
+      return;
+    }
     let note = arg.trim();
     const byId = RUN_ID.test(note) && !note.includes("..") ? resumableRun(this.o.runsDir, this.o.workspace, note) : null;
     if (byId) note = "";
@@ -600,9 +827,12 @@ export class Chat {
       return;
     }
     const state = target.loadState();
-    if (note) {
-      state.humanNotes.push({ at: nowIso(), phase: state.inProgress?.phase ?? state.phase, note });
+    if (note || files.length) {
+      const copies = this.copyInto(target, files);
+      if (!copies) return;
+      state.humanNotes.push({ at: nowIso(), phase: state.inProgress?.phase ?? state.phase, note: note || FILES_NOTE, ...(copies.length ? { attachments: copies } : {}) });
       target.saveState(state);
+      this.sentFiles(files);
     }
     const paused = this.paused;
     this.paused = null;
@@ -617,6 +847,11 @@ export class Chat {
     }
     if (this.paused) this.o.ui.info(`Left run ${this.paused.taskId} as it is; /resume ${this.paused.taskId} continues it.`);
     this.paused = null;
+    const unsent = this.conversation.discardPending();
+    if (unsent.length) {
+      this.o.ui.setAttachments?.([]);
+      this.o.ui.info(`Removed ${unsent.length} attached file${unsent.length === 1 ? "" : "s"} that ${unsent.length === 1 ? "was" : "were"} not sent: ${attachmentsText(unsent)}.`);
+    }
     this.conversation = new Conversation(this.o.runsDir);
     this.runner = null;
     this.omitted = 0;
@@ -710,7 +945,7 @@ export class Chat {
     return (this.active?.kind === "pipeline" ? this.active.store : null) ?? this.paused ?? this.last;
   }
 
-  private async command(name: ChatCommand, arg: string): Promise<void> {
+  private async command(name: ChatCommand, arg: string, o: SubmitOptions = {}): Promise<void> {
     const ui = this.o.ui;
     const store = this.focus();
     switch (name) {
@@ -747,8 +982,13 @@ export class Chat {
           ` · implementation round ${st.implRound}/${st.limits.reviewRounds}${usage ? ` · ${usage}` : ""}`].filter(Boolean).join("\n"));
         return;
       }
+      case "usage":
+        return this.usage();
       case "resume":
-        return this.resume(arg);
+        return this.resume(arg, o);
+      case "attachments":
+        ui.info(this.attachmentsText());
+        return;
       case "new":
         return this.reset();
       case "quit":

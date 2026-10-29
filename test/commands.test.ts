@@ -1,5 +1,6 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { COMMANDS, complete, helpText, parseInput, tokenize } from "../src/core/commands.js";
+import { COMMANDS, complete, helpText, parseInput, parsePathArg, tokenize } from "../src/core/commands.js";
 
 describe("commands: reading a line", () => {
   it("sends plain text to the recipient, and /claude or /codex with words to that agent", () => {
@@ -97,5 +98,73 @@ describe("commands: completion", () => {
 
   it("puts every usage and its description on one line in /help", () => {
     for (const line of helpText().split("\n").filter((l) => l.trimStart().startsWith("/"))) expect(line.trim(), line).toMatch(/^\S+(?: \S+)*\s{2,}\S/);
+  });
+});
+
+describe("/attach, /attachments, /detach", () => {
+  it("read one path as a shell reads one word, with no expansion of its own", () => {
+    const path = (s: string) => parsePathArg(s);
+    expect(path("screenshots/bug.png")).toEqual({ path: "screenshots/bug.png", home: false });
+    expect(path("'My notes.pdf'")).toEqual({ path: "My notes.pdf", home: false });
+    expect(path('"My notes.pdf"')).toEqual({ path: "My notes.pdf", home: false });
+    expect(path("My\\ notes.pdf")).toEqual({ path: "My notes.pdf", home: false });
+    expect(path("/Users/me/Screen\\ Shot\\ 2026-10-29\\ at\\ 10.00.png")).toEqual({ path: "/Users/me/Screen Shot 2026-10-29 at 10.00.png", home: false });
+    // A literal ' : in double quotes, or the shell's '\'' ; 'it''s' is two quoted parts, as in a shell.
+    expect(path(`"it's.txt"`)).toEqual({ path: "it's.txt", home: false });
+    expect(path(`'it'\\''s.txt'`)).toEqual({ path: "it's.txt", home: false });
+    expect(path(`'it''s.txt'`)).toEqual({ path: "its.txt", home: false });
+    expect(path(`"a \\"b\\" \\$HOME \\\\ \\x.txt"`)).toEqual({ path: 'a "b" $HOME \\ \\x.txt', home: false });
+    expect(path(`'C:\\Users\\me\\a.txt'`)).toEqual({ path: "C:\\Users\\me\\a.txt", home: false });
+    expect(path("~/Desktop/a.png")).toEqual({ path: "/Desktop/a.png", home: true });
+    expect(path("~")).toEqual({ path: "", home: true });
+    // Unlike a shell, ~/ is home inside quotes too, as people write it; \~ and ./~ name a folder called ~.
+    expect(path('"~/Desktop/My notes.pdf"')).toEqual({ path: "/Desktop/My notes.pdf", home: true });
+    expect(path("'~/a.png'")).toEqual({ path: "/a.png", home: true });
+    expect(path('~/Desktop/"My notes.pdf"')).toEqual({ path: "/Desktop/My notes.pdf", home: true });
+    expect(path("\\~/a.png")).toEqual({ path: "~/a.png", home: false });
+    expect(path("./~/a.png")).toEqual({ path: "./~/a.png", home: false });
+    expect(path("~user/a.png")).toEqual({ path: "~user/a.png", home: false });
+    expect(path("''")).toEqual({ error: "no path" });
+    expect(path("$HOME/*.png")).toEqual({ path: "$HOME/*.png", home: false });
+    // Unicode as typed: an NFD name stays NFD.
+    const nfd = "Ca\u0301ch du\u0300ng.pdf";
+    expect(path(`"${nfd}"`)).toEqual({ path: nfd, home: false });
+    expect(path("a.png b.png")).toEqual({ error: expect.stringMatching(/one path at a time/) });
+    expect(path("'open")).toEqual({ error: "a ' is not closed" });
+    expect(path('"open')).toEqual({ error: 'a " is not closed' });
+  });
+
+  it("parse as commands, leaving the settings' words as they were", () => {
+    expect(parseInput("/attach 'a b.png'")).toEqual({ kind: "attach", path: "a b.png", home: false });
+    expect(parseInput("/attach")).toEqual({ kind: "usage", text: expect.stringMatching(/^usage: \/attach <path>/) });
+    expect(parseInput("/attach a b")).toEqual({ kind: "usage", text: expect.stringMatching(/^one path at a time/) });
+    expect(parseInput("/attachments")).toEqual({ kind: "command", name: "attachments", arg: "" });
+    expect(parseInput("/detach 2")).toEqual({ kind: "detach", target: "2" });
+    expect(parseInput("/detach all")).toEqual({ kind: "detach", target: "all" });
+    expect(parseInput("/detach")).toEqual({ kind: "usage", text: expect.stringMatching(/^usage: \/detach/) });
+    expect(parseInput('/claude add-dir "My Dir"')).toEqual({ kind: "setting", setting: { target: "claude.add-dir", dir: "My Dir" }, save: false, yes: false });
+    expect(tokenize(`it's "a b"`).map((t) => t.text)).toEqual(["it's", "a b"]);
+    expect(complete("/att").map((c) => c.insert)).toEqual(["/attach ", "/attachments"]);
+    expect(complete("/detach ").map((c) => c.label)).toEqual(["<n>", "all"]);
+  });
+
+  it("read every example the usage line and the READMEs give as the file they name", () => {
+    const usageLine = parseInput("/attach");
+    if (usageLine.kind !== "usage") throw new Error("no usage line");
+    const readme = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+    // A word: quoted, or up to a space that is not escaped (or the end of a code span, or a comma).
+    const examples = (text: string) => [...text.matchAll(/\/attach (?:"[^"]*"|(?:\\ |[^\s`,])+)/g)].map((m) => m[0]).filter((e) => !e.includes("<"));
+    const fromUsage = examples(usageLine.text);
+    expect(fromUsage).toEqual(["/attach screenshots/bug.png", '/attach "~/Desktop/My notes.pdf"']);
+    const fromDocs = [...examples(readme("README.md")), ...examples(readme("docs/README.vi.md"))];
+    expect(fromDocs).toEqual(['/attach "~/Desktop/My notes.pdf"', "/attach shots/bug\\ 2.png", '/attach "~/Desktop/Ghi chú.pdf"', "/attach shots/loi\\ 2.png"]);
+    const read = Object.fromEntries([...fromUsage, ...fromDocs].map((e) => [e, parseInput(e)]));
+    expect(read).toEqual({
+      "/attach screenshots/bug.png": { kind: "attach", path: "screenshots/bug.png", home: false },
+      '/attach "~/Desktop/My notes.pdf"': { kind: "attach", path: "/Desktop/My notes.pdf", home: true },
+      "/attach shots/bug\\ 2.png": { kind: "attach", path: "shots/bug 2.png", home: false },
+      '/attach "~/Desktop/Ghi chú.pdf"': { kind: "attach", path: "/Desktop/Ghi chú.pdf", home: true },
+      "/attach shots/loi\\ 2.png": { kind: "attach", path: "shots/loi 2.png", home: false },
+    });
   });
 });

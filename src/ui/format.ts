@@ -1,3 +1,4 @@
+import type { UsageReport, UsageState } from "../core/usage.js";
 import type { Activity, Agent, DiscussionStatus, DiscussionStep, Message, ModelIdentity, Party, PermissionAnswer, Phase, Role, Verdict } from "../events.js";
 
 export const PIPELINE: Array<{ phase: Phase; label: string }> = [
@@ -170,4 +171,60 @@ export function discussionOutcome(d: { status: DiscussionStatus; answerer: Agent
     case "error":
       return "failed";
   }
+}
+
+// ------------------------------------------------------------------ /usage
+/** "█████░░░░░": `percent` of `width` blocks filled. */
+export function usageBar(percent: number, width: number): string {
+  const filled = Math.round((Math.min(100, Math.max(0, percent)) / 100) * width);
+  return "█".repeat(filled) + "░".repeat(width - filled);
+}
+
+/** A line of the usage panel: each screen draws its kinds its own way (a bar as blocks, or as a meter). */
+export interface UsageRow {
+  kind: "agent" | "group" | "limit" | "bar" | "muted" | "error" | "text" | "heading" | "blank";
+  text: string;
+  indent: number;
+  /** A bar's fill. */
+  percent?: number;
+}
+
+const USAGE_AGENTS: Record<Agent, string> = { claude: "Claude Code", codex: "Codex" };
+
+/** Both agents' limits first, each with its account; then what contributes to Claude's usage, which is long. */
+export function usageRows(r: UsageReport): UsageRow[] {
+  const rows: UsageRow[] = [];
+  const row = (kind: UsageRow["kind"], text: string, indent = 0, percent?: number) => rows.push({ kind, text, indent, ...(percent === undefined ? {} : { percent }) });
+  const section = (agent: Agent, state: UsageState) => {
+    const account = state.status === "ready" ? state.usage.account : null;
+    row("agent", `${USAGE_AGENTS[agent]}${account ? ` · ${account}` : ""}`);
+    if (state.status === "loading") return row("muted", "loading…", 2);
+    if (state.status === "error") return row("error", state.error, 2);
+    for (const group of state.usage.groups) {
+      const indent = group.title ? 4 : 2;
+      if (group.title) row("group", group.title, 2);
+      for (const limit of group.limits) {
+        row("limit", limit.label, indent);
+        row("bar", `${limit.usedPercent}% used`, indent, limit.usedPercent);
+        if (limit.resets) row("muted", limit.resets, indent);
+      }
+    }
+    for (const note of state.usage.notes) row("text", note, 2);
+  };
+  section("claude", r.claude);
+  row("blank", "");
+  section("codex", r.codex);
+  const details = r.claude.status === "ready" ? r.claude.usage.details : null;
+  if (details) {
+    row("blank", "");
+    row("heading", `${USAGE_AGENTS.claude} · ${details.title}`);
+    for (const line of details.lines) row("text", line);
+  }
+  return rows;
+}
+
+/** The report as text, for a screen that has no usage panel. */
+export function usageReportText(r: UsageReport): string {
+  const line = (x: UsageRow) => (x.kind === "blank" ? "" : `${" ".repeat(x.indent)}${x.kind === "bar" ? `${usageBar(x.percent ?? 0, 20)}  ` : ""}${x.text}`);
+  return ["── usage ──", ...usageRows(r).map(line)].join("\n");
 }

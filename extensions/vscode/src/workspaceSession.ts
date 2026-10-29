@@ -3,11 +3,13 @@
 // tab reopened after a reload gets what it showed then (view.json beside the conversation). No `vscode` import, so it
 // is tested against a real worker.
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import type { Attachment } from "../../../src/core/attachment-types.js";
+import { attachmentFile } from "../../../src/core/attachments.js";
 import type { Backend } from "../../../src/core/commands.js";
 import { atomicWrite } from "../../../src/core/state.js";
 import type { PermissionAnswer } from "../../../src/events.js";
-import { initialState, reduce, type SessionState, type ViewAction, type ViewState } from "../webview/state.js";
+import { initialState, reduce, uploading, type SessionState, type ViewAction, type ViewState } from "../webview/state.js";
 import type { DecisionChoice, HostMessage, Problem, Route, SettingRequest, WorkerRequest, WorkerResults } from "./protocol.js";
 import { WorkerClient, WorkerError, type NodeLookup } from "./workerClient.js";
 
@@ -44,7 +46,7 @@ export function restoredView(saved: ViewState, now: ViewState): ViewState {
   return {
     ...saved, generation: now.generation, session: now.session, workspace: now.workspace, version: now.version, pipeline: now.pipeline, edits: now.edits,
     models: now.models, settings: now.settings, catalog: now.catalog, problem: now.problem, status: "idle", current: null, turn: null, discussion: null,
-    decision: null, permissions: [],
+    decision: null, permissions: [], usage: null, attachments: [],
   };
 }
 
@@ -65,11 +67,25 @@ export interface ConversationHandle {
   readonly state: ViewState;
   attach(post: (message: HostMessage) => void): void;
   detach(): void;
-  submit(text: string, route?: Route): Promise<void>;
+  /** `attachments`: the ids of the tab's ready files that go with it. */
+  submit(text: string, route?: Route, attachments?: string[]): Promise<void>;
+  /**
+   * A pasted or dropped file arrived, still to be written for the worker: its chip takes its place among the files now
+   * (they keep the order they came in), and a message waits for it.
+   */
+  uploading(key: string, name: string): void;
+  /** A file for the next message, at a path the host chose (picked by the user, or written from a paste or a drop). */
+  stage(file: { key: string; path: string; name: string }): Promise<void>;
+  /** A file of the composer removed, by its key: a waiting one goes from the worker too. */
+  removeFile(key: string): void;
+  /** A file the host could not even hand to the worker (too large, not base64…): the composer shows why. */
+  failed(key: string, name: string, error: string): void;
   selectRecipient(backend: Backend): Promise<void>;
   applySetting(request: SettingRequest): Promise<void>;
   interrupt(): Promise<void>;
   toggleEdits(): Promise<void>;
+  /** Looks the usage up again for the tab's usage panel (its Refresh, the title bar's Usage), with no line in the timeline. */
+  usage(): Promise<void>;
   answerDecision(generation: number, id: string, decision: DecisionChoice, note: string | null): Promise<void>;
   answerPermission(generation: number, id: string, answer: PermissionAnswer): Promise<void>;
   /** The tab was closed: what it shows is saved, and what runs in it stops. */
@@ -110,6 +126,8 @@ export class WorkspaceSession {
   /** Shutdowns of workers let go of; a restart starts the next worker only once they are over (one lock holder). */
   private stopping: Promise<void> = Promise.resolve();
   private disposed = false;
+  /** Conversations whose worker named an attachment root other than their own: their tab is granted none. */
+  private readonly untrusted = new Set<string>();
 
   constructor(private readonly o: WorkspaceSessionOptions) {
     this.base = initialState("starting", o.workspace, 0);
@@ -127,6 +145,23 @@ export class WorkspaceSession {
   /** Where the workspace's conversations live, once the worker has said (null before). */
   get runsDirectory(): string | null {
     return this.runsDir;
+  }
+
+  /**
+   * Where the tab of `id` may show attached images from: its conversation's copies, under the runs directory the
+   * worker said; null before it said, or once the worker named another place for them (never trusted then).
+   */
+  attachmentRoot(id: string): string | null {
+    return this.runsDir && !this.untrusted.has(id) ? join(this.runsDir, "conversations", id, "attachments") : null;
+  }
+
+  /** The copy of `a` the tab of `id` may show: inside its root, and still there; null otherwise. */
+  attachmentPath(id: string, a: Attachment): string | null {
+    const root = this.attachmentRoot(id);
+    const file = this.runsDir ? attachmentFile(this.runsDir, a) : null;
+    const rel = root && file ? relative(resolve(root), resolve(file)) : "";
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
+    return existsSync(file!) ? file : null;
   }
 
   /** The conversations that have a tab in this session. */
@@ -149,13 +184,18 @@ export class WorkspaceSession {
       },
       attach: (post) => this.attach(id, post),
       detach: () => this.detach(id),
-      submit: (text, route) => this.submit(id, text, route),
+      submit: (text, route, attachments) => this.submit(id, text, route, attachments),
+      uploading: (key, name) => this.dispatch({ type: "attachment.uploading", key, name }, id),
+      stage: (file) => this.stage(id, file),
+      removeFile: (key) => this.removeFile(id, key),
+      failed: (key, name, error) => this.dispatch({ type: "attachment.failed", key, name, error }, id),
       selectRecipient: (backend) => this.send({ type: "recipient", conversation: id, backend }, id).then(() => undefined),
       applySetting: (request) => this.send({ type: "setting", conversation: id, ...request }, id).then(() => undefined),
       interrupt: async () => {
         if (this.client?.running) await this.send({ type: "interrupt", conversation: id }, id);
       },
       toggleEdits: () => this.send({ type: "toggleEdits", conversation: id }, id).then(() => undefined),
+      usage: () => this.send({ type: "usage", conversation: id }, id).then(() => undefined),
       answerDecision: (generation, requestId, decision, note) => this.answerDecision(id, generation, requestId, decision, note),
       answerPermission: (generation, requestId, answer) => this.answerPermission(id, generation, requestId, answer),
       close: () => this.close(id),
@@ -390,15 +430,61 @@ export class WorkspaceSession {
    * the pipeline, and with the Discuss route a question to discuss (a slash command still goes as typed). Resolves once
    * the worker has started it, not when it is done.
    */
-  private async submit(conversation: string, text: string, route: Route = "message"): Promise<void> {
+  private async submit(conversation: string, text: string, route: Route = "message", attachments: string[] = []): Promise<void> {
     const typed = text.trim();
     // /new keeps this tab's conversation and starts another in a new tab (the terminal chat starts over instead).
     if (/^\/new$/.test(typed) && this.o.onNewConversation) return this.o.onNewConversation();
+    if (uploading(this.view(conversation).state)) {
+      this.note("Some files are still being attached: send once they are ready (or remove them).", "error", conversation);
+      return;
+    }
     const command = typed.startsWith("/");
-    if (typed) {
+    // Files alone are a message too; the worker says which went with it (`sent`), and they join it then.
+    if (typed || attachments.length) {
       this.dispatch({ type: "user", text: typed, ...(route === "pipeline" && !command ? { pipeline: true } : {}), ...(route === "discuss" && !command ? { discuss: true } : {}) }, conversation);
     }
-    await this.send({ type: "submit", conversation, text, route }, conversation);
+    await this.send({ type: "submit", conversation, text, route, attachments }, conversation);
+  }
+
+  /**
+   * A file goes to the worker, which copies it into the conversation. Its answer counts only for the tab, the key and
+   * the worker that asked: a tab closed meanwhile, a file removed meanwhile, or a worker started over drop it.
+   */
+  private async stage(conversation: string, file: { key: string; path: string; name: string }): Promise<void> {
+    this.dispatch({ type: "attachment.uploading", key: file.key, name: file.name }, conversation);
+    const fail = (error: string) => {
+      if (this.views.has(conversation)) this.dispatch({ type: "attachment.failed", key: file.key, name: file.name, error }, conversation);
+    };
+    let r: WorkerResults["stageAttachment"];
+    let generation: number;
+    try {
+      // The first file of a tab may start the worker: what counts is the worker that took the file.
+      const client = await this.start();
+      if (!client) throw new WorkerError("exited", this.base.problem?.message ?? "the agentduo worker is not running");
+      generation = this.base.generation;
+      r = await client.request({ type: "stageAttachment", conversation, key: file.key, path: file.path, name: file.name });
+    } catch (e) {
+      return fail(e instanceof Error ? e.message : String(e));
+    }
+    if (!this.views.has(conversation)) return;
+    if (r.conversation !== conversation || r.key !== file.key || this.base.generation !== generation) return fail("agentduo started over meanwhile: attach the file again");
+    const root = this.attachmentRoot(conversation);
+    if (!root || resolve(r.root) !== resolve(root)) {
+      this.untrusted.add(conversation);
+      this.o.log(`the worker keeps the attachments of ${conversation} in ${r.root}, not ${root ?? "(unknown)"}: its images are not shown`);
+    }
+    if (!this.view(conversation).state.attachments.some((c) => c.key === file.key)) {
+      await this.send({ type: "removeAttachment", conversation, id: r.attachment.id }, conversation);
+      return;
+    }
+    this.dispatch({ type: "attachment.ready", key: file.key, attachment: r.attachment }, conversation);
+  }
+
+  private removeFile(conversation: string, key: string): void {
+    const chip = this.view(conversation).state.attachments.find((c) => c.key === key);
+    if (!chip) return;
+    this.dispatch({ type: "attachment.dismissed", key }, conversation);
+    if (chip.status === "ready" && chip.attachment) void this.send({ type: "removeAttachment", conversation, id: chip.attachment.id }, conversation);
   }
 
   private async answerDecision(conversation: string, generation: number, id: string, decision: DecisionChoice, note: string | null): Promise<void> {

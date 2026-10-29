@@ -33,7 +33,7 @@ describe("webview page", () => {
 });
 
 describe("webview sources", () => {
-  const files = ["webview/main.ts", "webview/render.ts", "webview/state.ts", "webview/markdown.ts"];
+  const files = ["webview/main.ts", "webview/render.ts", "webview/state.ts", "webview/markdown.ts", "webview/uploads.ts"];
 
   it("never turns text into markup or code", () => {
     for (const file of files) {

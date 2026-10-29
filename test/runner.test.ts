@@ -1,7 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentRunner } from "../src/agents/runner.js";
+import type { Attachment } from "../src/core/attachment-types.js";
+import { AttachmentStore, existingAttachmentFile } from "../src/core/attachments.js";
+import { png } from "./helpers/images.js";
 import { EventBus, type DuoEvent, type PermissionAnswer, type PermissionDecider } from "../src/events.js";
 import { critique, impl, plan } from "./helpers/builders.js";
 import { testConfig, type ConfigOverrides } from "./helpers/config.js";
@@ -26,7 +30,19 @@ afterEach(() => {
 });
 
 const runner = (o: ConfigOverrides = {}, permissions?: PermissionDecider) =>
-  new AgentRunner(testConfig(fake, o), t.path, join(t.path, "logs"), bus, { permissions });
+  new AgentRunner(testConfig(fake, o), t.path, join(t.path, "logs"), bus, { permissions, runsDir: join(t.path, "runs") });
+/** Files attached in a conversation of the runs directory: a 64×32 PNG, a big PNG (over Claude's 5 MB once encoded), and a PDF. */
+const attached = () => {
+  const store = new AttachmentStore(join(t.path, "runs"), join(t.path, "runs", "conversations", "c1"));
+  return {
+    shot: store.importBytes("shot.png", png(64, 32)),
+    big: { ...store.importBytes("big.png", png(64, 32)), size: 4_000_000 } as Attachment,
+    pdf: store.importBytes("spec.pdf", Buffer.from("%PDF-1.4\nMARKER\n")),
+  };
+};
+const sha = (a: Attachment) => createHash("sha256").update(readFileSync(existingAttachmentFile(join(t.path, "runs"), a))).digest("hex");
+const ask = (r: AgentRunner, backend: "claude" | "codex", attachments: Attachment[], logPrefix = "001-ask") =>
+  r.call({ mode: "text", backend, prompt: "[agentduo-conversation]\nWhat is in the files?", logPrefix, conversationId: "c1", turnId: "c1-t1", attachments });
 /** Answers every permission prompt with `answers` in turn, after `delayMs`, and records what it was asked. */
 const scripted = (answers: PermissionAnswer[], delayMs = 0) => {
   const asked: string[] = [];
@@ -158,6 +174,62 @@ describe("AgentRunner", () => {
       expect(call.args[call.args.indexOf("--permission-prompts") + 1]).toBe("none");
       expect(call.args).not.toContain("--input-format");
     }
+  });
+
+  it("sends Claude the images as blocks of a stream-json message and closes stdin when nobody answers prompts", async () => {
+    const { shot, big, pdf } = attached();
+    const r = await ask(runner(), "claude", [shot, pdf, big]);
+    expect(r).toMatchObject({ ok: true, data: "Answer from claude." });
+    const call = fake.calls("chat_claude")[0]!;
+    expect(call.args).toEqual(expect.arrayContaining(["--input-format", "stream-json"]));
+    expect(call.args[call.args.indexOf("--permission-prompts") + 1]).toBe("none");
+    expect(call.prompt).toBe("[agentduo-conversation]\nWhat is in the files?");
+    expect(call.images).toEqual([{ mediaType: "image/png", base64: 4 * Math.ceil(shot.size / 3), sha256: sha(shot) }]);
+    // The image too large for Claude goes as its path only, said once before the call.
+    const warnings = events.flatMap((e) => (e.type === "warning" ? [e.text] : []));
+    expect(warnings).toEqual(["big.png goes to Claude as a file to read, not as an image: it is over 4.8 MB once encoded."]);
+    await ask(runner(), "claude", [big], "002-ask");
+    // The prompt log is the text as sent; no base64 in agentduo's logs.
+    const logs = join(t.path, "logs");
+    expect(readFileSync(join(logs, "001-ask.a1.prompt.md"), "utf8")).toBe("[agentduo-conversation]\nWhat is in the files?");
+    const listed = JSON.parse(readFileSync(join(logs, "001-ask.a1.attachments.json"), "utf8")) as Array<{ name: string; image: boolean }>;
+    expect(listed.map((x) => [x.name, x.image])).toEqual([["shot.png", true], ["spec.pdf", false], ["big.png", false]]);
+    expect(readFileSync(join(logs, "001-ask.a1.cmd.json"), "utf8")).not.toMatch(/iVBOR/);
+  });
+
+  it("sends images in host mode too, and still answers every permission prompt", async () => {
+    const { shot } = attached();
+    fake.setScenario({ chat_claude: [{ permissions: [bashAsk("ls")], answer: "two files" }] });
+    const { decider, asked } = scripted([{ decision: "once" }]);
+    const r = await ask(runner({}, decider), "claude", [shot]);
+    expect(r).toMatchObject({ ok: true, data: "two files" });
+    expect(asked).toEqual(["Bash  ls"]);
+    expect(fake.permissionAnswers()).toEqual([expect.objectContaining({ behavior: "allow" })]);
+    expect(fake.calls("chat_claude")[0]!.images).toHaveLength(1);
+  });
+
+  it("gives Codex each image as --image=<path>, the prompt still on stdin", async () => {
+    const { shot, big, pdf } = attached();
+    const r = await ask(runner(), "codex", [shot, pdf, big]);
+    expect(r.ok).toBe(true);
+    const call = fake.calls("chat_codex")[0]!;
+    expect(call.args.slice(-3)).toEqual([`--image=${existingAttachmentFile(join(t.path, "runs"), shot)}`, `--image=${existingAttachmentFile(join(t.path, "runs"), big)}`, "-"]);
+    expect(call.prompt).toBe("[agentduo-conversation]\nWhat is in the files?");
+    expect(call.images).toEqual([expect.objectContaining({ sha256: sha(shot) }), expect.objectContaining({ sha256: sha(big) })]);
+    expect(events.some((e) => e.type === "warning")).toBe(false);
+  });
+
+  it("fails before the call when a copy is gone, on every attempt", async () => {
+    const { shot, pdf } = attached();
+    rmSync(existingAttachmentFile(join(t.path, "runs"), pdf));
+    const r = await ask(runner(), "codex", [shot, pdf]);
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/spec\.pdf is no longer where agentduo kept it/);
+    expect(fake.calls()).toEqual([]);
+    fake.setScenario({ implementer: [{ output: impl() }] });
+    const s = await runner().call({ role: "implementer", agentRole: "implementer", prompt: prompt("implementer"), schemaName: "implementation", logPrefix: "020", attachments: [pdf] });
+    expect(s).toMatchObject({ ok: false, attempts: 1 });
+    expect(fake.calls()).toEqual([]);
   });
 
   it("stops on abort", async () => {

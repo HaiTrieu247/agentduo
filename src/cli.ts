@@ -340,7 +340,7 @@ async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
     let chat: Chat | undefined;
     const session = startChatInk({
       bus, version: packageVersion(), verbose: !!opts.verbose, workspace: env.workspace,
-      onSubmit: (text) => void chat?.submit(text), onEscape: () => chat?.escape(), onCycleEdits: () => chat?.toggleEdits(),
+      onSubmit: (text) => void chat?.submit(text), onEscape: () => chat?.escape(), onCycleEdits: () => chat?.toggleEdits(), onUsageRefresh: () => chat?.usage(),
       views: () => {
         const run = chat?.focused();
         return run ? availableViews(run.store, run.state) : [];

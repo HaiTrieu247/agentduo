@@ -1,18 +1,19 @@
 // The extension host's per-folder session, against the real worker: presentation state, snapshots for a view that
 // comes and goes, questions that survive it, and a worker that dies.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PROTOCOL_VERSION, type HostMessage } from "../extensions/vscode/src/protocol.js";
-import { SHUTDOWN_GRACE_MS } from "../extensions/vscode/src/workerClient.js";
+import { SHUTDOWN_GRACE_MS, WorkerClient } from "../extensions/vscode/src/workerClient.js";
 import { emptyState, pickWorkspace, WorkspaceSession } from "../extensions/vscode/src/workspaceSession.js";
 import { reduce, type ViewState } from "../extensions/vscode/webview/state.js";
 import { RunStore } from "../src/core/state.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
 import type { ConfigOverrides } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
+import { png } from "./helpers/images.js";
 import { makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
 import { buildWorker, pidAlive, waitUntil, writeWorkspaceConfig } from "./helpers/vscode.js";
@@ -365,5 +366,101 @@ describe("pickWorkspace", () => {
     expect(pickWorkspace(["/a", "/b"], "/b")).toEqual({ kind: "folder", path: "/b" });
     expect(pickWorkspace(["/a", "/b"], "/c")).toEqual({ kind: "choose", folders: ["/a", "/b"] });
     expect(emptyState("choose-folder").session).toBe("choose-folder");
+  });
+});
+
+describe("WorkspaceSession: attached files", () => {
+  const userFile = (name: string, data: Buffer | string = png(64, 32)) => {
+    mkdirSync(join(t.path, "home"), { recursive: true });
+    writeFileSync(join(t.path, "home", name), data);
+    return join(t.path, "home", name);
+  };
+
+  it("stages files through the worker by path only, sends the ready ones with a message, and keeps no bytes in the view", async () => {
+    const requests: string[] = [];
+    const request = WorkerClient.prototype.request;
+    WorkerClient.prototype.request = function (this: WorkerClient, r: never, ms?: number) {
+      requests.push(JSON.stringify(r));
+      return request.call(this, r, ms);
+    } as typeof request;
+    try {
+      fake.setScenario({ chat_codex: [{ answer: "A red square." }] });
+      const s = session();
+      const view = new FakeView();
+      const tab = s.conversation(C);
+      tab.attach(view.post);
+      await tab.stage({ key: "w1", path: userFile("shot.png"), name: "shot.png" });
+      await tab.stage({ key: "w2", path: join(t.path, "home", "nope.png"), name: "nope.png" });
+      const st = tab.state;
+      expect(st.attachments.map((c) => [c.key, c.status, c.name])).toEqual([["w1", "ready", "shot.png"], ["w2", "error", "nope.png"]]);
+      expect(st.attachments[1]!.error).toMatch(/no such file/);
+      const a = st.attachments[0]!.attachment!;
+      expect(realpathSync(s.attachmentRoot(C)!)).toBe(realpathSync(join(repo, ".agentduo", "runs", "conversations", C, "attachments")));
+      expect(s.attachmentPath(C, a)).toBe(join(s.attachmentRoot(C)!, a.id, "shot.png"));
+      expect(s.attachmentPath(C, { ...a, path: "../../outside.png" })).toBeNull();
+      expect(s.attachmentPath("another-tab", a)).toBeNull();
+      tab.removeFile("w2");
+      await tab.submit("", "message", [a.id]);
+      await until(s, (x) => x.timeline.some((i) => i.kind === "answer"), "the answer");
+      const user = tab.state.timeline.find((i) => i.kind === "user");
+      expect(user).toMatchObject({ kind: "user", text: "", attachments: [expect.objectContaining({ id: a.id, name: "shot.png" })] });
+      expect(tab.state.attachments).toEqual([]);
+      expect(view.state!.attachments).toEqual([]);
+      expect(fake.calls("chat_codex")[0]!.images).toHaveLength(1);
+      // Requests name files by path or id; no file content crosses IPC, and the view keeps none.
+      const b64 = png(64, 32).toString("base64");
+      expect(requests.some((r) => r.includes('"type":"stageAttachment"') && r.includes("shot.png"))).toBe(true);
+      expect(requests.every((r) => !r.includes(b64.slice(0, 40)) && !r.includes("data:"))).toBe(true);
+      expect(JSON.stringify(tab.state)).not.toContain(b64.slice(0, 40));
+    } finally {
+      WorkerClient.prototype.request = request;
+    }
+  });
+
+  it("holds a message back while a file is being attached, and lets go of a file removed before it was stored", async () => {
+    const s = session();
+    const tab = s.conversation(C);
+    tab.attach(new FakeView().post);
+    await s.start();
+    const staging = tab.stage({ key: "w1", path: userFile("a.png"), name: "a.png" });
+    await tab.submit("now", "message", []);
+    expect(tab.state.timeline.at(-1)).toMatchObject({ kind: "info", tone: "error", text: expect.stringContaining("still being attached") });
+    tab.removeFile("w1");
+    await staging;
+    await waitUntil(() => tab.state.attachments.length === 0, 10_000, "the file removed");
+    expect(tab.state.timeline.some((i) => i.kind === "user")).toBe(false);
+    expect(fake.calls()).toEqual([]);
+  });
+
+  it("keeps pasted files in the order they came in, whichever is stored first, and holds a message back meanwhile", async () => {
+    fake.setScenario({ chat_codex: [{ answer: "Two squares." }] });
+    const s = session();
+    const tab = s.conversation(C);
+    tab.attach(new FakeView().post);
+    await s.start();
+    // The host has both files and still writes them for the worker.
+    tab.uploading("w1", "one.png");
+    tab.uploading("w2", "two.png");
+    await tab.submit("now", "message", []);
+    expect(tab.state.timeline.at(-1)).toMatchObject({ kind: "info", tone: "error", text: expect.stringContaining("still being attached") });
+    await tab.stage({ key: "w2", path: userFile("two.png", png(8, 8)), name: "two.png" });
+    await tab.stage({ key: "w1", path: userFile("one.png", png(16, 16)), name: "one.png" });
+    expect(tab.state.attachments.map((c) => [c.key, c.status])).toEqual([["w1", "ready"], ["w2", "ready"]]);
+    await tab.submit("", "message", tab.state.attachments.map((c) => c.attachment!.id));
+    await until(s, (x) => x.timeline.some((i) => i.kind === "answer"), "the answer");
+    const user = tab.state.timeline.find((i) => i.kind === "user");
+    expect(user?.kind === "user" && user.attachments?.map((a) => a.name)).toEqual(["one.png", "two.png"]);
+    expect(fake.calls("chat_codex")[0]!.images!.map((i) => i.file!.split("/").at(-1))).toEqual(["one.png", "two.png"]);
+  });
+
+  it("finds a tab's attachments under a runs_dir outside the workspace", async () => {
+    const outside = join(t.path, "elsewhere", "runs");
+    const s = session({ overrides: { paths: { runs_dir: outside } } });
+    const tab = s.conversation(C);
+    tab.attach(new FakeView().post);
+    await tab.stage({ key: "w1", path: userFile("a.png"), name: "a.png" });
+    const a = tab.state.attachments[0]!.attachment!;
+    expect(realpathSync(s.attachmentRoot(C)!)).toBe(realpathSync(join(outside, "conversations", C, "attachments")));
+    expect(s.attachmentPath(C, a) && existsSync(s.attachmentPath(C, a)!)).toBe(true);
   });
 });

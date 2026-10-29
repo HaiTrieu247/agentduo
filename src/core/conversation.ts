@@ -1,5 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { ATTACHMENT_LIMITS, formatBytes, type Attachment } from "./attachment-types.js";
+import { AttachmentError, attachmentFile, AttachmentStore } from "./attachments.js";
 import type { Backend } from "./config.js";
 import * as prompts from "./prompts.js";
 import { atomicWrite, ensureRunsDir, stamp, type ConversationContext, type EarlierTask, type Exchange } from "./state.js";
@@ -18,6 +20,8 @@ export interface Turn {
   logPrefix: string;
   /** A turn of a /discuss: its answer is a draft or a review, never an exchange of its own. */
   discussion?: DiscussionPlace;
+  /** The files the question came with; every step of a discussion gets its question's. */
+  attachments?: Attachment[];
 }
 
 /** A /discuss under way: who answers and who reviews, the conversation as it stood when it began, and what was said. */
@@ -29,6 +33,7 @@ export interface Discussion {
   maxRounds: number;
   context: ConversationContext;
   messages: prompts.DiscussionMessage[];
+  attachments: Attachment[];
 }
 
 /** What a conversation keeps on disk to go on after a restart: what later prompts carry, and how to show it in a list. */
@@ -94,6 +99,12 @@ export class Conversation {
   private readonly done: EarlierTask[] = [];
   private createdAt: string;
   private readonly clock: () => Date;
+  /** The copies of the files attached in this conversation. */
+  readonly files: AttachmentStore;
+  /** Files waiting to go with the next message, in the order they were attached. */
+  private waiting: Attachment[] = [];
+  /** Where an attachment's copy is, for prompts. */
+  readonly locate: prompts.Locate;
 
   constructor(private readonly runsDir: string, o: { id?: string; clock?: () => Date } = {}) {
     this.clock = o.clock ?? (() => new Date());
@@ -101,9 +112,11 @@ export class Conversation {
     this.id = o.id ?? `${stamp(now)}-chat-${process.pid}-${++counter}`;
     this.dir = join(conversationsDir(runsDir), this.id);
     this.createdAt = now.toISOString();
+    this.files = new AttachmentStore(runsDir, this.dir);
+    this.locate = (a) => attachmentFile(runsDir, a);
   }
 
-  /** The conversation `id` of this workspace as it was saved, or a new one by that id. */
+  /** The conversation `id` of this workspace as it was saved, or a new one by that id. Only reads. */
   static open(runsDir: string, id: string, clock?: () => Date): Conversation {
     const c = new Conversation(runsDir, { id, clock });
     const r = readRecord(join(c.dir, RECORD));
@@ -162,6 +175,70 @@ export class Conversation {
     return join(this.dir, "logs");
   }
 
+  // ------------------------------------------------------------------ attachments
+  /**
+   * For the chat that takes the conversation on: files an earlier process had waiting to be sent (it crashed, or was
+   * killed) are removed, since they were never sent and nothing shows them now; files that were sent stay.
+   */
+  recoverFiles(): number {
+    return this.files.recover();
+  }
+
+  /** The files waiting to go with the next message. */
+  get pending(): Attachment[] {
+    return [...this.waiting];
+  }
+
+  /** A copy of the file at `source` waits to go with the next message; refused past a message's limits. */
+  stage(source: string, name?: string): Attachment {
+    if (this.waiting.length >= ATTACHMENT_LIMITS.files) throw new AttachmentError(`a message can take at most ${ATTACHMENT_LIMITS.files} files`);
+    ensureRunsDir(this.runsDir);
+    const a = this.files.importFile(source, name);
+    const total = this.waiting.reduce((n, x) => n + x.size, a.size);
+    if (total > ATTACHMENT_LIMITS.submissionBytes) {
+      this.files.remove(a.id);
+      throw new AttachmentError(`${a.name} would make the message's files ${formatBytes(total)}; a message can take ${formatBytes(ATTACHMENT_LIMITS.submissionBytes)} in all`);
+    }
+    this.waiting.push(a);
+    this.files.setPending(this.waiting.map((x) => x.id));
+    return a;
+  }
+
+  /** Removes a waiting file (its copy too); null when no file of this conversation waits by that id. */
+  unstage(id: string): Attachment | null {
+    const a = this.waiting.find((x) => x.id === id);
+    if (!a) return null;
+    this.waiting = this.waiting.filter((x) => x !== a);
+    this.files.remove(a.id);
+    this.files.setPending(this.waiting.map((x) => x.id));
+    return a;
+  }
+
+  /** Removes every waiting file; the files already sent stay. */
+  discardPending(): Attachment[] {
+    const gone = this.waiting;
+    for (const a of gone) this.unstage(a.id);
+    return gone;
+  }
+
+  /**
+   * The waiting files `ids` names, in the order of `ids` (the tab's, which files stored side by side do not follow);
+   * all of them, in their order, when absent. An error names one that does not wait here.
+   */
+  select(ids?: string[]): Attachment[] {
+    if (!ids) return this.pending;
+    const unknown = ids.find((id) => !this.waiting.some((x) => x.id === id));
+    if (unknown) throw new AttachmentError("a file you attached is no longer waiting to be sent in this conversation; attach it again");
+    return [...new Set(ids)].map((id) => this.waiting.find((x) => x.id === id)!);
+  }
+
+  /** `files` went with a message that was accepted: they no longer wait, and stay as sent. */
+  sent(files: Attachment[]): void {
+    if (!files.length) return;
+    this.waiting = this.waiting.filter((x) => !files.some((f) => f.id === x.id));
+    this.files.setPending(this.waiting.map((x) => x.id));
+  }
+
   /** The answered exchanges that fit `limit` characters, newest kept, oldest dropped whole. */
   context(limit = CONTEXT_CHARS): ConversationContext {
     const answered = this.exchanges;
@@ -180,15 +257,19 @@ export class Conversation {
    * Starts a turn: the prompt for `backend` carries the conversation so far within the budget and the pipeline tasks
    * of the chat; the question itself is never cut, however long it is.
    */
-  begin(backend: Backend, question: string, earlier: EarlierTask[], workspace: string): { turn: Turn; prompt: string; omitted: number } {
+  begin(backend: Backend, question: string, earlier: EarlierTask[], workspace: string, attachments: Attachment[] = []): { turn: Turn; prompt: string; omitted: number } {
     const context = this.context();
     const n = this.before + this.turns.length + 1;
-    const turn: Turn = { id: `${this.id}-t${n}`, backend, question, answer: null, status: "running", logPrefix: `${String(n).padStart(3, "0")}-${backend}` };
+    const turn: Turn = {
+      id: `${this.id}-t${n}`, backend, question, answer: null, status: "running", logPrefix: `${String(n).padStart(3, "0")}-${backend}`,
+      ...(attachments.length ? { attachments } : {}),
+    };
     this.turns.push(turn);
     ensureRunsDir(this.runsDir);
     mkdirSync(this.logDir, { recursive: true });
     this.save();
-    return { turn, prompt: prompts.conversation({ workspace, backend, context, earlier, question }), omitted: context.omitted };
+    const prompt = prompts.conversation({ workspace, backend, context, earlier, question, attachments, locate: this.locate });
+    return { turn, prompt, omitted: context.omitted };
   }
 
   /** `verdict`: a review's, without its VERDICT line in `answer`. */
@@ -200,14 +281,14 @@ export class Conversation {
     if (turn.answer === null) return;
     const place = turn.discussion;
     if (!place) {
-      this.exchanges.push({ backend: turn.backend, question: turn.question, answer: turn.answer });
+      this.exchanges.push({ backend: turn.backend, question: turn.question, answer: turn.answer, ...(turn.attachments ? { attachments: turn.attachments } : {}) });
       this.save();
     } else this.discussions.get(place.id)?.messages.push({ backend: turn.backend, step: place.step, round: place.round, text: turn.answer, verdict });
   }
 
   /** Starts a /discuss: every step sees the conversation as it is now, within the budget. */
-  beginDiscussion(answerer: Backend, critic: Backend, question: string, maxRounds: number): Discussion {
-    const d: Discussion = { id: `${this.id}-d${++this.discussed}`, answerer, critic, question, maxRounds, context: this.context(), messages: [] };
+  beginDiscussion(answerer: Backend, critic: Backend, question: string, maxRounds: number, attachments: Attachment[] = []): Discussion {
+    const d: Discussion = { id: `${this.id}-d${++this.discussed}`, answerer, critic, question, maxRounds, context: this.context(), messages: [], attachments };
     this.discussions.set(d.id, d);
     return d;
   }
@@ -220,14 +301,16 @@ export class Conversation {
     const n = this.before + this.turns.length + 1;
     const turn: Turn = {
       id: `${this.id}-t${n}`, backend, question: d.question, answer: null, status: "running", logPrefix: `${String(n).padStart(3, "0")}-${backend}-${step}${round}`,
-      discussion: { id, step, round },
+      discussion: { id, step, round }, ...(d.attachments.length ? { attachments: d.attachments } : {}),
     };
     this.turns.push(turn);
     ensureRunsDir(this.runsDir);
     mkdirSync(this.logDir, { recursive: true });
     this.save();
+    // Every step is a call of its own, so each gets the question's files again (the images as images too).
     const prompt = prompts.discussion({
       workspace, context: d.context, earlier, question: d.question, answerer: d.answerer, critic: d.critic, maxRounds: d.maxRounds, step, round, history: d.messages,
+      attachments: d.attachments, locate: this.locate,
     });
     return { turn, prompt };
   }
@@ -242,7 +325,9 @@ export class Conversation {
     this.discussions.delete(id);
     if (answer === null) return;
     const by = backend ?? d.answerer;
-    this.exchanges.push({ backend: by, question: d.question, answer, discussedWith: by === d.answerer ? d.critic : d.answerer });
+    this.exchanges.push({
+      backend: by, question: d.question, answer, discussedWith: by === d.answerer ? d.critic : d.answerer, ...(d.attachments.length ? { attachments: d.attachments } : {}),
+    });
     this.save();
   }
 

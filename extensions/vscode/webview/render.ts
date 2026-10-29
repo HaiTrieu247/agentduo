@@ -3,24 +3,37 @@
 import {
   AGENT_NAMES, CODEX_PRESETS, COMMANDS, complete, type Backend, type Completion, type SettingCommand,
 } from "../../../src/core/commands.js";
+import { ATTACHMENT_LIMITS, attachmentDetail, formatBytes, type Attachment } from "../../../src/core/attachment-types.js";
+import type { UsageReport } from "../../../src/core/usage.js";
 import type { Activity, Agent, Message, ModelIdentity, Party, PermissionAnswer } from "../../../src/events.js";
 import {
-  discussionAuthor, discussionDoing, discussionOutcome, discussionStepText, formatClock, formatDuration, modelText, partyLabel, permissionAnswerText, PROVIDERS, roleLabel, usageText,
-  verdictText, whoLabel,
+  discussionAuthor, discussionDoing, discussionOutcome, discussionStepText, formatClock, formatDuration, modelText, partyLabel, permissionAnswerText, PROVIDERS, roleLabel, usageRows,
+  usageText, verdictText, whoLabel,
 } from "../../../src/ui/format.js";
 import type { DecisionChoice, Route, SettingRequest, WebviewCommand } from "../src/protocol.js";
 import { parseInline, parseMarkdown, type Block, type Inline } from "./markdown.js";
 import {
-  activityParts, canSubmit, decisionChoices, effortOptions, hasPending, isBusy, modelOptions, permissionChoices, pipelineView, placeholder, runInProgress,
-  type DiscussionCard, type PendingDecision, type PendingPermission, type PickOption, type StageStatus, type StepCard, type TimelineItem, type TurnCard, type ViewState,
+  activityParts, canSubmit, decisionChoices, effortOptions, hasPending, isBusy, modelOptions, permissionChoices, pipelineView, placeholder, readyAttachments, runInProgress,
+  sendStops, uploading, type AttachmentChip, type DiscussionCard, type PendingDecision, type PendingPermission, type PickOption, type StageStatus, type StepCard, type TimelineItem,
+  type TurnCard, type ViewState,
 } from "./state.js";
+import { FileQueue } from "./uploads.js";
 
 export interface Actions {
-  submit(text: string, route: Route): void;
+  /** `attachments`: the ids of the ready files that go with it. */
+  submit(text: string, route: Route, attachments: string[]): void;
+  /** Attach: the host asks for files. */
+  attach(): void;
+  /** A file pasted or dropped, as base64. */
+  upload(file: { key: string; name: string; data: string }): void;
+  /** A file of the composer removed (its ✕). */
+  removeFile(key: string): void;
   recipient(backend: Backend): void;
   setting(request: SettingRequest): void;
   interrupt(): void;
   toggleEdits(): void;
+  /** The usage panel's Refresh: look the usage up again. */
+  usage(): void;
   decide(id: string, decision: DecisionChoice, note: string | null): void;
   permit(id: string, answer: PermissionAnswer): void;
   command(name: WebviewCommand): void;
@@ -327,7 +340,8 @@ function timelineItem(item: TimelineItem, actions: Actions): HTMLElement {
       const to = item.pipeline ? "Pipeline" : item.discuss ? "Discuss" : item.to ? AGENT_NAMES[item.to] : null;
       return h("div", { class: "user-msg" },
         h("div", { class: "user-to" }, h("span", { class: "sr-only" }, "You"), to ? ` → ${to}` : ""),
-        h("div", { class: "user-text" }, item.text));
+        item.text ? h("div", { class: "user-text" }, item.text) : null,
+        item.attachments?.length ? h("ul", { class: "files sent", label: "Attached files" }, ...item.attachments.map((a) => fileChip({ name: a.name, detail: attachmentDetail(a), attachment: a }))) : null);
     }
     case "info":
       return h("div", { class: `info-note${item.tone === "error" ? " error" : ""}`, role: item.tone === "error" ? "alert" : undefined },
@@ -357,8 +371,68 @@ function timelineItem(item: TimelineItem, actions: Actions): HTMLElement {
   }
 }
 
+// ------------------------------------------------------------------ attached files
+/** The image URIs the host granted, by attachment id (null: the copy is gone); the previews of files still being stored, by key. */
+const imageUris = new Map<string, string | null>();
+const previews = new Map<string, string>();
+
+const FILE_ICONS: Array<[RegExp, string]> = [[/^image\//, "file-media"], [/^application\/pdf$/, "file-pdf"], [/^(text\/|application\/(json|xml|yaml|toml))/, "file-code"]];
+const fileIcon = (mediaType: string | null) => icon(FILE_ICONS.find(([re]) => mediaType && re.test(mediaType))?.[1] ?? "file");
+
+/** A thumbnail: the image, once the host granted its copy, or a preview while it is stored; an icon otherwise. */
+function paintThumb(thumb: HTMLElement): void {
+  const id = thumb.dataset.attachment;
+  const key = thumb.dataset.key;
+  const src = (id ? imageUris.get(id) : undefined) ?? (key ? previews.get(key) : undefined);
+  const gone = !!id && imageUris.get(id) === null;
+  thumb.classList.toggle("missing", gone);
+  thumb.title = gone ? "This copy is no longer there" : "";
+  if (src) {
+    const img = thumb.querySelector("img") ?? h("img", { attrs: { alt: "" } });
+    if (img.getAttribute("src") !== src) img.setAttribute("src", src);
+    thumb.replaceChildren(img);
+  } else thumb.replaceChildren(icon(gone ? "warning" : thumb.dataset.icon ?? "file"));
+}
+
+/** One attached file: its thumbnail or icon, its name (as text), what it is, and a remove control when it can go. */
+function fileChip(o: { name: string; detail: string; attachment: Attachment | null; key?: string; status?: AttachmentChip["status"]; remove?: () => void }): HTMLElement {
+  const a = o.attachment;
+  const thumb = h("span", { class: "file-thumb", attrs: { "aria-hidden": "true" } });
+  if (a?.image) thumb.dataset.attachment = a.id;
+  if (o.key) thumb.dataset.key = o.key;
+  const iconEl = o.status === "uploading" ? icon("loading", "codicon-modifier-spin") : o.status === "error" ? icon("error") : fileIcon(a?.mediaType ?? null);
+  thumb.dataset.icon = iconEl.className.replace(/^codicon codicon-/, "").split(" ")[0]!;
+  thumb.append(iconEl);
+  if (a?.image || (o.key && previews.has(o.key))) paintThumb(thumb);
+  const x = o.remove ? h("button", { class: "icon-btn file-x", title: `Remove ${o.name}`, label: `Remove ${o.name}`, attrs: { type: "button" } }, icon("close")) : null;
+  x?.addEventListener("click", o.remove!);
+  return h("li", { class: `file-chip${o.status ? ` file-${o.status}` : ""}`, title: o.name },
+    thumb, h("span", { class: "file-text" }, h("span", { class: "file-name" }, o.name), h("span", { class: `file-detail${o.status === "error" ? " err-text" : ""}` }, o.detail)), x);
+}
+
+/**
+ * The media type of the raster image whose base64 `data` this is, by its first bytes, or null: only such an image is
+ * previewed, never SVG or HTML, whatever the file says it is.
+ */
+export function rasterType(data: string): string | null {
+  let head = "";
+  try {
+    head = atob(data.slice(0, 16));
+  } catch {
+    return null;
+  }
+  const b = [...head].map((c) => c.charCodeAt(0));
+  if (b[0] === 0x89 && head.slice(1, 4) === "PNG") return "image/png";
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
+  if (head.startsWith("GIF8")) return "image/gif";
+  return head.startsWith("RIFF") && head.slice(8, 12) === "WEBP" ? "image/webp" : null;
+}
+
+/** Dropped from VS Code's Explorer or an editor: a URI, no file the webview can read. */
+const URI_TYPES = ["text/uri-list", "application/vnd.code.uri-list", "codefiles", "resourceurls"];
+
 // ------------------------------------------------------------------ questions for you
-function decisionCard(d: PendingDecision, generation: number, actions: Actions): HTMLElement {
+function decisionCard(d: PendingDecision, generation: number, actions: Actions, files: number): HTMLElement {
   const note = h("textarea", { class: "input note-input", attrs: { rows: "2", placeholder: "Note for the agents (optional; with Resume or Revise)", "aria-label": "Note for the agents" } });
   const VIEW: Record<string, { command: WebviewCommand; label: string; icon: string }> = {
     plan: { command: "openPlan", label: "Plan", icon: "go-to-file" }, review: { command: "openReview", label: "Review", icon: "go-to-file" },
@@ -378,6 +452,9 @@ function decisionCard(d: PendingDecision, generation: number, actions: Actions):
       ...d.views.map((v) => (VIEW[v] ? linkButton(VIEW[v]!.label, VIEW[v]!.icon, () => actions.command(VIEW[v]!.command)) : null)),
       linkButton("Changes", "git-compare", () => actions.command("openChanges"))),
     note,
+    // A decision never takes the composer's files: they would be lost to the run without a word.
+    files ? h("p", { class: "muted small files-hint" }, icon("attach"), ` ${files} file${files === 1 ? "" : "s"} below ${files === 1 ? "does" : "do"} not go with a decision. ` +
+      "To give them to the run, send them with a message first (a note for its next step), or choose Decide later, then /resume with a note.") : null,
     h("div", { class: "choices" }, ...choices));
 }
 
@@ -534,6 +611,39 @@ function settingsPanel(s: ViewState, actions: Actions, prefs: SettingsPrefs): HT
   ];
 }
 
+// ------------------------------------------------------------------ usage
+/** /usage as the panel shows it: each limit with a meter (its words say the same), then the rest as Claude prints it. */
+function usageNodes(r: UsageReport): HTMLElement[] {
+  return usageRows(r).map((row) => {
+    const indent = row.indent ? ` indent-${row.indent}` : "";
+    switch (row.kind) {
+      case "agent":
+      case "heading":
+        return h("div", { class: `usage-${row.kind}` }, row.text);
+      case "group":
+        return h("div", { class: `usage-group${indent}` }, row.text);
+      case "limit":
+        return h("div", { class: `usage-limit${indent}` }, row.text);
+      case "bar": {
+        const percent = Math.min(100, Math.max(0, row.percent ?? 0));
+        const fill = h("span", { class: `usage-fill${percent >= 90 ? " full" : percent >= 70 ? " high" : ""}` });
+        fill.style.width = `${percent}%`;
+        return h("div", { class: `usage-meter${indent}` },
+          h("span", { class: "usage-track", role: "meter", label: row.text, attrs: { "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(percent) } }, fill),
+          h("span", { class: "usage-percent" }, row.text));
+      }
+      case "muted":
+        return h("div", { class: `usage-muted muted${indent}` }, row.text);
+      case "error":
+        return h("div", { class: `usage-error${indent}` }, icon("error", "note-icon"), h("span", {}, row.text));
+      case "blank":
+        return h("div", { class: "usage-gap", attrs: { "aria-hidden": "true" } });
+      default:
+        return h("div", { class: `usage-text${indent}` }, row.text);
+    }
+  });
+}
+
 // ------------------------------------------------------------------ the view
 const STAGE_ICON: Record<StageStatus, string> = { done: "check", active: "circle-filled", stopped: "debug-pause", pending: "circle-outline" };
 const STAGE_WORD: Record<StageStatus, string> = { done: "done", active: "running", stopped: "stopped", pending: "to do" };
@@ -554,7 +664,7 @@ type Target = Backend | "pipeline" | "discuss";
 type Once = "pipeline" | "discuss";
 const ONCE: Record<Once, { icon: string; label: string }> = { pipeline: { icon: "run-all", label: "Pipeline" }, discuss: { icon: "comment-discussion", label: "Discuss" } };
 const otherAgent = (b: Backend): Backend => (b === "codex" ? "claude" : "codex");
-type Panel = "settings" | "commands" | "target";
+type Panel = "settings" | "usage" | "commands" | "target";
 
 /** Arrow keys, Home and End move between a menu's items; Escape closes it. */
 function menuKeys(menu: HTMLElement, close: () => void): void {
@@ -574,7 +684,11 @@ function menuKeys(menu: HTMLElement, close: () => void): void {
 }
 
 /** Builds the sidebar once, then updates it in place, re-creating only what changed (by identity, the reducer is immutable). */
-export function createUi(root: HTMLElement, actions: Actions, initialDraft = ""): { update(s: ViewState): void; focusComposer(): void; showSettings(): void; tick(): void } {
+export function createUi(root: HTMLElement, actions: Actions, initialDraft = ""): {
+  update(s: ViewState): void; focusComposer(): void; showSettings(): void; tick(): void; setUris(uris: Record<string, string | null>): void;
+  /** The host is to reload the page: `done` once the files read here are all with the host (none is lost with it). */
+  release(done: () => void): void;
+} {
   const stages = h("ol", { class: "stages" });
   const progressMeta = h("span", { class: "progress-meta" });
   const progress = h("nav", { class: "progress", label: "Workflow" }, stages, progressMeta);
@@ -603,6 +717,18 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
         return b;
       })()),
     settingsBody);
+  // /usage: a sheet like the settings', opened by a new report, refreshed or closed by the user.
+  const usageBody = h("div", { class: "sheet-body usage-body", attrs: { "aria-live": "polite" } });
+  const sheetButton = (name: string, label: string, onClick: () => void) => {
+    const b = h("button", { class: "icon-btn", title: label, label, attrs: { type: "button" } }, icon(name));
+    b.addEventListener("click", onClick);
+    return b;
+  };
+  const usageSheet = h("section", { class: "sheet usage-sheet", role: "region", label: "Usage", attrs: { id: "agentduo-usage", tabindex: "-1" } },
+    h("header", { class: "sheet-head" }, h("strong", {}, "Usage"), h("span", { class: "muted usage-hint" }, "Claude Code and Codex plan limits"), h("span", { class: "spacer" }),
+      sheetButton("refresh", "Refresh usage", () => actions.usage()),
+      sheetButton("close", "Close usage", () => setPanel(null, true))),
+    usageBody);
   const commandsMenu = h("ul", { class: "menu commands", role: "menu", label: "Commands", attrs: { id: "agentduo-commands" } });
   const targetMenu = h("ul", { class: "menu target-menu", role: "menu", label: "Send to", attrs: { id: "agentduo-target" } });
   const menu = h("ul", { class: "menu completions", role: "listbox", label: "Commands", attrs: { id: "agentduo-completions" } });
@@ -625,10 +751,15 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   editsBtn.addEventListener("click", () => actions.toggleEdits());
   const sendIcon = icon("arrow-up");
   const sendBtn = h("button", { class: "send-btn", attrs: { type: "button" } }, sendIcon);
+  const attachBtn = h("button", { class: "icon-btn attach", title: "Attach files: images, PDFs, text, code… (or paste an image, or Shift+drag files from your system here)", label: "Attach files", attrs: { type: "button" } }, icon("attach"));
+  attachBtn.addEventListener("click", () => actions.attach());
+  const files = h("ul", { class: "files composer-files", label: "Files for your next message" });
+  files.hidden = true;
+  const fileHint = h("div", { class: "file-hint muted small", role: "status" });
+  fileHint.hidden = true;
   // The menus float over the timeline, just above the box they belong to; the settings take room of their own.
-  const composer = h("footer", { class: "composer" }, settingsSheet,
-    h("div", { class: "composer-anchor" }, commandsMenu, targetMenu, menu,
-      h("div", { class: "composer-box" }, input, h("div", { class: "composer-bar" }, commandsBtn, targetBtn, editsBtn, h("span", { class: "spacer" }), sendBtn))));
+  const box = h("div", { class: "composer-box" }, files, input, h("div", { class: "composer-bar" }, attachBtn, commandsBtn, targetBtn, editsBtn, h("span", { class: "spacer" }), sendBtn));
+  const composer = h("footer", { class: "composer" }, settingsSheet, usageSheet, h("div", { class: "composer-anchor" }, commandsMenu, targetMenu, menu, fileHint, box));
   root.replaceChildren(progress, problem, timeline, pending, composer, announce);
   // The jump button floats at the bottom of the timeline (sticky), over the content, never pushing the composer.
   timeline.append(notice, empty, live, jump);
@@ -640,7 +771,7 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   // the sidebar is resized). Scrolling up unpins it; scrolling back down pins it again.
   let pinned = true;
   const items = new Map<string, { item: TimelineItem; el: HTMLElement }>();
-  let lastPending: { decision: unknown; permissions: unknown } = { decision: undefined, permissions: undefined };
+  let lastPending: { decision: unknown; permissions: unknown; files: number } = { decision: undefined, permissions: undefined, files: 0 };
   let lastSettings: unknown[] = [];
   const prefs: SettingsPrefs = { save: false, yes: false };
   let completions: Completion[] = [];
@@ -650,19 +781,24 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   /** The next message is a pipeline task or a question to discuss (picked in the menu); it goes back to the recipient once sent. */
   let once: Once | null = null;
   let panel: Panel | null = null;
+  /** The usage report the panel last opened for, and the one it shows (a new id opens it; one seen before never does). */
+  let usageSeen: number | null = null;
+  let usageShown: UsageReport | null = null;
   setPanel(null, false);
 
   const target = (): Target => once ?? state?.recipient ?? "codex";
-  /** Stop instead of send: something runs, and there is no text to send it as a note. */
-  const stopMode = () => !!state && isBusy(state) && !input.value.trim();
+  /** Stop instead of send: something runs, and there is neither text nor a file to send it as a note. */
+  const stopMode = () => !!state && sendStops(state, input.value, reads.size);
 
   function submit(): void {
     if (!state || !canSubmit(state)) return;
     const route: Route = once ?? "message";
     const text = input.value;
-    // An empty message only means something for a stopped run (the chat says how to continue it), or as a usage hint.
-    if (!text.trim() && route === "message" && state.status !== "paused") return;
-    actions.submit(text, route);
+    if (uploading(state) || reads.size) return hint("Some files are still being attached: send once they are ready.");
+    const ready = readyAttachments(state);
+    // An empty message only means something with files, for a stopped run (the chat says how to continue it), or as a usage hint.
+    if (!text.trim() && !ready.length && route === "message" && state.status !== "paused") return;
+    actions.submit(text, route, ready);
     input.value = "";
     actions.draft("");
     closedFor = null;
@@ -671,10 +807,101 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
     renderComposer(state);
   }
 
+  let hintTimer: ReturnType<typeof setTimeout> | undefined;
+  /** A line above the composer about its files, for a few seconds. */
+  function hint(text: string): void {
+    fileHint.textContent = text;
+    fileHint.hidden = false;
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(() => (fileHint.hidden = true), 8000);
+  }
+
+  let fileSeq = 0;
+  /** Pasted and dropped files, read here and handed to the host in the order given; a message waits for them. */
+  const reads = new FileQueue({
+    reader: () => new FileReader(),
+    send: (file) => actions.upload(file),
+    // A raster image keeps a preview until its copy is shown.
+    read: (key, data) => {
+      const type = data.length <= 12 * 1024 * 1024 ? rasterType(data) : null;
+      if (type) previews.set(key, `data:${type};base64,${data}`);
+    },
+    failed: (name) => hint(`${name} could not be read.`),
+    changed: () => {
+      shownFiles = null;
+      if (!state) return;
+      renderFiles(state);
+      renderSend(state);
+    },
+  });
+
+  /** Pasted or dropped files go to the host one by one, as base64. */
+  function uploadFiles(list: File[]): void {
+    for (const file of list) {
+      const name = file.name || `pasted-${Date.now()}.${(file.type.split("/")[1] ?? "bin").replace(/[^a-z0-9]/gi, "") || "bin"}`;
+      if (file.size > ATTACHMENT_LIMITS.fileBytes) {
+        hint(`${name} is ${formatBytes(file.size)}; a file can be at most ${formatBytes(ATTACHMENT_LIMITS.fileBytes)}.`);
+        continue;
+      }
+      if (!reads.add(`w${Date.now().toString(36)}${(++fileSeq).toString(36)}`, name, file)) {
+        return hint("This tab is reloading to show attached images: paste or drop the files again in a moment.");
+      }
+    }
+  }
+
+  let shownFiles: unknown = null;
+  function renderFiles(s: ViewState): void {
+    if (shownFiles === s.attachments) return;
+    shownFiles = s.attachments;
+    // The files still read here come after the host's, until it shows them.
+    const local = reads.waiting.filter((f) => !s.attachments.some((c) => c.key === f.key));
+    for (const key of previews.keys()) if (!s.attachments.some((c) => c.key === key && !c.attachment) && !local.some((f) => f.key === key)) previews.delete(key);
+    files.replaceChildren(...s.attachments.map((c) => fileChip({
+      name: c.name, key: c.key, attachment: c.attachment, status: c.status, remove: () => actions.removeFile(c.key),
+      detail: c.status === "uploading" ? "attaching…" : c.status === "error" ? c.error ?? "could not be attached" : c.attachment ? attachmentDetail(c.attachment) : "",
+    })), ...local.map((f) => fileChip({
+      name: f.name, key: f.key, attachment: null, status: "uploading", detail: f.sent ? "attaching…" : "reading…",
+      remove: () => {
+        if (reads.remove(f.key)) actions.removeFile(f.key);
+      },
+    })));
+    files.hidden = !s.attachments.length && !local.length;
+  }
+
+  // Paste: files on the clipboard (a screenshot) are attached; its text, if it has any, is pasted as usual.
+  input.addEventListener("paste", (e) => {
+    const list = [...(e.clipboardData?.files ?? [])];
+    if (!list.length) return;
+    if (!e.clipboardData?.getData("text/plain")) e.preventDefault();
+    uploadFiles(list);
+  });
+  // VS Code lets a drop reach the webview only with Shift held; files from the system come with their bytes, those from
+  // its Explorer only as URIs, which a webview cannot read.
+  const dragKind = (e: DragEvent) => {
+    const types = [...(e.dataTransfer?.types ?? [])];
+    return types.includes("Files") ? "files" : types.some((t) => URI_TYPES.includes(t)) ? "uris" : null;
+  };
+  composer.addEventListener("dragover", (e) => {
+    if (!dragKind(e)) return;
+    e.preventDefault();
+    box.classList.add("drop");
+  });
+  composer.addEventListener("dragleave", () => box.classList.remove("drop"));
+  composer.addEventListener("drop", (e) => {
+    box.classList.remove("drop");
+    const kind = dragKind(e);
+    if (!kind) return;
+    e.preventDefault();
+    const list = [...(e.dataTransfer?.files ?? [])];
+    if (list.length) uploadFiles(list);
+    else hint("Files from VS Code's Explorer cannot be dropped here: use Attach (the paperclip), or hold Shift and drag the file from Finder or your file manager.");
+  });
+
   function setPanel(next: Panel | null, focusBack: boolean): void {
     const was = panel;
     panel = next;
     settingsSheet.hidden = next !== "settings";
+    showUsage();
     commandsMenu.hidden = next !== "commands";
     targetMenu.hidden = next !== "target";
     commandsBtn.setAttribute("aria-expanded", String(next === "commands"));
@@ -684,7 +911,26 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
       (targetMenu.querySelector<HTMLButtonElement>('[aria-checked="true"]') ?? targetMenu.querySelector("button"))?.focus();
     } else if (next === "commands") commandsMenu.querySelector("button")?.focus();
     else if (next === "settings") settingsBody.querySelector<HTMLElement>("button, input")?.focus();
-    else if (focusBack) (was === "target" ? targetBtn : was === "commands" ? commandsBtn : input).focus();
+    else if (next === "usage") {
+      // Opened by a report, it takes the focus only from the composer, so Esc closes it; typing elsewhere is left alone.
+      if (document.activeElement === input || document.activeElement === document.body) usageSheet.focus();
+    } else if (focusBack) (was === "target" ? targetBtn : was === "commands" ? commandsBtn : input).focus();
+  }
+
+  /** A question for the user (a permission, a decision) goes before the usage panel, which comes back once it is answered. */
+  function showUsage(): void {
+    usageSheet.hidden = panel !== "usage" || (!!state && hasPending(state));
+  }
+
+  function renderUsage(s: ViewState): void {
+    const report = s.usage ?? null;
+    if (report === usageShown) return;
+    usageShown = report;
+    if (!report) return;
+    usageBody.replaceChildren(...usageNodes(report));
+    if (report.id === usageSeen) return;
+    usageSeen = report.id;
+    setPanel("usage", false);
   }
 
   function menuItem(o: { radio?: boolean; checked?: boolean; disabled?: boolean; mark: Node; label: string; detail: string; pick: () => void }): HTMLElement {
@@ -800,6 +1046,10 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
     if (e.key === "Enter" && plain) {
       e.preventDefault();
       submit();
+    } else if (e.key === "Escape" && panel === "usage") {
+      // The usage panel closes first: an answer under way goes on.
+      e.preventDefault();
+      setPanel(null, true);
     } else if (e.key === "Escape" && state && isBusy(state)) {
       e.preventDefault();
       actions.interrupt();
@@ -820,12 +1070,14 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   targetBtn.addEventListener("click", () => setPanel(panel === "target" ? null : "target", true));
   menuKeys(commandsMenu, () => setPanel(null, true));
   menuKeys(targetMenu, () => setPanel(null, true));
-  settingsSheet.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      setPanel(null, true);
-    }
-  });
+  for (const sheet of [settingsSheet, usageSheet]) {
+    sheet.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setPanel(null, true);
+      }
+    });
+  }
   // A click elsewhere closes an open menu (the settings stay until closed: they hold half-typed values).
   document.addEventListener("pointerdown", (e) => {
     if (panel !== "commands" && panel !== "target") return;
@@ -843,7 +1095,7 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
         actions.draft(input.value);
         input.focus();
         renderCompletions();
-      } else actions.submit(c.name, "message");
+      } else actions.submit(c.name, "message", []);
     });
     return h("li", { role: "none" }, item);
   }));
@@ -927,10 +1179,11 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   }
 
   function renderPending(s: ViewState): void {
-    if (lastPending.decision === s.decision && lastPending.permissions === s.permissions) return;
+    const waiting = readyAttachments(s).length;
+    if (lastPending.decision === s.decision && lastPending.permissions === s.permissions && lastPending.files === waiting) return;
     const hadFocus = pending.contains(document.activeElement);
-    lastPending = { decision: s.decision, permissions: s.permissions };
-    const cards = [...s.permissions.map((p) => permissionCard(p, actions)), ...(s.decision ? [decisionCard(s.decision, s.generation, actions)] : [])];
+    lastPending = { decision: s.decision, permissions: s.permissions, files: waiting };
+    const cards = [...s.permissions.map((p) => permissionCard(p, actions)), ...(s.decision ? [decisionCard(s.decision, s.generation, actions, waiting)] : [])];
     pending.replaceChildren(...cards);
     if (cards.length) {
       announce.textContent = s.permissions.length ? `${partyLabel(s.permissions[0]!.agent)} asks to use ${s.permissions[0]!.request.tool}` : "Your decision is needed";
@@ -944,9 +1197,10 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
     sendBtn.classList.toggle("stop", stopping);
     const label = stopping ? "Stop (Esc): /resume continues a stopped run" : once === "pipeline" ? "Hand the task to the pipeline (Enter)"
       : once === "discuss" ? "Start the discussion (Enter)" : s.status === "running" ? "Send the note (Enter)" : "Send (Enter)";
-    sendBtn.title = label;
+    sendBtn.title = (uploading(s) || reads.size) && !stopping ? "Files are still being attached…" : label;
     sendBtn.setAttribute("aria-label", label);
     sendBtn.disabled = !canSubmit(s);
+    attachBtn.disabled = !canSubmit(s);
   }
 
   function renderComposer(s: ViewState): void {
@@ -989,12 +1243,19 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
     update(s: ViewState): void {
       const prev = state;
       const grew = !prev || prev.timeline !== s.timeline || prev.current !== s.current || prev.turn !== s.turn || prev.discussion !== s.discussion;
+      // The report a reloaded or re-shown tab already had was seen then: only a new one opens the panel.
+      if (!prev) usageSeen = s.usage?.id ?? null;
       state = s;
+      // A file the host shows now (attaching, stored or failed) is the host's to show; the composer stops waiting for it.
+      reads.settle(new Set(s.attachments.map((c) => c.key)));
       renderProgress(s);
       renderProblem(s);
       renderTimeline(s);
       renderPending(s);
       renderComposer(s);
+      renderFiles(s);
+      renderUsage(s);
+      showUsage();
       const last = s.timeline.at(-1);
       if (prev && last && prev.timeline.at(-1) !== last && (last.kind === "finish" || last.kind === "step" || last.kind === "answer" || last.kind === "discussion")) {
         announce.textContent = last.kind === "finish" ? `Run ${last.phase.toLowerCase()}`
@@ -1007,7 +1268,12 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
       else jump.hidden = false;
     },
     focusComposer: () => input.focus(),
+    setUris(uris: Record<string, string | null>): void {
+      for (const [id, uri] of Object.entries(uris)) imageUris.set(id, uri);
+      for (const thumb of root.querySelectorAll<HTMLElement>(".file-thumb[data-attachment]")) if (thumb.dataset.attachment! in uris) paintThumb(thumb);
+    },
     showSettings: () => setPanel("settings", false),
+    release: (done) => reads.release(done),
     tick(): void {
       if (state?.current || state?.turn || state?.discussion) {
         renderLive(state);

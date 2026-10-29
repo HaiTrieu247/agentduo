@@ -1,5 +1,6 @@
 import { render, type RenderOptions } from "ink";
 import type { ChatStatus, ChatUi } from "../../chat.js";
+import { attachmentsText } from "../../core/attachment-types.js";
 import type { Decider, Decision, EventBus, PermissionDecider } from "../../events.js";
 import { ChatApp, ChatChannel } from "./ChatApp.js";
 import type { ViewKind } from "./HumanReviewPrompt.js";
@@ -15,6 +16,8 @@ export interface ChatInkOptions {
   onEscape(): void;
   /** Shift+Tab: switch the implementer's edit mode. */
   onCycleEdits?(): void;
+  /** r in the usage panel: look the usage up again. */
+  onUsageRefresh?(): void;
   views(): ViewKind[];
   readView(kind: ViewKind): Promise<string | null>;
   stdout?: NodeJS.WriteStream;
@@ -58,6 +61,9 @@ export function startChatInk(o: ChatInkOptions): ChatInkSession {
     setEdits: (mode) => channel.edits(mode),
     setRecipient: (backend) => channel.recipient(backend),
     setModels: (models) => channel.models(models),
+    usage: (report) => channel.usage(report),
+    setAttachments: (files) => channel.attachments(files),
+    sent: (files) => channel.info(`📎 sent with ${files.length === 1 ? "it" : `${files.length} files`}: ${attachmentsText(files)}`),
     exit: () => exit(),
   };
   let lastCtrlC = 0;
@@ -85,7 +91,7 @@ export function startChatInk(o: ChatInkOptions): ChatInkSession {
   if (o.stdin) options.stdin = o.stdin;
   const instance = render(
     <ChatApp bus={o.bus} channel={channel} version={o.version} workspace={o.workspace} verbose={o.verbose} onSubmit={onSubmit}
-      onEscape={o.onEscape} onCtrlC={onCtrlC} onCycleEdits={o.onCycleEdits} onDecision={onDecision} onPermission={broker.answer} views={o.views} readView={o.readView} />,
+      onEscape={o.onEscape} onCtrlC={onCtrlC} onCycleEdits={o.onCycleEdits} onUsageRefresh={o.onUsageRefresh} onDecision={onDecision} onPermission={broker.answer} views={o.views} readView={o.readView} />,
     options,
   );
   return {

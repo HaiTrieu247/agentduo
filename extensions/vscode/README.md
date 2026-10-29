@@ -33,7 +33,7 @@ Click the agentduo button in an editor's title bar (beside Claude Code's and Cod
   message. In a tab's title bar:
   - **＋** (or `/new` in the composer) opens a new conversation in a tab of its own; the other tabs keep theirs;
   - **Resume** and **Settings**;
-  - the `⋯` menu opens the run's plan, changes and report.
+  - the `⋯` menu opens the run's plan, changes and report, and **Usage**.
 - **Tabs work independently.** You can ask in one tab while another is still answering. A workspace runs one pipeline at
   a time, so `/pipeline` or `/resume` in another tab says which conversation's run is going. Settings (models, effort,
   edits, permissions) are the workspace's, so a change in one tab applies to every tab. Who a message goes to is each
@@ -55,6 +55,23 @@ Click the agentduo button in an editor's title bar (beside Claude Code's and Cod
   over the chip. The chip's tooltip and menu also tell what "default" currently means (for example
   `default → gpt-5.5 (codex doctor)`, or a Claude settings alias awaiting confirmation). The `/` button lists the
   commands, and typing `/` shows the same list with a description for each entry.
+- **Usage** (or `/usage` in the composer) opens a panel above the composer, as `/usage` opens one in the terminal chat:
+  how much of their plans' limits Claude Code and Codex have used, a meter per limit, then Claude's "What's contributing
+  to your limits usage?". Each part fills in as its agent answers. **Refresh** looks again; Esc or **✕** closes it, and
+  an answer under way goes on. A permission prompt or a decision goes before it.
+- **Attached files.** The paperclip under the input picks any files (images, PDFs, text, code…). You can also paste an
+  image (Cmd/Ctrl+V), or **hold Shift** while you drag files from Finder or Explorer onto the composer: VS Code needs
+  Shift to let a webview take a drop. A drag from VS Code's own Explorer or an editor carries no file the tab can read,
+  so use the paperclip for those. The files wait above the input, with a thumbnail for an image, until you send them
+  with your next message, question, discussion, task or note (Send with an empty input sends the files alone, also as
+  a note while the pipeline runs: the send button stops the run only when there is neither text nor a file); ✕
+  removes one. Files keep the order you gave them in, and a message waits until each is attached. A pasted or dropped
+  file goes to the extension host, which writes it to a file of its own and hands the engine its path; the engine
+  copies it into the conversation (`.agentduo/runs/conversations/<id>/attachments/`).
+  Sent files stay in the timeline, also after a reload; a copy that is gone shows a warning in place of its thumbnail.
+  Files waiting to be sent go away with `/new` and when the tab closes. A decision never takes them: send them with a
+  message first, or choose **Decide later**, then `/resume` with a note. Limits, the images sent as images and what
+  that costs are as in the terminal chat (see the main README).
 - **Settings** changes what the chat's settings commands change, and applies each choice at once. Model, effort,
   edits, reasoning and permissions are pickers: a click drops the list down. Codex's models are the ones its own
   `/model` offers (read with `codex debug models`), and its reasoning levels are those the chosen model takes. Claude's

@@ -53,7 +53,7 @@ export type SettingCommand =
   | { target: "codex.model"; model?: string | null; effort?: string | null }
   | { target: "codex.permissions"; preset?: CodexPermission };
 
-export type ChatCommand = "help" | "plan" | "diff" | "status" | "resume" | "new" | "quit" | "config";
+export type ChatCommand = "help" | "plan" | "diff" | "status" | "usage" | "resume" | "new" | "quit" | "config" | "attachments";
 
 export type ParsedInput =
   | { kind: "empty" }
@@ -66,6 +66,10 @@ export type ParsedInput =
   /** /discuss: the current recipient answers, the other agent reviews, until they agree. */
   | { kind: "discuss"; question: string }
   | { kind: "setting"; setting: SettingCommand; save: boolean; yes: boolean }
+  /** /attach <path>: `path` as the shell would read the word; `home`: it started with ~ (relative to the home directory). */
+  | { kind: "attach"; path: string; home: boolean }
+  /** /detach <n|id|all>. */
+  | { kind: "detach"; target: string }
   | { kind: "command"; name: ChatCommand; arg: string }
   | { kind: "usage"; text: string }
   | { kind: "unknown"; name: string };
@@ -87,6 +91,10 @@ export const COMMANDS: CommandInfo[] = [
   { name: "/plan", usage: "/plan", description: "show the final plan of the current run", args: false },
   { name: "/diff", usage: "/diff", description: "show what the current run changed", args: false },
   { name: "/status", usage: "/status", description: "show where the current run is, and what it has cost", args: false },
+  { name: "/usage", usage: "/usage", description: "show how much of their plans' limits Claude Code and Codex have used", args: false },
+  { name: "/attach", usage: "/attach <path>", description: "attach a file (image, PDF, text, code…) to your next message; quote a path with spaces, or escape them", args: true },
+  { name: "/attachments", usage: "/attachments", description: "list the files waiting to go with your next message", args: false },
+  { name: "/detach", usage: "/detach <n|all>", description: "remove a file waiting to go with your next message, or all of them", args: true },
   { name: "/resume", usage: "/resume [note | run id]", description: "continue the stopped or waiting run, optionally with a note for the agents", args: true },
   { name: "/new", usage: "/new", description: "start a new conversation (in VS Code, in a tab of its own); a stopped run stays resumable", args: false },
   { name: "/settings", usage: "/settings claude|codex <setting> …", description: "change a setting: model, effort, permissions, add-dir (add --save to keep it)", args: true },
@@ -220,8 +228,51 @@ function editsCommand(rest: string): ParsedInput {
 }
 
 const SIMPLE: Record<string, ChatCommand> = {
-  help: "help", plan: "plan", diff: "diff", status: "status", resume: "resume", new: "new", quit: "quit", exit: "quit", config: "config",
+  help: "help", plan: "plan", diff: "diff", status: "status", usage: "usage", resume: "resume", new: "new", quit: "quit", exit: "quit", config: "config",
+  attachments: "attachments",
 };
+
+/**
+ * One path as a POSIX shell reads one word, without running anything: 'single quotes' keep everything as it is;
+ * "double quotes" keep everything but \" \\ \$ \`; outside quotes a backslash keeps the next character (an escaped
+ * space, as a terminal writes a dropped file). Quoted and unquoted parts join ('it'"'"'s' is it's; 'it''s' is its).
+ * Unlike a shell, a path that starts with ~ or ~/ means the home directory inside quotes too ("~/My notes.pdf"), as
+ * people write it; \~ or ./~ names a directory called ~. No ~user, no globs, no variables. The text is not normalized.
+ */
+export function parsePathArg(input: string): { path: string; home: boolean } | { error: string } {
+  const s = input.trim();
+  let out = "";
+  /** The path starts with an escaped character (\~): it is only itself. */
+  let escapedFirst = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (c === "'") {
+      const end = s.indexOf("'", i + 1);
+      if (end < 0) return { error: "a ' is not closed" };
+      out += s.slice(i + 1, end);
+      i = end;
+    } else if (c === '"') {
+      let j = i + 1;
+      for (; j < s.length && s[j] !== '"'; j++) {
+        if (s[j] === "\\" && j + 1 < s.length && '"\\$`'.includes(s[j + 1]!)) j++;
+        out += s[j];
+      }
+      if (j >= s.length) return { error: 'a " is not closed' };
+      i = j;
+    } else if (c === "\\") {
+      if (i + 1 < s.length) {
+        if (!out) escapedFirst = true;
+        out += s[++i];
+      }
+    } else if (/\s/.test(c)) {
+      return { error: "one path at a time: put it in quotes, or escape its spaces with \\" };
+    } else out += c;
+  }
+  if (!out) return { error: "no path" };
+  return !escapedFirst && (out === "~" || out.startsWith("~/")) ? { path: out.slice(1), home: true } : { path: out, home: false };
+}
+
+const ATTACH_USAGE = 'usage: /attach <path>, e.g. /attach screenshots/bug.png or /attach "~/Desktop/My notes.pdf" (one file at a time)';
 
 /** What a line typed in the chat asks for. */
 export function parseInput(raw: string): ParsedInput {
@@ -243,6 +294,13 @@ export function parseInput(raw: string): ParsedInput {
       return settingsCommand(rest);
     case "edits":
       return editsCommand(rest);
+    case "attach": {
+      if (!rest) return usage(ATTACH_USAGE);
+      const parsed = parsePathArg(rest);
+      return "error" in parsed ? usage(`${parsed.error}. ${ATTACH_USAGE}`) : { kind: "attach", ...parsed };
+    }
+    case "detach":
+      return rest && !/\s/.test(rest) ? { kind: "detach", target: rest } : usage("usage: /detach <n|all>: n as /attachments numbers the files");
   }
   const simple = SIMPLE[name];
   return simple ? { kind: "command", name: simple, arg: rest } : { kind: "unknown", name: `/${name}` };
@@ -366,6 +424,8 @@ export function complete(input: string): Completion[] {
   if (cmd === "pipeline" && !args.length) return hint("<task>", "what both agents should do, e.g. Add JWT auth");
   if (cmd === "discuss" && !args.length) return hint("<question>", "what the agents should discuss until they agree");
   if (cmd === "resume" && !args.length) return hint("[note | run id]", "a note for the agents, or the id of another run to continue");
+  if (cmd === "attach" && !args.length) return hint("<path>", "a file to send with your next message; quote it if it has spaces (~/ is your home, quoted or not)");
+  if (cmd === "detach" && !args.length) return [...hint("<n>", "the number /attachments gives the file"), ...pick([{ word: "all", description: "remove every waiting file" }])];
   return [];
 }
 
