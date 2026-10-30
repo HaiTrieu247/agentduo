@@ -139,7 +139,9 @@ a rail of dots, and one box to write in. Session actions live in the view's titl
 
 Icons are [Codicons](https://github.com/microsoft/vscode-codicons), VS Code's own icon font (CC BY 4.0, a
 devDependency): the build copies `codicon.css`, `codicon.ttf` and the licence to `dist/webview`, and the page loads
-that stylesheet before ours. The Claude and Codex marks stay agentduo's own SVG drawings.
+that stylesheet before ours. The Claude and Codex marks are their makers' logos, as inline SVG paths in
+`render.ts` (Claude's spark in its orange, OpenAI's blossom for Codex in the text colour; high contrast turns both to
+the text colour). The empty sidebar shows no logos: the name agentduo is its focal point.
 
 Every status also has a text label or an icon, so it never relies on colour alone. The status colours are made for
 icons, and in light themes they are too pale for small text. There, status text mixes them with

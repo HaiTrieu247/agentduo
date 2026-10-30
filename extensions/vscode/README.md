@@ -79,8 +79,8 @@ Click the agentduo button in an editor's title bar (beside Claude Code's and Cod
   allowed and denied tool rules and its extra directories are tags: type one and press Enter to add it, and the × on a
   rule removes it. A box below saves the changes to `.agentduo/config.yaml`.
 - Each answer and each pipeline step is drawn on a line of dots, as in VS Code's own chat views: one row per tool the
-  agent used (Bash, Read, Edit…), folded once it is done, then the answer. Answers are shown whole, with an Anthropic or
-  OpenAI mark and the model they ran on. Their Markdown (headings, lists, code, tables, quotes) is rendered as text
+  agent used (Bash, Read, Edit…), folded once it is done, then the answer. Answers are shown whole, with Claude's or
+  OpenAI's logo and the model they ran on. Their Markdown (headings, lists, code, tables, quotes) is rendered as text
   elements, never as HTML, and links show their target as a tooltip without opening it.
 - **agentduo: Open Chat** puts the cursor in the composer. Enter sends and Shift+Enter starts a new line; while an IME
   is composing, Enter only commits the word. The mode chip opens Claude Code's mode menu (Manual, Edit automatically,
@@ -120,4 +120,6 @@ browser for older runs: **Resume** continues the latest run, as `/resume` does i
 
 The icons are [Codicons](https://github.com/microsoft/vscode-codicons) by Microsoft, licensed under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) and bundled unchanged (`dist/webview/codicon-LICENSE.txt`).
-The Claude and Codex marks are agentduo's own drawings, not either company's logo.
+The Claude and OpenAI logos are trademarks of Anthropic and OpenAI, shown only to say which agent answers; agentduo
+is not affiliated with either company. Claude's comes from [Simple Icons](https://simpleicons.org) (CC0) and OpenAI's
+from [Lobe Icons](https://github.com/lobehub/lobe-icons) (MIT, © 2023 LobeHub).

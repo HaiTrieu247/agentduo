@@ -20,9 +20,6 @@
   --ok-text: var(--ok);
   --warn-text: var(--warn);
   --err-text: var(--err);
-  /* Each agent's mark; its name is always written beside it, so the colour is never the only identity. */
-  --claude: var(--vscode-charts-orange, #d18616);
-  --codex: var(--vscode-charts-green, #388a34);
 }
 
 /* Light themes' status colours are made for icons and are too pale for small text (Light Modern: 1.9:1 for passed,
@@ -125,9 +122,9 @@ body {
 .notice { font-size: 11px; border-bottom: 1px dashed var(--border); padding-bottom: 6px; }
 
 .empty { margin: auto 0; padding: 24px 8px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 8px; }
-.empty-marks { display: flex; gap: 12px; }
-.empty-marks .mark { width: 26px; height: 26px; }
-.empty-title { font-size: 15px; font-weight: 600; }
+/* The name is the welcome screen's one focal point; the agents' logos stay beside their names elsewhere. */
+.empty-title { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
+.empty-version { margin-left: 6px; font-size: 12px; font-weight: 400; letter-spacing: 0; color: var(--muted); }
 .empty p { margin: 0; max-width: 32em; }
 
 /* Your message: a box of its own, as VS Code's chat views show it. */
@@ -153,9 +150,8 @@ body {
 .turn-head .role, .turn-head .model { color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
 .turn-head .meta { margin-left: auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
 
+/* Each agent's logo, in its own colours (render.ts); its name is always written beside it. */
 .mark { flex: none; vertical-align: -2px; }
-.mark-claude { color: var(--claude); }
-.mark-codex { color: var(--codex); }
 .speaker-id { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
 .speaker-id .company { color: var(--muted); font-size: 11px; }
 
@@ -665,8 +661,8 @@ body.vscode-high-contrast-light .sheet, body.vscode-high-contrast-light .group, 
 body.vscode-high-contrast-light .chip, body.vscode-high-contrast-light .pick-list {
   border: 1px solid var(--vscode-contrastBorder, currentColor);
 }
-/* High contrast: the marks take the text colour; the names beside them say who is who. */
-body.vscode-high-contrast .mark, body.vscode-high-contrast-light .mark { color: currentColor; }
+/* High contrast: the logos take the text colour; the names beside them say who is who. */
+body.vscode-high-contrast .mark path, body.vscode-high-contrast-light .mark path { fill: currentColor; }
 body.vscode-high-contrast .usage-track, body.vscode-high-contrast-light .usage-track { border: 1px solid var(--vscode-contrastBorder, currentColor); }
 body.vscode-high-contrast .stage-active, body.vscode-high-contrast-light .stage-active { outline: 1px solid var(--vscode-contrastActiveBorder, currentColor); }
 body.vscode-high-contrast .menu-item:focus-visible, body.vscode-high-contrast-light .menu-item:focus-visible,
