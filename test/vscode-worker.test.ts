@@ -1,10 +1,11 @@
 // The VS Code extension's engine worker, built and copied outside the repository, driven over real IPC with the
 // fake codex/claude CLIs as subprocesses.
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PROTOCOL_VERSION } from "../extensions/vscode/src/protocol.js";
 import { WorkerError } from "../extensions/vscode/src/workerClient.js";
+import { NOT_REPO_NOTE } from "../src/chat.js";
 import { main, type CliIO } from "../src/cli.js";
 import { acquireWorkspaceLock, RunStore } from "../src/core/state.js";
 import type { Attachment } from "../src/core/attachment-types.js";
@@ -399,6 +400,25 @@ describe("vscode worker", () => {
     await next.h.client.request({ type: "submit", conversation: C, text: "/resume", route: "message" });
     await next.h.waitFor(finished("DONE"));
     expect(latest().phase).toBe("DONE");
+  });
+
+  it("opens in a folder outside a git repository: questions are answered, a pipeline waits for `git init`", async () => {
+    const plain = join(t.path, "plain");
+    mkdirSync(plain);
+    writeWorkspaceConfig(plain, fake);
+    const h = new WorkerHarness({ script: worker.script, workspace: plain, env: { ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg") } });
+    harnesses.push(h);
+    await h.client.start();
+    const init = await h.client.request({ type: "initialize", workspace: plain, configPath: null });
+    expect([init.problem, init.hint]).toEqual([null, NOT_REPO_NOTE]);
+    fake.setScenario({ chat_codex: [{ answer: "Hi." }] });
+    await h.client.request({ type: "submit", conversation: C, text: "Hello?", route: "message" });
+    const answered = await h.waitFor(isEvent("turn.finished"));
+    expect(answered.kind === "event" && answered.event).toMatchObject({ status: "success", answer: "Hi." });
+    await h.client.request({ type: "submit", conversation: C, text: "Make app.txt fixed", route: "pipeline" });
+    await h.waitFor((m) => m.kind === "ui" && m.conversation === C && m.update.type === "info" && m.update.text.includes("A pipeline run needs a git repository"));
+    expect(fake.calls().map((c) => c.role)).toEqual(["chat_codex"]);
+    expect(h.events().some((e) => e.type === "run.started")).toBe(false);
   });
 
   it("reports a missing CLI, a broken config and a lock held by the CLI, without calling an agent", async () => {

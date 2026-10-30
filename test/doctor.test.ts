@@ -52,6 +52,19 @@ describe("runDoctor", () => {
     expect(quiet).not.toContain("implementer edits rely on");
   });
 
+  it("only notes a folder outside a git repository, where the chat works and a run does not", async () => {
+    const t = tempDir();
+    dirs.push(t);
+    const plain = join(t.path, "plain");
+    mkdirSync(plain);
+    const checks = await runDoctor({ dir: plain, cfg: testConfig(new FakeClis(t.path)), sources: [], runsDir: join(plain, ".agentduo", "runs") });
+    expect(checks.filter((c) => !c.ok && c.required)).toEqual([]);
+    expect(checks.find((c) => c.message.startsWith("workspace"))).toEqual({
+      ok: false, required: false, message: `workspace not inside a git repository: ${plain} (the chat and /discuss work; a pipeline run needs 'git init' first)`,
+    });
+    expect(checks.find((c) => c.message.startsWith("codex supports"))).toMatchObject({ ok: true, message: expect.stringContaining("--skip-git-repo-check") });
+  });
+
   it("checks a runs dir anywhere in the repository, which agentduo ignores itself", async () => {
     const t = tempDir();
     dirs.push(t);

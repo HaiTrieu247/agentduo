@@ -77,7 +77,7 @@ class Controller implements vscode.Disposable, PanelHost {
     const session = this.current();
     if (session) return session;
     if (!this.folders().length) {
-      void vscode.window.showInformationMessage("agentduo needs a folder: open the folder (inside a git repository) to work in.");
+      void vscode.window.showInformationMessage("agentduo needs a folder: open the folder to work in.");
       return null;
     }
     await this.chooseWorkspace();

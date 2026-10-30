@@ -128,6 +128,12 @@ describe("CodexBackend", () => {
     expect(backend.buildArgs({ mode: "text", lastMessageFile: "/tmp/last.md" }).at(-1)).toBe("-");
   });
 
+  it("lets a conversation turn run outside a git repository; the workflow's calls run inside one", () => {
+    const backend = new CodexBackend(defaultConfig().codex, "/ws");
+    expect(backend.buildArgs({ mode: "text", lastMessageFile: "/tmp/last.md" })).toContain("--skip-git-repo-check");
+    expect(backend.buildArgs({ schemaName: "plan", lastMessageFile: "/tmp/last.json", role: "planner" })).not.toContain("--skip-git-repo-check");
+  });
+
   it("finalizes from the last-message file, then from the stream", () => {
     const backend = new CodexBackend(defaultConfig().codex, "/ws");
     const t = tempDir();

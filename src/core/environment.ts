@@ -67,13 +67,21 @@ export function missingCli(cfg: ConfigData, backends: readonly Backend[], proces
 }
 
 /**
- * Why agents cannot run in this workspace with `cfg`, or null when they can. `saved`: cfg is a run's saved config.
- * `backends`: the CLIs that must be there (default: every one the pipeline's roles use; none to open the chat, which
- * checks each agent when it is asked).
+ * What the work needs besides a valid config. `backends`: the CLIs that must be there (default: every one the
+ * pipeline's roles use; none to open the chat, which checks each agent when it is asked). `repo`: a git repository
+ * (default), which the workflow snapshots and diffs; the chat opens anywhere and checks it when a run starts.
+ * `saved`: the config is a run's saved one.
  */
+export interface RunnableNeeds {
+  backends?: readonly Backend[];
+  repo?: boolean;
+  saved?: boolean;
+}
+
+/** Why agents cannot run in this workspace with `cfg` for work that needs `o`, or null when they can. */
 export function runnableProblem(env: Pick<WorkspaceEnv, "workspace" | "isRepo">, cfg: ConfigData, source: string,
-  processEnv: NodeJS.ProcessEnv, saved = false, backends?: readonly Backend[]): RunnableProblem | null {
-  if (!env.isRepo) {
+  processEnv: NodeJS.ProcessEnv, o: RunnableNeeds = {}): RunnableProblem | null {
+  if (o.repo !== false && !env.isRepo) {
     return { kind: "not_repo", message: `${env.workspace} is not inside a git repository (run 'git init' here, or 'duo init' to be asked)` };
   }
   try {
@@ -82,7 +90,7 @@ export function runnableProblem(env: Pick<WorkspaceEnv, "workspace" | "isRepo">,
     if (e instanceof ConfigError) return { kind: "config", message: e.message };
     throw e;
   }
-  return missingCli(cfg, backends ?? Object.values(cfg.agents), processEnv, saved);
+  return missingCli(cfg, o.backends ?? Object.values(cfg.agents), processEnv, o.saved);
 }
 
 /** `duo doctor`: a config that does not validate is reported, and the defaults stand in for the remaining checks. */

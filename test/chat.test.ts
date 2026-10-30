@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Chat, type ChatUi } from "../src/chat.js";
+import { Chat, NOT_REPO_NOTE, type ChatUi } from "../src/chat.js";
 import type { Attachment } from "../src/core/attachment-types.js";
 import { existingAttachmentFile } from "../src/core/attachments.js";
 import { Conversation } from "../src/core/conversation.js";
@@ -564,6 +564,48 @@ describe("Chat: a conversation with both agents", () => {
     await chat.submit("/pipeline Make app.txt fixed");
     expect(ui.errors.at(-1)).toContain("CLI not found: codex");
     expect(RunStore.list(runsDir)).toEqual([]);
+  });
+
+  it("answers and discusses outside a git repository, where a run waits for `git init`", async () => {
+    const plain = join(t.path, "plain");
+    mkdirSync(plain);
+    const plainRuns = join(plain, ".agentduo", "runs");
+    // No gate: check.mjs lives in the repository the other tests use.
+    const chat = new Chat({ cfg: testConfig(fake, { gates: [] }), workspace: plain, runsDir: plainRuns, configFile: join(plain, ".agentduo", "config.yaml"), bus, decider: new ScriptedDecider(), ui });
+    chats.push(chat);
+    await chat.greet();
+    expect(ui.lines).toContain(NOT_REPO_NOTE);
+    fake.setScenario({
+      ...happy(), chat_codex: [{ answer: "Hi." }],
+      discuss_answer: [{ answer: "Use Postgres." }], discuss_critique: [{ answer: "Agreed.\nVERDICT: AGREE" }], discuss_synthesis: [{ answer: "Postgres." }],
+    });
+    await chat.submit("Hello?");
+    await chat.idle();
+    expect(answers()).toEqual([expect.objectContaining({ backend: "codex", status: "success", answer: "Hi." })]);
+    // `codex exec` refuses to start outside a repository without it.
+    expect(argsOf("chat_codex")).toContain("--skip-git-repo-check");
+    await chat.submit("/discuss Redis or Postgres?");
+    await chat.idle();
+    expect(events.find((e) => e.type === "discussion.finished")).toMatchObject({ status: "agreed", answer: "Postgres." });
+    expect(argsOf("discuss_critique")).not.toContain("--skip-git-repo-check"); // Claude needs no such flag
+
+    const asked = fake.calls().length;
+    const refusal = `A pipeline run needs a git repository, to snapshot and diff your files, and ${plain} is not inside one: run 'git init' here first. ` +
+      "Questions and /discuss work without it.";
+    for (const send of [() => chat.submit("/pipeline Make app.txt fixed"), () => chat.submitPipeline("Make app.txt fixed"), () => chat.submit("/resume")]) {
+      ui.errors.length = 0;
+      await send();
+      expect(ui.errors).toEqual([refusal]);
+    }
+    expect(fake.calls()).toHaveLength(asked);
+    expect(RunStore.list(plainRuns)).toEqual([]);
+
+    // Checked each time: once the folder is a repository, the next /pipeline runs, without the flag.
+    execFileSync("git", ["init", "-q"], { cwd: plain });
+    await chat.submit("/pipeline Make app.txt fixed");
+    await chat.idle();
+    expect(RunStore.list(plainRuns).map((st) => st.phase)).toEqual(["DONE"]);
+    expect(argsOf("planner")).not.toContain("--skip-git-repo-check");
   });
 
   it("gives Claude in the chat the implementer's permission mode (/mode, Shift+Tab), and no other implementer flag", async () => {

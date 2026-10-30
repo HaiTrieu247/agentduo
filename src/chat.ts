@@ -135,6 +135,10 @@ export function resumeHint(runsDir: string, workspace: string): string | null {
   return `Run ${st.taskId} (${firstLine(st.task, 60)}) ${where}. Type /resume to continue it.`;
 }
 
+/** What the chat says as it opens outside a git repository (the extension too). */
+export const NOT_REPO_NOTE = "This folder is not inside a git repository: you can ask Claude and Codex and /discuss here, but a pipeline run " +
+  "needs one (run 'git init' here first).";
+
 /** The one thing agents do for this chat at a time: a pipeline run, the answer to a question, or a discussion. */
 type Execution =
   | { kind: "pipeline"; store: RunStore; workflow: Workflow; cfg: ConfigData; done: Promise<void> }
@@ -244,13 +248,17 @@ export class Chat {
     this.change(settings.mode(nextMode(permissionMode(this.cfg))), false, () => this.modeText());
   }
 
-  /** Shows the settings and models, starts looking the models up, and points at a run an earlier session left stopped or waiting. */
+  /**
+   * Shows the settings and models, starts looking the models up, says what works outside a git repository, and points
+   * at a run an earlier session left stopped or waiting.
+   */
   async greet(): Promise<void> {
     this.o.ui.setMode(permissionMode(this.cfg));
     this.o.ui.setRecipient(this.recipient);
     this.o.ui.setSettings?.(settingsView(this.cfg));
     this.o.ui.setModels(this.models.current());
     this.models.refresh();
+    if (!(await this.git.isRepo())) this.o.ui.info(NOT_REPO_NOTE);
     const hint = resumeHint(this.o.runsDir, this.o.workspace);
     if (hint) this.o.ui.info(hint);
   }
@@ -278,6 +286,7 @@ export class Chat {
         ui.info(`Your messages now go to ${AGENT_NAMES[input.backend]}. /claude or /codex switches; /pipeline <task> hands a task to both.`);
         return;
       case "pipeline":
+        if (await this.outsideRepo()) return;
         return this.withFiles(o, (files) => this.startPipeline(input.task, files));
       case "discuss":
         return this.withFiles(o, (files) => this.discuss(input.question, files));
@@ -306,6 +315,7 @@ export class Chat {
       this.o.ui.info("usage: /pipeline <task>, e.g. /pipeline Add JWT auth");
       return;
     }
+    if (await this.outsideRepo()) return;
     this.withFiles(o, (files) => this.startPipeline(text, files));
   }
 
@@ -706,6 +716,17 @@ export class Chat {
   }
 
   // ------------------------------------------------------------------ pipeline
+  /**
+   * A run snapshots and diffs the workspace with git: outside a repository it says so (the files waiting stay), and
+   * nothing starts. Checked each time, since `git init` may come during the chat.
+   */
+  private async outsideRepo(): Promise<boolean> {
+    if (await this.git.isRepo()) return false;
+    this.o.ui.info(`A pipeline run needs a git repository, to snapshot and diff your files, and ${this.o.workspace} is not inside one: ` +
+      "run 'git init' here first. Questions and /discuss work without it.", "error");
+    return true;
+  }
+
   private startPipeline(task: string, files: Attachment[] = []): void {
     if (this.active) return this.busy();
     if (this.elsewhere()) return;
@@ -986,6 +1007,7 @@ export class Chat {
       case "usage":
         return this.usage();
       case "resume":
+        if (await this.outsideRepo()) return;
         return this.resume(arg, o);
       case "attachments":
         ui.info(this.attachmentsText());

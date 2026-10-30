@@ -6,8 +6,8 @@ import { Command, CommanderError, Option } from "commander";
 import { killAllActive } from "./agents/process.js";
 import { Chat, newRun } from "./chat.js";
 import { settings } from "./core/settings.js";
-import { configFromSaved, ConfigError, type Backend, type ConfigData } from "./core/config.js";
-import { diagnose, EnvironmentError, prepareEnvironment, runnableProblem, type WorkspaceEnv } from "./core/environment.js";
+import { configFromSaved, ConfigError, type ConfigData } from "./core/config.js";
+import { diagnose, EnvironmentError, prepareEnvironment, runnableProblem, type RunnableNeeds, type WorkspaceEnv } from "./core/environment.js";
 import { Git } from "./core/git.js";
 import { initRepo } from "./core/init.js";
 import type { Review } from "./core/outputs.js";
@@ -136,9 +136,9 @@ async function prepare(io: CliIO, opts: CommonOptions): Promise<Env> {
   return env;
 }
 
-/** `backends`: the CLIs that must be found (default: those of the pipeline's roles). */
-function requireRunnable(env: Env, cfg: ConfigData, source: string, io: CliIO, saved = false, backends?: Backend[]): void {
-  const problem = runnableProblem(env, cfg, source, io.env, saved, backends);
+/** Default: the workflow's needs, a git repository and the CLIs of the pipeline's roles. */
+function requireRunnable(env: Env, cfg: ConfigData, source: string, io: CliIO, o: RunnableNeeds = {}): void {
+  const problem = runnableProblem(env, cfg, source, io.env, o);
   if (problem) throw new CliExit(EXIT.ERROR, problem.message);
 }
 
@@ -325,11 +325,12 @@ async function runCommand(io: CliIO, words: string[], opts: RunOptions, explicit
 
 /**
  * `duo` alone: a chat session in this workspace, holding its lock until the user leaves. It opens without either CLI
- * (help and settings need none); each question checks its agent's CLI, and /pipeline those of every role.
+ * (help and settings need none) and outside a git repository; each question checks its agent's CLI, and /pipeline
+ * those of every role and the repository.
  */
 async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
   const env = await prepare(io, opts);
-  requireRunnable(env, env.cfg, env.sources.join(", "), io, false, []);
+  requireRunnable(env, env.cfg, env.sources.join(", "), io, { backends: [], repo: false });
   withAcceptEdits(env.cfg, opts);
   const release = lockWorkspace(env.runsDir);
   try {
@@ -382,7 +383,7 @@ async function resumeCommand(io: CliIO, runId: string | undefined, opts: ResumeO
     // A run keeps the config it started with, unless asked to pick up the current one.
     const useSaved = !opts.reloadConfig && store.exists("config.json");
     const cfg = withAcceptEdits(useSaved ? configFromSaved(store.readJson("config.json")) : env.cfg, opts);
-    requireRunnable(env, cfg, useSaved ? store.path("config.json") : env.sources.join(", "), io, useSaved);
+    requireRunnable(env, cfg, useSaved ? store.path("config.json") : env.sources.join(", "), io, { saved: useSaved });
     if (!useSaved || opts.acceptEdits) store.writeJson("config.json", cfg);
     state.workspace ??= env.workspace;
     return await execute(io, env, cfg, store, state, opts, opts.decision ? { decision: opts.decision, note: opts.note } : undefined);

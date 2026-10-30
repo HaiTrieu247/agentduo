@@ -121,7 +121,7 @@ Không cần cài gói npm `agentduo`. Máy chỉ cần Node, git, Codex CLI và
 
 Chi tiết xem [extensions/vscode/README.md](../extensions/vscode/README.md). Khi phát triển, mở repo trong VS Code rồi nhấn F5 (**Run agentduo extension**).
 
-Yêu cầu: Node.js ≥ 22.12, git, Codex CLI và Claude Code. Workspace phải nằm trong một git repo. Nếu chưa có, `duo init` sẽ hỏi có muốn `git init` không.
+Yêu cầu: Node.js ≥ 22.12, git, Codex CLI và Claude Code. Chạy pipeline (`duo "<task>"`, `/pipeline`) thì workspace phải nằm trong một git repo, vì agentduo chụp snapshot và tạo diff bằng git. Nếu chưa có, `duo init` sẽ hỏi có muốn `git init` không. Chat và `/discuss` thì chạy ở thư mục nào cũng được.
 
 ## Workspace
 

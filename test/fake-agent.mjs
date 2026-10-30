@@ -23,7 +23,7 @@ import { dirname } from "node:path";
 import { createInterface } from "node:readline";
 
 const HELP = {
-  codex: "Usage: codex exec [OPTIONS] --json --output-schema --sandbox --output-last-message --cd",
+  codex: "Usage: codex exec [OPTIONS] --json --output-schema --sandbox --output-last-message --cd --skip-git-repo-check",
   claude: "Usage: claude [options] --output-format --input-format --verbose --json-schema --permission-mode --permission-prompts --permission-prompt-tool --tools --allowedTools --disallowedTools",
 };
 

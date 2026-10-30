@@ -1184,7 +1184,7 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   function renderEmpty(s: ViewState): void {
     empty.hidden = s.timeline.length > 0 || !!s.current || !!s.turn || !!s.discussion;
     if (empty.hidden) return;
-    const text = s.session === "no-folder" ? "Open a folder (inside a git repository) to work in."
+    const text = s.session === "no-folder" ? "Open a folder to work in."
       : s.session === "choose-folder" ? "This window has several folders: choose the one agentduo works in."
         : "Ask Codex or Claude anything. The menu under the input picks who answers, or hands a task to the Pipeline: Codex plans and reviews it, Claude critiques the plan and implements it. / lists the commands.";
     empty.replaceChildren(

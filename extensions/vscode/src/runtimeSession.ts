@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { killAllActive } from "../../../src/agents/process.js";
-import { Chat, resumeHint, type ChatUi } from "../../../src/chat.js";
+import { Chat, NOT_REPO_NOTE, resumeHint, type ChatUi } from "../../../src/chat.js";
 import { AttachmentError } from "../../../src/core/attachments.js";
 import { isPermissionMode, parseInput, type Backend, type SettingCommand } from "../../../src/core/commands.js";
 import { ConfigError, type ConfigData } from "../../../src/core/config.js";
@@ -193,8 +193,8 @@ export class RuntimeSession {
     return {
       ...result, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, configSources: env.sources,
       pipeline: pipelineOf(env.cfg), mode: safePermissionMode(env.cfg), models: this.modelsFor(env).current(), settings: safeSettings(env.cfg), warnings: env.warnings,
-      problem: runnableProblem(env, env.cfg, env.sources.join(", "), this.o.env) ?? locked,
-      hint: resumeHint(env.runsDir, env.workspace),
+      problem: runnableProblem(env, env.cfg, env.sources.join(", "), this.o.env, { repo: false }) ?? locked,
+      hint: resumeHint(env.runsDir, env.workspace) ?? (env.isRepo ? null : NOT_REPO_NOTE),
     };
   }
 
@@ -221,8 +221,9 @@ export class RuntimeSession {
       throw e;
     }
     for (const warning of env.warnings) this.uiFor(conversation).info(`warning: ${warning}`);
-    // As `duo` opens its chat: a git repository and a valid config; each question checks its own agent's CLI.
-    const problem = runnableProblem(env, env.cfg, env.sources.join(", "), this.o.env, false, needs(env.cfg));
+    // As `duo` opens its chat: a valid config, in any folder (a run checks for the git repository it needs); each
+    // question checks its own agent's CLI.
+    const problem = runnableProblem(env, env.cfg, env.sources.join(", "), this.o.env, { backends: needs(env.cfg), repo: false });
     if (problem) throw new SessionError(problem.kind, problem.message);
     let release: () => void;
     try {

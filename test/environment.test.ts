@@ -86,11 +86,14 @@ describe("runnableProblem", () => {
     expect(runnableProblem({ workspace: "/x", isRepo: false }, ok, "", env)).toEqual({
       kind: "not_repo", message: "/x is not inside a git repository (run 'git init' here, or 'duo init' to be asked)",
     });
+    // The chat opens anywhere; a run checks for the repository itself.
+    expect(runnableProblem({ workspace: "/x", isRepo: false }, ok, "", env, { repo: false })).toBeNull();
     const bad = { ...ok, limits: { ...ok.limits, max_retries: -1 } };
     expect(runnableProblem(ws, bad, "ws.yaml", env)).toMatchObject({ kind: "config", message: expect.stringContaining("invalid configuration (ws.yaml)") });
     const missing = { ...ok, codex: { ...ok.codex, bin: join(t.path, "missing") } };
     expect(runnableProblem(ws, missing, "", env)?.message).toBe("CLI not found: codex. Install it or set '<backend>.bin' in the config; run 'duo doctor' for details.");
-    expect(runnableProblem(ws, missing, "", env, true)?.message).toContain("pass --reload-config");
+    expect(runnableProblem(ws, missing, "", env, { saved: true })?.message).toContain("pass --reload-config");
+    expect(runnableProblem(ws, missing, "", env, { backends: ["claude"] })).toBeNull();
     const claudeOnly = { ...missing, agents: { planner: "claude", plan_reviewer: "claude", implementer: "claude", code_reviewer: "claude" } as const };
     expect(runnableProblem(ws, claudeOnly, "", env)).toBeNull();
   });

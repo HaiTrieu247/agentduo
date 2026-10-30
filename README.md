@@ -35,7 +35,8 @@ When a limit is reached, an agent fails or blocks, or a critical finding appears
 
 ## Requirements
 
-- Node.js ≥ 22.12 and git. The workspace must be inside a git repository; `duo init` offers to run `git init`.
+- Node.js ≥ 22.12 and git. A pipeline run (`duo "<task>"`, `/pipeline`) needs the workspace to be inside a git repository,
+  because it snapshots and diffs your files; `duo init` offers to run `git init`. The chat and `/discuss` work in any folder.
 - [Codex CLI](https://developers.openai.com/codex/cli/): run `npm i -g @openai/codex`, then `codex login`.
 - [Claude Code](https://code.claude.com/docs/en/overview): the `claude` command. If it is installed only through the VS Code, Cursor or Windsurf extension, agentduo finds the bundled binary.
 

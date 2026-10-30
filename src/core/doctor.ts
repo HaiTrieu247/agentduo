@@ -14,7 +14,7 @@ export interface Check {
 
 /** Flags agentduo itself needs (the protocol); permissions are the CLIs' own business. */
 const PROTOCOL_FLAGS = {
-  codex: { args: ["exec", "--help"], flags: ["--json", "--output-schema", "--output-last-message", "--cd"] },
+  codex: { args: ["exec", "--help"], flags: ["--json", "--output-schema", "--output-last-message", "--cd", "--skip-git-repo-check"] },
   claude: { args: ["--help"], flags: ["--output-format", "--verbose", "--json-schema", "--permission-prompts"] },
 } as const;
 /** Relaying permission prompts (claude.permission_prompts: ask) needs Claude's host protocol. */
@@ -50,7 +50,8 @@ export async function runDoctor(o: { dir: string; cfg: ConfigData; sources: stri
   add(gitVersion.ok, gitVersion.ok ? gitVersion.out.trim() : "git is not installed");
   const git = new Git(o.dir);
   const isRepo = await git.isRepo();
-  add(isRepo, `workspace inside a git repository: ${o.dir}`);
+  add(isRepo, isRepo ? `workspace inside a git repository: ${o.dir}`
+    : `workspace not inside a git repository: ${o.dir} (the chat and /discuss work; a pipeline run needs 'git init' first)`, false);
   add(!o.configError, o.configError ? `config: ${o.configError}` : `config: ${o.sources.length ? o.sources.join(", ") : "built-in defaults"}`);
   for (const name of SCHEMA_NAMES) {
     const problems = strictProblems(loadSchema(name));

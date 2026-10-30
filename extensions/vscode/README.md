@@ -6,7 +6,8 @@ uses the same configuration, run directory and lock. A run started in one can be
 
 ## Requirements
 
-- VS Code desktop 1.95 or later, with a local, trusted folder that is inside a git repository.
+- VS Code desktop 1.95 or later, with a local, trusted folder. Questions and discussions work in any folder; the
+  Pipeline needs the folder to be inside a git repository (run `git init` there first).
 - Node 22.12 or later. VS Code's own Node is not used. The extension takes the first suitable `node` on the
   `PATH` VS Code sees, or the path in the `agentduo.nodePath` setting.
 - Codex CLI and Claude Code CLI, installed and signed in. Set `codex.bin` / `claude.bin` in `.agentduo/config.yaml`

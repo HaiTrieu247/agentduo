@@ -28,12 +28,13 @@ agentduo là **kênh** giữa hai CLI. Nó:
 | Lớp an toàn riêng | Bỏ hết: flag quyền, guard, từ chối working tree bẩn, "hard rules" trong prompt, ràng buộc "implementer phải là Claude" |
 | Quality gates | Tuỳ chọn. Mặc định `gates: []`, khi đó không có pha VERIFY. Có gate thì agentduo chạy và chuyển kết quả cho reviewer |
 | Phạm vi | Workspace là thư mục hiện tại (hoặc `--dir`). Thay đổi ngoài workspace chỉ bị cảnh báo |
-| Không có git | Báo lỗi kèm gợi ý. Trong terminal, `duo init` hỏi có muốn `git init` không |
+| Không có git | Chat và `/discuss` vẫn chạy. Workflow (`run`/`resume`, và `/pipeline`/`/resume` trong chat) báo lỗi kèm gợi ý. Trong terminal, `duo init` hỏi có muốn `git init` không |
 | `package.json` repository/homepage/bugs | Để trống cho tới khi người dùng có URL repo |
 
 ## 3. Workspace
 
-- **Thư mục workspace** `W` = `--dir PATH` nếu có, nếu không thì thư mục hiện tại. Không còn đi ngược lên thư mục gốc của git repo. `W` phải nằm trong một git repo, với `R` = thư mục gốc của repo đó; nếu không, lệnh `run`/`resume` báo lỗi: `<W> is not inside a git repository (run 'git init' here, or 'duo init' to be asked)`.
+- **Thư mục workspace** `W` = `--dir PATH` nếu có, nếu không thì thư mục hiện tại. Không còn đi ngược lên thư mục gốc của git repo. Workflow cần `W` nằm trong một git repo, với `R` = thư mục gốc của repo đó; nếu không, lệnh `run`/`resume` báo lỗi: `<W> is not inside a git repository (run 'git init' here, or 'duo init' to be asked)`.
+- **Chat ngoài git repo.** Chat (`duo` không kèm task, và sidebar VS Code) mở được ở thư mục bất kỳ, và nói ngay khi mở rằng pipeline cần git. Câu hỏi và `/discuss` chạy bình thường; mỗi lượt chat của Codex nhận thêm `--skip-git-repo-check`, vì `codex exec` từ chối chạy ngoài git repo (trong repo, flag này không đổi gì). `/pipeline` và `/resume` kiểm tra repo mỗi lần gọi, nên chạy `git init` giữa chừng là dùng được ngay. `duo doctor` chỉ ghi chú việc thiếu repo, không coi là lỗi.
 - **Codex và Claude chạy với `cwd = W`.** Codex nhận thêm `--cd W`.
 - **Dữ liệu** nằm ở `W/.agentduo/` (`config.yaml`, `.gitignore`, `runs/`). `paths.runs_dir` tương đối thì tính từ `W`, và `~` ở đầu được mở rộng.
 - **Snapshot và diff** dùng pathspec giới hạn trong `W` (tương đối với `R`; khi `W = R` thì là `.`). Diff gửi cho reviewer, diff stat và danh sách file đổi chỉ gồm thay đổi trong `W`.
