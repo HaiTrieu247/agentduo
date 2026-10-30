@@ -100,7 +100,7 @@ a rail of dots, and one box to write in. Session actions live in the view's titl
 ├───────────────────────────────────────────┤
 │ ╭───────────────────────────────────────╮ │  composer: Enter sends, Shift+Enter newline, IME-safe;
 │ │ Ask Codex… (/ for commands)           │ │  the placeholder follows ChatStatus
-│ │ /  ⬡ Codex gpt-6.1 ▾  ✎ Edits: ask [↑]│ │  / commands · recipient chip · edits · send, or Stop
+│ │ /  ⬡ Codex gpt-6.1 ▾  ⚡ Auto ▾     [↑]│ │  / commands · recipient chip · mode menu · send, or Stop
 │ ╰───────────────────────────────────────╯ │  (■) while something runs and the input is empty
 └───────────────────────────────────────────┘
 ```

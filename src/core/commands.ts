@@ -2,7 +2,28 @@
 // Pure (no Node), so the terminal chat, the extension worker and the sidebar's webview share one catalog.
 
 export type Backend = "claude" | "codex";
-export type EditMode = "auto" | "ask";
+
+/** Claude Code's permission modes the chat offers, in the order its Shift+Tab goes through them (without plan). */
+export const PERMISSION_MODES = ["manual", "acceptEdits", "auto"] as const;
+export type PermissionMode = (typeof PERMISSION_MODES)[number];
+/** Each mode as Claude Code's mode menu names and describes it. */
+export const MODE_INFO: Record<PermissionMode, { label: string; description: string }> = {
+  manual: { label: "Manual", description: "Claude asks for approval before each edit" },
+  acceptEdits: { label: "Edit automatically", description: "Claude edits files without asking" },
+  auto: { label: "Auto", description: "Claude approves actions that pass a safety check and pauses for anything risky" },
+};
+
+export const isPermissionMode = (mode: string): mode is PermissionMode => (PERMISSION_MODES as readonly string[]).includes(mode);
+
+/** A mode by Claude Code's name for it; one the chat does not offer (plan, bypassPermissions…) as the flag says it. */
+export function modeLabel(mode: string): string {
+  return isPermissionMode(mode) ? MODE_INFO[mode].label : mode;
+}
+
+/** Shift+Tab: the next mode, and manual after one the chat does not offer. */
+export function nextMode(mode: string): PermissionMode {
+  return isPermissionMode(mode) ? PERMISSION_MODES[(PERMISSION_MODES.indexOf(mode) + 1) % PERMISSION_MODES.length]! : "manual";
+}
 
 export const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export const CODEX_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -45,7 +66,7 @@ export const AGENT_NAMES: Record<Backend, string> = { claude: "Claude", codex: "
  * means "default": agentduo passes nothing and the CLI's own configuration decides.
  */
 export type SettingCommand =
-  | { target: "edits"; mode?: EditMode }
+  | { target: "mode"; mode?: PermissionMode }
   | { target: "claude.model"; model?: string | null }
   | { target: "claude.effort"; effort?: string | null }
   | { target: "claude.permissions"; rule?: { kind: RuleKind; rule: string } }
@@ -98,7 +119,7 @@ export const COMMANDS: CommandInfo[] = [
   { name: "/resume", usage: "/resume [note | run id]", description: "continue the stopped or waiting run, optionally with a note for the agents", args: true },
   { name: "/new", usage: "/new", description: "start a new conversation (in VS Code, in a tab of its own); a stopped run stays resumable", args: false },
   { name: "/settings", usage: "/settings claude|codex <setting> …", description: "change a setting: model, effort, permissions, add-dir (add --save to keep it)", args: true },
-  { name: "/edits", usage: "/edits auto|ask", description: "Claude (chat and pipeline implementer) edits files without asking (auto), or asks first", args: true },
+  { name: "/mode", usage: `/mode ${PERMISSION_MODES.join("|")}`, description: "Claude's permission mode (chat and pipeline implementer): Manual, Edit automatically or Auto, as Shift+Tab in Claude Code", args: true },
   { name: "/config", usage: "/config", description: "show the settings both agents run with now", args: false },
   { name: "/help", usage: "/help", description: "list the commands", args: false },
   { name: "/quit", usage: "/quit", description: "leave; a running pipeline stops at its step and stays resumable", args: false },
@@ -209,22 +230,21 @@ function settingsCommand(rest: string): ParsedInput {
   const words = tokenize(rest);
   const [target, name] = words;
   if (!target) return { kind: "command", name: "config", arg: "" };
-  if (target.text === "edits") return editsCommand(rest.slice(target.end).trim());
-  if (target.text !== "claude" && target.text !== "codex") return usage("usage: /settings claude|codex <setting> … (or /settings edits auto|ask)");
+  if (target.text === "mode") return modeCommand(rest.slice(target.end).trim());
+  if (target.text !== "claude" && target.text !== "codex") return usage(`usage: /settings claude|codex <setting> … (or /settings mode ${PERMISSION_MODES.join("|")})`);
   const backend = target.text;
   if (!name || !SETTINGS[backend].some((s) => s.name === name.text)) return usage(settingUsage(backend));
   return settingOf(backend, name.text, words.slice(2)) ?? usage(settingUsage(backend, name.text));
 }
 
-function editsCommand(rest: string): ParsedInput {
+function modeCommand(rest: string): ParsedInput {
   const words = tokenize(rest);
   const args = words.filter((w) => !FLAGS.has(w.text));
   const save = words.some((w) => w.text === "--save");
-  if (!args.length) return { kind: "setting", setting: { target: "edits" }, save, yes: false };
-  if (args.length === 1 && isOneOf(args[0]!.text, ["auto", "ask"] as const)) {
-    return { kind: "setting", setting: { target: "edits", mode: args[0]!.text as EditMode }, save, yes: false };
-  }
-  return usage("usage: /edits auto|ask");
+  if (!args.length) return { kind: "setting", setting: { target: "mode" }, save, yes: false };
+  const mode = args[0]!.text;
+  if (args.length === 1 && isPermissionMode(mode)) return { kind: "setting", setting: { target: "mode", mode }, save, yes: false };
+  return usage(`usage: /mode ${PERMISSION_MODES.join("|")}`);
 }
 
 const SIMPLE: Record<string, ChatCommand> = {
@@ -292,8 +312,8 @@ export function parseInput(raw: string): ParsedInput {
       return rest ? { kind: "discuss", question: rest } : usage("usage: /discuss <question>, e.g. /discuss Redis or Postgres for the job queue?");
     case "settings":
       return settingsCommand(rest);
-    case "edits":
-      return editsCommand(rest);
+    case "mode":
+      return modeCommand(rest);
     case "attach": {
       if (!rest) return usage(ATTACH_USAGE);
       const parsed = parsePathArg(rest);
@@ -329,7 +349,7 @@ export function helpText(): string {
     {
       title: ["Keys"],
       rows: [
-        ["Shift+Tab", "switch Claude's edits between ask and auto"],
+        ["Shift+Tab", "switch Claude's mode: Manual, Edit automatically, Auto (as in Claude Code)"],
         ["Esc", "stop what is running: an answer, or the pipeline's current step (/resume continues it)"],
         ["Ctrl-C twice", "leave"],
       ],
@@ -411,16 +431,16 @@ export function complete(input: string): Completion[] {
       return pick([
         { word: "claude", more: true, description: "Claude's model, effort, permissions and extra directories" },
         { word: "codex", more: true, description: "Codex's model, reasoning effort and permissions" },
-        { word: "edits", more: true, description: "edits auto|ask: whether Claude edits files without asking" },
+        { word: "mode", more: true, description: `mode ${PERMISSION_MODES.join("|")}: what Claude does without asking` },
       ]);
     }
     const target = args[0]!;
-    if (target === "edits" && args.length === 1) return editsValues(pick);
+    if (target === "mode" && args.length === 1) return modeValues(pick);
     if (target !== "claude" && target !== "codex") return [];
     if (args.length === 1) return pick(settingWords(target, false));
     return settingValues(target, args[1]!, args.slice(2));
   }
-  if (cmd === "edits" && !args.length) return editsValues(pick);
+  if (cmd === "mode" && !args.length) return modeValues(pick);
   if (cmd === "pipeline" && !args.length) return hint("<task>", "what both agents should do, e.g. Add JWT auth");
   if (cmd === "discuss" && !args.length) return hint("<question>", "what the agents should discuss until they agree");
   if (cmd === "resume" && !args.length) return hint("[note | run id]", "a note for the agents, or the id of another run to continue");
@@ -429,9 +449,6 @@ export function complete(input: string): Completion[] {
   return [];
 }
 
-function editsValues(pick: (items: Array<{ word: string; description: string }>) => Completion[]): Completion[] {
-  return pick([
-    { word: "auto", description: "Claude edits files without asking (acceptEdits)" },
-    { word: "ask", description: "Claude asks before it edits a file" },
-  ]);
+function modeValues(pick: (items: Array<{ word: string; description: string }>) => Completion[]): Completion[] {
+  return pick(PERMISSION_MODES.map((mode) => ({ word: mode, description: `${MODE_INFO[mode].label}: ${MODE_INFO[mode].description}` })));
 }

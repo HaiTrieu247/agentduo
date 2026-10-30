@@ -20,7 +20,7 @@ describe("worker requests", () => {
       .toEqual({ type: "permissionAnswer", requestId: "perm-0", answer: { decision: "once" } });
     expect(parseRequestEnvelope(envelope({ type: "readSnapshotFile", runId: "20261028-1-x", ...COMMITS, side: "snapshot", path: "gói pkg/tệp.txt" })).request)
       .toEqual({ type: "readSnapshotFile", runId: "20261028-1-x", ...COMMITS, side: "snapshot", path: "gói pkg/tệp.txt" });
-    for (const type of ["interrupt", "toggleEdits", "closeConversation", "usage"]) {
+    for (const type of ["interrupt", "cycleMode", "closeConversation", "usage"]) {
       expect(parseRequestEnvelope(envelope({ type, conversation: "c-1", extra: "ignored" })).request).toEqual({ type, conversation: "c-1" });
     }
     // What a run's artifacts and changes are asked for: the run of a conversation, or the workspace's latest.
@@ -30,6 +30,16 @@ describe("worker requests", () => {
     }
     expect(parseRequestEnvelope(envelope({ type: "readArtifact", artifact: "plan", conversation: null })).request).toEqual({ type: "readArtifact", artifact: "plan", conversation: null });
     for (const type of ["doctor", "shutdown"]) expect(parseRequestEnvelope(envelope({ type, extra: "ignored" })).request).toEqual({ type });
+  });
+
+  it("is protocol 7: takes only the permission modes the chat offers, and no longer edits ask|auto", () => {
+    expect(PROTOCOL_VERSION).toBe(7);
+    const setting = (s: unknown) => parseRequestEnvelope(envelope({ type: "setting", conversation: "c-1", setting: s })).request;
+    for (const mode of ["manual", "acceptEdits", "auto"]) expect(setting({ target: "mode", mode })).toMatchObject({ setting: { target: "mode", mode } });
+    expect(setting({ target: "mode" })).toMatchObject({ setting: { target: "mode" } });
+    for (const s of [{ target: "mode", mode: "plan" }, { target: "mode", mode: "bypassPermissions" }, { target: "edits", mode: "auto" }]) {
+      expect(() => setting(s), JSON.stringify(s)).toThrow(ProtocolError);
+    }
   });
 
   it("names the conversation each of its requests is for, with an id that is safe as a directory name", () => {
@@ -69,8 +79,8 @@ describe("worker requests", () => {
 });
 
 describe("attachments", () => {
-  it("is protocol 6: the worker stages files by a path the host chose, and a submit names files by id", () => {
-    expect(PROTOCOL_VERSION).toBe(6);
+  it("since protocol 6, the worker stages files by a path the host chose, and a submit names files by id", () => {
+    expect(PROTOCOL_VERSION).toBeGreaterThanOrEqual(6);
     const stage = { type: "stageAttachment", conversation: "c-1", key: "w1a", path: "/tmp/staging/w1a-0/shot.png", name: "shot.png" };
     expect(parseRequestEnvelope(envelope(stage)).request).toEqual(stage);
     expect(parseRequestEnvelope(envelope({ type: "stageAttachment", conversation: "c-1", key: "k", path: "C:\\Users\\me\\a.pdf", name: "a.pdf" })).request).toMatchObject({ path: "C:\\Users\\me\\a.pdf" });
@@ -128,7 +138,7 @@ describe("worker messages", () => {
     expect(parseWorkerMessage({ kind: "event", protocol: PROTOCOL_VERSION, generation: 1, conversation: "c-1", event: { type: "warning", text: "x" } }).kind).toBe("event");
     // An event belongs to a conversation; an update may be for the whole workspace (models, settings).
     expect(() => parseWorkerMessage({ kind: "event", protocol: PROTOCOL_VERSION, generation: 1, event: { type: "warning", text: "x" } })).toThrow(ProtocolError);
-    expect(parseWorkerMessage({ kind: "ui", protocol: PROTOCOL_VERSION, generation: 1, conversation: null, update: { type: "edits", mode: "ask" } }).kind).toBe("ui");
+    expect(parseWorkerMessage({ kind: "ui", protocol: PROTOCOL_VERSION, generation: 1, conversation: null, update: { type: "mode", mode: "manual" } }).kind).toBe("ui");
     expect(() => parseWorkerMessage({ kind: "event", protocol: 1, generation: 1, event: { type: "warning" } })).toThrow(/protocol 1/);
     expect(() => parseWorkerMessage({ kind: "decision", protocol: PROTOCOL_VERSION, generation: 1, requestId: "d", review: {} })).toThrow(ProtocolError);
     expect(() => parseWorkerMessage({ kind: "shell", protocol: 1 })).toThrow(ProtocolError);

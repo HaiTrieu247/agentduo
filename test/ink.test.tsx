@@ -252,20 +252,20 @@ describe("Ink components", () => {
     app.unmount();
   });
 
-  it("chat: Shift+Tab switches the edit mode, which the hint line shows", async () => {
+  it("chat: Shift+Tab switches Claude's permission mode, which the hint line shows by Claude Code's name", async () => {
     const channel = new ChatChannel();
     let cycles = 0;
     const app = render(<ChatApp bus={new EventBus()} channel={channel} version="0.3.0" workspace="/ws" verbose={false} onSubmit={noop} onEscape={noop}
-      onCtrlC={noop} onCycleEdits={() => { cycles += 1; }} onDecision={noop} onPermission={noop} views={() => []} readView={async () => null} />);
-    channel.edits("ask");
+      onCtrlC={noop} onCycleMode={() => { cycles += 1; }} onDecision={noop} onPermission={noop} views={() => []} readView={async () => null} />);
+    channel.mode("manual");
     await wait();
-    expect(app.lastFrame()).toContain("edits: ask (Shift+Tab)");
+    expect(app.lastFrame()).toContain("mode: Manual (Shift+Tab)");
     app.stdin.write("\u001B[Z");
     await wait();
     expect(cycles).toBe(1);
-    channel.edits("auto");
+    channel.mode("acceptEdits");
     await wait();
-    expect(app.lastFrame()).toContain("edits: auto (Shift+Tab)");
+    expect(app.lastFrame()).toContain("mode: Edit automatically (Shift+Tab)");
     app.unmount();
   });
 

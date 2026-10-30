@@ -217,11 +217,11 @@ describe("WorkspaceSession", () => {
     fake.setScenario(happy());
     const started = s.start();
     await waitUntil(() => s.workerPid !== undefined, 10_000, "the worker's hello");
-    await Promise.all([s.conversation(C).submit("Make app.txt fixed", "pipeline"), s.conversation(C).toggleEdits(), started]);
+    await Promise.all([s.conversation(C).submit("Make app.txt fixed", "pipeline"), s.conversation(C).cycleMode(), started]);
     await until(s, (st) => finishes(st).includes("DONE") && st.status === "idle", "DONE");
-    expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["initialize", "(initialized)", "submit", "toggleEdits"]);
+    expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["initialize", "(initialized)", "submit", "cycleMode"]);
     expect(s.conversation(C).state.session).toBe("active");
-    expect(s.conversation(C).state.edits).toBe("auto");
+    expect(s.conversation(C).state.mode).toBe("acceptEdits");
     expect(s.conversation(C).state.timeline.filter((i) => i.kind === "info" && i.tone === "error")).toEqual([]);
   });
 

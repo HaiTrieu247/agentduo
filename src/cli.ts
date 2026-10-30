@@ -109,9 +109,9 @@ interface CommonOptions { dir?: string; config?: string; plain?: boolean; verbos
 interface RunOptions extends CommonOptions { taskFile?: string; acceptEdits?: boolean }
 interface ResumeOptions extends CommonOptions { decision?: Decision["decision"]; note?: string; reloadConfig?: boolean; acceptEdits?: boolean }
 
-/** --accept-edits: the implementer edits files without asking, like /edits auto in the chat. */
+/** --accept-edits: the implementer edits files without asking, like /mode acceptEdits in the chat. */
 function withAcceptEdits<T extends ConfigData>(cfg: T, opts: { acceptEdits?: boolean }): T {
-  if (opts.acceptEdits) settings.edits("auto").apply(cfg);
+  if (opts.acceptEdits) settings.mode("acceptEdits").apply(cfg);
   return cfg;
 }
 
@@ -340,7 +340,7 @@ async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
     let chat: Chat | undefined;
     const session = startChatInk({
       bus, version: packageVersion(), verbose: !!opts.verbose, workspace: env.workspace,
-      onSubmit: (text) => void chat?.submit(text), onEscape: () => chat?.escape(), onCycleEdits: () => chat?.toggleEdits(), onUsageRefresh: () => chat?.usage(),
+      onSubmit: (text) => void chat?.submit(text), onEscape: () => chat?.escape(), onCycleMode: () => chat?.cycleMode(), onUsageRefresh: () => chat?.usage(),
       views: () => {
         const run = chat?.focused();
         return run ? availableViews(run.store, run.state) : [];

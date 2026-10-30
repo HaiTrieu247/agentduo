@@ -90,12 +90,12 @@ Code và Codex; pipeline đầy đủ chỉ chạy khi bạn yêu cầu:
 agentduo trả về usage. `/claude model …` và các lệnh tương tự là lối tắt, chỉ được hiểu là cấu hình khi đúng hình dạng
 (`/claude model opus`); còn lại, ví dụ `/claude model nào phù hợp nhất cho repo này?`, được gửi nguyên văn cho Claude
 như một câu hỏi, kể cả `--save`. `/claude -- <câu hỏi>` luôn là câu hỏi.
-- Shift+Tab hoặc `/edits auto|ask`: Claude tự sửa file mà không hỏi (`acceptEdits`), cả trong chat lẫn khi làm implementer của pipeline, hoặc hỏi trước khi sửa.
+- Shift+Tab hoặc `/mode manual|acceptEdits|auto`: chế độ quyền của Claude, cả trong chat lẫn khi làm implementer của pipeline, giống Shift+Tab trong Claude Code. Manual hỏi trước mỗi lần sửa; Edit automatically (`acceptEdits`) tự sửa file mà không hỏi; Auto tự duyệt những việc qua được bước kiểm tra an toàn của Claude Code và dừng lại hỏi khi có việc rủi ro.
 - `/claude model …`, `/claude effort …`, `/claude permissions allow|deny|remove <rule>`, `/claude add-dir <path>`.
 - `/codex model <tên> [effort]`, `/codex permissions read-only|auto|full-access|default`. Riêng `full-access` phải xác nhận thêm bằng `--yes`.
 - `/config` để xem cấu hình mà hai agent đang chạy.
 
-Thay đổi áp dụng từ câu hỏi hoặc lần gọi agent kế tiếp; câu trả lời đang chạy giữ model lúc nó bắt đầu. Thay đổi chỉ giữ trong phiên chat, trừ khi lệnh kết thúc bằng `--save`: khi đó agentduo ghi vào `.agentduo/config.yaml` và giữ nguyên các comment trong file. `/help` liệt kê mọi lệnh kèm giải thích. Ngoài chat, `duo --accept-edits "<task>"` có tác dụng giống `/edits auto`.
+Thay đổi áp dụng từ câu hỏi hoặc lần gọi agent kế tiếp; câu trả lời đang chạy giữ model lúc nó bắt đầu. Thay đổi chỉ giữ trong phiên chat, trừ khi lệnh kết thúc bằng `--save`: khi đó agentduo ghi vào `.agentduo/config.yaml` và giữ nguyên các comment trong file. `/help` liệt kê mọi lệnh kèm giải thích. Ngoài chat, `duo --accept-edits "<task>"` có tác dụng giống `/mode acceptEdits`.
 
 `duo "<task>"` và `duo run "<task>"` vẫn chạy pipeline cho một việc rồi thoát; đây là cách dùng cho script và CI.
 
@@ -114,7 +114,7 @@ code --install-extension extensions/vscode/agentduo-vscode-*.vsix
 Không cần cài gói npm `agentduo`. Máy chỉ cần Node, git, Codex CLI và Claude Code đã đăng nhập. Nếu VS Code mở từ Dock không thấy đúng `PATH`, đặt `agentduo.nodePath` trong settings của VS Code, hoặc `codex.bin` / `claude.bin` trong `.agentduo/config.yaml`.
 
 - Mở sidebar không chạy gì cả. Run chỉ bắt đầu khi bạn gửi task. Với workspace nhiều thư mục, bạn chọn thư mục trước (**agentduo: Choose Workspace Folder**).
-- Enter để gửi, Shift+Enter để xuống dòng. Khi agent đang chạy, nội dung bạn gửi là ghi chú cho bước kế tiếp. **Stop** (hoặc Esc trong ô nhập) dừng bước hiện tại; gửi lại sẽ chạy lại bước đó. Các lệnh `/new`, `/resume`, `/edits`, `/claude …`, `/codex …` giống hệt trong terminal.
+- Enter để gửi, Shift+Enter để xuống dòng. Khi agent đang chạy, nội dung bạn gửi là ghi chú cho bước kế tiếp. **Stop** (hoặc Esc trong ô nhập) dừng bước hiện tại; gửi lại sẽ chạy lại bước đó. Các lệnh `/new`, `/resume`, `/mode`, `/claude …`, `/codex …` giống hệt trong terminal. Nút chế độ dưới ô nhập mở menu Modes giống Claude Code (Manual, Edit automatically, Auto); Shift+Tab trong ô nhập chuyển sang chế độ kế tiếp.
 - **Đính kèm file:** nút kẹp giấy dưới ô nhập chọn được nhiều file bất kỳ. Bạn cũng có thể dán ảnh (Cmd/Ctrl+V), hoặc **giữ Shift** khi kéo file từ Finder/Explorer của hệ điều hành vào ô nhập (VS Code cần Shift mới cho webview nhận file thả vào). Kéo từ Explorer của chính VS Code hay từ editor thì tab không đọc được file, nên hãy dùng nút kẹp giấy. File chờ hiện phía trên ô nhập (ảnh có thumbnail), có ✕ để bỏ; gửi với ô nhập trống thì chỉ gửi file. File chờ gửi bị bỏ khi `/new` hoặc khi đóng tab. Giới hạn và cách gửi ảnh giống chat trên terminal.
 - Reload cửa sổ hay đóng VS Code sẽ dừng bước đang chạy. Quyết định đang chờ được hoãn, yêu cầu quyền chưa trả lời bị từ chối, và run vẫn tiếp tục được. Extension không bao giờ tự chạy lại task; nó hiện nút **Resume** để bạn bấm.
 - Bản đầu chỉ hỗ trợ VS Code desktop với thư mục local. Chưa hỗ trợ Remote SSH, WSL, container hay VS Code web.

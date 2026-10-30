@@ -58,8 +58,8 @@ async function dispatch(s: RuntimeSession, request: WorkerRequest): Promise<Work
     case "interrupt":
       await s.interrupt(request.conversation);
       return { accepted: true };
-    case "toggleEdits":
-      await s.toggleEdits(request.conversation);
+    case "cycleMode":
+      await s.cycleMode(request.conversation);
       return { accepted: true };
     case "usage":
       await s.usage(request.conversation);

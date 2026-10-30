@@ -14,8 +14,8 @@ export interface ChatInkOptions {
   onSubmit(text: string): void;
   /** Esc, or the first Ctrl-C while something runs: stop the answer, or the run's current step. */
   onEscape(): void;
-  /** Shift+Tab: switch the implementer's edit mode. */
-  onCycleEdits?(): void;
+  /** Shift+Tab: Claude's next permission mode. */
+  onCycleMode?(): void;
   /** r in the usage panel: look the usage up again. */
   onUsageRefresh?(): void;
   views(): ViewKind[];
@@ -58,7 +58,7 @@ export function startChatInk(o: ChatInkOptions): ChatInkSession {
       status = next;
       channel.status(next);
     },
-    setEdits: (mode) => channel.edits(mode),
+    setMode: (mode) => channel.mode(mode),
     setRecipient: (backend) => channel.recipient(backend),
     setModels: (models) => channel.models(models),
     usage: (report) => channel.usage(report),
@@ -91,7 +91,7 @@ export function startChatInk(o: ChatInkOptions): ChatInkSession {
   if (o.stdin) options.stdin = o.stdin;
   const instance = render(
     <ChatApp bus={o.bus} channel={channel} version={o.version} workspace={o.workspace} verbose={o.verbose} onSubmit={onSubmit}
-      onEscape={o.onEscape} onCtrlC={onCtrlC} onCycleEdits={o.onCycleEdits} onUsageRefresh={o.onUsageRefresh} onDecision={onDecision} onPermission={broker.answer} views={o.views} readView={o.readView} />,
+      onEscape={o.onEscape} onCtrlC={onCtrlC} onCycleMode={o.onCycleMode} onUsageRefresh={o.onUsageRefresh} onDecision={onDecision} onPermission={broker.answer} views={o.views} readView={o.readView} />,
     options,
   );
   return {

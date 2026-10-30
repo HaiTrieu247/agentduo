@@ -428,7 +428,7 @@ describe("Workflow", () => {
 
 describe("Workflow after a chat discussion", () => {
   it("tells every role the discussion's synthesis, as Codex's, and none of its drafts or reviews", async () => {
-    const ui: ChatUi = { info: () => {}, setStatus: () => {}, setEdits: () => {}, setRecipient: () => {}, setModels: () => {}, exit: () => {} };
+    const ui: ChatUi = { info: () => {}, setStatus: () => {}, setMode: () => {}, setRecipient: () => {}, setModels: () => {}, exit: () => {} };
     const chat = new Chat({
       cfg: h.cfg, workspace: h.repo, runsDir: h.runsDir, configFile: join(h.repo, ".agentduo", "config.yaml"), bus: new EventBus(), decider: new ScriptedDecider(), ui,
     });

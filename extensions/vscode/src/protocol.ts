@@ -3,7 +3,7 @@
 import type { ChatStatus } from "../../../src/chat.js";
 import { ATTACHMENT_LIMITS, base64Size, isAttachmentId, type Attachment } from "../../../src/core/attachment-types.js";
 import {
-  CLAUDE_EFFORTS, CODEX_EFFORTS, CODEX_PRESETS, RULE_KINDS, type Backend, type SettingCommand,
+  CLAUDE_EFFORTS, CODEX_EFFORTS, CODEX_PRESETS, PERMISSION_MODES, RULE_KINDS, type Backend, type SettingCommand,
 } from "../../../src/core/commands.js";
 import type { Check } from "../../../src/core/doctor.js";
 import type { CodexCatalog } from "../../../src/core/models.js";
@@ -19,8 +19,9 @@ import type { ViewAction, ViewState } from "../webview/state.js";
  * 5: /usage: `usage` updates for a tab's usage panel, and the `usage` request that looks it up again.
  * 6: attachments: the host stages a file by path (one the user picked, or one it wrote from a paste or a drop) and the
  *    worker copies it into the conversation; a submit names the files it sends by id. No bytes ever cross IPC.
+ * 7: Claude Code's permission modes (manual, acceptEdits, auto) in place of edits ask|auto: `cycleMode`, `mode` updates.
  */
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 
 export const BACKENDS = ["codex", "claude"] as const;
 /** How the composer's text is meant: a message (to the recipient, or a slash command), a pipeline task, or a question to discuss. */
@@ -80,7 +81,8 @@ export type WorkerRequest =
   | { type: "recipient"; conversation: string; backend: Backend }
   | ({ type: "setting"; conversation: string } & SettingRequest)
   | { type: "interrupt"; conversation: string }
-  | { type: "toggleEdits"; conversation: string }
+  /** Shift+Tab or the mode menu's ⇧+Tab: Claude's next permission mode, as in Claude Code. */
+  | { type: "cycleMode"; conversation: string }
   /** The usage panel's Refresh, and the title bar's Usage: the tab's chat looks the usage up again, as /usage does. */
   | { type: "usage"; conversation: string }
   /** The tab was closed: what runs in it stops (a run stays resumable), and the worker lets the conversation go. */
@@ -110,7 +112,8 @@ export interface InitializeResult {
   configFile: string | null;
   configSources: string[];
   pipeline: PipelineStep[];
-  edits: string;
+  /** Claude's permission mode: manual, acceptEdits, auto, or another one Claude Code has. */
+  mode: string;
   /** Who a plain message goes to. */
   recipient: Backend;
   /** As far as known now; codex doctor's answer follows as a `models` update, never holding up initialize. */
@@ -172,7 +175,7 @@ export interface WorkerResults {
   recipient: { accepted: true };
   setting: { accepted: true };
   interrupt: { accepted: true };
-  toggleEdits: { accepted: true };
+  cycleMode: { accepted: true };
   usage: { accepted: true };
   closeConversation: { closed: true };
   decision: { applied: true };
@@ -197,7 +200,7 @@ export interface WorkerErrorData {
 export type UiUpdate =
   | { type: "info"; text: string; tone?: "info" | "error" }
   | { type: "status"; status: ChatStatus }
-  | { type: "edits"; mode: string }
+  | { type: "mode"; mode: string }
   | { type: "recipient"; backend: Backend }
   | { type: "models"; models: ModelMap }
   | { type: "settings"; settings: SettingsView }
@@ -242,7 +245,7 @@ export type WebviewMessage =
   | { type: "recipient"; backend: Backend }
   | ({ type: "setting" } & SettingRequest)
   | { type: "interrupt" }
-  | { type: "toggleEdits" }
+  | { type: "cycleMode" }
   /** The usage panel's Refresh. */
   | { type: "usage" }
   | { type: "decision"; generation: number; id: string; decision: DecisionChoice; note: string | null }
@@ -412,11 +415,11 @@ function present(o: Obj, key: string): boolean {
 
 export function parseSetting(v: unknown): SettingCommand {
   const o = obj(v, "setting");
-  const target = oneOf(o.target, ["edits", "claude.model", "claude.effort", "claude.permissions", "claude.add-dir", "codex.model", "codex.permissions"] as const, "setting.target");
+  const target = oneOf(o.target, ["mode", "claude.model", "claude.effort", "claude.permissions", "claude.add-dir", "codex.model", "codex.permissions"] as const, "setting.target");
   const nullable = <T>(key: string, read: (x: unknown) => T): T | null | undefined => (!present(o, key) ? undefined : o[key] === null ? null : read(o[key]));
   switch (target) {
-    case "edits":
-      return present(o, "mode") ? { target, mode: oneOf(o.mode, ["auto", "ask"] as const, "setting.mode") } : { target };
+    case "mode":
+      return present(o, "mode") ? { target, mode: oneOf(o.mode, PERMISSION_MODES, "setting.mode") } : { target };
     case "claude.model": {
       const model = nullable("model", (x) => settingText(x, "setting.model"));
       return model === undefined ? { target } : { target, model };
@@ -451,7 +454,7 @@ const route = (v: unknown): Route => (v === undefined ? "message" : oneOf(v, ROU
 export function parseRequest(v: unknown): WorkerRequest {
   const o = obj(v, "request");
   const type = oneOf(o.type, [
-    "initialize", "submit", "stageAttachment", "removeAttachment", "recipient", "setting", "interrupt", "toggleEdits", "usage", "closeConversation", "decision",
+    "initialize", "submit", "stageAttachment", "removeAttachment", "recipient", "setting", "interrupt", "cycleMode", "usage", "closeConversation", "decision",
     "permissionAnswer", "inspectFocusedRun", "readArtifact", "listChanges", "readSnapshotFile", "doctor", "shutdown",
   ] as const, "request.type");
   switch (type) {
@@ -470,7 +473,7 @@ export function parseRequest(v: unknown): WorkerRequest {
     case "setting":
       return { type, conversation: conversationId(o.conversation), ...settingRequest(o) };
     case "interrupt":
-    case "toggleEdits":
+    case "cycleMode":
     case "usage":
     case "closeConversation":
       return { type, conversation: conversationId(o.conversation) };
@@ -535,7 +538,7 @@ export function parseWorkerMessage(v: unknown): WorkerMessage {
 export function parseWebviewMessage(v: unknown): WebviewMessage {
   const o = obj(v, "webview message");
   const type = oneOf(o.type, [
-    "ready", "submit", "attach", "upload", "detach", "recipient", "setting", "interrupt", "toggleEdits", "usage", "decision", "permission", "command",
+    "ready", "submit", "attach", "upload", "detach", "recipient", "setting", "interrupt", "cycleMode", "usage", "decision", "permission", "command",
     "readyToReload",
   ] as const, "type");
   switch (type) {

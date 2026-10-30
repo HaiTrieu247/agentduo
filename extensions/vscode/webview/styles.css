@@ -411,8 +411,7 @@ body {
 .chip:hover, .chip[aria-expanded="true"] { background: var(--hover); }
 .chip:disabled { opacity: 0.5; cursor: default; }
 .chip.target { flex: 0 1 auto; }
-.chip.edits { flex: none; color: var(--muted); }
-.chip.edits[aria-pressed="true"] { color: var(--vscode-foreground); border-color: var(--border); }
+.chip.mode { flex: none; }
 .chip-icon { display: inline-flex; flex: none; }
 .chip-name { white-space: nowrap; }
 .chip-detail { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
@@ -438,7 +437,7 @@ body {
 
 /* A narrow sidebar keeps the names and drops the model, which stays in the chip's tooltip and menu. */
 @media (max-width: 290px) {
-  .chip-detail, .chip.edits .chip-name { display: none; }
+  .chip-detail, .chip.mode .chip-name { display: none; }
 }
 
 /* Menus float above the box; the completion list follows what is typed. */
@@ -485,6 +484,9 @@ body {
 .menu-detail { font-size: 11px; opacity: 0.75; overflow-wrap: anywhere; }
 .codicon.menu-check { flex: none; }
 .menu-sep { height: 1px; margin: 4px 0; background: var(--vscode-menu-separatorBackground, var(--border)); }
+/* The mode menu's title row, as in Claude Code's: what it is, and the key that goes through it. */
+.menu-head { display: flex; justify-content: space-between; gap: 8px; padding: 2px 8px 4px; font-size: 11px; color: var(--muted); }
+.menu-keys { white-space: nowrap; }
 
 .completion { display: flex; flex-direction: column; padding: 3px 8px; border-radius: 4px; cursor: pointer; min-width: 0; }
 .completion.selected {

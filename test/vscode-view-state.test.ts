@@ -214,7 +214,7 @@ describe("view state", () => {
   const settings = (o: { claudeModel?: string | null; codexModel?: string | null; codexEffort?: string | null } = {}): ViewAction => ({
     type: "ui", update: {
       type: "settings", settings: {
-        claude: { model: o.claudeModel ?? null, effort: null, edits: "ask", allow: [], deny: [], addDirs: [] },
+        claude: { model: o.claudeModel ?? null, effort: null, mode: "manual", allow: [], deny: [], addDirs: [] },
         codex: { model: o.codexModel ?? null, effort: o.codexEffort ?? null, permissions: "default" },
       } satisfies SettingsView,
     },

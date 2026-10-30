@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import YAML from "yaml";
-import { CLAUDE_EFFORTS, CODEX_EFFORTS, type CodexPermission, type EditMode } from "./commands.js";
+import { CLAUDE_EFFORTS, CODEX_EFFORTS, type CodexPermission, type PermissionMode } from "./commands.js";
 import type { ConfigData } from "./config.js";
 
-export { CLAUDE_EFFORTS, CODEX_EFFORTS, type CodexPermission, type EditMode };
+export { CLAUDE_EFFORTS, CODEX_EFFORTS, type CodexPermission, type PermissionMode };
 
 /**
  * The settings the chat can change, each mirroring a command of the CLI it configures (Claude's /model, /effort,
@@ -64,13 +64,14 @@ export function implementerMode(cfg: ConfigData): string | null {
   return values([...cfg.claude.args, ...(cfg.claude.role_args.implementer ?? [])], PERMISSION_MODE).at(-1) ?? null;
 }
 
-export function editMode(cfg: ConfigData): EditMode | string {
+/** That mode by its flag value, "manual" for none or "default" (Claude Code's older name for it). */
+export function permissionMode(cfg: ConfigData): PermissionMode | string {
   const mode = implementerMode(cfg);
-  return mode === "acceptEdits" ? "auto" : !mode || mode === "default" ? "ask" : mode;
+  return !mode || mode === "default" ? "manual" : mode;
 }
 
 /**
- * The one implementer flag a conversation call to Claude also gets: its permission mode, so /edits and Shift+Tab mean
+ * The one implementer flag a conversation call to Claude also gets: its permission mode, so /mode and Shift+Tab mean
  * the same for Claude in the chat as for the implementer. Placed after `claude.args`, it wins over them as it does
  * for the implementer; no other implementer flag comes along.
  */
@@ -85,13 +86,14 @@ function setImplementerArgs(cfg: ConfigData, args: string[]): void {
 }
 
 export const settings = {
-  /** Shift+Tab / `/edits`: let the implementer edit files without asking ("acceptEdits"), or ask first. */
-  edits: (mode: EditMode): SettingChange => ({
+  /** Shift+Tab / `/mode`: the implementer's permission mode, as Claude Code's Shift+Tab sets it. */
+  mode: (mode: PermissionMode): SettingChange => ({
     paths: [["claude", "role_args"]],
     apply(cfg) {
       const rest = without(cfg.claude.role_args.implementer ?? [], PERMISSION_MODE);
-      if (mode === "auto") rest.push("--permission-mode", "acceptEdits");
-      // A mode in claude.args applies to every call; the implementer needs an explicit "default" to ask again.
+      if (mode !== "manual") rest.push("--permission-mode", mode);
+      // A mode in claude.args applies to every call; the implementer needs an explicit one to ask again. "default", not
+      // "manual": older Claude Code versions know only that name.
       else if (values(cfg.claude.args, PERMISSION_MODE).length) rest.push("--permission-mode", "default");
       setImplementerArgs(cfg, rest);
     },
@@ -163,14 +165,14 @@ const codexPermission = (cfg: ConfigData): string => {
 
 /** The chat's settings as plain values, for a settings panel; "default" = whatever the CLI's own configuration says. */
 export interface SettingsView {
-  claude: { model: string | null; effort: string | null; edits: string; allow: string[]; deny: string[]; addDirs: string[] };
+  claude: { model: string | null; effort: string | null; mode: string; allow: string[]; deny: string[]; addDirs: string[] };
   codex: { model: string | null; effort: string | null; permissions: string };
 }
 
 export function settingsView(cfg: ConfigData): SettingsView {
   const { allow, deny } = claudeRules(cfg);
   return {
-    claude: { model: cfg.claude.model, effort: values(cfg.claude.args, ["--effort"]).at(-1) ?? null, edits: editMode(cfg), allow, deny, addDirs: claudeDirs(cfg) },
+    claude: { model: cfg.claude.model, effort: values(cfg.claude.args, ["--effort"]).at(-1) ?? null, mode: permissionMode(cfg), allow, deny, addDirs: claudeDirs(cfg) },
     codex: { model: cfg.codex.model, effort: values(cfg.codex.args, CONFIG).filter(isEffort).at(-1)?.split("=")[1] ?? null, permissions: codexPermission(cfg) },
   };
 }
@@ -182,7 +184,7 @@ export function describeSettings(cfg: ConfigData): string {
   const a = cfg.agents;
   return [
     `Claude  model: ${v.claude.model ?? "default"} · effort: ${v.claude.effort ?? "default"} · ` +
-      `edits: ${v.claude.edits} · allow: ${list(v.claude.allow)} · deny: ${list(v.claude.deny)} · add-dir: ${list(v.claude.addDirs)}`,
+      `mode: ${v.claude.mode} · allow: ${list(v.claude.allow)} · deny: ${list(v.claude.deny)} · add-dir: ${list(v.claude.addDirs)}`,
     `Codex   model: ${v.codex.model ?? "default"} · effort: ${v.codex.effort ?? "default"} · permissions: ${v.codex.permissions}`,
     `Roles   planner: ${a.planner} · plan critic: ${a.plan_reviewer} · implementer: ${a.implementer} · code reviewer: ${a.code_reviewer}`,
   ].join("\n");

@@ -25,7 +25,7 @@ class FakeUi implements ChatUi {
   readonly lines: string[] = [];
   readonly errors: string[] = [];
   readonly statuses: string[] = [];
-  readonly edits: string[] = [];
+  readonly modes: string[] = [];
   readonly recipients: string[] = [];
   models: ModelMap | null = null;
   exited = false;
@@ -38,8 +38,8 @@ class FakeUi implements ChatUi {
   sent(files: Attachment[]): void {
     this.sentFiles.push(files.map((f) => f.name));
   }
-  setEdits(mode: string): void {
-    this.edits.push(mode);
+  setMode(mode: string): void {
+    this.modes.push(mode);
   }
   info(text: string, tone?: "info" | "error"): void {
     this.lines.push(text);
@@ -566,21 +566,25 @@ describe("Chat: a conversation with both agents", () => {
     expect(RunStore.list(runsDir)).toEqual([]);
   });
 
-  it("gives Claude in the chat the implementer's edit mode (/edits, Shift+Tab), and no other implementer flag", async () => {
+  it("gives Claude in the chat the implementer's permission mode (/mode, Shift+Tab), and no other implementer flag", async () => {
     const cfg = testConfig(fake);
     cfg.claude.role_args.implementer = ["--max-turns", "5"];
     const chat = newChat({ cfg });
-    await chat.submit("/edits auto");
+    await chat.submit("/mode acceptEdits");
     await chat.submit("/claude edit app.txt please");
     await chat.idle();
     const args = argsOf("chat_claude");
     expect(after(args, "--permission-mode")).toBe("acceptEdits");
     expect(args).not.toContain("--max-turns");
-    chat.toggleEdits();
+    chat.cycleMode();
     await chat.submit("/claude again");
     await chat.idle();
-    expect(argsOf("chat_claude", 1)).not.toContain("--permission-mode");
-    expect(ui.lines.some((l) => l.includes("Claude (in the chat and as the pipeline's implementer)"))).toBe(true);
+    expect(after(argsOf("chat_claude", 1), "--permission-mode")).toBe("auto");
+    chat.cycleMode();
+    await chat.submit("/claude once more");
+    await chat.idle();
+    expect(argsOf("chat_claude", 2)).not.toContain("--permission-mode");
+    expect(ui.lines.some((l) => l.includes("Mode: Auto") && l.includes("in the chat and as the pipeline's implementer"))).toBe(true);
   });
 
   it("names the model each answer ran on; a setting changed meanwhile only changes the next question", async () => {
@@ -790,12 +794,13 @@ describe("Chat: the pipeline", () => {
     expect(ui.exited).toBe(true);
   });
 
-  it("switches the implementer's edits with /edits or Shift+Tab, for this chat only", async () => {
+  it("switches the implementer's permission mode with /mode or Shift+Tab, for this chat only", async () => {
     const chat = newChat();
     await chat.greet();
-    expect(ui.edits.at(-1)).toBe("ask");
-    await chat.submit("/edits auto");
-    expect(ui.edits.at(-1)).toBe("auto");
+    expect(ui.modes.at(-1)).toBe("manual");
+    await chat.submit("/mode acceptEdits");
+    expect(ui.modes.at(-1)).toBe("acceptEdits");
+    expect(ui.lines.at(-1)).toContain("Mode: Edit automatically");
     expect(ui.lines.at(-1)).toContain("this chat only");
     fake.setScenario(happy());
     await chat.submit("/pipeline Make app.txt fixed");
@@ -803,12 +808,16 @@ describe("Chat: the pipeline", () => {
     expect(after(argsOf("implementer"), "--permission-mode")).toBe("acceptEdits");
     expect(argsOf("plan_reviewer")).not.toContain("--permission-mode");
     expect(JSON.parse(readFileSync(RunStore.open(runsDir).path("config.json"), "utf8")).claude.role_args.implementer).toEqual(["--permission-mode", "acceptEdits"]);
-    chat.toggleEdits();
-    expect(ui.edits.at(-1)).toBe("ask");
-    await chat.submit("/edits");
-    expect(ui.lines.at(-1)).toContain("ask");
-    await chat.submit("/edits sometimes");
-    expect(ui.lines.at(-1)).toContain("/edits auto|ask");
+    chat.cycleMode();
+    expect(ui.modes.at(-1)).toBe("auto");
+    expect(ui.lines.at(-1)).toContain("Mode: Auto");
+    expect(ui.lines.at(-1)).toContain("safety check");
+    chat.cycleMode();
+    expect(ui.modes.at(-1)).toBe("manual");
+    await chat.submit("/mode");
+    expect(ui.lines.at(-1)).toContain("Mode: Manual");
+    await chat.submit("/mode sometimes");
+    expect(ui.lines.at(-1)).toContain("/mode manual|acceptEdits|auto");
   });
 
   it("applies a change made during a run from that run's next agent call", async () => {
@@ -855,7 +864,7 @@ describe("Chat: the pipeline", () => {
     mkdirSync(join(repo, ".agentduo"), { recursive: true });
     writeFileSync(join(repo, ".agentduo", "config.yaml"), "# team settings\ngates: []\n");
     const chat = newChat();
-    await chat.submit("/edits auto --save");
+    await chat.submit("/mode acceptEdits --save");
     await chat.submit("/codex model gpt-5.5 --save");
     const text = readFileSync(join(repo, ".agentduo", "config.yaml"), "utf8");
     for (const s of ["# team settings", "acceptEdits", "model: gpt-5.5"]) expect(text).toContain(s);
@@ -866,7 +875,7 @@ describe("Chat: the pipeline", () => {
     const chat = newChat();
     await chat.submit("/help");
     const help = ui.lines.at(-1)!;
-    for (const command of ["/claude", "/codex", "/pipeline", "/plan", "/diff", "/status", "/usage", "/resume", "/new", "/quit", "Esc", "Shift+Tab", "/edits",
+    for (const command of ["/claude", "/codex", "/pipeline", "/plan", "/diff", "/status", "/usage", "/resume", "/new", "/quit", "Esc", "Shift+Tab", "/mode",
       "/settings claude model", "/settings claude effort", "/settings claude permissions", "/settings claude add-dir", "/settings codex model",
       "/settings codex permissions", "/claude -- <question>", "/config", "/help", "--save"]) {
       expect(help, command).toContain(command);

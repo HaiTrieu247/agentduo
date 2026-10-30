@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { killAllActive } from "../../../src/agents/process.js";
 import { Chat, resumeHint, type ChatUi } from "../../../src/chat.js";
 import { AttachmentError } from "../../../src/core/attachments.js";
-import { parseInput, type Backend, type SettingCommand } from "../../../src/core/commands.js";
+import { isPermissionMode, parseInput, type Backend, type SettingCommand } from "../../../src/core/commands.js";
 import { ConfigError, type ConfigData } from "../../../src/core/config.js";
 import { Conversation } from "../../../src/core/conversation.js";
 import type { Check } from "../../../src/core/doctor.js";
@@ -10,7 +10,7 @@ import { diagnose, EnvironmentError, prepareEnvironment, runnableProblem, type W
 import { ModelRegistry, resolvingModels } from "../../../src/core/models.js";
 import type { Review } from "../../../src/core/outputs.js";
 import { findingsMarkdown } from "../../../src/core/render.js";
-import { editMode, settingsView, type SettingsView } from "../../../src/core/settings.js";
+import { permissionMode, settingsView, type SettingsView } from "../../../src/core/settings.js";
 import { acquireWorkspaceLock, LockError, RunStore, workspaceBusy, workspaceLockHolder, type RunState } from "../../../src/core/state.js";
 import { EventBus, type DuoEvent, type HumanReview, type ModelMap, type PermissionAnswer } from "../../../src/events.js";
 import { packageVersion } from "../../../src/paths.js";
@@ -65,12 +65,12 @@ export function pipelineOf(cfg: ConfigData): PipelineStep[] {
   return steps;
 }
 
-/** An unvalidated config may hold anything; the edit mode is only shown. */
-function safeEditMode(cfg: ConfigData): string {
+/** An unvalidated config may hold anything; the permission mode is only shown. */
+function safePermissionMode(cfg: ConfigData): string {
   try {
-    return editMode(cfg);
+    return permissionMode(cfg);
   } catch {
-    return "ask";
+    return "manual";
   }
 }
 
@@ -126,13 +126,13 @@ export class RuntimeSession {
     this.ui = this.uiFor(null);
   }
 
-  /** What a chat shows goes to its own tab; edits, models and settings are the workspace's, so every tab shows them. */
+  /** What a chat shows goes to its own tab; the mode, models and settings are the workspace's, so every tab shows them. */
   private uiFor(conversation: string | null): ChatUi {
     const sink = this.o.sink;
     return {
       info: (text, tone) => sink.ui({ type: "info", text, ...(tone === "error" ? { tone } : {}) }, conversation),
       setStatus: (status) => sink.ui({ type: "status", status }, conversation),
-      setEdits: (mode) => sink.ui({ type: "edits", mode }, null),
+      setMode: (mode) => sink.ui({ type: "mode", mode }, null),
       setRecipient: (backend) => sink.ui({ type: "recipient", backend }, conversation),
       setModels: (models) => sink.ui({ type: "models", models }, null),
       setSettings: (settings) => sink.ui({ type: "settings", settings }, null),
@@ -177,7 +177,7 @@ export class RuntimeSession {
   async initialize(): Promise<InitializeResult> {
     const result: InitializeResult = {
       version: packageVersion(), node: process.versions.node, workspace: resolve(this.o.workspace), runsDir: null, configFile: null, configSources: [],
-      pipeline: [], edits: "ask", recipient: "codex", models: unknownModels("the configuration could not be loaded"), settings: null, warnings: [],
+      pipeline: [], mode: "manual", recipient: "codex", models: unknownModels("the configuration could not be loaded"), settings: null, warnings: [],
       problem: null, hint: null,
     };
     let env: WorkspaceEnv;
@@ -192,7 +192,7 @@ export class RuntimeSession {
     const locked: Problem | null = holder && holder !== process.pid ? { kind: "locked", message: workspaceBusy(holder) } : null;
     return {
       ...result, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, configSources: env.sources,
-      pipeline: pipelineOf(env.cfg), edits: safeEditMode(env.cfg), models: this.modelsFor(env).current(), settings: safeSettings(env.cfg), warnings: env.warnings,
+      pipeline: pipelineOf(env.cfg), mode: safePermissionMode(env.cfg), models: this.modelsFor(env).current(), settings: safeSettings(env.cfg), warnings: env.warnings,
       problem: runnableProblem(env, env.cfg, env.sources.join(", "), this.o.env) ?? locked,
       hint: resumeHint(env.runsDir, env.workspace),
     };
@@ -237,7 +237,7 @@ export class RuntimeSession {
     }
     this.release = release;
     this.o.sink.ui({ type: "pipeline", pipeline: pipelineOf(env.cfg) }, null);
-    this.o.sink.ui({ type: "edits", mode: editMode(env.cfg) }, null);
+    this.o.sink.ui({ type: "mode", mode: permissionMode(env.cfg) }, null);
     this.o.sink.ui({ type: "settings", settings: settingsView(env.cfg) }, null);
     this.o.sink.ui({ type: "session", session: "active" }, null);
     return env;
@@ -349,12 +349,12 @@ export class RuntimeSession {
     });
   }
 
-  toggleEdits(conversation: string): Promise<void> {
+  cycleMode(conversation: string): Promise<void> {
     return this.serial(async () => {
       const chat = await this.ensureSession(conversation);
-      chat.toggleEdits();
-      const mode = editMode(chat.config);
-      if (mode === "ask" || mode === "auto") this.follow(conversation, { target: "edits", mode });
+      chat.cycleMode();
+      const mode = permissionMode(chat.config);
+      if (isPermissionMode(mode)) this.follow(conversation, { target: "mode", mode });
     });
   }
 

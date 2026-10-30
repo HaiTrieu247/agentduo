@@ -36,7 +36,7 @@ Click the agentduo button in an editor's title bar (beside Claude Code's and Cod
   - the `⋯` menu opens the run's plan, changes and report, and **Usage**.
 - **Tabs work independently.** You can ask in one tab while another is still answering. A workspace runs one pipeline at
   a time, so `/pipeline` or `/resume` in another tab says which conversation's run is going. Settings (models, effort,
-  edits, permissions) are the workspace's, so a change in one tab applies to every tab. Who a message goes to is each
+  mode, permissions) are the workspace's, so a change in one tab applies to every tab. Who a message goes to is each
   tab's own.
 - **Conversations last.** After a reload or a restart, VS Code reopens the tabs: each shows what it showed, and its next
   question still carries what was said before. An answer that was still going when the window closed has stopped, as Esc
@@ -73,7 +73,7 @@ Click the agentduo button in an editor's title bar (beside Claude Code's and Cod
   message first, or choose **Decide later**, then `/resume` with a note. Limits, the images sent as images and what
   that costs are as in the terminal chat (see the main README).
 - **Settings** changes what the chat's settings commands change, and applies each choice at once. Model, effort,
-  edits, reasoning and permissions are pickers: a click drops the list down. Codex's models are the ones its own
+  mode, reasoning and permissions are pickers: a click drops the list down. Codex's models are the ones its own
   `/model` offers (read with `codex debug models`), and its reasoning levels are those the chosen model takes. Claude's
   models are Claude Code's aliases (Fable, Opus, Sonnet, Haiku, their 1M-context variants, Best, Opus Plan). Claude's
   allowed and denied tool rules and its extra directories are tags: type one and press Enter to add it, and the × on a
@@ -83,7 +83,9 @@ Click the agentduo button in an editor's title bar (beside Claude Code's and Cod
   OpenAI mark and the model they ran on. Their Markdown (headings, lists, code, tables, quotes) is rendered as text
   elements, never as HTML, and links show their target as a tooltip without opening it.
 - **agentduo: Open Chat** puts the cursor in the composer. Enter sends and Shift+Enter starts a new line; while an IME
-  is composing, Enter only commits the word. While a pipeline step runs, what you type is a note for the next step.
+  is composing, Enter only commits the word. The mode chip opens Claude Code's mode menu (Manual, Edit automatically,
+  Auto), for Claude in the chat and as the pipeline's implementer; Shift+Tab in the composer switches to the next mode,
+  as in Claude Code, so there it does not move the focus back. While a pipeline step runs, what you type is a note for the next step.
   While something runs and the input is empty, the send button becomes **Stop** (Esc in the composer does the same): it
   interrupts the answer or the step. A stopped step continues with `/resume [note]` (or **Resume**), and an empty Enter
   only reminds you of it.

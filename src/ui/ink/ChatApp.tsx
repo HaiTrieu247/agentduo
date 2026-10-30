@@ -3,7 +3,7 @@ import { Box, Static, Text, useInput, useStdout } from "ink";
 import { useEffect, useReducer, useRef, useState } from "react";
 import type { ChatStatus } from "../../chat.js";
 import { attachmentDetail, type Attachment } from "../../core/attachment-types.js";
-import { AGENT_NAMES, complete, type Backend, type Completion } from "../../core/commands.js";
+import { AGENT_NAMES, complete, modeLabel, type Backend, type Completion } from "../../core/commands.js";
 import type { UsageReport } from "../../core/usage.js";
 import type { Decision, EventBus, ModelMap, PermissionAnswer } from "../../events.js";
 import { modelText, PROVIDERS } from "../format.js";
@@ -17,7 +17,7 @@ import { UsagePanel } from "./UsagePanel.js";
 type ChatLine =
   | { type: "user" | "info"; text: string }
   | { type: "status"; status: ChatStatus }
-  | { type: "edits"; mode: string }
+  | { type: "mode"; mode: string }
   | { type: "recipient"; backend: Backend }
   | { type: "models"; models: ModelMap }
   | { type: "usage"; report: UsageReport }
@@ -35,8 +35,8 @@ export class ChatChannel {
     this.emitter.emit("line", { type: "info", text });
   }
 
-  edits(mode: string): void {
-    this.emitter.emit("line", { type: "edits", mode });
+  mode(mode: string): void {
+    this.emitter.emit("line", { type: "mode", mode });
   }
 
   status(status: ChatStatus): void {
@@ -78,8 +78,8 @@ export interface ChatAppProps {
   onSubmit(text: string): void;
   onEscape(): void;
   onCtrlC(): void;
-  /** Shift+Tab, as in Claude Code: switch Claude between asking before edits and editing automatically. */
-  onCycleEdits?(): void;
+  /** Shift+Tab, as in Claude Code: Claude's next permission mode (Manual, Edit automatically, Auto). */
+  onCycleMode?(): void;
   /** r in the usage panel: look the usage up again. */
   onUsageRefresh?(): void;
   onDecision(d: Decision | "defer"): void;
@@ -146,8 +146,8 @@ function Attachments({ files }: { files: Attachment[] }) {
   );
 }
 
-function ChatInput({ status, edits, to, models, files, onSubmit, onEscape, onCycleEdits }: {
-  status: ChatStatus; edits: string | null; to: Backend; models: ModelMap | null; files: Attachment[]; onSubmit(text: string): void; onEscape(): void; onCycleEdits?(): void;
+function ChatInput({ status, mode, to, models, files, onSubmit, onEscape, onCycleMode }: {
+  status: ChatStatus; mode: string | null; to: Backend; models: ModelMap | null; files: Attachment[]; onSubmit(text: string): void; onEscape(): void; onCycleMode?(): void;
 }) {
   const [text, setText] = useState("");
   const [selected, setSelected] = useState(0);
@@ -165,7 +165,7 @@ function ChatInput({ status, edits, to, models, files, onSubmit, onEscape, onCyc
   useInput((input, key) => {
     if (key.ctrl && input === "c") return; // handled by the app, which counts presses
     if (key.tab && key.shift) {
-      onCycleEdits?.();
+      onCycleMode?.();
       return;
     }
     if (menu) {
@@ -213,7 +213,7 @@ function ChatInput({ status, edits, to, models, files, onSubmit, onEscape, onCyc
       <Text dimColor wrap="truncate-end">
         {"  to: "}
         <Text bold>{AGENT_NAMES[to]}</Text>
-        {` · ${model("claude")} · ${model("codex")}${edits ? ` · edits: ${edits} (Shift+Tab)` : ""}`}
+        {` · ${model("claude")} · ${model("codex")}${mode ? ` · mode: ${modeLabel(mode)} (Shift+Tab)` : ""}`}
       </Text>
       <Text dimColor wrap="truncate-end">{`  ${HINTS[status]}`}</Text>
     </Box>
@@ -224,7 +224,7 @@ function ChatInput({ status, edits, to, models, files, onSubmit, onEscape, onCyc
 export function ChatApp(p: ChatAppProps) {
   const [view, dispatch] = useReducer(reduce, undefined, () => initialView(p.version, p.verbose, { workspace: p.workspace }));
   const [status, setStatus] = useState<ChatStatus>("idle");
-  const [edits, setEdits] = useState<string | null>(null);
+  const [mode, setMode] = useState<string | null>(null);
   const [to, setTo] = useState<Backend>("codex");
   const [models, setModels] = useState<ModelMap | null>(null);
   const [usage, setUsage] = useState<UsageReport | null>(null);
@@ -239,7 +239,7 @@ export function ChatApp(p: ChatAppProps) {
   useEffect(() => p.bus.on((event) => dispatch({ type: "event", event, now: Date.now() })), [p.bus]);
   useEffect(() => p.channel.on((line) => {
     if (line.type === "status") setStatus(line.status);
-    else if (line.type === "edits") setEdits(line.mode);
+    else if (line.type === "mode") setMode(line.mode);
     else if (line.type === "recipient") setTo(line.backend);
     else if (line.type === "models") setModels(line.models);
     else if (line.type === "attachments") setFiles(line.files);
@@ -288,7 +288,7 @@ export function ChatApp(p: ChatAppProps) {
               setUsage(null);
             }} />
           ) : (
-            <ChatInput status={status} edits={edits} to={to} models={models} files={files} onSubmit={p.onSubmit} onEscape={p.onEscape} onCycleEdits={p.onCycleEdits} />
+            <ChatInput status={status} mode={mode} to={to} models={models} files={files} onSubmit={p.onSubmit} onEscape={p.onEscape} onCycleMode={p.onCycleMode} />
           )}
         </>
       )}

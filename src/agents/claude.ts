@@ -182,7 +182,7 @@ export class ClaudeBackend implements AgentBackend {
   /**
    * Protocol flags only; what Claude may do comes from the user's Claude Code settings plus args/role_args. A
    * conversation turn (text mode) has no schema and no role, but keeps the implementer's permission mode, which is
-   * what /edits sets for Claude in the chat too.
+   * what /mode sets for Claude in the chat too.
    */
   buildArgs(a: BuildArgs): string[] {
     return [

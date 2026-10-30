@@ -1,7 +1,8 @@
 // The sidebar's DOM. Every string an agent or the worker produced goes in through text nodes, never as markup,
 // and every button sends a named action; nothing here can open a path or run a command of its own choosing.
 import {
-  AGENT_NAMES, CODEX_PRESETS, COMMANDS, complete, type Backend, type Completion, type SettingCommand,
+  AGENT_NAMES, CODEX_PRESETS, COMMANDS, complete, isPermissionMode, MODE_INFO, modeLabel, PERMISSION_MODES, type Backend, type Completion, type PermissionMode,
+  type SettingCommand,
 } from "../../../src/core/commands.js";
 import { ATTACHMENT_LIMITS, attachmentDetail, formatBytes, type Attachment } from "../../../src/core/attachment-types.js";
 import type { UsageReport } from "../../../src/core/usage.js";
@@ -31,7 +32,8 @@ export interface Actions {
   recipient(backend: Backend): void;
   setting(request: SettingRequest): void;
   interrupt(): void;
-  toggleEdits(): void;
+  /** Shift+Tab: Claude's next permission mode. */
+  cycleMode(): void;
   /** The usage panel's Refresh: look the usage up again. */
   usage(): void;
   decide(id: string, decision: DecisionChoice, note: string | null): void;
@@ -560,10 +562,9 @@ interface SettingsPrefs {
   yes: boolean;
 }
 
-const EDITS: PickOption[] = [
-  { value: "ask", label: "Ask before edits", detail: "Claude asks before it changes a file" },
-  { value: "auto", label: "Edit automatically", detail: "Claude changes files without asking" },
-];
+/** Claude Code's permission modes, with the icons of its mode menu (no codicon has its hand: a person approves). */
+const MODE_ICONS: Record<PermissionMode, string> = { manual: "person", acceptEdits: "code", auto: "zap" };
+const MODES: PickOption[] = PERMISSION_MODES.map((mode) => ({ value: mode, label: MODE_INFO[mode].label, detail: MODE_INFO[mode].description }));
 const PERMISSIONS: Record<string, PickOption> = {
   default: { value: "default", label: "Default", detail: "Codex's own setting (~/.codex/config.toml)" },
   "read-only": { value: "read-only", label: "Read only", detail: "reads the workspace, changes nothing" },
@@ -586,14 +587,14 @@ function settingsPanel(s: ViewState, actions: Actions, prefs: SettingsPrefs): HT
   const orNull = (value: string) => (value === "default" ? null : value);
   const claudeModel = modelOptions(s, "claude");
   const codexModel = modelOptions(s, "codex");
-  const edits = EDITS.some((e) => e.value === v.claude.edits) ? EDITS : [...EDITS, { value: v.claude.edits, label: v.claude.edits, detail: "" }];
+  const modes = MODES.some((m) => m.value === v.claude.mode) ? MODES : [...MODES, { value: v.claude.mode, label: v.claude.mode, detail: "set in the configuration" }];
   const rule = (kind: "allow" | "deny" | "remove") => (text: string) => send({ target: "claude.permissions", rule: { kind, rule: text } });
   return [
     h("fieldset", { class: "group" },
       h("legend", {}, speaker("claude")),
       picker({ key: "claude.model", label: "Model", ...claudeModel, pick: (m) => send({ target: "claude.model", model: orNull(m) }) }),
       picker({ key: "claude.effort", label: "Effort", ...effortOptions(s, "claude"), pick: (e) => send({ target: "claude.effort", effort: orNull(e) }) }),
-      picker({ key: "edits", label: "Edits (chat and pipeline implementer)", value: v.claude.edits, options: edits, pick: (m) => (m === "ask" || m === "auto") && send({ target: "edits", mode: m }) }),
+      picker({ key: "mode", label: "Mode (chat and pipeline implementer)", value: v.claude.mode, options: modes, pick: (m) => isPermissionMode(m) && send({ target: "mode", mode: m }) }),
       tagList({ key: "claude.allow", label: "Allowed tools", items: v.claude.allow, placeholder: "Add a rule and press Enter, e.g. Bash(npm test:*)", add: rule("allow"), remove: rule("remove") }),
       tagList({ key: "claude.deny", label: "Denied tools", items: v.claude.deny, placeholder: "Add a rule and press Enter, e.g. Bash(git push:*)", add: rule("deny"), remove: rule("remove") }),
       tagList({ key: "claude.dirs", label: "Extra directories", items: v.claude.addDirs, placeholder: "Add a path Claude may also work in, then Enter", add: (dir) => send({ target: "claude.add-dir", dir }) })),
@@ -664,7 +665,10 @@ type Target = Backend | "pipeline" | "discuss";
 type Once = "pipeline" | "discuss";
 const ONCE: Record<Once, { icon: string; label: string }> = { pipeline: { icon: "run-all", label: "Pipeline" }, discuss: { icon: "comment-discussion", label: "Discuss" } };
 const otherAgent = (b: Backend): Backend => (b === "codex" ? "claude" : "codex");
-type Panel = "settings" | "usage" | "commands" | "target";
+type Panel = "settings" | "usage" | "commands" | "target" | "mode";
+
+/** Shift+Tab alone: in the message box and the mode menu it switches Claude's mode, as in Claude Code. */
+const shiftTab = (e: KeyboardEvent) => e.key === "Tab" && e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey;
 
 /** Arrow keys, Home and End move between a menu's items; Escape closes it. */
 function menuKeys(menu: HTMLElement, close: () => void): void {
@@ -731,6 +735,7 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
     usageBody);
   const commandsMenu = h("ul", { class: "menu commands", role: "menu", label: "Commands", attrs: { id: "agentduo-commands" } });
   const targetMenu = h("ul", { class: "menu target-menu", role: "menu", label: "Send to", attrs: { id: "agentduo-target" } });
+  const modeMenu = h("ul", { class: "menu mode-menu", role: "menu", label: "Modes", attrs: { id: "agentduo-mode" } });
   const menu = h("ul", { class: "menu completions", role: "listbox", label: "Commands", attrs: { id: "agentduo-completions" } });
   menu.hidden = true;
   const input = h("textarea", {
@@ -745,10 +750,10 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   const targetDetail = h("span", { class: "chip-detail" });
   const targetBtn = h("button", { class: "chip target", attrs: { type: "button", "aria-haspopup": "menu", "aria-expanded": "false", "aria-controls": "agentduo-target" } },
     targetIcon, targetName, targetDetail, icon("chevron-down", "chip-chevron"));
-  const editsText = h("span", { class: "chip-name" });
-  const editsBtn = h("button", { class: "chip edits", title: "Switch Claude's edits between ask and auto, in the chat and as the pipeline's implementer (/edits)", attrs: { type: "button", "aria-pressed": "false" } },
-    icon("edit"), editsText);
-  editsBtn.addEventListener("click", () => actions.toggleEdits());
+  const modeIcon = h("span", { class: "chip-icon" });
+  const modeName = h("span", { class: "chip-name" });
+  const modeBtn = h("button", { class: "chip mode", attrs: { type: "button", "aria-haspopup": "menu", "aria-expanded": "false", "aria-controls": "agentduo-mode" } },
+    modeIcon, modeName, icon("chevron-down", "chip-chevron"));
   const sendIcon = icon("arrow-up");
   const sendBtn = h("button", { class: "send-btn", attrs: { type: "button" } }, sendIcon);
   const attachBtn = h("button", { class: "icon-btn attach", title: "Attach files: images, PDFs, text, code… (or paste an image, or Shift+drag files from your system here)", label: "Attach files", attrs: { type: "button" } }, icon("attach"));
@@ -758,8 +763,8 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   const fileHint = h("div", { class: "file-hint muted small", role: "status" });
   fileHint.hidden = true;
   // The menus float over the timeline, just above the box they belong to; the settings take room of their own.
-  const box = h("div", { class: "composer-box" }, files, input, h("div", { class: "composer-bar" }, attachBtn, commandsBtn, targetBtn, editsBtn, h("span", { class: "spacer" }), sendBtn));
-  const composer = h("footer", { class: "composer" }, settingsSheet, usageSheet, h("div", { class: "composer-anchor" }, commandsMenu, targetMenu, menu, fileHint, box));
+  const box = h("div", { class: "composer-box" }, files, input, h("div", { class: "composer-bar" }, attachBtn, commandsBtn, targetBtn, modeBtn, h("span", { class: "spacer" }), sendBtn));
+  const composer = h("footer", { class: "composer" }, settingsSheet, usageSheet, h("div", { class: "composer-anchor" }, commandsMenu, targetMenu, modeMenu, menu, fileHint, box));
   root.replaceChildren(progress, problem, timeline, pending, composer, announce);
   // The jump button floats at the bottom of the timeline (sticky), over the content, never pushing the composer.
   timeline.append(notice, empty, live, jump);
@@ -904,17 +909,21 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
     showUsage();
     commandsMenu.hidden = next !== "commands";
     targetMenu.hidden = next !== "target";
+    modeMenu.hidden = next !== "mode";
     commandsBtn.setAttribute("aria-expanded", String(next === "commands"));
     targetBtn.setAttribute("aria-expanded", String(next === "target"));
-    if (next === "target") {
-      renderTargetMenu();
-      (targetMenu.querySelector<HTMLButtonElement>('[aria-checked="true"]') ?? targetMenu.querySelector("button"))?.focus();
+    modeBtn.setAttribute("aria-expanded", String(next === "mode"));
+    if (next === "target" || next === "mode") {
+      const list = next === "target" ? targetMenu : modeMenu;
+      if (next === "target") renderTargetMenu();
+      else renderModeMenu();
+      (list.querySelector<HTMLButtonElement>('[aria-checked="true"]') ?? list.querySelector("button"))?.focus();
     } else if (next === "commands") commandsMenu.querySelector("button")?.focus();
     else if (next === "settings") settingsBody.querySelector<HTMLElement>("button, input")?.focus();
     else if (next === "usage") {
       // Opened by a report, it takes the focus only from the composer, so Esc closes it; typing elsewhere is left alone.
       if (document.activeElement === input || document.activeElement === document.body) usageSheet.focus();
-    } else if (focusBack) (was === "target" ? targetBtn : was === "commands" ? commandsBtn : input).focus();
+    } else if (focusBack) (was === "target" ? targetBtn : was === "commands" ? commandsBtn : was === "mode" ? modeBtn : input).focus();
   }
 
   /** A question for the user (a permission, a decision) goes before the usage panel, which comes back once it is answered. */
@@ -974,6 +983,28 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
       menuItem({ mark: icon("settings-gear"), label: "Models, effort and permissions…", detail: "both agents' settings", pick: () => setPanel("settings", false) }));
   }
 
+  /** Claude Code's mode menu: its three modes, the one in use checked; ⇧+Tab in the message box goes through them too. */
+  function renderModeMenu(): void {
+    if (!state) return;
+    const now = state.mode;
+    const focused = modeMenu.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.mode : undefined;
+    modeMenu.replaceChildren(
+      h("li", { class: "menu-head", role: "presentation" }, h("span", {}, "Modes"), h("span", { class: "menu-keys" }, "⇧+Tab to switch")),
+      ...PERMISSION_MODES.map((mode) => {
+        const item = menuItem({
+          radio: true, checked: now === mode, mark: icon(MODE_ICONS[mode]), label: MODE_INFO[mode].label, detail: MODE_INFO[mode].description,
+          pick: () => {
+            setPanel(null, true);
+            if (state && state.mode !== mode) actions.setting({ setting: { target: "mode", mode }, save: false, yes: false });
+          },
+        });
+        item.querySelector("button")!.dataset.mode = mode;
+        return item;
+      }));
+    // Rebuilt by a mode changed meanwhile (⇧+Tab in the menu): the item that had the focus keeps it.
+    if (focused) modeMenu.querySelector<HTMLButtonElement>(`[data-mode="${focused}"]`)?.focus();
+  }
+
   function renderCompletions(): void {
     const text = input.value;
     completions = composing || text === closedFor ? [] : complete(text);
@@ -1023,6 +1054,12 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   input.addEventListener("keydown", (e) => {
     if (e.isComposing || composing || e.keyCode === 229) return; // an IME is still composing: Enter picks a candidate
     const plain = !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey;
+    // As in Claude Code, Shift+Tab in the message box switches Claude's mode instead of moving the focus back.
+    if (shiftTab(e)) {
+      e.preventDefault();
+      actions.cycleMode();
+      return;
+    }
     if (completions.length) {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
@@ -1068,8 +1105,15 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   sendBtn.addEventListener("click", () => (stopMode() ? actions.interrupt() : submit()));
   commandsBtn.addEventListener("click", () => setPanel(panel === "commands" ? null : "commands", true));
   targetBtn.addEventListener("click", () => setPanel(panel === "target" ? null : "target", true));
+  modeBtn.addEventListener("click", () => setPanel(panel === "mode" ? null : "mode", true));
   menuKeys(commandsMenu, () => setPanel(null, true));
   menuKeys(targetMenu, () => setPanel(null, true));
+  menuKeys(modeMenu, () => setPanel(null, true));
+  modeMenu.addEventListener("keydown", (e) => {
+    if (!shiftTab(e)) return;
+    e.preventDefault();
+    actions.cycleMode();
+  });
   for (const sheet of [settingsSheet, usageSheet]) {
     sheet.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
@@ -1080,9 +1124,9 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   }
   // A click elsewhere closes an open menu (the settings stay until closed: they hold half-typed values).
   document.addEventListener("pointerdown", (e) => {
-    if (panel !== "commands" && panel !== "target") return;
+    if (panel !== "commands" && panel !== "target" && panel !== "mode") return;
     const t = e.target as Node;
-    if (![commandsMenu, targetMenu, commandsBtn, targetBtn].some((el) => el.contains(t))) setPanel(null, false);
+    if (![commandsMenu, targetMenu, modeMenu, commandsBtn, targetBtn, modeBtn].some((el) => el.contains(t))) setPanel(null, false);
   });
   commandsMenu.append(...COMMANDS.map((c) => {
     const item = h("button", { class: "menu-item", role: "menuitem", attrs: { type: "button" } },
@@ -1224,8 +1268,13 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
     targetBtn.classList.toggle("resolving", m?.status === "resolving");
     targetBtn.disabled = !canSubmit(s);
     if (panel === "target") renderTargetMenu();
-    editsText.textContent = `Edits: ${s.edits}`;
-    editsBtn.setAttribute("aria-pressed", String(s.edits === "auto"));
+    const mode = isPermissionMode(s.mode) ? s.mode : null;
+    modeIcon.replaceChildren(icon(mode ? MODE_ICONS[mode] : "shield"));
+    modeName.textContent = modeLabel(s.mode);
+    modeBtn.title = `${modeLabel(s.mode)}: ${mode ? MODE_INFO[mode].description : "Claude's permission mode, set in the configuration"}\n`
+      + "Claude in the chat and as the pipeline's implementer. Click to choose, or Shift+Tab in the message box (/mode)";
+    modeBtn.setAttribute("aria-label", `Mode: ${modeLabel(s.mode)}`);
+    if (panel === "mode") renderModeMenu();
     renderSend(s);
     const inputs = [s.settings, s.catalog, s.models];
     if (inputs.some((x, i) => x !== lastSettings[i])) {

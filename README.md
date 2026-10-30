@@ -144,7 +144,7 @@ running keeps the model it started with. It lasts for this chat only, unless the
 
 | Command | Same as | What it changes |
 |---|---|---|
-| Shift+Tab, `/edits auto\|ask` | Shift+Tab in Claude Code | `auto`: Claude edits files without asking (`acceptEdits`), in the chat and as the pipeline's implementer; the plan critic is not affected |
+| Shift+Tab, `/mode manual\|acceptEdits\|auto` | Shift+Tab in Claude Code | Claude's permission mode, in the chat and as the pipeline's implementer: Manual asks before each edit, Edit automatically (`acceptEdits`) edits files without asking, Auto approves what passes Claude Code's safety check and pauses for anything risky; the plan critic is not affected |
 | `/claude model <name\|default>` | `/model` | Claude's model |
 | `/claude effort low\|medium\|high\|xhigh\|max\|default` | `/effort` | Claude's effort level |
 | `/claude permissions [allow\|deny\|remove <rule>]` | `/permissions` | tool rules for agentduo's Claude calls, e.g. `Bash(npm test:*)` |
@@ -153,7 +153,7 @@ running keeps the model it started with. It lasts for this chat only, unless the
 | `/codex permissions read-only\|auto\|full-access\|default` | `/permissions` in Codex | Codex's sandbox; `full-access` asks you to confirm with `--yes` |
 | `/config` | `/config`, `/status` | shows what both agents run with now |
 
-Outside the chat, `duo --accept-edits "<task>"` does what `/edits auto` does.
+Outside the chat, `duo --accept-edits "<task>"` does what `/mode acceptEdits` does.
 
 `duo "<task>"` and `duo run "<task>"` still run the pipeline on a single task and exit; that is the form for scripts and CI.
 

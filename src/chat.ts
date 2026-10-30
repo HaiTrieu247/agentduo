@@ -4,7 +4,9 @@ import { AgentRunner, type AgentResult } from "./agents/runner.js";
 import { firstLine } from "./agents/types.js";
 import { attachmentDetail, attachmentsText, type Attachment } from "./core/attachment-types.js";
 import { AttachmentError, AttachmentStore } from "./core/attachments.js";
-import { AGENT_NAMES, helpText, parseInput, type Backend, type ChatCommand, type SettingCommand } from "./core/commands.js";
+import {
+  AGENT_NAMES, helpText, isPermissionMode, MODE_INFO, modeLabel, nextMode, parseInput, type Backend, type ChatCommand, type SettingCommand,
+} from "./core/commands.js";
 import { configFromSaved, type ConfigData } from "./core/config.js";
 import { Conversation, type Turn } from "./core/conversation.js";
 import { parseVerdict } from "./core/discussion.js";
@@ -12,7 +14,7 @@ import { missingCli } from "./core/environment.js";
 import { Git } from "./core/git.js";
 import { ModelRegistry, withObserved } from "./core/models.js";
 import {
-  claudeDirs, claudeRules, describeSettings, editMode, saveSettings, settings, settingsView, type SettingChange, type SettingsView,
+  claudeDirs, claudeRules, describeSettings, permissionMode, saveSettings, settings, settingsView, type SettingChange, type SettingsView,
 } from "./core/settings.js";
 import { nowIso, RunStore, type ConversationContext, type EarlierTask, type RunState } from "./core/state.js";
 import { readClaudeUsage, readCodexUsage, type UsageReport, type UsageState } from "./core/usage.js";
@@ -30,8 +32,8 @@ export interface ChatUi {
   /** A line from agentduo itself: command output and hints. */
   info(text: string, tone?: "info" | "error"): void;
   setStatus(status: ChatStatus): void;
-  /** Claude's edit mode, shown beside the input: "ask", "auto", or another Claude permission mode. */
-  setEdits(mode: string): void;
+  /** Claude's permission mode, shown beside the input: "manual", "acceptEdits", "auto", or another one Claude Code has. */
+  setMode(mode: string): void;
   /** Who a plain message goes to. */
   setRecipient(backend: Backend): void;
   /** The model each agent runs with, as far as it is known. */
@@ -237,14 +239,14 @@ export class Chat {
     return !!why;
   }
 
-  /** Shift+Tab: switch Claude between asking before edits and editing automatically. */
-  toggleEdits(): void {
-    this.change(settings.edits(editMode(this.cfg) === "auto" ? "ask" : "auto"), false, () => this.editsText());
+  /** Shift+Tab, as in Claude Code: Claude's next permission mode (Manual, Edit automatically, Auto). */
+  cycleMode(): void {
+    this.change(settings.mode(nextMode(permissionMode(this.cfg))), false, () => this.modeText());
   }
 
   /** Shows the settings and models, starts looking the models up, and points at a run an earlier session left stopped or waiting. */
   async greet(): Promise<void> {
-    this.o.ui.setEdits(editMode(this.cfg));
+    this.o.ui.setMode(permissionMode(this.cfg));
     this.o.ui.setRecipient(this.recipient);
     this.o.ui.setSettings?.(settingsView(this.cfg));
     this.o.ui.setModels(this.models.current());
@@ -861,11 +863,10 @@ export class Chat {
   }
 
   // ------------------------------------------------------------------ settings
-  private editsText(): string {
-    const mode = editMode(this.cfg);
-    const who = "Claude (in the chat and as the pipeline's implementer)";
-    return mode === "auto" ? `Edits: auto — ${who} edits files without asking.`
-      : mode === "ask" ? `Edits: ask — ${who} asks before editing files.` : `Edits: Claude's permission mode is ${mode}.`;
+  private modeText(): string {
+    const mode = permissionMode(this.cfg);
+    const what = isPermissionMode(mode) ? ` — ${MODE_INFO[mode].description}` : "";
+    return `Mode: ${modeLabel(mode)}${what}, in the chat and as the pipeline's implementer.`;
   }
 
   /**
@@ -881,7 +882,7 @@ export class Chat {
       running.store.writeJson("config.json", running.cfg);
     }
     if (save && !quiet) saveSettings(this.o.configFile, this.cfg, change.paths);
-    this.o.ui.setEdits(editMode(this.cfg));
+    this.o.ui.setMode(permissionMode(this.cfg));
     this.o.ui.setSettings?.(settingsView(this.cfg));
     this.models.refresh();
     if (quiet) return;
@@ -901,9 +902,9 @@ export class Chat {
     const change = (c: SettingChange, text: () => string) => this.change(c, save, text, quiet);
     const view = settingsView(this.cfg);
     switch (s.target) {
-      case "edits":
-        if (!s.mode) return ui.info(this.editsText());
-        return change(settings.edits(s.mode), () => this.editsText());
+      case "mode":
+        if (!s.mode) return ui.info(this.modeText());
+        return change(settings.mode(s.mode), () => this.modeText());
       case "claude.model":
         if (s.model === undefined) return ui.info(`Claude's model: ${modelText(this.models.identity("claude"))}`);
         return change(settings.claudeModel(s.model), () => `Claude's model: ${this.cfg.claude.model ?? "default"}.`);

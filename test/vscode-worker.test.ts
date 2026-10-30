@@ -96,8 +96,8 @@ describe("vscode worker: one conversation per tab", () => {
     expect(h.events().filter((e) => e.type === "run.started")).toHaveLength(1);
   });
 
-  it("has every tab follow a setting one of them changed", async () => {
-    fake.setScenario({ chat_claude: [{ answer: "one" }, { answer: "two" }] });
+  it("has every tab follow a setting one of them changed, and the mode another one switched", async () => {
+    fake.setScenario({ chat_claude: [{ answer: "one" }, { answer: "two" }, { answer: "three" }] });
     const { h } = await open();
     await say(h, "tab-a", "/claude hello");
     await h.waitFor(isEvent("turn.finished"));
@@ -106,6 +106,14 @@ describe("vscode worker: one conversation per tab", () => {
     await h.nth(isEvent("turn.finished"), 1);
     const args = fake.calls("chat_claude")[1]!.args;
     expect(args[args.indexOf("--model") + 1]).toBe("opus");
+    // Shift+Tab in tab B, then the menu's Auto in tab C: tab A's next question runs in auto.
+    await h.client.request({ type: "cycleMode", conversation: "tab-b" });
+    await h.waitFor((m) => m.kind === "ui" && m.update.type === "mode" && m.update.mode === "acceptEdits");
+    await h.client.request({ type: "setting", conversation: "tab-c", setting: { target: "mode", mode: "auto" }, save: false, yes: false });
+    await say(h, "tab-a", "/claude once more");
+    await h.nth(isEvent("turn.finished"), 2);
+    const third = fake.calls("chat_claude")[2]!.args;
+    expect(third[third.indexOf("--permission-mode") + 1]).toBe("auto");
   });
 
   it("stops what runs in a tab that is closed, and lets its conversation go", async () => {
@@ -137,7 +145,7 @@ describe("vscode worker", () => {
     const { init } = await open();
     expect(init.problem).toBeNull();
     expect(init.pipeline.map((p) => `${p.label}:${p.agent}`)).toEqual(["PLAN:codex", "CRITIQUE:claude", "FINALIZE:codex", "IMPLEMENT:claude", "VERIFY:gates", "REVIEW:codex"]);
-    expect([init.edits, init.hint, init.workspace]).toEqual(["ask", null, repo]);
+    expect([init.mode, init.hint, init.workspace]).toEqual(["manual", null, repo]);
     expect(existsSync(runsDir)).toBe(false);
     expect(fake.calls()).toEqual([]);
   });

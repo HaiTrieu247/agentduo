@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { defaultConfig } from "../src/core/config.js";
 import { ClaudeBackend } from "../src/agents/claude.js";
 import { CodexBackend } from "../src/agents/codex.js";
-import { describeSettings, editMode, saveSettings, settings } from "../src/core/settings.js";
+import { modeLabel, nextMode } from "../src/core/commands.js";
+import { describeSettings, permissionMode, saveSettings, settings } from "../src/core/settings.js";
 import { tempDir } from "./helpers/tmp.js";
 
 const dirs: Array<{ cleanup(): void }> = [];
@@ -18,23 +19,41 @@ const codexArgs = (cfg = defaultConfig()) => new CodexBackend(cfg.codex, "/ws").
 const valueOf = (args: string[], flag: string) => args[args.lastIndexOf(flag) + 1];
 
 describe("settings", () => {
-  it("switches the implementer between asking before edits and editing automatically", () => {
+  it("switches the implementer between Claude Code's modes: manual, acceptEdits and auto", () => {
     const cfg = defaultConfig();
-    expect(editMode(cfg)).toBe("ask");
-    settings.edits("auto").apply(cfg);
-    expect(editMode(cfg)).toBe("auto");
+    expect(permissionMode(cfg)).toBe("manual");
+    settings.mode("acceptEdits").apply(cfg);
+    expect(permissionMode(cfg)).toBe("acceptEdits");
     expect(valueOf(claudeArgs(cfg), "--permission-mode")).toBe("acceptEdits");
     expect(claudeArgs(cfg, "plan_reviewer")).not.toContain("--permission-mode");
-    settings.edits("auto").apply(cfg);
+    settings.mode("auto").apply(cfg);
+    settings.mode("auto").apply(cfg);
+    expect(permissionMode(cfg)).toBe("auto");
     expect(claudeArgs(cfg).filter((a) => a === "--permission-mode")).toHaveLength(1);
-    settings.edits("ask").apply(cfg);
+    expect(valueOf(claudeArgs(cfg), "--permission-mode")).toBe("auto");
+    settings.mode("manual").apply(cfg);
     expect(claudeArgs(cfg)).not.toContain("--permission-mode");
-    // A mode set for every Claude call still has to give way to "ask" for the implementer.
+    // A mode set for every Claude call still has to give way to manual for the implementer.
     cfg.claude.args = ["--permission-mode=acceptEdits"];
-    expect(editMode(cfg)).toBe("auto");
-    settings.edits("ask").apply(cfg);
-    expect(editMode(cfg)).toBe("ask");
+    expect(permissionMode(cfg)).toBe("acceptEdits");
+    settings.mode("manual").apply(cfg);
+    expect(permissionMode(cfg)).toBe("manual");
+    // "default", Claude Code's older name for manual, which the versions agentduo supports all take.
     expect(valueOf(claudeArgs(cfg), "--permission-mode")).toBe("default");
+    // A mode the chat does not offer is shown as Claude Code names it.
+    cfg.claude.role_args.implementer = ["--permission-mode", "plan"];
+    expect(permissionMode(cfg)).toBe("plan");
+    cfg.claude.role_args.implementer = ["--permission-mode", "manual"];
+    expect(permissionMode(cfg)).toBe("manual");
+  });
+
+  it("cycles the modes as Shift+Tab does in Claude Code, from any mode back to manual", () => {
+    expect(nextMode("manual")).toBe("acceptEdits");
+    expect(nextMode("acceptEdits")).toBe("auto");
+    expect(nextMode("auto")).toBe("manual");
+    expect(nextMode("plan")).toBe("manual");
+    expect(modeLabel("acceptEdits")).toBe("Edit automatically");
+    expect(modeLabel("bypassPermissions")).toBe("bypassPermissions");
   });
 
   it("sets Claude's model and effort, its allow and deny rules, and extra directories", () => {
@@ -84,11 +103,11 @@ describe("settings", () => {
 
   it("describes the settings both agents run with", () => {
     const cfg = defaultConfig();
-    settings.edits("auto").apply(cfg);
+    settings.mode("auto").apply(cfg);
     settings.claudeRule("allow", "Bash(npm test:*)").apply(cfg);
     settings.codexModel("gpt-5.5", "high").apply(cfg);
     const text = describeSettings(cfg);
-    for (const s of ["Claude", "model: default", "edits: auto", "allow: Bash(npm test:*)", "Codex", "model: gpt-5.5", "effort: high",
+    for (const s of ["Claude", "model: default", "mode: auto", "allow: Bash(npm test:*)", "Codex", "model: gpt-5.5", "effort: high",
       "permissions: default", "planner: codex"]) expect(text).toContain(s);
   });
 
@@ -99,7 +118,7 @@ describe("settings", () => {
     mkdirSync(join(t.path, "ws", ".agentduo"), { recursive: true });
     writeFileSync(file, "# my notes\ngates:\n  - name: tests # keep me\n    command: npm test\n");
     const cfg = defaultConfig();
-    const change = settings.edits("auto");
+    const change = settings.mode("acceptEdits");
     change.apply(cfg);
     saveSettings(file, cfg, change.paths);
     const model = settings.codexModel("gpt-5.5", null);

@@ -128,7 +128,8 @@ export interface ViewState {
   version: string | null;
   pipeline: PipelineStep[];
   status: ChatStatus;
-  edits: string;
+  /** Claude's permission mode: manual, acceptEdits, auto, or another one Claude Code has. */
+  mode: string;
   /** Who a plain message goes to. */
   recipient: Backend;
   /** Null until the worker has said (a new worker starts over). */
@@ -173,7 +174,7 @@ export type ViewAction =
   | { type: "note"; text: string; tone: "info" | "error" }
   | { type: "workspace"; session: SessionState; workspace: string | null; generation: number }
   | {
-    type: "initialized"; version: string; workspace: string; pipeline: PipelineStep[]; edits: string; recipient?: Backend; models?: ModelMap;
+    type: "initialized"; version: string; workspace: string; pipeline: PipelineStep[]; mode: string; recipient?: Backend; models?: ModelMap;
     settings?: SettingsView | null;
   }
   | { type: "problem"; problem: Problem | null }
@@ -187,7 +188,7 @@ export type ViewAction =
 
 export function initialState(session: SessionState = "starting", workspace: string | null = null, generation = 0): ViewState {
   return {
-    generation, session, workspace, version: null, pipeline: [], status: "idle", edits: "ask", recipient: "codex", models: null, settings: null, catalog: null, usage: null, problem: null,
+    generation, session, workspace, version: null, pipeline: [], status: "idle", mode: "manual", recipient: "codex", models: null, settings: null, catalog: null, usage: null, problem: null,
     run: null, ended: null, current: null, turn: null, discussion: null, logs: null, reached: [], stopped: null,
     planning: { round: 1, limit: 0 }, impl: { round: 0, limit: 0 }, totals: { costUsd: 0, tokens: 0 }, live: { costUsd: 0, tokens: 0 },
     decision: null, permissions: [], attachments: [], timeline: [], dropped: 0, seq: 0,
@@ -447,14 +448,14 @@ function onUi(s: ViewState, u: UiUpdate): ViewState {
       return push(s, { kind: "info", text: u.text, tone: u.tone ?? "info" });
     case "status":
       return { ...s, status: u.status };
-    case "edits":
-      return { ...s, edits: u.mode };
+    case "mode":
+      return { ...s, mode: u.mode };
     case "recipient":
       return { ...s, recipient: u.backend };
     case "models":
       return { ...s, models: u.models };
     case "settings":
-      return { ...s, settings: u.settings, edits: u.settings.claude.edits };
+      return { ...s, settings: u.settings, mode: u.settings.claude.mode };
     case "catalog":
       return { ...s, catalog: { codex: u.codex } };
     case "usage":
@@ -491,7 +492,7 @@ export function reduce(s: ViewState, a: ViewAction): ViewState {
     case "initialized":
       // A models update can overtake the initialize answer it follows; the newer one stays.
       return {
-        ...s, session: "dormant", version: a.version, workspace: a.workspace, pipeline: a.pipeline, edits: a.edits, recipient: a.recipient ?? s.recipient,
+        ...s, session: "dormant", version: a.version, workspace: a.workspace, pipeline: a.pipeline, mode: a.mode, recipient: a.recipient ?? s.recipient,
         models: s.models ?? a.models ?? null, settings: a.settings ?? s.settings,
       };
     case "problem":

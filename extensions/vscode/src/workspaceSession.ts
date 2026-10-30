@@ -44,7 +44,7 @@ const addsToTimeline = (a: ViewAction) => a.type === "note" || a.type === "user"
  */
 export function restoredView(saved: ViewState, now: ViewState): ViewState {
   return {
-    ...saved, generation: now.generation, session: now.session, workspace: now.workspace, version: now.version, pipeline: now.pipeline, edits: now.edits,
+    ...saved, generation: now.generation, session: now.session, workspace: now.workspace, version: now.version, pipeline: now.pipeline, mode: now.mode,
     models: now.models, settings: now.settings, catalog: now.catalog, problem: now.problem, status: "idle", current: null, turn: null, discussion: null,
     decision: null, permissions: [], usage: null, attachments: [],
   };
@@ -83,7 +83,7 @@ export interface ConversationHandle {
   selectRecipient(backend: Backend): Promise<void>;
   applySetting(request: SettingRequest): Promise<void>;
   interrupt(): Promise<void>;
-  toggleEdits(): Promise<void>;
+  cycleMode(): Promise<void>;
   /** Looks the usage up again for the tab's usage panel (its Refresh, the title bar's Usage), with no line in the timeline. */
   usage(): Promise<void>;
   answerDecision(generation: number, id: string, decision: DecisionChoice, note: string | null): Promise<void>;
@@ -194,7 +194,7 @@ export class WorkspaceSession {
       interrupt: async () => {
         if (this.client?.running) await this.send({ type: "interrupt", conversation: id }, id);
       },
-      toggleEdits: () => this.send({ type: "toggleEdits", conversation: id }, id).then(() => undefined),
+      cycleMode: () => this.send({ type: "cycleMode", conversation: id }, id).then(() => undefined),
       usage: () => this.send({ type: "usage", conversation: id }, id).then(() => undefined),
       answerDecision: (generation, requestId, decision, note) => this.answerDecision(id, generation, requestId, decision, note),
       answerPermission: (generation, requestId, answer) => this.answerPermission(id, generation, requestId, answer),
@@ -400,7 +400,7 @@ export class WorkspaceSession {
       const init = await client.request({ type: "initialize", workspace: this.o.workspace, configPath: this.o.configPath });
       if (this.spawned === client) {
         this.dispatch({
-          type: "initialized", version: init.version, workspace: init.workspace, pipeline: init.pipeline, edits: init.edits, recipient: init.recipient,
+          type: "initialized", version: init.version, workspace: init.workspace, pipeline: init.pipeline, mode: init.mode, recipient: init.recipient,
           models: init.models, settings: init.settings,
         }, null);
         this.dispatch({ type: "problem", problem: init.problem }, null);

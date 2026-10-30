@@ -49,7 +49,7 @@ describe("commands: reading a line", () => {
   it("gives /settings, the canonical form, a usage instead of a question when it does not fit", () => {
     expect(parseInput("/settings claude model opus")).toMatchObject({ kind: "setting", setting: { target: "claude.model", model: "opus" } });
     expect(parseInput("/settings codex permissions auto --save")).toMatchObject({ kind: "setting", save: true });
-    expect(parseInput("/settings edits auto")).toMatchObject({ kind: "setting", setting: { target: "edits", mode: "auto" } });
+    expect(parseInput("/settings mode auto")).toMatchObject({ kind: "setting", setting: { target: "mode", mode: "auto" } });
     expect(parseInput("/settings claude effort extreme")).toEqual({ kind: "usage", text: expect.stringContaining("/settings claude effort") });
     expect(parseInput("/settings codex nope")).toEqual({ kind: "usage", text: expect.stringContaining("/settings codex model|permissions") });
     expect(parseInput("/settings gemini model x")).toMatchObject({ kind: "usage" });
@@ -64,7 +64,11 @@ describe("commands: reading a line", () => {
     expect(parseInput("/resume keep it short")).toEqual({ kind: "command", name: "resume", arg: "keep it short" });
     expect(parseInput("/exit")).toEqual({ kind: "command", name: "quit", arg: "" });
     expect(parseInput("/frobnicate")).toEqual({ kind: "unknown", name: "/frobnicate" });
-    expect(parseInput("/edits sometimes")).toMatchObject({ kind: "usage" });
+    expect(parseInput("/mode acceptEdits --save")).toEqual({ kind: "setting", setting: { target: "mode", mode: "acceptEdits" }, save: true, yes: false });
+    expect(parseInput("/mode")).toEqual({ kind: "setting", setting: { target: "mode" }, save: false, yes: false });
+    expect(parseInput("/mode plan")).toEqual({ kind: "usage", text: "usage: /mode manual|acceptEdits|auto" });
+    // /edits auto meant acceptEdits; it is gone rather than taken as the broader auto.
+    expect(parseInput("/edits auto")).toEqual({ kind: "unknown", name: "/edits" });
   });
 
   it("keeps a quoted path in one word", () => {
@@ -92,7 +96,9 @@ describe("commands: completion", () => {
     expect(complete("/settings claude effort ").map((c) => c.label)).toEqual(["low", "medium", "high", "xhigh", "max", "default"]);
     expect(complete("/codex model gpt-5.5 h").map((c) => c.insert)).toEqual(["/codex model gpt-5.5 high"]);
     expect(complete("/codex permissions ").map((c) => c.label)).toEqual(["read-only", "auto", "full-access", "default"]);
-    expect(complete("/edits ").map((c) => c.label)).toEqual(["auto", "ask"]);
+    expect(complete("/mode ").map((c) => c.label)).toEqual(["manual", "acceptEdits", "auto"]);
+    expect(complete("/mode ")[1]!.description).toContain("Edit automatically");
+    expect(complete("/settings mode a").map((c) => c.insert)).toEqual(["/settings mode acceptEdits", "/settings mode auto"]);
     expect(complete("/claude model nào ")).toEqual([]);
   });
 
