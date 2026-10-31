@@ -546,7 +546,7 @@ describe("Workflow with settings changed while it runs", () => {
       fake.setScenario(happy());
       await chat.submit("/resume");
       await chat.idle();
-      expect(stateOf(h).phase).toBe("DONE");
+      expect(stateOf(h).phase, JSON.stringify(stateOf(h).humanReview)).toBe("DONE");
       expect(fake.calls("implementer").map((c) => c.backend)).toEqual(["claude"]);
       expect(fake.calls("implementer")[0]!.args).toEqual(expect.arrayContaining(["--model", "opus"]));
       const saved = savedConfig();

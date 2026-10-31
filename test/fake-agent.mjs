@@ -77,7 +77,9 @@ async function main() {
   const counts = existsSync(process.env.FAKE_COUNTS) ? JSON.parse(readFileSync(process.env.FAKE_COUNTS, "utf8")) : {};
   const n = counts[role] ?? 0;
   counts[role] = n + 1;
-  writeFileSync(process.env.FAKE_COUNTS, JSON.stringify(counts));
+  // Whole or not at all: a stop may kill the agent here, and an emptied file would fail every later call.
+  writeFileSync(`${process.env.FAKE_COUNTS}.${process.pid}.tmp`, JSON.stringify(counts));
+  renameSync(`${process.env.FAKE_COUNTS}.${process.pid}.tmp`, process.env.FAKE_COUNTS);
   const unscripted = step === "critique" ? [{ answer: "Looks right.\nVERDICT: AGREE" }] : chat ? scenario.chat ?? [{ answer: `Answer from ${backend}.` }] : [{ raw: `no scripted response for role ${role}` }];
   const responses = scenario[role] ?? unscripted;
   const resp = responses[Math.min(n, responses.length - 1)];
