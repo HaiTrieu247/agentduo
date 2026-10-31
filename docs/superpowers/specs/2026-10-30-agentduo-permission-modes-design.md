@@ -48,7 +48,18 @@ Verified on 2026-10-30 with Claude Code 2.1.311, using agentduo's own flags (str
 - Shift+Tab cycles Manual → Edit automatically → Auto → Manual, as Claude Code's does without Plan. From any other
   mode, it goes to Manual. The hint line shows `mode: <name> (Shift+Tab)`.
 - `/mode` alone says the mode and what it does. `/mode <mode>` and `/settings mode <mode>` change it for this chat,
-  or for good with `--save`.
+  or for good with `--save` (this workspace) or `--global` (every workspace).
+
+## Saving a setting
+
+- `--save` writes the keys a change touched, with the values this chat now has, to the workspace's config file (or
+  `--config`).
+- `--global` writes them to the user config file (`~/.config/agentduo/config.yaml`), with the change made to what that
+  file says over the defaults, so nothing of the workspace's config goes along. The change is then applied once more
+  over the workspace's config: a key it still changes is one the workspace sets, which wins there, and the chat names
+  it. `--save --global` writes both files.
+- A file that cannot be written (or read, for `--global`) leaves the change in this chat, and the chat says why.
+- The VS Code settings sheet has a box for each.
 
 ## VS Code
 

@@ -95,7 +95,7 @@ như một câu hỏi, kể cả `--save`. `/claude -- <câu hỏi>` luôn là c
 - `/codex model <tên> [effort]`, `/codex permissions read-only|auto|full-access|default`. Riêng `full-access` phải xác nhận thêm bằng `--yes`.
 - `/config` để xem cấu hình mà hai agent đang chạy.
 
-Thay đổi áp dụng từ câu hỏi hoặc lần gọi agent kế tiếp; câu trả lời đang chạy giữ model lúc nó bắt đầu. Thay đổi chỉ giữ trong phiên chat, trừ khi lệnh kết thúc bằng `--save`: khi đó agentduo ghi vào `.agentduo/config.yaml` và giữ nguyên các comment trong file. `/help` liệt kê mọi lệnh kèm giải thích. Ngoài chat, `duo --accept-edits "<task>"` có tác dụng giống `/mode acceptEdits`.
+Thay đổi áp dụng từ câu hỏi hoặc lần gọi agent kế tiếp; câu trả lời đang chạy giữ model lúc nó bắt đầu. Thay đổi chỉ giữ trong phiên chat, trừ khi lệnh kết thúc bằng `--save`: khi đó agentduo ghi vào `.agentduo/config.yaml` và giữ nguyên các comment trong file. Với `--global`, agentduo ghi vào `~/.config/agentduo/config.yaml` để áp dụng cho mọi workspace. Thay đổi được tính trên riêng file đó, nên config của workspace hiện tại không bị chép theo. Nếu config của workspace cũng đặt đúng key đó thì nó vẫn thắng ở workspace này: chat sẽ báo, và `--save --global` ghi cả hai file. `/help` liệt kê mọi lệnh kèm giải thích. Ngoài chat, `duo --accept-edits "<task>"` có tác dụng giống `/mode acceptEdits`.
 
 `duo "<task>"` và `duo run "<task>"` vẫn chạy pipeline cho một việc rồi thoát; đây là cách dùng cho script và CI.
 

@@ -353,7 +353,7 @@ async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
       stdout: io.stdout as NodeJS.WriteStream, stdin: io.stdin as NodeJS.ReadStream,
     });
     chat = new Chat({
-      cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, bus, decider: session.decider, permissions: session.permissions, ui: session.ui,
+      cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, userConfigFile: env.userConfigFile, bus, decider: session.decider, permissions: session.permissions, ui: session.ui,
       env: io.env,
     });
     const offSignal = io.onSignal?.(() => session.ui.exit());

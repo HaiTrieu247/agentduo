@@ -567,6 +567,7 @@ function tagList(o: { key: string; label: string; items: string[]; placeholder: 
 /** The panel's checkboxes, kept across its rebuilds (each setting changed rebuilds it). */
 interface SettingsPrefs {
   save: boolean;
+  global: boolean;
   yes: boolean;
 }
 
@@ -591,7 +592,7 @@ function checkbox(key: string, checked: boolean, text: string, change: (checked:
 function settingsPanel(s: ViewState, actions: Actions, prefs: SettingsPrefs): HTMLElement[] {
   const v = s.settings;
   if (!v) return [h("p", { class: "muted" }, "The settings show once agentduo has read the configuration.")];
-  const send = (setting: SettingCommand, o: { yes?: boolean } = {}) => actions.setting({ setting, save: prefs.save, yes: !!o.yes });
+  const send = (setting: SettingCommand, o: { yes?: boolean } = {}) => actions.setting({ setting, save: prefs.save, global: prefs.global, yes: !!o.yes });
   const orNull = (value: string) => (value === "default" ? null : value);
   const claudeModel = modelOptions(s, "claude");
   const codexModel = modelOptions(s, "codex");
@@ -617,6 +618,7 @@ function settingsPanel(s: ViewState, actions: Actions, prefs: SettingsPrefs): HT
       }),
       checkbox("codex.yes", prefs.yes, " confirm full access (Codex may change any file and use the network)", (c) => (prefs.yes = c))),
     checkbox("save", prefs.save, " save changes to .agentduo/config.yaml (otherwise for this session only)", (c) => (prefs.save = c)),
+    checkbox("global", prefs.global, " save changes for every workspace, in ~/.config/agentduo/config.yaml", (c) => (prefs.global = c)),
   ];
 }
 
@@ -786,7 +788,7 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   const items = new Map<string, { item: TimelineItem; el: HTMLElement }>();
   let lastPending: { decision: unknown; permissions: unknown; files: number } = { decision: undefined, permissions: undefined, files: 0 };
   let lastSettings: unknown[] = [];
-  const prefs: SettingsPrefs = { save: false, yes: false };
+  const prefs: SettingsPrefs = { save: false, global: false, yes: false };
   let completions: Completion[] = [];
   let selected = 0;
   /** The text the list was closed for (Esc, or a pick with Enter): it stays closed until the text changes. */
@@ -1003,7 +1005,7 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
           radio: true, checked: now === mode, mark: icon(MODE_ICONS[mode]), label: MODE_INFO[mode].label, detail: MODE_INFO[mode].description,
           pick: () => {
             setPanel(null, true);
-            if (state && state.mode !== mode) actions.setting({ setting: { target: "mode", mode }, save: false, yes: false });
+            if (state && state.mode !== mode) actions.setting({ setting: { target: "mode", mode }, save: false, global: false, yes: false });
           },
         });
         item.querySelector("button")!.dataset.mode = mode;

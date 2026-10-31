@@ -42,6 +42,12 @@ describe("worker requests", () => {
     }
   });
 
+  it("says where a setting is saved, as --save and --global do: nowhere when the request does not say", () => {
+    const request = (o: object) => parseRequestEnvelope(envelope({ type: "setting", conversation: "c-1", setting: { target: "claude.model", model: "opus" }, ...o })).request;
+    expect(request({})).toMatchObject({ save: false, global: false, yes: false });
+    expect(request({ save: true, global: true })).toMatchObject({ save: true, global: true, yes: false });
+  });
+
   it("names the conversation each of its requests is for, with an id that is safe as a directory name", () => {
     for (const conversation of [undefined, "", "../x", "a/b", ".hidden", "x".repeat(201)]) {
       expect(() => parseRequestEnvelope(envelope({ type: "submit", conversation, text: "hi" })), String(conversation)).toThrow(ProtocolError);

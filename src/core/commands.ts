@@ -86,7 +86,8 @@ export type ParsedInput =
   | { kind: "pipeline"; task: string }
   /** /discuss: the current recipient answers, the other agent reviews, until they agree. */
   | { kind: "discuss"; question: string }
-  | { kind: "setting"; setting: SettingCommand; save: boolean; yes: boolean }
+  /** `save`: --save, into the workspace's config file; `global`: --global, into the user config file. */
+  | { kind: "setting"; setting: SettingCommand; save: boolean; global: boolean; yes: boolean }
   /** /attach <path>: `path` as the shell would read the word; `home`: it started with ~ (relative to the home directory). */
   | { kind: "attach"; path: string; home: boolean }
   /** /detach <n|id|all>. */
@@ -118,7 +119,7 @@ export const COMMANDS: CommandInfo[] = [
   { name: "/detach", usage: "/detach <n|all>", description: "remove a file waiting to go with your next message, or all of them", args: true },
   { name: "/resume", usage: "/resume [note | run id]", description: "continue the stopped or waiting run, optionally with a note for the agents", args: true },
   { name: "/new", usage: "/new", description: "start a new conversation (in VS Code, in a tab of its own); a stopped run stays resumable", args: false },
-  { name: "/settings", usage: "/settings claude|codex <setting> …", description: "change a setting: model, effort, permissions, add-dir (add --save to keep it)", args: true },
+  { name: "/settings", usage: "/settings claude|codex <setting> …", description: "change a setting: model, effort, permissions, add-dir (add --save to keep it here, --global in every workspace)", args: true },
   { name: "/mode", usage: `/mode ${PERMISSION_MODES.join("|")}`, description: "Claude's permission mode (chat and pipeline implementer): Manual, Edit automatically or Auto, as Shift+Tab in Claude Code", args: true },
   { name: "/config", usage: "/config", description: "show the settings both agents run with now", args: false },
   { name: "/help", usage: "/help", description: "list the commands", args: false },
@@ -160,7 +161,7 @@ export function tokenize(input: string): Token[] {
   return out;
 }
 
-const FLAGS = new Set(["--save", "--yes"]);
+const FLAGS = new Set(["--save", "--global", "--yes"]);
 const usage = (text: string): ParsedInput => ({ kind: "usage", text });
 const settingUsage = (backend: Backend, name?: string): string => {
   const list = SETTINGS[backend].filter((s) => !name || s.name === name);
@@ -171,13 +172,12 @@ const modelValue = (value: string) => (value === "default" ? null : value);
 
 /**
  * The setting `words` name, or null when they do not have its shape (then the words are a question, not a setting).
- * --save and --yes count only once the rest fits.
+ * --save, --global and --yes count only once the rest fits.
  */
 function settingOf(backend: Backend, name: string, words: Token[]): ParsedInput | null {
-  const save = words.some((w) => w.text === "--save");
-  const yes = words.some((w) => w.text === "--yes");
+  const has = (flag: string) => words.some((w) => w.text === flag);
   const args = words.filter((w) => !FLAGS.has(w.text)).map((w) => w.text);
-  const setting = (s: SettingCommand): ParsedInput => ({ kind: "setting", setting: s, save, yes });
+  const setting = (s: SettingCommand): ParsedInput => ({ kind: "setting", setting: s, save: has("--save"), global: has("--global"), yes: has("--yes") });
   if (backend === "claude") {
     switch (name) {
       case "model":
@@ -241,9 +241,10 @@ function modeCommand(rest: string): ParsedInput {
   const words = tokenize(rest);
   const args = words.filter((w) => !FLAGS.has(w.text));
   const save = words.some((w) => w.text === "--save");
-  if (!args.length) return { kind: "setting", setting: { target: "mode" }, save, yes: false };
+  const global = words.some((w) => w.text === "--global");
+  if (!args.length) return { kind: "setting", setting: { target: "mode" }, save, global, yes: false };
   const mode = args[0]!.text;
-  if (args.length === 1 && isPermissionMode(mode)) return { kind: "setting", setting: { target: "mode", mode }, save, yes: false };
+  if (args.length === 1 && isPermissionMode(mode)) return { kind: "setting", setting: { target: "mode", mode }, save, global, yes: false };
   return usage(`usage: /mode ${PERMISSION_MODES.join("|")}`);
 }
 
@@ -339,7 +340,7 @@ export function helpText(): string {
       rows: COMMANDS.map((c) => [c.usage, c.description]),
     },
     {
-      title: ["Settings (this chat only; add --save to write one to .agentduo/config.yaml)"],
+      title: ["Settings (this chat only; add --save to write one to .agentduo/config.yaml, or --global to ~/.config/agentduo/config.yaml for every workspace)"],
       rows: [
         ...(["claude", "codex"] as const).flatMap((backend) => SETTINGS[backend].map((s): [string, string] => [`/settings ${backend} ${s.usage}`, s.description])),
         ["/claude model …, /codex permissions …", "shortcuts for /settings, taken as a setting only when the words fit it exactly"],

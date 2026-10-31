@@ -91,9 +91,12 @@ const happy = () => ({
   implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }],
   code_reviewer: [{ output: review(true) }],
 });
-const newChat = (o: { cfg?: ConfigData; decider?: Decider; env?: NodeJS.ProcessEnv; conversationId?: string; busyElsewhere?: () => string | null } = {}) => {
+const userConfig = () => join(t.path, "xdg", "agentduo", "config.yaml");
+const newChat = (o: { cfg?: ConfigData; decider?: Decider; env?: NodeJS.ProcessEnv; conversationId?: string; busyElsewhere?: () => string | null;
+  userConfigFile?: string; } = {}) => {
   const chat = new Chat({
-    cfg: o.cfg ?? testConfig(fake), workspace: repo, runsDir, configFile: join(repo, ".agentduo", "config.yaml"), bus, decider: o.decider ?? new ScriptedDecider(), ui,
+    cfg: o.cfg ?? testConfig(fake), workspace: repo, runsDir, configFile: join(repo, ".agentduo", "config.yaml"), userConfigFile: o.userConfigFile ?? userConfig(),
+    bus, decider: o.decider ?? new ScriptedDecider(), ui,
     env: o.env, conversationId: o.conversationId, busyElsewhere: o.busyElsewhere,
   });
   chats.push(chat);
@@ -571,7 +574,8 @@ describe("Chat: a conversation with both agents", () => {
     mkdirSync(plain);
     const plainRuns = join(plain, ".agentduo", "runs");
     // No gate: check.mjs lives in the repository the other tests use.
-    const chat = new Chat({ cfg: testConfig(fake, { gates: [] }), workspace: plain, runsDir: plainRuns, configFile: join(plain, ".agentduo", "config.yaml"), bus, decider: new ScriptedDecider(), ui });
+    const chat = new Chat({ cfg: testConfig(fake, { gates: [] }), workspace: plain, runsDir: plainRuns, configFile: join(plain, ".agentduo", "config.yaml"),
+      userConfigFile: userConfig(), bus, decider: new ScriptedDecider(), ui });
     chats.push(chat);
     await chat.greet();
     expect(ui.lines).toContain(NOT_REPO_NOTE);
@@ -913,13 +917,45 @@ describe("Chat: the pipeline", () => {
     expect(ui.lines.at(-1)).toContain("saved to");
   });
 
+  it("saves a change for every workspace with --global, and says when the workspace's config wins over it", async () => {
+    const workspaceFile = join(repo, ".agentduo", "config.yaml");
+    mkdirSync(join(repo, ".agentduo"), { recursive: true });
+    writeFileSync(workspaceFile, "claude:\n  model: sonnet\n");
+    const chat = newChat();
+    await chat.submit("/claude effort high --global");
+    expect(ui.lines.at(-1)).toBe(`Claude's effort: high.; saved to ${userConfig()}`);
+    expect(readFileSync(userConfig(), "utf8")).toContain("--effort");
+    expect(readFileSync(workspaceFile, "utf8")).toBe("claude:\n  model: sonnet\n");
+
+    await chat.submit("/claude model opus --global");
+    expect(ui.lines.at(-1)).toContain(`saved to ${userConfig()}, but ${workspaceFile} sets claude.model too, which wins in this workspace`);
+    expect(chat.config.claude.model).toBe("opus");
+    expect(readFileSync(userConfig(), "utf8")).toContain("model: opus");
+    await chat.submit("/claude model opus --global --save");
+    expect(ui.lines.at(-1)).toBe(`Claude's model: opus.; saved to ${workspaceFile} and ${userConfig()}`);
+
+    await chat.submit("/config");
+    expect(ui.lines.at(-1)).toContain(`--global (it writes ${userConfig()})`);
+    await chat.submit("/codex model gpt-5.5");
+    expect(ui.lines.at(-1)).toContain("--global in every workspace");
+  });
+
+  it("keeps a change it could not save, and says why", async () => {
+    mkdirSync(join(t.path, "xdg", "agentduo"), { recursive: true });
+    writeFileSync(userConfig(), "claude: [\n");
+    const chat = newChat();
+    await chat.submit("/codex model gpt-5.5 --global");
+    expect(ui.lines.at(-1)).toMatch(new RegExp(`^Codex's model: gpt-5\\.5\\.; could not save it to ${userConfig().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: `));
+    expect(chat.config.codex.model).toBe("gpt-5.5");
+  });
+
   it("lists every command with what it does", async () => {
     const chat = newChat();
     await chat.submit("/help");
     const help = ui.lines.at(-1)!;
     for (const command of ["/claude", "/codex", "/pipeline", "/plan", "/diff", "/status", "/usage", "/resume", "/new", "/quit", "Esc", "Shift+Tab", "/mode",
       "/settings claude model", "/settings claude effort", "/settings claude permissions", "/settings claude add-dir", "/settings codex model",
-      "/settings codex permissions", "/claude -- <question>", "/config", "/help", "--save"]) {
+      "/settings codex permissions", "/claude -- <question>", "/config", "/help", "--save", "--global"]) {
       expect(help, command).toContain(command);
     }
     for (const line of help.split("\n").filter((l) => l.trimStart().startsWith("/"))) expect(line.trim(), line).toMatch(/^\S+(?: \S+)*\s{2,}\S/);

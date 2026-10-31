@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import YAML from "yaml";
 import { CLAUDE_EFFORTS, CODEX_EFFORTS, type CodexPermission, type PermissionMode } from "./commands.js";
-import type { ConfigData } from "./config.js";
+import { configFromFiles, type ConfigData } from "./config.js";
 
 export { CLAUDE_EFFORTS, CODEX_EFFORTS, type CodexPermission, type PermissionMode };
 
@@ -190,14 +191,34 @@ export function describeSettings(cfg: ConfigData): string {
   ].join("\n");
 }
 
+function valueAt(cfg: ConfigData, path: string[]): unknown {
+  let value: unknown = cfg;
+  for (const key of path) value = (value as Record<string, unknown> | undefined)?.[key];
+  return value;
+}
+
 /** Writes the keys a change touched into a config file, keeping its comments and everything else as it was. */
 export function saveSettings(file: string, cfg: ConfigData, paths: string[][]): void {
   const doc = existsSync(file) ? YAML.parseDocument(readFileSync(file, "utf8")) : new YAML.Document({});
   for (const path of paths) {
-    let value: unknown = cfg;
-    for (const key of path) value = (value as Record<string, unknown> | undefined)?.[key];
+    const value = valueAt(cfg, path);
     doc.setIn(path, value === undefined ? null : structuredClone(value));
   }
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, String(doc));
+}
+
+/**
+ * `--global`: writes a change into the user config file, made to what that file says over the defaults, so nothing
+ * of the workspace's config goes along. Returns the keys `configFile`, read over it, sets otherwise (there it wins):
+ * a change is idempotent, so a key it still changes over both files is one the change is not in force for.
+ */
+export function saveGlobalSetting(userFile: string, configFile: string, change: SettingChange): string[] {
+  const user = configFromFiles([userFile]);
+  change.apply(user);
+  saveSettings(userFile, user, change.paths);
+  const here = configFromFiles([userFile, configFile]);
+  const before = change.paths.map((path) => structuredClone(valueAt(here, path)));
+  change.apply(here);
+  return change.paths.filter((path, i) => !isDeepStrictEqual(valueAt(here, path), before[i])).map((path) => path.join("."));
 }

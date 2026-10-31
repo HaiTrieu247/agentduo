@@ -141,7 +141,7 @@ the canonical form, and gives the usage when the words do not fit. `/claude mode
 as a setting only when the words fit it exactly (`/claude model opus`); anything else, such as
 `/claude model which is best for this repo?`, goes to Claude as a question, word for word, `--save` included.
 `/claude -- <question>` is always a question. A change applies from the next question or agent call; an answer already
-running keeps the model it started with. It lasts for this chat only, unless the command ends with `--save`, which writes it to `.agentduo/config.yaml` and keeps the file's comments.
+running keeps the model it started with. It lasts for this chat only, unless the command ends with `--save`, which writes it to `.agentduo/config.yaml` and keeps the file's comments, or with `--global`, which writes it to `~/.config/agentduo/config.yaml` for every workspace. `--global` saves the change as made to that file alone, so nothing of this workspace's config goes along. A key the workspace's config sets too still wins there: the chat says so, and `--save --global` writes both files.
 
 | Command | Same as | What it changes |
 |---|---|---|

@@ -145,6 +145,19 @@ function readYaml(path: string): Record<string, unknown> {
   return parsed;
 }
 
+/** `data` with the config file at `path` merged over it; its warnings go to `warnings`, prefixed with the path. */
+function mergeFile(data: Record<string, unknown>, path: string, warnings: string[]): Record<string, unknown> {
+  const fileWarnings: string[] = [];
+  try {
+    data = mergeInto(data, readYaml(path), "", fileWarnings);
+  } catch (err) {
+    if (err instanceof ConfigError && !err.message.startsWith(path)) throw new ConfigError(`${path}: ${err.message}`);
+    throw err;
+  }
+  warnings.push(...fileWarnings.map((w) => `${path}: ${w}`));
+  return data;
+}
+
 /** Defaults ← user config ← `<dir>/.agentduo/config.yaml` (or --config). */
 export function loadConfig(opts: { dir: string; configPath?: string; env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform; validate?: boolean }): LoadedConfig {
   const warnings: string[] = [];
@@ -155,19 +168,19 @@ export function loadConfig(opts: { dir: string; configPath?: string; env?: NodeJ
   const userPath = userConfigPath(opts.env ?? process.env, opts.platform ?? process.platform);
   for (const path of userPath === dirPath ? [dirPath] : [userPath, dirPath]) {
     if (!existsSync(path)) continue;
-    const fileWarnings: string[] = [];
-    try {
-      data = mergeInto(data, readYaml(path), "", fileWarnings);
-    } catch (err) {
-      if (err instanceof ConfigError && !err.message.startsWith(path)) throw new ConfigError(`${path}: ${err.message}`);
-      throw err;
-    }
-    warnings.push(...fileWarnings.map((w) => `${path}: ${w}`));
+    data = mergeFile(data, path, warnings);
     sources.push(path);
   }
   const cfg = data as unknown as ConfigData;
   if (opts.validate !== false) validateConfig(cfg, sources.join(", ") || undefined);
   return { data: cfg, sources, warnings };
+}
+
+/** Defaults ← each of `files` that exists, in order; unvalidated, as a chat setting reads the files it writes to. */
+export function configFromFiles(files: string[]): ConfigData {
+  let data = defaultConfig() as unknown as Record<string, unknown>;
+  for (const path of new Set(files)) if (existsSync(path)) data = mergeFile(data, path, []);
+  return data as unknown as ConfigData;
 }
 
 /** A run's saved config.json, merged over today's defaults so keys added later get their default value. */

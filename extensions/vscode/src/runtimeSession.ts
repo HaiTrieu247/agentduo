@@ -259,7 +259,7 @@ export class RuntimeSession {
     const ui = this.uiFor(conversation);
     const models = this.modelsFor(env);
     const chat = new Chat({
-      cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, bus, decider: decisions, permissions, ui, env: this.o.env, models,
+      cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, userConfigFile: env.userConfigFile, bus, decider: decisions, permissions, ui, env: this.o.env, models,
       conversationId: conversation, busyElsewhere: () => this.runningElsewhere(conversation),
     });
     // The settings changed in the other tabs of this session (already said and saved there).
@@ -344,7 +344,7 @@ export class RuntimeSession {
     return this.serial(async () => {
       const chat = await this.ensureSession(conversation);
       const before = JSON.stringify(chat.config);
-      chat.applySetting(request.setting, { save: request.save, yes: request.yes });
+      chat.applySetting(request.setting, { save: request.save, global: request.global, yes: request.yes });
       // Only shown, refused (full access without --yes), or already so: nothing for the other tabs to follow.
       if (JSON.stringify(chat.config) !== before) this.follow(conversation, request.setting);
     });

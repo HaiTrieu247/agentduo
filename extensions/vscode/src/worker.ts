@@ -53,7 +53,7 @@ async function dispatch(s: RuntimeSession, request: WorkerRequest): Promise<Work
       await s.selectRecipient(request.conversation, request.backend);
       return { accepted: true };
     case "setting":
-      await s.applySetting(request.conversation, { setting: request.setting, save: request.save, yes: request.yes });
+      await s.applySetting(request.conversation, { setting: request.setting, save: request.save, global: request.global, yes: request.yes });
       return { accepted: true };
     case "interrupt":
       await s.interrupt(request.conversation);

@@ -78,7 +78,8 @@ Click the agentduo button in an editor's title bar (beside Claude Code's and Cod
   `/model` offers (read with `codex debug models`), and its reasoning levels are those the chosen model takes. Claude's
   models are Claude Code's aliases (Fable, Opus, Sonnet, Haiku, their 1M-context variants, Best, Opus Plan). Claude's
   allowed and denied tool rules and its extra directories are tags: type one and press Enter to add it, and the × on a
-  rule removes it. A box below saves the changes to `.agentduo/config.yaml`.
+  rule removes it. A box below saves the changes to `.agentduo/config.yaml`, another to `~/.config/agentduo/config.yaml`
+  for every workspace (as `--save` and `--global` do).
 - Each answer and each pipeline step is drawn on a line of dots, as in VS Code's own chat views: one row per tool the
   agent used (Bash, Read, Edit…), folded once it is done, then the answer. Answers are shown whole, with Claude's or
   OpenAI's logo and the model they ran on. Their Markdown (headings, lists, code, tables, quotes) is rendered as text

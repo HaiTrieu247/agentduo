@@ -5,7 +5,7 @@ import { defaultConfig } from "../src/core/config.js";
 import { ClaudeBackend } from "../src/agents/claude.js";
 import { CodexBackend } from "../src/agents/codex.js";
 import { modeLabel, nextMode } from "../src/core/commands.js";
-import { describeSettings, permissionMode, saveSettings, settings } from "../src/core/settings.js";
+import { describeSettings, permissionMode, saveGlobalSetting, saveSettings, settings } from "../src/core/settings.js";
 import { tempDir } from "./helpers/tmp.js";
 
 const dirs: Array<{ cleanup(): void }> = [];
@@ -130,5 +130,29 @@ describe("settings", () => {
     const fresh = join(t.path, "other", ".agentduo", "config.yaml");
     saveSettings(fresh, cfg, settings.claudeModel("opus").paths);
     expect(readFileSync(fresh, "utf8")).toContain("claude:");
+  });
+
+  it("saves a --global change to what the user config says, and names the keys the workspace config overrides", () => {
+    const t = tempDir();
+    dirs.push(t);
+    const user = join(t.path, "xdg", "agentduo", "config.yaml");
+    const ws = join(t.path, "ws", ".agentduo", "config.yaml");
+    mkdirSync(join(t.path, "ws", ".agentduo"), { recursive: true });
+    writeFileSync(ws, "claude:\n  args: [--no-session-persistence, --verbose]\n  role_args:\n    plan_reviewer: [--max-turns, '3']\ncodex:\n  model: o3\n");
+    expect(saveGlobalSetting(user, ws, settings.claudeEffort("high"))).toEqual(["claude.args"]);
+    let text = readFileSync(user, "utf8");
+    expect(text).toContain("--effort");
+    expect(text).not.toContain("--verbose");
+    expect(saveGlobalSetting(user, ws, settings.claudeModel("opus"))).toEqual([]);
+    // Per role: the workspace's plan_reviewer flags leave the user's implementer mode in force.
+    expect(saveGlobalSetting(user, ws, settings.mode("auto"))).toEqual([]);
+    expect(saveGlobalSetting(user, ws, settings.codexModel("gpt-5.5", "high"))).toEqual(["codex.model"]);
+    text = readFileSync(user, "utf8");
+    for (const s of ["model: opus", "auto", "model: gpt-5.5", "model_reasoning_effort=high"]) expect(text).toContain(s);
+    expect(text).not.toContain("plan_reviewer");
+    writeFileSync(ws, "claude:\n  role_args:\n    implementer: [--permission-mode, acceptEdits]\n");
+    expect(saveGlobalSetting(user, ws, settings.mode("auto"))).toEqual(["claude.role_args"]);
+    // The same file both ways (duo --config on the user config): nothing hides it.
+    expect(saveGlobalSetting(user, user, settings.claudeModel("haiku"))).toEqual([]);
   });
 });

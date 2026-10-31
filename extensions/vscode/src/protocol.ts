@@ -31,7 +31,10 @@ export type Route = (typeof ROUTES)[number];
 /** A setting changed from the sidebar's controls; the worker applies it as the chat's own command would. */
 export interface SettingRequest {
   setting: SettingCommand;
+  /** Writes it to the workspace's config file, as --save does. */
   save: boolean;
+  /** Writes it to the user config file, for every workspace, as --global does. */
+  global: boolean;
   /** Confirms full access for Codex, as --yes does. */
   yes: boolean;
 }
@@ -446,7 +449,7 @@ export function parseSetting(v: unknown): SettingCommand {
 }
 
 function settingRequest(o: Obj): SettingRequest {
-  return { setting: parseSetting(o.setting), save: o.save === true, yes: o.yes === true };
+  return { setting: parseSetting(o.setting), save: o.save === true, global: o.global === true, yes: o.yes === true };
 }
 
 const route = (v: unknown): Route => (v === undefined ? "message" : oneOf(v, ROUTES, "route"));

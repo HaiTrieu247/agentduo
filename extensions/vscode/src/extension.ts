@@ -154,7 +154,7 @@ class Controller implements vscode.Disposable, PanelHost {
         case "recipient":
           return c.selectRecipient(message.backend);
         case "setting":
-          return c.applySetting({ setting: message.setting, save: message.save, yes: message.yes });
+          return c.applySetting({ setting: message.setting, save: message.save, global: message.global, yes: message.yes });
         case "interrupt":
           return c.interrupt();
         case "cycleMode":

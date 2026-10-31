@@ -430,7 +430,8 @@ describe("Workflow after a chat discussion", () => {
   it("tells every role the discussion's synthesis, as Codex's, and none of its drafts or reviews", async () => {
     const ui: ChatUi = { info: () => {}, setStatus: () => {}, setMode: () => {}, setRecipient: () => {}, setModels: () => {}, exit: () => {} };
     const chat = new Chat({
-      cfg: h.cfg, workspace: h.repo, runsDir: h.runsDir, configFile: join(h.repo, ".agentduo", "config.yaml"), bus: new EventBus(), decider: new ScriptedDecider(), ui,
+      cfg: h.cfg, workspace: h.repo, runsDir: h.runsDir, configFile: join(h.repo, ".agentduo", "config.yaml"),
+      userConfigFile: join(h.runsDir, "..", "user-config.yaml"), bus: new EventBus(), decider: new ScriptedDecider(), ui,
     });
     fake.setScenario({
       ...happy(), discuss_answer: [{ answer: "DRAFT: keep it." }], discuss_critique: [{ answer: "REVIEW: say why.\nVERDICT: REVISE" }, { answer: "Good.\nVERDICT: AGREE" }],

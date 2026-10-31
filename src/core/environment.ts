@@ -2,7 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { resolveBinary } from "../agents/resolve.js";
-import { ConfigError, defaultConfig, loadConfig, validateConfig, type Backend, type ConfigData } from "./config.js";
+import { ConfigError, defaultConfig, loadConfig, userConfigPath, validateConfig, type Backend, type ConfigData } from "./config.js";
 import { runDoctor, type Check } from "./doctor.js";
 import { Git } from "./git.js";
 
@@ -18,6 +18,8 @@ export interface WorkspaceEnv {
   warnings: string[];
   /** Where a setting saved from the chat goes: the --config file, or <workspace>/.agentduo/config.yaml. */
   configFile: string;
+  /** Where a setting saved from the chat with --global goes: the user config file, which `cfg` read first. */
+  userConfigFile: string;
 }
 
 /** The workspace directory is missing or is a file; the message is what the CLI prints. */
@@ -48,6 +50,7 @@ export async function prepareEnvironment(o: { cwd: string; dir?: string; configP
     workspace, isRepo, git, cfg: loaded.data, sources: loaded.sources, warnings: loaded.warnings,
     runsDir: isAbsolute(runs) ? runs : join(workspace, runs),
     configFile: configPath ?? join(workspace, ".agentduo", "config.yaml"),
+    userConfigFile: userConfigPath(o.env),
   };
 }
 

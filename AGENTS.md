@@ -15,7 +15,7 @@ A prompt that starts with `[agentduo-conversation]` is a turn of the chat's thre
 - Node ≥ 22.12, ESM, TypeScript strict. Relative imports end in `.js`, including imports of `.ts`/`.tsx` files.
 - Runtime dependencies are exactly `ink`, `react`, `commander`, `yaml` and `ajv`. Ask the user before adding another one.
 - `duo` alone opens the chat (`src/chat.ts` drives runs, notes, Esc and slash commands; `src/ui/ink/ChatApp.tsx` draws it). The chat talks to its screen only through the `ChatUi` interface, so its tests use a fake one.
-- Chat settings commands (`/mode`, `/claude …`, `/codex …`) mirror the CLIs' own commands and change only flags, through `src/core/settings.ts`. Each change edits `cfg.claude` / `cfg.codex` in place (the backends hold those objects) and must be idempotent, because the chat replays its changes on a resumed run.
+- Chat settings commands (`/mode`, `/claude …`, `/codex …`) mirror the CLIs' own commands and change only flags, through `src/core/settings.ts`. Each change edits `cfg.claude` / `cfg.codex` in place (the backends hold those objects) and must be idempotent, because the chat replays its changes on a resumed run, and `--global` applies a change once more over the workspace's config to tell whether that config hides it.
 - `src/core` and `src/agents` never import from `src/ui`. Everything that reaches the screen is an `EventBus` event (`src/events.ts`), and human decisions come back through the `Decider` interface.
 - Tests: `npm test` (vitest). When you change a workflow transition, add a scenario to `test/workflow.test.ts`; those scenarios drive `test/fake-agent.mjs` through real subprocesses. When a CLI's stream format changes, refresh `test/fixtures/*.jsonl` from a real run, with personal paths replaced by `/repo`.
 

@@ -33,8 +33,9 @@ describe("commands: reading a line", () => {
   });
 
   it("keeps the shortcuts whose words fit a setting exactly", () => {
-    expect(parseInput("/claude model opus")).toEqual({ kind: "setting", setting: { target: "claude.model", model: "opus" }, save: false, yes: false });
-    expect(parseInput("/claude model default --save")).toEqual({ kind: "setting", setting: { target: "claude.model", model: null }, save: true, yes: false });
+    expect(parseInput("/claude model opus")).toEqual({ kind: "setting", setting: { target: "claude.model", model: "opus" }, save: false, global: false, yes: false });
+    expect(parseInput("/claude model default --save")).toEqual({ kind: "setting", setting: { target: "claude.model", model: null }, save: true, global: false, yes: false });
+    expect(parseInput("/claude model opus --global")).toEqual({ kind: "setting", setting: { target: "claude.model", model: "opus" }, save: false, global: true, yes: false });
     expect(parseInput("/claude model")).toMatchObject({ kind: "setting", setting: { target: "claude.model" } });
     expect(parseInput("/claude effort high")).toMatchObject({ kind: "setting", setting: { target: "claude.effort", effort: "high" } });
     expect(parseInput("/claude permissions allow Bash(npm test:*)")).toMatchObject({
@@ -43,7 +44,7 @@ describe("commands: reading a line", () => {
     expect(parseInput('/claude add-dir "/tmp/my dir"')).toMatchObject({ kind: "setting", setting: { target: "claude.add-dir", dir: "/tmp/my dir" } });
     expect(parseInput("/codex model gpt-5.5 high")).toMatchObject({ kind: "setting", setting: { target: "codex.model", model: "gpt-5.5", effort: "high" } });
     expect(parseInput("/codex model gpt-5.5")).toMatchObject({ kind: "setting", setting: { target: "codex.model", model: "gpt-5.5", effort: null } });
-    expect(parseInput("/codex permissions full-access --yes")).toEqual({ kind: "setting", setting: { target: "codex.permissions", preset: "full-access" }, save: false, yes: true });
+    expect(parseInput("/codex permissions full-access --yes")).toEqual({ kind: "setting", setting: { target: "codex.permissions", preset: "full-access" }, save: false, global: false, yes: true });
   });
 
   it("gives /settings, the canonical form, a usage instead of a question when it does not fit", () => {
@@ -64,8 +65,9 @@ describe("commands: reading a line", () => {
     expect(parseInput("/resume keep it short")).toEqual({ kind: "command", name: "resume", arg: "keep it short" });
     expect(parseInput("/exit")).toEqual({ kind: "command", name: "quit", arg: "" });
     expect(parseInput("/frobnicate")).toEqual({ kind: "unknown", name: "/frobnicate" });
-    expect(parseInput("/mode acceptEdits --save")).toEqual({ kind: "setting", setting: { target: "mode", mode: "acceptEdits" }, save: true, yes: false });
-    expect(parseInput("/mode")).toEqual({ kind: "setting", setting: { target: "mode" }, save: false, yes: false });
+    expect(parseInput("/mode acceptEdits --save")).toEqual({ kind: "setting", setting: { target: "mode", mode: "acceptEdits" }, save: true, global: false, yes: false });
+    expect(parseInput("/mode auto --global --save")).toEqual({ kind: "setting", setting: { target: "mode", mode: "auto" }, save: true, global: true, yes: false });
+    expect(parseInput("/mode")).toEqual({ kind: "setting", setting: { target: "mode" }, save: false, global: false, yes: false });
     expect(parseInput("/mode plan")).toEqual({ kind: "usage", text: "usage: /mode manual|acceptEdits|auto" });
     // /edits auto meant acceptEdits; it is gone rather than taken as the broader auto.
     expect(parseInput("/edits auto")).toEqual({ kind: "unknown", name: "/edits" });
@@ -148,7 +150,7 @@ describe("/attach, /attachments, /detach", () => {
     expect(parseInput("/detach 2")).toEqual({ kind: "detach", target: "2" });
     expect(parseInput("/detach all")).toEqual({ kind: "detach", target: "all" });
     expect(parseInput("/detach")).toEqual({ kind: "usage", text: expect.stringMatching(/^usage: \/detach/) });
-    expect(parseInput('/claude add-dir "My Dir"')).toEqual({ kind: "setting", setting: { target: "claude.add-dir", dir: "My Dir" }, save: false, yes: false });
+    expect(parseInput('/claude add-dir "My Dir"')).toEqual({ kind: "setting", setting: { target: "claude.add-dir", dir: "My Dir" }, save: false, global: false, yes: false });
     expect(tokenize(`it's "a b"`).map((t) => t.text)).toEqual(["it's", "a b"]);
     expect(complete("/att").map((c) => c.insert)).toEqual(["/attach ", "/attachments"]);
     expect(complete("/detach ").map((c) => c.label)).toEqual(["<n>", "all"]);

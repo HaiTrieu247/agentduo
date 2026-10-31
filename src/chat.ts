@@ -14,7 +14,7 @@ import { missingCli } from "./core/environment.js";
 import { Git } from "./core/git.js";
 import { ModelRegistry, withObserved } from "./core/models.js";
 import {
-  claudeDirs, claudeRules, describeSettings, permissionMode, saveSettings, settings, settingsView, type SettingChange, type SettingsView,
+  claudeDirs, claudeRules, describeSettings, permissionMode, saveGlobalSetting, saveSettings, settings, settingsView, type SettingChange, type SettingsView,
 } from "./core/settings.js";
 import { nowIso, RunStore, type ConversationContext, type EarlierTask, type RunState } from "./core/state.js";
 import { readClaudeUsage, readCodexUsage, type UsageReport, type UsageState } from "./core/usage.js";
@@ -67,12 +67,20 @@ const FILES_NOTE = "See the attached file(s).";
 const DECISION_FILES = "The files waiting to be sent do not go with a decision. To give them to the run, send them with a message before you " +
   "decide (it becomes a note for the run's next step), or decide later and /resume with a note: the files go with it.";
 
+/** Where a changed setting is written besides this chat: --save, the config file; --global, the user config file. */
+export interface SaveFlags {
+  save?: boolean;
+  global?: boolean;
+}
+
 export interface ChatOptions {
   cfg: ConfigData;
   workspace: string;
   runsDir: string;
   /** Where `--save` writes a setting: the workspace's .agentduo/config.yaml, or --config. */
   configFile: string;
+  /** Where `--global` writes a setting: the user config file, read before `configFile`. */
+  userConfigFile: string;
   bus: EventBus;
   decider: Decider;
   permissions?: PermissionDecider;
@@ -245,7 +253,7 @@ export class Chat {
 
   /** Shift+Tab, as in Claude Code: Claude's next permission mode (Manual, Edit automatically, Auto). */
   cycleMode(): void {
-    this.change(settings.mode(nextMode(permissionMode(this.cfg))), false, () => this.modeText());
+    this.change(settings.mode(nextMode(permissionMode(this.cfg))), {}, () => this.modeText());
   }
 
   /**
@@ -295,7 +303,7 @@ export class Chat {
       case "detach":
         return this.detach(input.target);
       case "setting":
-        return this.applySetting(input.setting, { save: input.save, yes: input.yes });
+        return this.applySetting(input.setting, { save: input.save, global: input.global, yes: input.yes });
       case "usage":
         ui.info(input.text);
         return;
@@ -892,9 +900,9 @@ export class Chat {
 
   /**
    * Applies a setting to new runs and questions and, from its next agent call, to the run that is going (whose saved
-   * config follows, so a resume keeps it); --save also writes it to the config file.
+   * config follows, so a resume keeps it); --save also writes it to the config file, --global to the user's.
    */
-  private change(change: SettingChange, save: boolean, text: () => string, quiet = false): void {
+  private change(change: SettingChange, flags: SaveFlags, text: () => string, quiet = false): void {
     change.apply(this.cfg);
     this.changes.push(change);
     const running = this.active?.kind === "pipeline" ? this.active : null;
@@ -902,25 +910,49 @@ export class Chat {
       change.apply(running.cfg);
       running.store.writeJson("config.json", running.cfg);
     }
-    if (save && !quiet) saveSettings(this.o.configFile, this.cfg, change.paths);
+    const scope = quiet ? "" : this.persist(change, flags);
     this.o.ui.setMode(permissionMode(this.cfg));
     this.o.ui.setSettings?.(settingsView(this.cfg));
     this.models.refresh();
     if (quiet) return;
-    const scope = save ? `; saved to ${this.o.configFile}` : " (this chat only; add --save to keep it)";
     const when = running ? " Applies from the next agent call of the current run." : this.active ? " Applies from the next question." : "";
     this.o.ui.info(`${text()}${when}${scope}`);
+  }
+
+  /** Writes a change where --save and --global say; returns what the message about it says of that. */
+  private persist(change: SettingChange, flags: SaveFlags): string {
+    const { configFile, userConfigFile } = this.o;
+    if (!flags.save && !flags.global) return " (this chat only; add --save to keep it in this workspace, or --global in every workspace)";
+    const saved: string[] = [];
+    let hidden: string[] = [];
+    try {
+      if (flags.save) {
+        saveSettings(configFile, this.cfg, change.paths);
+        saved.push(configFile);
+      }
+      if (flags.global) {
+        hidden = saveGlobalSetting(userConfigFile, configFile, change);
+        saved.push(userConfigFile);
+      }
+    } catch (e) {
+      const failed = flags.save && !saved.length ? configFile : userConfigFile;
+      return `${saved.length ? `; saved to ${saved[0]}` : ""}; could not save it to ${failed}: ${(e as Error).message}`;
+    }
+    const scope = `; saved to ${[...new Set(saved)].join(" and ")}`;
+    if (!hidden.length) return scope;
+    return `${scope}, but ${configFile} sets ${hidden.join(" and ")} too, which wins in this workspace: the saved setting will not apply here ` +
+      "next time (add --save to save it here as well)";
   }
 
   /**
    * A setting from a command or the settings panel: shows it when it has no value, changes it otherwise. `quiet`: it was
    * changed in another conversation of the workspace, which said so (and saved it): this one only follows.
    */
-  applySetting(s: SettingCommand, flags: { save?: boolean; yes?: boolean; quiet?: boolean } = {}): void {
+  applySetting(s: SettingCommand, flags: SaveFlags & { yes?: boolean; quiet?: boolean } = {}): void {
     const ui = this.o.ui;
-    const save = !!flags.save;
+    const saveFlags: SaveFlags = { save: !!flags.save, global: !!flags.global };
     const quiet = !!flags.quiet;
-    const change = (c: SettingChange, text: () => string) => this.change(c, save, text, quiet);
+    const change = (c: SettingChange, text: () => string) => this.change(c, saveFlags, text, quiet);
     const view = settingsView(this.cfg);
     switch (s.target) {
       case "mode":
@@ -976,7 +1008,7 @@ export class Chat {
         return;
       case "config":
         ui.info(`${describeSettings(this.cfg)}\nModels  Claude: ${modelText(this.models.identity("claude"))} · Codex: ${modelText(this.models.identity("codex"))}\n` +
-          `Changes in this chat are not saved unless a command ends with --save (it writes ${this.o.configFile}).`);
+          `Changes in this chat are not saved unless a command ends with --save (it writes ${this.o.configFile}) or --global (it writes ${this.o.userConfigFile}).`);
         return;
       case "plan": {
         const plan = store && (store.exists("plan.final.md") ? store.readText("plan.final.md") : store.exists("plan.md") ? store.readText("plan.md") : null);

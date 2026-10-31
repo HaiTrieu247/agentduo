@@ -102,7 +102,7 @@ describe("vscode worker: one conversation per tab", () => {
     const { h } = await open();
     await say(h, "tab-a", "/claude hello");
     await h.waitFor(isEvent("turn.finished"));
-    await h.client.request({ type: "setting", conversation: "tab-b", setting: { target: "claude.model", model: "opus" }, save: false, yes: false });
+    await h.client.request({ type: "setting", conversation: "tab-b", setting: { target: "claude.model", model: "opus" }, save: false, global: false, yes: false });
     await say(h, "tab-a", "/claude again");
     await h.nth(isEvent("turn.finished"), 1);
     const args = fake.calls("chat_claude")[1]!.args;
@@ -110,7 +110,7 @@ describe("vscode worker: one conversation per tab", () => {
     // Shift+Tab in tab B, then the menu's Auto in tab C: tab A's next question runs in auto.
     await h.client.request({ type: "cycleMode", conversation: "tab-b" });
     await h.waitFor((m) => m.kind === "ui" && m.update.type === "mode" && m.update.mode === "acceptEdits");
-    await h.client.request({ type: "setting", conversation: "tab-c", setting: { target: "mode", mode: "auto" }, save: false, yes: false });
+    await h.client.request({ type: "setting", conversation: "tab-c", setting: { target: "mode", mode: "auto" }, save: false, global: false, yes: false });
     await say(h, "tab-a", "/claude once more");
     await h.nth(isEvent("turn.finished"), 2);
     const third = fake.calls("chat_claude")[2]!.args;
