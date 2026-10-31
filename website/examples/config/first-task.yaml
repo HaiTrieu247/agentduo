@@ -1,0 +1,6 @@
+# .agentduo/config.yaml for the first-task tutorial.
+# agentduo runs this gate after every implementation round and shows its result to the code reviewer.
+gates:
+  - name: tests
+    command: "npm test"
+    required: true

@@ -1,0 +1,10 @@
+# Swap the roles: Claude Code plans and reviews, Codex critiques and implements.
+# codex exec is read-only unless told otherwise, so the implementer gets a workspace-write sandbox.
+agents:
+  planner: claude
+  plan_reviewer: codex
+  implementer: codex
+  code_reviewer: claude
+codex:
+  role_args:
+    implementer: [--sandbox, workspace-write]

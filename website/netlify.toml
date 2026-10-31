@@ -1,0 +1,9 @@
+# Netlify Git integration: set the site's Base directory to "website". Netlify then runs the build there and publishes
+# website/dist. Headers and the 404 rules live in dist/_headers and dist/_redirects (written by the build), so a
+# drag-and-drop deploy of dist/ gets them too. The build reads the committed release snapshots and needs no network.
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"

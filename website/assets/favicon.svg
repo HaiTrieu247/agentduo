@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="100 100 824 824">
+  <title>AgentDuo</title>
+  <rect x="100" y="100" width="824" height="824" rx="185.4" fill="#1d2023"/>
+  <g fill="none" stroke-width="64" stroke-linecap="round">
+    <path d="M342 342H578A104 104 0 0 1 682 446V538" stroke="#14a892"/>
+    <path d="M682 682H446A104 104 0 0 1 342 578V486" stroke="#e0832f"/>
+  </g>
+  <circle cx="342" cy="342" r="104" fill="#14a892"/>
+  <circle cx="682" cy="682" r="104" fill="#e0832f"/>
+</svg>

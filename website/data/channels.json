@@ -1,0 +1,87 @@
+{
+  "schema": 1,
+  "checkedAt": "2026-10-31T16:32:38.705Z",
+  "github": {
+    "version": "0.8.1",
+    "publishedAt": "2026-10-31T15:41:04Z",
+    "tag": "v0.8.1",
+    "url": "https://github.com/HaiTrieu247/agentduo/releases/tag/v0.8.1",
+    "source": "https://api.github.com/repos/HaiTrieu247/agentduo/releases"
+  },
+  "npm": {
+    "package": "agentduo",
+    "version": "0.8.1",
+    "publishedAt": "2026-10-31T15:46:41.637Z",
+    "url": "https://www.npmjs.com/package/agentduo",
+    "source": "https://registry.npmjs.org/agentduo",
+    "history": [
+      {
+        "version": "0.8.1",
+        "publishedAt": "2026-10-31T15:46:41.637Z"
+      },
+      {
+        "version": "0.8.0",
+        "publishedAt": "2026-10-31T14:13:53.349Z"
+      },
+      {
+        "version": "0.7.2",
+        "publishedAt": "2026-10-31T07:44:46.063Z"
+      },
+      {
+        "version": "0.7.1",
+        "publishedAt": "2026-10-31T05:21:01.863Z"
+      },
+      {
+        "version": "0.7.0",
+        "publishedAt": "2026-10-30T08:39:32.869Z"
+      },
+      {
+        "version": "0.6.3",
+        "publishedAt": "2026-10-30T07:41:39.577Z"
+      },
+      {
+        "version": "0.6.2",
+        "publishedAt": "2026-10-29T11:49:37.288Z"
+      },
+      {
+        "version": "0.6.1",
+        "publishedAt": "2026-10-29T07:19:06.110Z"
+      },
+      {
+        "version": "0.6.0",
+        "publishedAt": "2026-10-29T04:05:10.116Z"
+      },
+      {
+        "version": "0.5.0",
+        "publishedAt": "2026-10-28T15:19:15.565Z"
+      },
+      {
+        "version": "0.4.0",
+        "publishedAt": "2026-10-28T02:54:59.148Z"
+      },
+      {
+        "version": "0.3.0",
+        "publishedAt": "2026-10-27T17:28:00.633Z"
+      },
+      {
+        "version": "0.2.0",
+        "publishedAt": "2026-10-27T16:11:07.029Z"
+      },
+      {
+        "version": "0.1.1",
+        "publishedAt": "2026-10-27T13:28:46.918Z"
+      },
+      {
+        "version": "0.1.0",
+        "publishedAt": "2026-10-27T13:09:29.492Z"
+      }
+    ]
+  },
+  "marketplace": {
+    "id": "HaiTrieuThinh.agentduo-vscode",
+    "version": "0.8.1",
+    "publishedAt": "2026-10-31T15:47:52.053Z",
+    "url": "https://marketplace.visualstudio.com/items?itemName=HaiTrieuThinh.agentduo-vscode",
+    "source": "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery"
+  }
+}

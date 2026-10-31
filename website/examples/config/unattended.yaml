@@ -1,0 +1,10 @@
+# For runs nobody watches (CI, a background job): Claude cannot ask, so allow what the implementer needs up front.
+# These flags reach Claude Code only in agentduo's calls; your own Claude Code settings are unchanged.
+claude:
+  permission_prompts: deny            # never relay a permission prompt; Claude denies what its settings do not allow
+  role_args:
+    implementer: [--permission-mode, acceptEdits, --allowedTools, "Bash(npm test:*)"]
+gates:
+  - name: tests
+    command: "npm test"
+    required: true

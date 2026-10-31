@@ -1,0 +1,4 @@
+# Deliberately wrong: a gate without a name, and a string where a boolean belongs. Validation must reject it.
+gates:
+  - command: "npm test"
+    required: "yes"

@@ -1,0 +1,13 @@
+# Command gates: agentduo runs each command in the workspace after every implementation round (the VERIFY step).
+# A required gate that fails sends the work back to the implementer; an optional one is only reported.
+gates:
+  - name: tests
+    command: "npm test"
+    required: true
+    timeout_sec: 600
+  - name: lint
+    command: "npm run lint"
+    required: false
+limits:
+  max_consecutive_gate_failures: 3   # this many failing rounds in a row stop the run and ask you
+  gate_timeout_sec: 900              # for gates without a timeout_sec of their own

@@ -1,0 +1,10 @@
+# Review policy (quality_gates): how strict the loop is. These keys decide when a run is DONE or stops for you;
+# they run no commands. Commands to run are under gates.
+quality_gates:
+  blocking_severities: [critical, high, medium]   # findings of these severities must be fixed before DONE
+  stop_on_critical_issue: true                     # a critical finding stops the run and asks you
+  review_on_gate_failure: true                     # the reviewer sees a round whose required gates failed
+safety:
+  pause_before_implement: true                     # stop with the final plan and wait for your go-ahead
+limits:
+  max_review_rounds: 3

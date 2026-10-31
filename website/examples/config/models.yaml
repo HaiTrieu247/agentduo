@@ -1,0 +1,8 @@
+# Models and effort for agentduo's calls only. null (or leaving a key out) lets each CLI's own settings decide.
+claude:
+  model: opus
+  max_budget_usd: 5                   # Claude stops a call that would cost more than this
+  args: [--no-session-persistence, --effort, high]
+codex:
+  model: gpt-5.5
+  args: [--ephemeral, -c, model_reasoning_effort=high]
