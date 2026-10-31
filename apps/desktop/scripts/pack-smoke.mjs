@@ -48,6 +48,21 @@ function layout(app) {
   return { exe, fuseTarget: exe, resources: join(app, "resources") };
 }
 
+/**
+ * Removes a folder, trying again for a few seconds: Windows refuses while a process still holds a file there, and the
+ * app's Chromium helpers and worker exit a moment after the app.
+ */
+function remove(path) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return rmSync(path, { recursive: true, force: true });
+    } catch (e) {
+      if (attempt >= 50 || !["EBUSY", "EPERM", "ENOTEMPTY"].includes(e.code)) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    }
+  }
+}
+
 let scratch = null;
 try {
   let app = resolve(option("--app") ?? findApp());
@@ -114,10 +129,16 @@ try {
       const line = await new Promise((done, reject) => {
         const child = spawn(exe, process.env.AGENTDUO_E2E_NO_SANDBOX ? ["--no-sandbox"] : [], { env: appEnv, stdio: ["ignore", "pipe", "pipe"] });
         let out = "";
+        // Settles once, after the app has exited.
+        let settled = false;
         const finish = (f) => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timer);
+          if (child.exitCode !== null || child.signalCode !== null) return f();
+          child.once("exit", () => f());
           child.kill();
-          f();
+          setTimeout(() => child.kill("SIGKILL"), 10_000).unref();
         };
         const timer = setTimeout(() => finish(() => reject(new Error(`the app did not start in 60 s:\n${out.slice(-2000)}`))), 60_000);
         const read = (d) => {
@@ -131,12 +152,12 @@ try {
       });
       pass(`the app started and showed its window: ${line}`);
     } finally {
-      rmSync(profile, { recursive: true, force: true });
+      remove(profile);
     }
   }
 } catch (e) {
   console.error(`FAIL ${e.message}`);
   process.exitCode = 1;
 } finally {
-  if (scratch) rmSync(scratch, { recursive: true, force: true });
+  if (scratch) remove(scratch);
 }

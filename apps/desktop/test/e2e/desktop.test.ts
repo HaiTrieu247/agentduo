@@ -14,7 +14,7 @@ import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, type ElectronApplication, type Page } from "playwright";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import YAML from "yaml";
 import { userConfigPath } from "../../../../src/core/config.js";
 import { RunStore, type RunState } from "../../../../src/core/state.js";
@@ -171,6 +171,9 @@ beforeAll(async () => {
   writeFileSync(user, YAML.stringify({ claude: { bin: fake.path("claude") }, codex: { bin: fake.path("codex") } }));
   await launch();
 });
+
+// A failed test prints the app's log (main and its workers): on CI that is all there is to say why.
+beforeEach(({ onTestFailed }) => onTestFailed(() => console.log(`the app's log:\n${log.slice(-200).join("\n")}`)));
 
 afterAll(async () => {
   await quit().catch(() => undefined);
