@@ -11,7 +11,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { _electron as electron, type ElectronApplication, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -26,7 +26,9 @@ import { makeRepo } from "../../../../test/helpers/repo.js";
 import { tempDir } from "../../../../test/helpers/tmp.js";
 import { waitUntil } from "../../../../test/helpers/vscode.js";
 
-const desktop = fileURLToPath(new URL("../..", import.meta.url));
+// Without its trailing separator: on Windows Playwright quotes each argument into one command line, where a closing
+// `\"` is an escaped quote, so Electron got a folder that does not exist and waited on its error box.
+const desktop = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 /** What runs: a packaged app's executable (AGENTDUO_E2E_APP), or the checkout's Electron with the built app. */
 function executable(): { path: string; args: string[] } {
   const packaged = process.env.AGENTDUO_E2E_APP;
