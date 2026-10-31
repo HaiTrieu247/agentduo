@@ -42,7 +42,7 @@ async function openWorker(workspace: string, generation = 1): Promise<WorkerHarn
   const h = new WorkerHarness({ script: worker.script, workspace, env: { ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg") }, generation });
   harnesses.push(h);
   await h.client.start();
-  await h.client.request({ type: "initialize", workspace, configPath: null });
+  await h.client.request({ type: "initialize", workspace, configPath: null, discover: true });
   return h;
 }
 

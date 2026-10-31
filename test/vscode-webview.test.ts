@@ -33,7 +33,9 @@ describe("webview page", () => {
 });
 
 describe("webview sources", () => {
-  const files = ["webview/main.ts", "webview/render.ts", "webview/state.ts", "webview/markdown.ts", "webview/uploads.ts"];
+  const files = [
+    "webview/main.ts", "webview/render.ts", "webview/dom.ts", "webview/state.ts", "webview/markdown.ts", "webview/uploads.ts", "webview/sidebar.ts", "webview/account.ts",
+  ];
 
   it("never turns text into markup or code", () => {
     for (const file of files) {
@@ -42,23 +44,26 @@ describe("webview sources", () => {
         expect(text.includes(sink), `${file} uses ${sink}`).toBe(false);
       }
     }
-    expect(source("webview/render.ts")).toContain("document.createTextNode");
+    expect(source("webview/dom.ts")).toContain("document.createTextNode");
   });
 
   it("loads nothing from the network", () => {
-    for (const file of [...files, "webview/styles.css"]) expect(source(file).replaceAll('"http://www.w3.org/2000/svg"', ""), file).not.toMatch(/https?:\/\/|@import|url\(/);
+    for (const file of [...files, "webview/styles.css", "webview/sidebar.css"]) expect(source(file).replaceAll('"http://www.w3.org/2000/svg"', ""), file).not.toMatch(/https?:\/\/|@import|url\(/);
   });
 
   it("takes its colours from the theme and covers high contrast and reduced motion", () => {
+    for (const file of ["webview/styles.css", "webview/sidebar.css"]) {
+      const css = source(file);
+      expect(css, file).toContain("vscode-high-contrast");
+      expect(css, file).toContain("prefers-reduced-motion");
+      // Colour literals only as fallbacks inside var(…).
+      for (const line of css.split("\n").filter((l) => /#[0-9a-f]{3,6}\b|rgba?\(/i.test(l))) expect(line, `${file}: ${line}`).toMatch(/var\(--vscode-[^,]+,[^)]*(#|rgba?\()/i);
+    }
     const css = source("webview/styles.css");
     for (const token of ["--vscode-foreground", "--vscode-focusBorder", "--vscode-textLink-foreground", "--vscode-testing-iconPassed", "--vscode-editorError-foreground",
       "--vscode-sideBar-background", "--vscode-button-background", "--vscode-input-background"]) {
       expect(css, token).toContain(token);
     }
-    expect(css).toContain("vscode-high-contrast");
-    expect(css).toContain("prefers-reduced-motion");
-    // Colour literals only as fallbacks inside var(…).
-    for (const line of css.split("\n").filter((l) => /#[0-9a-f]{3,6}\b|rgba?\(/i.test(l))) expect(line, line).toMatch(/var\(--vscode-[^,]+,[^)]*(#|rgba?\()/i);
   });
 
   it("keeps the composer usable with a keyboard and an IME", () => {

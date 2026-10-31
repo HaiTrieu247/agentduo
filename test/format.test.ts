@@ -42,13 +42,15 @@ describe("format", () => {
 
 describe("format: /usage", () => {
   const claude: AgentUsage = {
-    account: "subscription",
+    account: "Max",
+    email: "claude@example.com",
     groups: [{ title: null, limits: [{ label: "Current session", usedPercent: 46, resets: "Resets Oct 29 at 3pm (Asia/Saigon)" }] }],
     notes: [],
     details: { title: "What's contributing to your limits usage?", lines: ["Last 24h · 546 requests", "  93%  Start fresh when you switch tasks"] },
   };
   const codex: AgentUsage = {
-    account: "ChatGPT Plus · user@example.com",
+    account: "ChatGPT Plus",
+    email: "user@example.com",
     groups: [{ title: null, limits: [{ label: "5h limit", usedPercent: 0, resets: null }] }, { title: "GPT-Spark", limits: [{ label: "5h limit", usedPercent: 100, resets: null }] }],
     notes: ["Credits: 12.5"],
     details: null,
@@ -58,10 +60,10 @@ describe("format: /usage", () => {
     expect([usageBar(46, 10), usageBar(0, 4), usageBar(100, 4), usageBar(130, 4)]).toEqual(["█████░░░░░", "░░░░", "████", "████"]);
   });
 
-  it("lays out both agents' limits first, then what contributes to Claude's usage", () => {
+  it("lays out both agents' limits first, each under its plan and email, then what contributes to Claude's usage", () => {
     const rows = usageRows({ id: 1, claude: { status: "ready", usage: claude }, codex: { status: "ready", usage: codex } });
     expect(rows).toEqual([
-      { kind: "agent", text: "Claude Code · subscription", indent: 0 },
+      { kind: "agent", text: "Claude Code · Max · claude@example.com", indent: 0 },
       { kind: "limit", text: "Current session", indent: 2 },
       { kind: "bar", text: "46% used", percent: 46, indent: 2 },
       { kind: "muted", text: "Resets Oct 29 at 3pm (Asia/Saigon)", indent: 2 },
@@ -95,7 +97,7 @@ describe("format: /usage", () => {
     const text = usageReportText({ id: 1, claude: { status: "ready", usage: claude }, codex: { status: "error", error: "Codex is not signed in: run codex login" } });
     expect(text.split("\n")).toEqual([
       "── usage ──",
-      "Claude Code · subscription",
+      "Claude Code · Max · claude@example.com",
       "  Current session",
       `  ${"█".repeat(9)}${"░".repeat(11)}  46% used`,
       "  Resets Oct 29 at 3pm (Asia/Saigon)",

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Chat, NOT_REPO_NOTE, type ChatUi } from "../src/chat.js";
+import { Chat, HOME_NOTE, NOT_REPO_NOTE, type ChatUi } from "../src/chat.js";
 import type { Attachment } from "../src/core/attachment-types.js";
 import { existingAttachmentFile } from "../src/core/attachments.js";
 import { Conversation } from "../src/core/conversation.js";
@@ -398,8 +398,8 @@ describe("Chat: /usage", () => {
     await waitUntil(() => settled(panel.reports.at(-1)), 10_000, "both parts of the usage");
     const last = panel.reports.at(-1)!;
     expect(last.id).toBe(panel.reports[0]!.id);
-    expect(last.claude).toMatchObject({ status: "ready", usage: { account: "subscription", groups: [{ limits: [{ label: "Current session", usedPercent: 10 }] }] } });
-    expect(last.codex).toMatchObject({ status: "ready", usage: { account: "ChatGPT Plus · fake@example.com" } });
+    expect(last.claude).toMatchObject({ status: "ready", usage: { account: "Max", email: "fake@anthropic.example", groups: [{ limits: [{ label: "Current session", usedPercent: 10 }] }] } });
+    expect(last.codex).toMatchObject({ status: "ready", usage: { account: "ChatGPT Plus", email: "fake@example.com" } });
     expect(panel.reports).toHaveLength(3);
     expect(fake.calls()).toEqual([]);
     expect(ui.lines).toEqual([]);
@@ -420,7 +420,7 @@ describe("Chat: /usage", () => {
     await chat.submit("/usage");
     await waitUntil(() => ui.lines.length > 0, 10_000, "the usage text");
     expect(ui.lines).toHaveLength(1);
-    expect(ui.lines[0]).toMatch(/^── usage ──\nClaude Code · subscription\n {2}Current session\n[\s\S]*Codex · ChatGPT Plus · fake@example\.com\n {2}5h limit/);
+    expect(ui.lines[0]).toMatch(/^── usage ──\nClaude Code · Max · fake@anthropic\.example\n {2}Current session\n[\s\S]*Codex · ChatGPT Plus · fake@example\.com\n {2}5h limit/);
   });
 
   it("asks again on a refresh, whose report replaces the earlier one, which never shows again", async () => {
@@ -610,6 +610,21 @@ describe("Chat: a conversation with both agents", () => {
     await chat.idle();
     expect(RunStore.list(plainRuns).map((st) => st.phase)).toEqual(["DONE"]);
     expect(argsOf("planner")).not.toContain("--skip-git-repo-check");
+  });
+
+  it("in the home folder (VS Code with no folder open), says a pipeline needs a project folder, never to git init the home", async () => {
+    const home = join(t.path, "home");
+    mkdirSync(home);
+    const chat = new Chat({ cfg: testConfig(fake, { gates: [] }), workspace: home, runsDir: join(home, ".agentduo", "runs"), configFile: join(home, ".agentduo", "config.yaml"),
+      userConfigFile: userConfig(), bus, decider: new ScriptedDecider(), ui, env: { ...process.env, HOME: home } });
+    chats.push(chat);
+    await chat.greet();
+    expect(ui.lines).toContain(HOME_NOTE);
+    expect(ui.lines).not.toContain(NOT_REPO_NOTE);
+    await chat.submit("/pipeline Make app.txt fixed");
+    expect(ui.errors).toEqual([`A pipeline run needs a git repository, to snapshot and diff your files, and ${home} is not inside one: ` +
+      "it is your home folder: run the pipeline from a project folder inside one. Questions and /discuss work without it."]);
+    expect(RunStore.list(join(home, ".agentduo", "runs"))).toEqual([]);
   });
 
   it("gives Claude in the chat the implementer's permission mode (/mode, Shift+Tab), and no other implementer flag", async () => {

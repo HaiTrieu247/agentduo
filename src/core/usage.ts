@@ -1,8 +1,8 @@
 // What each agent's plan still lets it use, as the CLI's own usage screen shows it, read without calling a model:
-// `claude -p /usage` prints Claude Code's /usage. Codex's /status lives only in its TUI (`codex exec "/status"` would
-// ask the model), so its app server is asked instead, as Codex's IDE extension does: `account/read` and
-// `account/rateLimits/read` over JSON-RPC on stdio. The app server exits as soon as its stdin closes, so stdin stays
-// open until both have answered.
+// `claude -p /usage` prints Claude Code's /usage, and `claude auth status` says which account it uses. Codex's /status
+// lives only in its TUI (`codex exec "/status"` would ask the model), so its app server is asked instead, as Codex's
+// IDE extension does: `account/read` and `account/rateLimits/read` over JSON-RPC on stdio. The app server exits as soon
+// as its stdin closes, so stdin stays open until both have answered.
 import { runProcess, type ChildIO } from "../agents/process.js";
 import { resolveBinary } from "../agents/resolve.js";
 import { packageVersion } from "../paths.js";
@@ -27,8 +27,10 @@ export interface UsageGroup {
 }
 
 export interface AgentUsage {
-  /** The account, as the CLI names it ("subscription", "ChatGPT Plus · a@b.c"); null when it does not say. */
+  /** The account's plan, or how the CLI signs in ("Max", "ChatGPT Plus", "API key"); null when it does not say. */
   account: string | null;
+  /** The account's email, when the CLI says it. */
+  email: string | null;
   groups: UsageGroup[];
   /** What else the CLI says about the account (credits, a limit reached), or all it printed when that had no limits. */
   notes: string[];
@@ -61,6 +63,11 @@ const failed = (what: string, r: { code: number | null; stderr: string; stdout: 
   return `${what} failed (exit code ${r.code})${said ? `: ${said}` : ""}`;
 };
 const seconds = (ms: number) => `${Math.round(ms / 100) / 10}s`;
+const isObj = (v: unknown): v is Record<string, any> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+const PLANS: Record<string, string> = { prolite: "Pro Lite", promax: "Pro Max", edu_plus: "Edu Plus", edu_pro: "Edu Pro", sci_plus: "Sci Plus" };
+/** A plan as its CLI's own screens name it: "max" is Max, "edu_plus" Edu Plus. */
+const planName = (plan: string) => PLANS[plan] ?? plan.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 
 // ------------------------------------------------------------------ Claude
 const ACCOUNT = /^You are currently using your (.+?) to power your Claude Code usage\.?$/;
@@ -77,7 +84,7 @@ export function claudeUsage(stdout: string): AgentUsage {
     return from < 0 ? [] : list.slice(from, list.findLastIndex(Boolean) + 1);
   };
   const first = lines.findIndex((l) => LIMIT.test(l));
-  if (first < 0) return { account: null, groups: [], notes: trim(lines), details: null };
+  if (first < 0) return { account: null, email: null, groups: [], notes: trim(lines), details: null };
   let account: string | null = null;
   const notes: string[] = [];
   for (const line of lines.slice(0, first).filter(Boolean)) {
@@ -94,20 +101,67 @@ export function claudeUsage(stdout: string): AgentUsage {
     limits.push({ label: m[1]!, usedPercent: Number(m[2]), resets: resets ? resets.charAt(0).toUpperCase() + resets.slice(1) : null });
   }
   const rest = trim(lines.slice(end));
-  return { account, groups: [{ title: null, limits }], notes, details: rest.length ? { title: rest[0]!, lines: rest.slice(1) } : null };
+  return { account, email: null, groups: [{ title: null, limits }], notes, details: rest.length ? { title: rest[0]!, lines: rest.slice(1) } : null };
 }
 
-export async function readClaudeUsage(o: UsageOptions): Promise<UsageState> {
+/** Who Claude Code signs in as: its plan (or how it signs in) and email, as `claude auth status` says it. */
+export type ClaudeAccount = { status: "ready"; account: string; email: string | null } | { status: "signedOut" } | { status: "error"; error: string };
+
+export const CLAUDE_SIGNED_OUT = "Claude Code is not signed in: run claude auth login";
+
+const CLAUDE_PROVIDERS: Record<string, string> = { bedrock: "Amazon Bedrock", vertex: "Google Vertex AI", foundry: "Microsoft Foundry", gateway: "Cloud gateway" };
+
+/** `claude auth status` (JSON, as Claude Code 2.1.31x prints it): a plan for a claude.ai login, else how it signs in. */
+export function claudeAccount(status: unknown): ClaudeAccount {
+  if (!isObj(status)) return { status: "error", error: "claude auth status said nothing about the account" };
+  if (status.loggedIn === false) return { status: "signedOut" };
+  const email = typeof status.email === "string" && status.email ? status.email : null;
+  const provider = typeof status.apiProvider === "string" ? CLAUDE_PROVIDERS[status.apiProvider] : undefined;
+  const account = status.authMethod === "claude.ai"
+    ? (typeof status.subscriptionType === "string" && status.subscriptionType ? planName(status.subscriptionType) : "Claude account")
+    : status.authMethod === "api_key" ? "API key"
+    : status.authMethod === "api_key_helper" ? "API key helper"
+    : status.authMethod === "oauth_token" ? "OAuth token"
+    : provider ?? (status.authMethod === "third_party" ? "Third-party provider" : String(status.authMethod ?? "unknown account"));
+  return { status: "ready", account, email };
+}
+
+export async function readClaudeAccount(o: UsageOptions): Promise<ClaudeAccount> {
   const bin = resolveBinary(o.cfg.claude.bin, "claude", o.env);
   if (!bin) return { status: "error", error: "claude CLI not found" };
   const timeoutMs = o.timeoutMs ?? USAGE_TIMEOUT_MS;
   try {
-    const r = await runProcess(bin, ["-p", "/usage"], { cwd: o.workspace, env: o.env, timeoutMs, signal: o.signal, killGraceMs: 500, maxBufferChars: 1024 * 1024 });
+    const r = await runProcess(bin, ["auth", "status"], { cwd: o.workspace, env: o.env, timeoutMs, signal: o.signal, killGraceMs: 500, maxBufferChars: 64 * 1024 });
     if (r.aborted) return { status: "error", error: "stopped" };
+    if (r.timedOut) return { status: "error", error: `claude auth status did not answer within ${seconds(timeoutMs)}` };
+    // Signed out, it exits with 1 and still prints its JSON.
+    try {
+      return claudeAccount(JSON.parse(r.stdout));
+    } catch {
+      return { status: "error", error: r.code === 0 ? "claude auth status printed no JSON" : failed("claude auth status", r) };
+    }
+  } catch (e) {
+    return { status: "error", error: `cannot run claude: ${(e as Error).message}` };
+  }
+}
+
+/** Claude's /usage with its account: the plan and email `claude auth status` says, else the account /usage names. */
+export async function readClaudeUsage(o: UsageOptions): Promise<UsageState> {
+  const bin = resolveBinary(o.cfg.claude.bin, "claude", o.env);
+  if (!bin) return { status: "error", error: "claude CLI not found" };
+  const timeoutMs = o.timeoutMs ?? USAGE_TIMEOUT_MS;
+  const account = readClaudeAccount(o);
+  try {
+    const r = await runProcess(bin, ["-p", "/usage"], { cwd: o.workspace, env: o.env, timeoutMs, signal: o.signal, killGraceMs: 500, maxBufferChars: 1024 * 1024 });
+    const who = await account;
+    if (r.aborted) return { status: "error", error: "stopped" };
+    if (who.status === "signedOut") return { status: "error", error: CLAUDE_SIGNED_OUT };
     if (r.timedOut) return { status: "error", error: `claude -p /usage did not answer within ${seconds(timeoutMs)}` };
     if (r.code !== 0) return { status: "error", error: failed("claude -p /usage", r) };
-    return { status: "ready", usage: claudeUsage(r.stdout) };
+    const usage = claudeUsage(r.stdout);
+    return { status: "ready", usage: who.status === "ready" ? { ...usage, account: who.account, email: who.email } : usage };
   } catch (e) {
+    await account;
     return { status: "error", error: `cannot run claude: ${(e as Error).message}` };
   }
 }
@@ -120,9 +174,6 @@ export interface CodexAnswers {
   account: RpcReply;
   rateLimits: RpcReply;
 }
-
-const PLANS: Record<string, string> = { prolite: "Pro Lite", promax: "Pro Max", edu_plus: "Edu Plus", edu_pro: "Edu Pro", sci_plus: "Sci Plus" };
-const planName = (plan: string) => PLANS[plan] ?? plan.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 
 const REACHED: Record<string, string> = {
   rate_limit_reached: "You have reached a usage limit.",
@@ -151,8 +202,6 @@ export function resetText(epochSec: number, timeZone?: string): string {
   return `Resets ${part("month")} ${part("day")} at ${part("hour")}${minute === "00" ? "" : `:${minute}`}${part("dayPeriod").toLowerCase()}`;
 }
 
-const isObj = (v: unknown): v is Record<string, any> => typeof v === "object" && v !== null && !Array.isArray(v);
-
 function limitsOf(snapshot: Record<string, any>, timeZone?: string): UsageLimit[] {
   return [snapshot.primary, snapshot.secondary].filter(isObj).map((w) => ({
     label: windowLabel(w.windowDurationMins),
@@ -168,9 +217,10 @@ export function codexUsage(answers: CodexAnswers, timeZone?: string): UsageState
   const account = isObj(read.account) ? read.account : null;
   if (!account) return { status: "error", error: "Codex is not signed in: run codex login" };
   const name = account.type === "chatgpt"
-    ? ["ChatGPT" + (typeof account.planType === "string" ? ` ${planName(account.planType)}` : ""), account.email].filter(Boolean).join(" · ")
+    ? "ChatGPT" + (typeof account.planType === "string" ? ` ${planName(account.planType)}` : "")
     : account.type === "apiKey" ? "API key" : account.type === "amazonBedrock" ? "Amazon Bedrock" : String(account.type ?? "unknown account");
-  const usage: AgentUsage = { account: name, groups: [], notes: [], details: null };
+  const email = account.type === "chatgpt" && typeof account.email === "string" && account.email ? account.email : null;
+  const usage: AgentUsage = { account: name, email, groups: [], notes: [], details: null };
   if ("error" in answers.rateLimits || !isObj(answers.rateLimits.result)) {
     usage.notes.push(account.type === "chatgpt"
       ? `Codex could not read its limits: ${"error" in answers.rateLimits ? answers.rateLimits.error : "no answer"}`

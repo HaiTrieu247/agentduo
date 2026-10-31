@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PROTOCOL_VERSION } from "../extensions/vscode/src/protocol.js";
 import { WorkerError } from "../extensions/vscode/src/workerClient.js";
-import { NOT_REPO_NOTE } from "../src/chat.js";
+import { HOME_NOTE, NOT_REPO_NOTE } from "../src/chat.js";
 import { main, type CliIO } from "../src/cli.js";
 import { acquireWorkspaceLock, RunStore } from "../src/core/state.js";
 import type { Attachment } from "../src/core/attachment-types.js";
@@ -53,12 +53,12 @@ const happy = () => ({
   code_reviewer: [{ output: review(true) }],
 });
 
-async function open(o: { overrides?: ConfigOverrides; config?: boolean; generation?: number } = {}) {
+async function open(o: { overrides?: ConfigOverrides; config?: boolean; generation?: number; discover?: boolean } = {}) {
   if (o.config !== false) writeWorkspaceConfig(repo, fake, o.overrides);
   const h = new WorkerHarness({ script: worker.script, workspace: repo, env: { ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg") }, generation: o.generation });
   harnesses.push(h);
   await h.client.start();
-  const init = await h.client.request({ type: "initialize", workspace: repo, configPath: null });
+  const init = await h.client.request({ type: "initialize", workspace: repo, configPath: null, discover: o.discover ?? true });
   return { h, init };
 }
 
@@ -185,11 +185,38 @@ describe("vscode worker", () => {
     await waitUntil(() => usage().some((u) => u.report.claude.status !== "loading" && u.report.codex.status !== "loading"), 10_000, "the usage");
     const first = usage()[0]!.report.id;
     expect(usage()[0]).toEqual({ conversation: C, report: { id: first, claude: { status: "loading" }, codex: { status: "loading" } } });
-    expect(usage().at(-1)!.report).toMatchObject({ id: first, claude: { status: "ready", usage: { account: "subscription" } }, codex: { status: "ready" } });
+    expect(usage().at(-1)!.report).toMatchObject({ id: first, claude: { status: "ready", usage: { account: "Max", email: "fake@anthropic.example" } }, codex: { status: "ready" } });
     await h.client.request({ type: "usage", conversation: C });
     await waitUntil(() => usage().some((u) => u.report.id > first && u.report.codex.status === "ready" && u.report.claude.status === "ready"), 10_000, "the refreshed usage");
     expect(fake.calls()).toEqual([]);
     expect(h.messages.some((m) => m.kind === "ui" && m.update.type === "info")).toBe(false);
+  });
+
+  it("answers the Account & Usage view with both agents' accounts and limits, for no tab, with no lock and no agent call", async () => {
+    const { h } = await open();
+    const r = await h.client.request({ type: "accountUsage" });
+    expect(r.claude).toMatchObject({ status: "ready", usage: { account: "Max", email: "fake@anthropic.example", groups: [{ limits: [{ label: "Current session", usedPercent: 10 }] }] } });
+    expect(r.codex).toMatchObject({ status: "ready", usage: { account: "ChatGPT Plus", email: "fake@example.com", groups: [{ limits: [{ label: "5h limit" }, { label: "Weekly limit" }] }] } });
+    expect(fake.usageCalls().map((c) => `${c.backend} ${c.args.slice(0, 2).join(" ")}`).sort()).toEqual(["claude -p /usage", "claude auth status", "codex app-server"]);
+    expect(fake.calls()).toEqual([]);
+    expect(existsSync(lockFile())).toBe(false);
+    expect(h.messages.some((m) => m.kind === "ui" && (m.update.type === "usage" || m.update.type === "info"))).toBe(false);
+  });
+
+  it("looks no model up when initialized only for the Account & Usage view, and still answers it", async () => {
+    fake.setScenario({ catalog: { models: [{ slug: "gpt-one", display_name: "One", priority: 1 }] } });
+    const { h } = await open({ discover: false });
+    const r = await h.client.request({ type: "accountUsage" });
+    expect([r.claude.status, r.codex.status]).toEqual(["ready", "ready"]);
+    await new Promise((done) => setTimeout(done, 800));
+    expect(h.messages.some((m) => m.kind === "ui" && (m.update.type === "catalog" || m.update.type === "models"))).toBe(false);
+  });
+
+  it("says which agent could not answer the Account & Usage view, and still gives the other", async () => {
+    fake.setScenario({ usage: { claude: { auth: { loggedIn: false, authMethod: "none", apiProvider: "firstParty" }, exit: 1, stderr: "Not logged in" } } });
+    const { h } = await open();
+    const r = await h.client.request({ type: "accountUsage" });
+    expect(r).toMatchObject({ claude: { status: "error", error: "Claude Code is not signed in: run claude auth login" }, codex: { status: "ready", usage: { account: "ChatGPT Plus" } } });
   });
 
   it("leaves VERIFY out of the flow without gates", async () => {
@@ -409,8 +436,14 @@ describe("vscode worker", () => {
     const h = new WorkerHarness({ script: worker.script, workspace: plain, env: { ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg") } });
     harnesses.push(h);
     await h.client.start();
-    const init = await h.client.request({ type: "initialize", workspace: plain, configPath: null });
+    const init = await h.client.request({ type: "initialize", workspace: plain, configPath: null, discover: true });
     expect([init.problem, init.hint]).toEqual([null, NOT_REPO_NOTE]);
+    // The home folder (VS Code with no folder open) says so, and no `git init` there.
+    const home = new WorkerHarness({ script: worker.script, workspace: plain, env: { ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg"), HOME: plain } });
+    harnesses.push(home);
+    await home.client.start();
+    expect((await home.client.request({ type: "initialize", workspace: plain, configPath: null, discover: false })).hint).toBe(HOME_NOTE);
+    await home.client.shutdown();
     fake.setScenario({ chat_codex: [{ answer: "Hi." }] });
     await h.client.request({ type: "submit", conversation: C, text: "Hello?", route: "message" });
     const answered = await h.waitFor(isEvent("turn.finished"));

@@ -23,10 +23,11 @@ export const MAX_ACTIVITIES = 150;
 export const MAX_ANSWER_CHARS = 2_000_000;
 
 /**
- * no-folder / choose-folder: nothing to run in yet; starting: the worker is coming up; dormant: ready, no lock held;
- * active: a chat session holds the workspace lock; ended: /quit gave it back; stopped: the worker is gone.
+ * choose-folder: the window has several folders and none is chosen, so nothing runs yet (with no folder open, agentduo
+ * works in the home folder); starting: the worker is coming up; dormant: ready, no lock held; active: a chat session
+ * holds the workspace lock; ended: /quit gave it back; stopped: the worker is gone.
  */
-export type SessionState = "no-folder" | "choose-folder" | "starting" | "dormant" | "active" | "ended" | "stopped";
+export type SessionState = "choose-folder" | "starting" | "dormant" | "active" | "ended" | "stopped";
 
 export interface StepCard {
   phase: Phase;
@@ -524,7 +525,6 @@ export const readyAttachments = (s: ViewState): string[] => s.attachments.flatMa
 // ------------------------------------------------------------------ view model (pure, shared by render.ts and tests)
 /** `next`: the composer's next message is a task for the pipeline, or a question to discuss (picked in its recipient menu). */
 export function placeholder(s: ViewState, next: "pipeline" | "discuss" | null = null): string {
-  if (s.session === "no-folder") return "Open a folder to give agentduo a workspace";
   if (s.session === "choose-folder") return "Choose a workspace folder first";
   const name = AGENT_NAMES[s.recipient];
   if (next === "pipeline" && s.status !== "running") return "A task for the pipeline: Codex plans and reviews, Claude critiques and implements";
@@ -558,7 +558,7 @@ export function sendStops(s: ViewState, text: string, reading: number): boolean 
 }
 
 export function canSubmit(s: ViewState): boolean {
-  return s.session !== "no-folder" && s.session !== "choose-folder";
+  return s.session !== "choose-folder";
 }
 
 export interface Choice<K extends string> {

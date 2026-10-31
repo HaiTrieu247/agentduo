@@ -1,6 +1,7 @@
-// Three bundles, built by scripts/build-vscode.mjs: the extension host (CJS, inside VS Code), the webview (browser)
-// and the engine worker (ESM, run by an external Node >= 22.12, with every dependency bundled). A fourth, the
-// Extension Development Host smoke test, is built only when asked for (scripts/test-vscode.mjs).
+// Three bundles, built by scripts/build-vscode.mjs: the extension host (CJS, inside VS Code), the webviews (browser:
+// a conversation's tab and the Account & Usage view) and the engine worker (ESM, run by an external Node >= 22.12,
+// with every dependency bundled). A fourth, the Extension Development Host smoke test, is built only when asked for
+// (scripts/test-vscode.mjs).
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Options } from "tsup";
@@ -18,7 +19,7 @@ const builds: Options[] = [
     external: ["vscode"], noExternal: [/^(?!vscode$)/],
   },
   {
-    ...common, name: "webview", entry: { main: join(here, "webview", "main.ts") }, outDir: join(out, "dist", "webview"),
+    ...common, name: "webview", entry: { main: join(here, "webview", "main.ts"), sidebar: join(here, "webview", "sidebar.ts") }, outDir: join(out, "dist", "webview"),
     format: ["iife"], platform: "browser", target: "es2022", outExtension: () => ({ js: ".js" }),
   },
   {

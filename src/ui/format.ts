@@ -191,13 +191,13 @@ export interface UsageRow {
 
 const USAGE_AGENTS: Record<Agent, string> = { claude: "Claude Code", codex: "Codex" };
 
-/** Both agents' limits first, each with its account; then what contributes to Claude's usage, which is long. */
+/** Both agents' limits first, each with its account (plan and email); then what contributes to Claude's usage, which is long. */
 export function usageRows(r: UsageReport): UsageRow[] {
   const rows: UsageRow[] = [];
   const row = (kind: UsageRow["kind"], text: string, indent = 0, percent?: number) => rows.push({ kind, text, indent, ...(percent === undefined ? {} : { percent }) });
   const section = (agent: Agent, state: UsageState) => {
-    const account = state.status === "ready" ? state.usage.account : null;
-    row("agent", `${USAGE_AGENTS[agent]}${account ? ` · ${account}` : ""}`);
+    const who = state.status === "ready" ? [state.usage.account, state.usage.email] : [];
+    row("agent", [USAGE_AGENTS[agent], ...who].filter(Boolean).join(" · "));
     if (state.status === "loading") return row("muted", "loading…", 2);
     if (state.status === "error") return row("error", state.error, 2);
     for (const group of state.usage.groups) {

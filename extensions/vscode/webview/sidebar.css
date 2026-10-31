@@ -1,0 +1,70 @@
+/* The Activity Bar's Account & Usage view, in the manner of VS Code's own side views: rows of a name and its value,
+   a thin meter per limit. Colours and fonts come from the theme (--vscode-*); a meter also says its percent in words. */
+:root {
+  --err: var(--vscode-editorError-foreground, #e51400);
+  --warn: var(--vscode-editorWarning-foreground, #bf8803);
+  --accent: var(--vscode-textLink-foreground, #3794ff);
+  --muted: var(--vscode-descriptionForeground, #8b8b8b);
+  --border: var(--vscode-sideBarSectionHeader-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
+  --err-text: var(--err);
+}
+
+body.vscode-light {
+  --err-text: color-mix(in srgb, var(--err) 70%, var(--vscode-foreground));
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 4px 20px 12px;
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size, 13px);
+  line-height: 1.45;
+}
+
+.app { display: flex; flex-direction: column; min-width: 0; }
+
+.codicon[class*="codicon-"] { font-size: 14px; vertical-align: -2px; }
+
+.agent-part { display: flex; flex-direction: column; gap: 2px; padding: 8px 0 10px; min-width: 0; }
+.agent-part + .agent-part { border-top: 1px solid var(--border); }
+
+.row { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.row .label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .value { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+
+.agent { align-items: center; margin-bottom: 2px; font-weight: 600; }
+.agent .mark { flex: none; }
+.agent .value { font-weight: normal; color: var(--muted); }
+.field .label { flex: none; color: var(--muted); }
+.field .value { flex: 1 1 auto; }
+.limit { margin-top: 6px; }
+.limit .value { flex: none; font-variant-numeric: tabular-nums; }
+.group { margin-top: 8px; font-weight: 600; color: var(--muted); }
+
+.meter { height: 4px; margin: 3px 0 2px; overflow: hidden; border-radius: 2px; background: color-mix(in srgb, var(--vscode-foreground) 14%, transparent); }
+.fill { display: block; height: 100%; border-radius: 2px; background: var(--vscode-progressBar-background, var(--accent)); }
+.fill.high { background: var(--warn); }
+.fill.full { background: var(--err); }
+
+.muted { color: var(--muted); font-size: 11px; }
+.text { margin-top: 4px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.error { display: flex; gap: 6px; color: var(--err-text); overflow-wrap: anywhere; }
+.error .codicon { flex: none; }
+.problem { padding: 8px 0; }
+
+.foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 8px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
+.link { padding: 0; border: 0; background: none; color: var(--vscode-textLink-foreground); font: inherit; cursor: pointer; }
+.link:hover { color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground)); text-decoration: underline; }
+.link:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+
+/* The logos' colours are their makers'; high contrast turns them to the text colour, as in the tab. */
+body.vscode-high-contrast .mark path, body.vscode-high-contrast-light .mark path { fill: currentColor; }
+body.vscode-high-contrast .meter, body.vscode-high-contrast-light .meter { border: 1px solid var(--vscode-contrastBorder, currentColor); }
+body.vscode-high-contrast .agent-part + .agent-part, body.vscode-high-contrast-light .agent-part + .agent-part { border-top-color: var(--vscode-contrastBorder, currentColor); }
+
+@media (prefers-reduced-motion: reduce) {
+  .codicon-modifier-spin { animation: none; }
+}

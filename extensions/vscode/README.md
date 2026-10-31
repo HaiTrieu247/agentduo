@@ -6,8 +6,10 @@ uses the same configuration, run directory and lock. A run started in one can be
 
 ## Requirements
 
-- VS Code desktop 1.95 or later, with a local, trusted folder. Questions and discussions work in any folder; the
-  Pipeline needs the folder to be inside a git repository (run `git init` there first).
+- VS Code desktop 1.95 or later, with a local, trusted folder, or no folder at all: then agentduo works in your home
+  folder, and its conversations and config go to `~/.agentduo`, as `duo` started there does. Questions and discussions
+  work in any folder; the Pipeline needs the folder to be inside a git repository (run `git init` there first), so in
+  the home folder it asks you to open a project folder.
 - Node 22.12 or later. VS Code's own Node is not used. The extension takes the first suitable `node` on the
   `PATH` VS Code sees, or the path in the `agentduo.nodePath` setting.
 - Codex CLI and Claude Code CLI, installed and signed in. Set `codex.bin` / `claude.bin` in `.agentduo/config.yaml`
@@ -42,11 +44,18 @@ Click the agentduo button in an editor's title bar (beside Claude Code's and Cod
 - **Conversations last.** After a reload or a restart, VS Code reopens the tabs: each shows what it showed, and its next
   question still carries what was said before. An answer that was still going when the window closed has stopped, as Esc
   would stop it. Conversations live under the runs directory (`.agentduo/runs/conversations/`).
-- **agentduo in the Activity Bar** lists the workspace's conversations, newest first: open ones, and closed ones you can
-  open again to go on. **＋** starts a new one, and a badge counts the questions waiting for you.
+- **agentduo in the Activity Bar** has two views:
+  - **Account & Usage**: the accounts of both Claude Code and Codex (plan and email), and how much of each plan's limits
+    is used, a meter per limit with when it resets, as `/usage` shows them (`claude -p /usage` and `claude auth status`,
+    Codex's app server; no model call, about two seconds). It looks them up when it shows (again once they are a minute
+    old), on **↻**, every 5 minutes while it shows, and after an answer or a run in any tab, at most once a minute; a
+    collapsed or hidden view looks nothing up. If one agent cannot say, only its part says why. **View details** opens
+    the tab's Usage panel, with Claude's "What's contributing to your limits usage?".
+  - **Conversations** lists the workspace's conversations, newest first: open ones, and closed ones you can open again
+    to go on. **＋** starts a new one, and a badge counts the questions waiting for you.
 - Opening a tab starts nothing but the worker, which only reads: it reads the latest run, so it can offer **Resume**. The
   first task you send starts a run in the chosen folder. In a multi-root window you choose the folder first
-  (**agentduo: Choose Workspace Folder**).
+  (**agentduo: Choose Workspace Folder**); until then, the Account & Usage view asks with your home folder's config.
 - While a run goes on or waits for you, a line at the top of its tab shows its stages and rounds.
 - The composer works like the terminal chat: a three-way conversation with Claude Code and Codex. The chip under the
   input says who a message goes to and on which model (Codex at first). Its menu switches between **Codex** and
@@ -57,7 +66,7 @@ Click the agentduo button in an editor's title bar (beside Claude Code's and Cod
   `default → gpt-5.5 (codex doctor)`, or a Claude settings alias awaiting confirmation). The `/` button lists the
   commands, and typing `/` shows the same list with a description for each entry.
 - **Usage** (or `/usage` in the composer) opens a panel above the composer, as `/usage` opens one in the terminal chat:
-  how much of their plans' limits Claude Code and Codex have used, a meter per limit, then Claude's "What's contributing
+  each agent's account, how much of their plans' limits Claude Code and Codex have used, a meter per limit, then Claude's "What's contributing
   to your limits usage?". Each part fills in as its agent answers. **Refresh** looks again; Esc or **✕** closes it, and
   an answer under way goes on. A permission prompt or a decision goes before it.
 - **Attached files.** The paperclip under the input picks any files (images, PDFs, text, code…). You can also paste an
@@ -114,7 +123,7 @@ a task on its own. It offers **Resume** instead.
 
 ## Limits of this version
 
-Desktop VS Code with a local folder only. There is no web build, and Remote SSH, WSL and containers are not
+Desktop VS Code with a local folder (or none, for your home folder) only. There is no web build, and Remote SSH, WSL and containers are not
 supported. Each window has one session; its tabs answer side by side, but run one pipeline at a time. There is no
 browser for older runs: **Resume** continues the latest run, as `/resume` does in the CLI.
 

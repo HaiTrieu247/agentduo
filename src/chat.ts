@@ -22,6 +22,7 @@ import { EXIT, Workflow } from "./core/workflow.js";
 import type {
   Decider, DiscussionPlace, DiscussionStatus, DiscussionStep, EventBus, ModelMap, PermissionDecider, TurnStatus, Verdict,
 } from "./events.js";
+import { isHomeFolder } from "./paths.js";
 import { formatCost, formatTokens, modelText, usageReportText } from "./ui/format.js";
 
 /** idle: ready; running: a pipeline run is going; answering: an agent answers a question; paused: a run was stopped with Esc. */
@@ -146,6 +147,11 @@ export function resumeHint(runsDir: string, workspace: string): string | null {
 /** What the chat says as it opens outside a git repository (the extension too). */
 export const NOT_REPO_NOTE = "This folder is not inside a git repository: you can ask Claude and Codex and /discuss here, but a pipeline run " +
   "needs one (run 'git init' here first).";
+/** The same in the home folder (VS Code with no folder open works there), where `git init` would take in the whole home. */
+export const HOME_NOTE = "This is your home folder, not a git repository: you can ask Claude and Codex and /discuss here, but a pipeline run " +
+  "needs a project folder inside one.";
+
+export const notRepoNote = (workspace: string, env: NodeJS.ProcessEnv): string => (isHomeFolder(workspace, env) ? HOME_NOTE : NOT_REPO_NOTE);
 
 /** The one thing agents do for this chat at a time: a pipeline run, the answer to a question, or a discussion. */
 type Execution =
@@ -266,7 +272,7 @@ export class Chat {
     this.o.ui.setSettings?.(settingsView(this.cfg));
     this.o.ui.setModels(this.models.current());
     this.models.refresh();
-    if (!(await this.git.isRepo())) this.o.ui.info(NOT_REPO_NOTE);
+    if (!(await this.git.isRepo())) this.o.ui.info(notRepoNote(this.o.workspace, this.env));
     const hint = resumeHint(this.o.runsDir, this.o.workspace);
     if (hint) this.o.ui.info(hint);
   }
@@ -730,8 +736,9 @@ export class Chat {
    */
   private async outsideRepo(): Promise<boolean> {
     if (await this.git.isRepo()) return false;
+    const fix = isHomeFolder(this.o.workspace, this.env) ? "it is your home folder: run the pipeline from a project folder inside one" : "run 'git init' here first";
     this.o.ui.info(`A pipeline run needs a git repository, to snapshot and diff your files, and ${this.o.workspace} is not inside one: ` +
-      "run 'git init' here first. Questions and /discuss work without it.", "error");
+      `${fix}. Questions and /discuss work without it.`, "error");
     return true;
   }
 

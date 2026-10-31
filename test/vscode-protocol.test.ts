@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DecisionBroker, PermissionBroker } from "../extensions/vscode/src/decisionBroker.js";
 import {
-  isWorkspacePath, MAX_UPLOAD_CHARS, parseRequestEnvelope, parseWebviewMessage, parseWorkerMessage, PROTOCOL_VERSION, ProtocolError,
+  isWorkspacePath, MAX_UPLOAD_CHARS, parseAccountViewMessage, parseRequestEnvelope, parseWebviewMessage, parseWorkerMessage, PROTOCOL_VERSION, ProtocolError,
 } from "../extensions/vscode/src/protocol.js";
 import type { HumanReview, PermissionRequest } from "../src/events.js";
 
@@ -29,11 +29,14 @@ describe("worker requests", () => {
       expect(parseRequestEnvelope(envelope({ type })).request).toEqual({ type, conversation: null });
     }
     expect(parseRequestEnvelope(envelope({ type: "readArtifact", artifact: "plan", conversation: null })).request).toEqual({ type: "readArtifact", artifact: "plan", conversation: null });
-    for (const type of ["doctor", "shutdown"]) expect(parseRequestEnvelope(envelope({ type, extra: "ignored" })).request).toEqual({ type });
+    for (const type of ["accountUsage", "doctor", "shutdown"]) expect(parseRequestEnvelope(envelope({ type, extra: "ignored" })).request).toEqual({ type });
+    // The models are looked up unless the host says not to (the worker that only answers the Account & Usage view).
+    const init = (o: object) => parseRequestEnvelope(envelope({ type: "initialize", workspace: "/home/me", configPath: null, ...o })).request;
+    expect([init({}), init({ discover: true }), init({ discover: false })].map((r) => r.type === "initialize" && r.discover)).toEqual([true, true, false]);
   });
 
-  it("is protocol 7: takes only the permission modes the chat offers, and no longer edits ask|auto", () => {
-    expect(PROTOCOL_VERSION).toBe(7);
+  it("is protocol 8 (the Account & Usage view's accountUsage); takes only the permission modes the chat offers", () => {
+    expect(PROTOCOL_VERSION).toBe(8);
     const setting = (s: unknown) => parseRequestEnvelope(envelope({ type: "setting", conversation: "c-1", setting: s })).request;
     for (const mode of ["manual", "acceptEdits", "auto"]) expect(setting({ target: "mode", mode })).toMatchObject({ setting: { target: "mode", mode } });
     expect(setting({ target: "mode" })).toMatchObject({ setting: { target: "mode" } });
@@ -134,6 +137,15 @@ describe("webview messages", () => {
       { type: "open", uri: "file:///etc/passwd" }, { type: "permission", generation: 1, id: "p", answer: { decision: "yes" } }, { type: "submit" }, "ready",
     ]) {
       expect(() => parseWebviewMessage(raw), JSON.stringify(raw)).toThrow(ProtocolError);
+    }
+  });
+});
+
+describe("Account & Usage view messages", () => {
+  it("only asks for its state, a refresh or the details; nothing else gets through", () => {
+    for (const type of ["ready", "refresh", "details"]) expect(parseAccountViewMessage({ type, extra: "ignored" })).toEqual({ type });
+    for (const raw of [{ type: "command", name: "doctor" }, { type: "usage" }, { type: "open", uri: "file:///etc/passwd" }, "refresh", null]) {
+      expect(() => parseAccountViewMessage(raw), JSON.stringify(raw)).toThrow(ProtocolError);
     }
   });
 });

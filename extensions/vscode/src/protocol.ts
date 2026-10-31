@@ -8,7 +8,7 @@ import {
 import type { Check } from "../../../src/core/doctor.js";
 import type { CodexCatalog } from "../../../src/core/models.js";
 import type { SettingsView } from "../../../src/core/settings.js";
-import type { UsageReport } from "../../../src/core/usage.js";
+import type { UsageReport, UsageState } from "../../../src/core/usage.js";
 import type { DuoEvent, HumanReview, ModelMap, Party, PermissionAnswer, Phase, Role } from "../../../src/events.js";
 import type { ViewAction, ViewState } from "../webview/state.js";
 
@@ -20,8 +20,10 @@ import type { ViewAction, ViewState } from "../webview/state.js";
  * 6: attachments: the host stages a file by path (one the user picked, or one it wrote from a paste or a drop) and the
  *    worker copies it into the conversation; a submit names the files it sends by id. No bytes ever cross IPC.
  * 7: Claude Code's permission modes (manual, acceptEdits, auto) in place of edits ask|auto: `cycleMode`, `mode` updates.
+ * 8: the Activity Bar's Account & Usage view: `accountUsage`, both agents' accounts and limits, for no conversation; an
+ *    `initialize` with `discover: false` looks no model up (the worker that only answers that view).
  */
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 
 export const BACKENDS = ["codex", "claude"] as const;
 /** How the composer's text is meant: a message (to the recipient, or a slash command), a pipeline task, or a question to discuss. */
@@ -71,7 +73,8 @@ export interface Problem {
  * A run's artifacts and changes are asked for a conversation's run, or with null for the workspace's latest.
  */
 export type WorkerRequest =
-  | { type: "initialize"; workspace: string; configPath: string | null }
+  /** `discover`: look the models up once initialized (false for a worker that only answers the Account & Usage view). */
+  | { type: "initialize"; workspace: string; configPath: string | null; discover: boolean }
   /** `attachments`: the ids of the waiting files the message sends (the tab's ready ones); absent: none. */
   | { type: "submit"; conversation: string; text: string; route: Route; attachments?: string[] }
   /**
@@ -96,6 +99,8 @@ export type WorkerRequest =
   | { type: "readArtifact"; artifact: ArtifactName; conversation: string | null }
   | { type: "listChanges"; conversation: string | null }
   | { type: "readSnapshotFile"; runId: string; base: string; snapshot: string; side: SnapshotSide; path: string }
+  /** The Account & Usage view: both agents' accounts and limits, as /usage looks them up, with the workspace's config. */
+  | { type: "accountUsage" }
   | { type: "doctor" }
   | { type: "shutdown" };
 export type RequestType = WorkerRequest["type"];
@@ -169,6 +174,12 @@ export interface SnapshotFile {
   text: string | null;
 }
 
+/** Both agents' accounts and limits, each as it came back (an agent that could not say has its error). */
+export interface AccountUsage {
+  claude: UsageState;
+  codex: UsageState;
+}
+
 export interface WorkerResults {
   initialize: InitializeResult;
   submit: { accepted: true };
@@ -187,6 +198,7 @@ export interface WorkerResults {
   readArtifact: ArtifactContent;
   listChanges: ChangeList;
   readSnapshotFile: SnapshotFile;
+  accountUsage: AccountUsage;
   doctor: { checks: Check[] };
   shutdown: { stopped: true };
 }
@@ -274,6 +286,24 @@ export type HostMessage =
    * left only in the page, and takes no more files until it is reloaded.
    */
   | { type: "prepareReload" };
+
+// ------------------------------------------------------------------ Account & Usage view ↔ host
+/** What the Account & Usage view shows; the host keeps it, so a view shown again has it at once. */
+export interface AccountViewState {
+  /** The last lookup that answered; null before the first. */
+  usage: AccountUsage | null;
+  /** When it answered (ms since the epoch). */
+  updatedAt: number | null;
+  /** A lookup is under way: the numbers shown are the earlier ones. */
+  refreshing: boolean;
+  /** Why the last lookup could not run at all (the worker could not start, a broken config). */
+  problem: string | null;
+}
+
+export type AccountHostMessage = { type: "account"; state: AccountViewState };
+
+/** `refresh`: look it up again; `details`: open the usage panel of a tab, with all /usage says. */
+export type AccountViewMessage = { type: "ready" } | { type: "refresh" } | { type: "details" };
 
 // ------------------------------------------------------------------ validation
 export class ProtocolError extends Error {
@@ -458,11 +488,11 @@ export function parseRequest(v: unknown): WorkerRequest {
   const o = obj(v, "request");
   const type = oneOf(o.type, [
     "initialize", "submit", "stageAttachment", "removeAttachment", "recipient", "setting", "interrupt", "cycleMode", "usage", "closeConversation", "decision",
-    "permissionAnswer", "inspectFocusedRun", "readArtifact", "listChanges", "readSnapshotFile", "doctor", "shutdown",
+    "permissionAnswer", "inspectFocusedRun", "readArtifact", "listChanges", "readSnapshotFile", "accountUsage", "doctor", "shutdown",
   ] as const, "request.type");
   switch (type) {
     case "initialize":
-      return { type, workspace: text(o.workspace, "workspace", 4096), configPath: optionalText(o.configPath, "configPath") };
+      return { type, workspace: text(o.workspace, "workspace", 4096), configPath: optionalText(o.configPath, "configPath"), discover: o.discover !== false };
     case "submit":
       return { type, conversation: conversationId(o.conversation), text: text(o.text, "text"), route: route(o.route), attachments: attachmentIds(o.attachments) };
     case "stageAttachment":
@@ -536,6 +566,11 @@ export function parseWorkerMessage(v: unknown): WorkerMessage {
       break;
   }
   return o as unknown as WorkerMessage;
+}
+
+export function parseAccountViewMessage(v: unknown): AccountViewMessage {
+  const o = obj(v, "account view message");
+  return { type: oneOf(o.type, ["ready", "refresh", "details"] as const, "type") };
 }
 
 export function parseWebviewMessage(v: unknown): WebviewMessage {

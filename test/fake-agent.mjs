@@ -14,6 +14,8 @@
 // scenario.doctor.model (null: none), after scenario.doctor.sleep ms; scenario.doctor.exit fails it.
 // `codex debug models` prints scenario.catalog.models as Codex's model catalog; scenario.catalog.exit fails it.
 // `claude -p /usage` prints scenario.usage.claude.text (default: a short /usage); its exit and stderr fail it.
+// `claude auth status` prints scenario.usage.claude.auth as JSON (default: signed in to claude.ai with Max), exiting 1
+// when it is signed out as Claude does; scenario.usage.claude.authExit fails it with no JSON.
 // `codex app-server` answers initialize, account/read (scenario.usage.codex.account) and account/rateLimits/read
 // (.rateLimits, or the error .rateLimitsError) until stdin closes; .hang never answers, .exit and .stderr fail it.
 import { execSync } from "node:child_process";
@@ -40,6 +42,7 @@ async function main() {
   if (backend === "codex" && args[0] === "doctor") return doctor(args);
   if (backend === "codex" && args[0] === "debug" && args[1] === "models") return catalog(args);
   if (backend === "claude" && args[0] === "-p" && args[1] === "/usage") return claudeUsage(args);
+  if (backend === "claude" && args[0] === "auth" && args[1] === "status") return claudeAuth(args);
   if (backend === "codex" && args[0] === "app-server") return appServer(args);
   const host = args.includes("--permission-prompt-tool");
   const streamed = backend === "claude" && args.includes("--input-format");
@@ -203,6 +206,19 @@ async function claudeUsage(args) {
   }
   process.stdout.write(u.text ?? "You are currently using your subscription to power your Claude Code usage\n\nCurrent session: 10% used · resets Oct 29 at 3pm (UTC)\n");
   return 0;
+}
+
+/** `claude auth status`: the account Claude Code signs in with, as JSON (Claude Code 2.1.31x), with no model call. */
+function claudeAuth(args) {
+  const u = usageScenario("claude");
+  if (process.env.FAKE_LOG) appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend: "claude", usage: true, args }) + "\n");
+  if (u.authExit) {
+    process.stderr.write("error: unknown command 'auth'\n");
+    return u.authExit;
+  }
+  const status = u.auth ?? { loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", email: "fake@anthropic.example", orgId: "org", orgName: "Org", subscriptionType: "max" };
+  process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
+  return status.loggedIn === false ? 1 : 0;
 }
 
 /** `codex app-server`: JSON-RPC lines on stdin and stdout, as codex 0.164 speaks it (see fixtures/codex-account.json). */

@@ -3,6 +3,7 @@ import { isAbsolute, join, posix, relative } from "node:path";
 import { runProcess } from "../agents/process.js";
 import { resolveBinary } from "../agents/resolve.js";
 import { loadSchema, SCHEMA_NAMES, strictProblems } from "../agents/schema.js";
+import { isHomeFolder } from "../paths.js";
 import type { ConfigData } from "./config.js";
 import { Git } from "./git.js";
 
@@ -51,7 +52,8 @@ export async function runDoctor(o: { dir: string; cfg: ConfigData; sources: stri
   const git = new Git(o.dir);
   const isRepo = await git.isRepo();
   add(isRepo, isRepo ? `workspace inside a git repository: ${o.dir}`
-    : `workspace not inside a git repository: ${o.dir} (the chat and /discuss work; a pipeline run needs 'git init' first)`, false);
+    : isHomeFolder(o.dir, env) ? `workspace is your home folder, not a git repository: ${o.dir} (the chat and /discuss work; a pipeline run needs a project folder inside one)`
+      : `workspace not inside a git repository: ${o.dir} (the chat and /discuss work; a pipeline run needs 'git init' first)`, false);
   add(!o.configError, o.configError ? `config: ${o.configError}` : `config: ${o.sources.length ? o.sources.join(", ") : "built-in defaults"}`);
   for (const name of SCHEMA_NAMES) {
     const problems = strictProblems(loadSchema(name));

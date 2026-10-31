@@ -9,6 +9,7 @@ import { PROTOCOL_VERSION, type HostMessage } from "../extensions/vscode/src/pro
 import { SHUTDOWN_GRACE_MS, WorkerClient } from "../extensions/vscode/src/workerClient.js";
 import { emptyState, pickWorkspace, WorkspaceSession } from "../extensions/vscode/src/workspaceSession.js";
 import { reduce, type ViewState } from "../extensions/vscode/webview/state.js";
+import { NOT_REPO_NOTE } from "../src/chat.js";
 import { RunStore } from "../src/core/state.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
 import type { ConfigOverrides } from "./helpers/config.js";
@@ -110,6 +111,19 @@ describe("WorkspaceSession: a tab per conversation", () => {
     expect(said(view.state)).toEqual(["What is the answer?", "The answer is 42."]);
     expect(view.state).toMatchObject({ session: "dormant", status: "idle", decision: null, permissions: [], turn: null });
     expect(s.conversation("tab-new").state.timeline).toEqual([]);
+  });
+
+  it("shows the first tab what the worker said as it started for no tab (the Account & Usage view or the list started it)", async () => {
+    repo = join(t.path, "plain"); // not a repository, so the worker's hint is the not-a-repository note
+    mkdirSync(repo);
+    const s = session();
+    await s.start();
+    const first = new FakeView();
+    s.conversation("tab-a").attach(first.post);
+    expect(first.state!.timeline).toEqual([expect.objectContaining({ kind: "info", text: NOT_REPO_NOTE })]);
+    const second = new FakeView();
+    s.conversation("tab-b").attach(second.post);
+    expect(second.state!.timeline).toEqual([]);
   });
 
   it("opens a new tab for /new and keeps this one's conversation", async () => {
@@ -365,7 +379,7 @@ describe("pickWorkspace", () => {
     expect(pickWorkspace(["/a", "/b"], null)).toEqual({ kind: "choose", folders: ["/a", "/b"] });
     expect(pickWorkspace(["/a", "/b"], "/b")).toEqual({ kind: "folder", path: "/b" });
     expect(pickWorkspace(["/a", "/b"], "/c")).toEqual({ kind: "choose", folders: ["/a", "/b"] });
-    expect(emptyState("choose-folder").session).toBe("choose-folder");
+    expect(emptyState().session).toBe("choose-folder");
   });
 });
 

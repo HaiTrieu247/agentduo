@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import * as vscode from "vscode";
 import { ATTACHMENT_LIMITS, formatBytes } from "../../../src/core/attachment-types.js";
@@ -8,11 +8,14 @@ import { safeFileName } from "../../../src/core/attachments.js";
 import { listConversations } from "../../../src/core/conversation.js";
 import { stamp } from "../../../src/core/state.js";
 import { shownImages, type ViewState } from "../webview/state.js";
+import { ACCOUNT_VIEW, AccountView } from "./accountView.js";
 import { ARTIFACT_SCHEME, ChangeRegistry, SNAPSHOT_SCHEME } from "./artifacts.js";
 import { ConversationPanel, PANEL_TYPE, type PanelHost } from "./conversationPanel.js";
 import { ConversationsView, type ConversationEntry } from "./conversationsView.js";
 import { ArtifactContentProvider, changesToShow, openArtifact, openChanges, openDiff, SnapshotContentProvider } from "./diffProvider.js";
-import { isConversationId, type ArtifactName, type DecisionChoice, type WebviewCommand, type WebviewMessage } from "./protocol.js";
+import {
+  isConversationId, type AccountUsage, type AccountViewState, type ArtifactName, type DecisionChoice, type WebviewCommand, type WebviewMessage,
+} from "./protocol.js";
 import { findNode } from "./workerClient.js";
 import { emptyState, pickWorkspace, WorkspaceSession, type ConversationHandle } from "./workspaceSession.js";
 
@@ -44,6 +47,8 @@ class Controller implements vscode.Disposable, PanelHost {
   readonly panels = new Map<string, ConversationPanel>();
   readonly list: ConversationsView;
   tree!: vscode.TreeView<ConversationEntry>;
+  /** The Activity Bar's Account & Usage view, above the list. */
+  readonly account: AccountView;
   /** The tab the commands act on: the one last active. */
   private lastActive: string | null = null;
   private generation = 0;
@@ -52,49 +57,85 @@ class Controller implements vscode.Disposable, PanelHost {
   private readonly shown = new Map<string, string>();
   /** The URIs each tab was given for its attached images (null: the copy is gone), so each goes once per webview. */
   private readonly granted = new Map<string, Map<string, string | null>>();
+  /** The tabs whose chat answers or runs: when one stops, the agents' limits have moved. */
+  private readonly busy = new Set<string>();
+  /** While the window's folders wait for a choice: a worker in the home folder, only for the Account & Usage view. */
+  private lookup: WorkspaceSession | null = null;
 
   constructor(private readonly context: vscode.ExtensionContext, readonly output: vscode.OutputChannel) {
     this.artifacts = new ArtifactContentProvider(() => this.session, () => this.active());
     this.list = new ConversationsView(() => this.entries());
+    this.account = new AccountView(context.extensionUri, { read: () => this.readAccount(), details: () => void this.usage(), log: (line) => this.output.appendLine(line) });
   }
 
   private folders(): string[] {
     return (vscode.workspace.workspaceFolders ?? []).filter((f) => f.uri.scheme === "file").map((f) => f.uri.fsPath);
   }
 
-  /** The chosen folder's session, created on first need; null while there is no folder, or several and none chosen. */
-  current(): WorkspaceSession | null {
+  /**
+   * Where agentduo works: the chosen folder, or the home folder while none is open (as `duo` started there does: its
+   * conversations go to ~/.agentduo); null while the window has several folders and none is chosen.
+   */
+  private wanted(): string | null {
     const choice = pickWorkspace(this.folders(), this.context.workspaceState.get<string>(REMEMBERED_FOLDER) ?? null);
-    if (choice.kind !== "folder") return null;
-    if (this.session?.workspace === choice.path) return this.session;
+    return choice.kind === "folder" ? choice.path : choice.kind === "none" ? homedir() : null;
+  }
+
+  /** The session of the folder agentduo works in, created on first need; null while several folders wait for a choice. */
+  current(): WorkspaceSession | null {
+    const path = this.wanted();
+    if (!path) return null;
+    if (this.session?.workspace === path) return this.session;
     if (this.session) return this.session; // a switch is under way (switchTo replaces it)
-    this.session = this.create(choice.path);
+    this.session = this.create(path);
     return this.session;
   }
 
-  /** The session for a command; asks for a folder when it has to. */
+  /** The session for a command; asks for a folder when several wait for a choice. */
   async need(): Promise<WorkspaceSession | null> {
     const session = this.current();
     if (session) return session;
-    if (!this.folders().length) {
-      void vscode.window.showInformationMessage("agentduo needs a folder: open the folder to work in.");
-      return null;
-    }
     await this.chooseWorkspace();
     return this.session;
   }
 
-  private create(path: string): WorkspaceSession {
-    if (this.tree) this.tree.description = basename(path);
-    return new WorkspaceSession({
+  /** How the list names the folder: `~` for the home folder. */
+  private label(path: string): string {
+    return path === homedir() ? "~" : basename(path);
+  }
+
+  /** What every session of the window shares: the worker's script, the Node it runs on, the generations, the log. */
+  private engine(path: string) {
+    return {
       workspace: path, configPath: null, workerScript: this.context.asAbsolutePath(join("runtime", "worker.js")), env: process.env,
       resolveNode: () => findNode({ configured: vscode.workspace.getConfiguration("agentduo").get<string>("nodePath")?.trim() || null, env: process.env }),
       nextGeneration: () => ++this.generation,
-      log: (line) => this.output.appendLine(line),
+      log: (line: string) => this.output.appendLine(line),
+    };
+  }
+
+  private create(path: string): WorkspaceSession {
+    if (this.tree) this.tree.description = this.label(path);
+    this.dropLookup();
+    return new WorkspaceSession({
+      ...this.engine(path),
       onChange: (conversation, state) => this.onState(conversation, state),
       onQuestion: (conversation, kind, text) => this.onQuestion(conversation, kind, text),
       onNewConversation: () => void this.openConversation(null),
     });
+  }
+
+  /** The Account & Usage view's session while the folders wait for a choice: the home folder's config, no tab, no model lookup. */
+  private lookupSession(): WorkspaceSession {
+    this.lookup ??= new WorkspaceSession({ ...this.engine(homedir()), discover: false });
+    return this.lookup;
+  }
+
+  /** A folder's session has taken over: the lookup-only worker goes. */
+  private dropLookup(): void {
+    const lookup = this.lookup;
+    this.lookup = null;
+    void lookup?.dispose();
   }
 
   // ------------------------------------------------------------------ tabs
@@ -175,7 +216,7 @@ class Controller implements vscode.Disposable, PanelHost {
     if (!panel) return;
     const session = this.current();
     if (!session) {
-      panel.post({ type: "snapshot", state: emptyState(this.folders().length ? "choose-folder" : "no-folder"), conversation });
+      panel.post({ type: "snapshot", state: emptyState(), conversation });
       return;
     }
     session.conversation(conversation).attach((message) => {
@@ -268,6 +309,7 @@ class Controller implements vscode.Disposable, PanelHost {
   closed(conversation: string): void {
     this.panels.delete(conversation);
     this.shown.delete(conversation);
+    this.busy.delete(conversation);
     this.granted.delete(conversation);
     if (this.lastActive === conversation) this.lastActive = null;
     void this.session?.conversation(conversation).close();
@@ -281,6 +323,9 @@ class Controller implements vscode.Disposable, PanelHost {
 
   private onState(conversation: string, state: ViewState): void {
     this.grantImages(conversation, state, false);
+    const busy = state.status === "running" || state.status === "answering";
+    if (!busy && this.busy.delete(conversation)) this.account.changed();
+    else if (busy) this.busy.add(conversation);
     const title = titleOf(state);
     const seen = `${title}\n${state.status}\n${state.decision?.id ?? ""}\n${state.permissions.length}\n${state.timeline.length > 0}`;
     if (this.shown.get(conversation) === seen) return;
@@ -344,14 +389,16 @@ class Controller implements vscode.Disposable, PanelHost {
     }
     if (path) this.session = this.create(path);
     else if (this.tree) this.tree.description = undefined;
+    this.busy.clear();
     for (const id of this.panels.keys()) this.attach(id);
     this.refreshList();
+    this.account.reset();
   }
 
   async chooseWorkspace(): Promise<void> {
     const folders = this.folders();
     if (!folders.length) {
-      void vscode.window.showInformationMessage("agentduo needs a folder: open one first.");
+      void vscode.window.showInformationMessage("No folder is open, so agentduo works in your home folder (~). Open a folder to work there.");
       return;
     }
     const pick = await vscode.window.showQuickPick(folders.map((path) => ({ label: basename(path), description: path, path })), {
@@ -363,8 +410,7 @@ class Controller implements vscode.Disposable, PanelHost {
   }
 
   async foldersChanged(): Promise<void> {
-    const choice = pickWorkspace(this.folders(), this.context.workspaceState.get<string>(REMEMBERED_FOLDER) ?? null);
-    const wanted = choice.kind === "folder" ? choice.path : null;
+    const wanted = this.wanted();
     if (wanted !== (this.session?.workspace ?? null)) await this.switchTo(wanted);
   }
 
@@ -417,7 +463,15 @@ class Controller implements vscode.Disposable, PanelHost {
     panel?.postWhenReady({ type: "showSettings" });
   }
 
-  /** The title bar's Usage: the tab's usage panel opens, as /usage opens it. */
+  /**
+   * The Account & Usage view's lookup: the worker of the folder agentduo works in asks both CLIs (it starts one if none
+   * runs), with that folder's config; while several folders wait for a choice, a worker in the home folder asks.
+   */
+  private async readAccount(): Promise<AccountUsage> {
+    return (this.current() ?? this.lookupSession()).request({ type: "accountUsage" });
+  }
+
+  /** The title bar's Usage (and the Account & Usage view's View details): the tab's usage panel opens, as /usage opens it. */
   async usage(): Promise<void> {
     const session = await this.need();
     if (!session) return;
@@ -458,7 +512,7 @@ class Controller implements vscode.Disposable, PanelHost {
     const file = join(session.workspace, ".agentduo", "config.yaml");
     if (!existsSync(file)) {
       const answer = await vscode.window.showInformationMessage(
-        `There is no ${join(".agentduo", "config.yaml")} in ${basename(session.workspace)} yet; agentduo uses its defaults (and your user config). Create one?`,
+        `There is no ${join(".agentduo", "config.yaml")} in ${this.label(session.workspace)} yet; agentduo uses its defaults (and your user config). Create one?`,
         "Create", "Cancel",
       );
       if (answer !== "Create") return;
@@ -471,9 +525,12 @@ class Controller implements vscode.Disposable, PanelHost {
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     const session = this.session;
     this.session = null;
-    await session?.dispose();
+    const lookup = this.lookup;
+    this.lookup = null;
+    await Promise.all([session?.dispose(), lookup?.dispose()]);
     this.artifacts.dispose();
     this.list.dispose();
+    this.account.dispose();
   }
 }
 
@@ -499,6 +556,8 @@ export interface TestApi {
   upload(name: string, data: Buffer): Promise<void>;
   /** As the composer sends a message with every file that is ready. */
   submitWithFiles(text: string): Promise<void>;
+  /** What the Account & Usage view shows. */
+  account(): AccountViewState;
 }
 
 export function activate(context: vscode.ExtensionContext): TestApi | undefined {
@@ -511,6 +570,7 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
     output,
     c.tree,
     c.tree.onDidChangeVisibility((e) => e.visible && c.listShown()),
+    vscode.window.registerWebviewViewProvider(ACCOUNT_VIEW, c.account),
     vscode.window.registerWebviewPanelSerializer(PANEL_TYPE, {
       // A tab VS Code restores after a reload: the conversation its webview kept, which carries on.
       deserializeWebviewPanel: async (panel, state: unknown) => {
@@ -535,6 +595,7 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
     vscode.commands.registerCommand("agentduo.openReport", () => c.openArtifact("report")),
     vscode.commands.registerCommand("agentduo.openChanges", () => c.command("openChanges")),
     vscode.commands.registerCommand("agentduo.usage", () => c.usage()),
+    vscode.commands.registerCommand("agentduo.refreshAccount", () => c.account.refresh()),
     vscode.commands.registerCommand("agentduo.doctor", () => c.doctor()),
     vscode.commands.registerCommand("agentduo.openConfiguration", () => c.openConfiguration()),
     vscode.commands.registerCommand("agentduo.chooseWorkspace", () => c.chooseWorkspace()),
@@ -574,6 +635,7 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
       const id = c.active() ?? (await c.openConversation(null));
       if (session) await c.upload(session.conversation(id), { type: "upload", key: newFileKey(), name, data: data.toString("base64") });
     },
+    account: () => c.account.current,
     submitWithFiles: async (text) => {
       const t = tab();
       if (!t) throw new Error("no tab is open");

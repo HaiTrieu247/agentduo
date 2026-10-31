@@ -9,7 +9,7 @@ import { attachmentFile } from "../../../src/core/attachments.js";
 import type { Backend } from "../../../src/core/commands.js";
 import { atomicWrite } from "../../../src/core/state.js";
 import type { PermissionAnswer } from "../../../src/events.js";
-import { initialState, reduce, uploading, type SessionState, type ViewAction, type ViewState } from "../webview/state.js";
+import { initialState, reduce, uploading, type ViewAction, type ViewState } from "../webview/state.js";
 import type { DecisionChoice, HostMessage, Problem, Route, SettingRequest, WorkerRequest, WorkerResults } from "./protocol.js";
 import { WorkerClient, WorkerError, type NodeLookup } from "./workerClient.js";
 
@@ -22,7 +22,10 @@ const PROBLEM_CODES = new Set<string>(["environment", "config", "not_repo", "mis
 
 export type WorkspaceChoice = { kind: "none" } | { kind: "choose"; folders: string[] } | { kind: "folder"; path: string };
 
-/** One folder is used as is; with several, the user picks (a remembered pick stays while it is still open). */
+/**
+ * One folder is used as is; with several, the user picks (a remembered pick stays while it is still open). With none,
+ * agentduo works in the home folder, as `duo` started there does.
+ */
 export function pickWorkspace(folders: string[], remembered: string | null): WorkspaceChoice {
   if (!folders.length) return { kind: "none" };
   if (folders.length === 1) return { kind: "folder", path: folders[0]! };
@@ -30,9 +33,9 @@ export function pickWorkspace(folders: string[], remembered: string | null): Wor
   return { kind: "choose", folders };
 }
 
-/** A placeholder state while there is no session to show (no folder open, or a folder still to choose). */
-export function emptyState(session: Extract<SessionState, "no-folder" | "choose-folder">): ViewState {
-  return initialState(session);
+/** A placeholder state while there is no session to show: the window has several folders, and none is chosen yet. */
+export function emptyState(): ViewState {
+  return initialState("choose-folder");
 }
 
 /** Actions that add to a tab's timeline: a broadcast one reaches every tab, never the workspace's own state. */
@@ -95,6 +98,8 @@ export interface ConversationHandle {
 export interface WorkspaceSessionOptions {
   workspace: string;
   configPath: string | null;
+  /** Look the models up once the worker is up (default); false for a session that only answers the Account & Usage view. */
+  discover?: boolean;
   workerScript: string;
   env: NodeJS.ProcessEnv;
   resolveNode(): NodeLookup;
@@ -116,6 +121,11 @@ export class WorkspaceSession {
   private readonly handles = new Map<string, ConversationHandle>();
   /** Where conversations live, once the worker has said: each tab's view.json goes beside its conversation. */
   private runsDir: string | null = null;
+  /**
+   * What the worker said as it started (warnings, the hint) while no tab was open, because the Account & Usage view or
+   * the list started it: the first tab to open shows it, as it would have had it started the worker.
+   */
+  private greeting: string[] = [];
   /** The worker a start has forked, until that start is over: restart and dispose shut it down without waiting for it. */
   private launching: WorkerClient | null = null;
   /** The worker this session owns, from its hello on, initialized or not; its messages and exit are ours. */
@@ -261,6 +271,7 @@ export class WorkspaceSession {
   /** The tab (re)appeared: it gets its whole state, then batches of actions. */
   private attach(id: string, post: (message: HostMessage) => void): void {
     const view = this.view(id);
+    for (const text of this.greeting.splice(0)) this.apply(id, view, { type: "note", text, tone: "info" });
     view.post = post;
     view.queue = [];
     post({ type: "snapshot", state: view.state, conversation: id });
@@ -397,7 +408,7 @@ export class WorkspaceSession {
     if (released()) return null;
     this.spawned = client;
     try {
-      const init = await client.request({ type: "initialize", workspace: this.o.workspace, configPath: this.o.configPath });
+      const init = await client.request({ type: "initialize", workspace: this.o.workspace, configPath: this.o.configPath, discover: this.o.discover !== false });
       if (this.spawned === client) {
         this.dispatch({
           type: "initialized", version: init.version, workspace: init.workspace, pipeline: init.pipeline, mode: init.mode, recipient: init.recipient,
@@ -406,8 +417,9 @@ export class WorkspaceSession {
         this.dispatch({ type: "problem", problem: init.problem }, null);
         this.runsDir = init.runsDir;
         this.restoreViews();
-        for (const warning of init.warnings) this.note(`warning: ${warning}`);
-        if (init.hint) this.note(init.hint);
+        const greeting = [...init.warnings.map((warning) => `warning: ${warning}`), ...(init.hint ? [init.hint] : [])];
+        if (this.views.size) for (const text of greeting) this.note(text);
+        else this.greeting = greeting;
       }
     } catch (e) {
       if (this.spawned === client) this.fail(e, null);

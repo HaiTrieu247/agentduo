@@ -52,9 +52,10 @@ Code và Codex; pipeline đầy đủ chỉ chạy khi bạn yêu cầu:
 - **Gõ `/`** sẽ hiện danh sách lệnh kèm chú thích, lọc dần theo những gì bạn gõ: Up/Down để chọn, Tab hoặc Enter để
   điền, Enter lần nữa để gửi, Esc để đóng danh sách.
 - **Prompt hỏi quyền và các quyết định** hiện ra thay cho ô nhập.
-- **`/usage`** mở một popup thay cho ô nhập, giống `/usage` của Claude Code. Popup cho biết mỗi agent đã dùng bao nhiêu
-  phần trăm hạn mức của gói, mỗi hạn mức có một thanh tiến độ và thời điểm reset. Bên dưới là phần "What's contributing
-  to your limits usage?" của Claude. Cả hai đều không gọi model. Phía Claude là `claude -p /usage`. Phía Codex lấy từ
+- **`/usage`** mở một popup thay cho ô nhập, giống `/usage` của Claude Code. Popup cho biết tài khoản của mỗi agent (gói
+  và email), và mỗi agent đã dùng bao nhiêu phần trăm hạn mức của gói. Mỗi hạn mức có một thanh tiến độ và thời điểm
+  reset. Bên dưới là phần "What's contributing to your limits usage?" của Claude. Cả hai đều không gọi model. Phía
+  Claude là `claude -p /usage`, cùng `claude auth status` để lấy tài khoản. Phía Codex lấy từ
   `codex app-server` (`account/read` và `account/rateLimits/read`, giống cách extension IDE của Codex hỏi, kèm các
   `-c`/`--enable`/`--disable` của bạn), vì `/status` của Codex chỉ có trong giao diện TUI của nó. Popup hiện ngay, và
   phần của mỗi agent được điền khi agent đó trả lời (khoảng 2 giây, tối đa 15 giây). Bên nào lỗi thì chỉ phần của bên
@@ -113,11 +114,13 @@ code --install-extension extensions/vscode/agentduo-vscode-*.vsix
 
 Không cần cài gói npm `agentduo`. Máy chỉ cần Node, git, Codex CLI và Claude Code đã đăng nhập. Nếu VS Code mở từ Dock không thấy đúng `PATH`, đặt `agentduo.nodePath` trong settings của VS Code, hoặc `codex.bin` / `claude.bin` trong `.agentduo/config.yaml`.
 
-- Mở sidebar không chạy gì cả. Run chỉ bắt đầu khi bạn gửi task. Với workspace nhiều thư mục, bạn chọn thư mục trước (**agentduo: Choose Workspace Folder**).
+- Bấm icon agentduo trên Activity Bar sẽ thấy hai mục. **Account & Usage** hiện tài khoản của cả Claude Code lẫn Codex (gói, email) và hạn mức đã dùng, mỗi hạn mức một thanh tiến độ và giờ reset. **Conversations** liệt kê các cuộc trò chuyện. Số liệu được lấy khi mục hiện ra (lấy lại nếu đã cũ hơn 1 phút), khi bấm ↻, 5 phút một lần khi mục đang mở, và sau mỗi câu trả lời hay mỗi run (tối đa 1 lần mỗi phút). Mỗi lần lấy mất khoảng 2 giây và không gọi model. Mục bị thu gọn hay bị ẩn thì không lấy gì. **View details** mở khung Usage đầy đủ trong tab.
+- Mở sidebar không chạy gì cả. Run chỉ bắt đầu khi bạn gửi task. Với workspace nhiều thư mục, bạn chọn thư mục trước (**agentduo: Choose Workspace Folder**); trong lúc chưa chọn, mục Account & Usage dùng config của thư mục home.
+- Không mở folder nào thì agentduo làm việc trong thư mục home, giống khi chạy `duo` ở đó: cuộc trò chuyện và config nằm trong `~/.agentduo`. Hỏi đáp, `/discuss`, `/usage` và mục Account & Usage đều chạy được. Pipeline cần một folder dự án nằm trong git repo, nên ở thư mục home nó nhắc bạn mở folder đó (không bảo `git init` cả thư mục home).
 - Enter để gửi, Shift+Enter để xuống dòng. Khi agent đang chạy, nội dung bạn gửi là ghi chú cho bước kế tiếp. **Stop** (hoặc Esc trong ô nhập) dừng bước hiện tại; gửi lại sẽ chạy lại bước đó. Các lệnh `/new`, `/resume`, `/mode`, `/claude …`, `/codex …` giống hệt trong terminal. Nút chế độ dưới ô nhập mở menu Modes giống Claude Code (Manual, Edit automatically, Auto); Shift+Tab trong ô nhập chuyển sang chế độ kế tiếp.
 - **Đính kèm file:** nút kẹp giấy dưới ô nhập chọn được nhiều file bất kỳ. Bạn cũng có thể dán ảnh (Cmd/Ctrl+V), hoặc **giữ Shift** khi kéo file từ Finder/Explorer của hệ điều hành vào ô nhập (VS Code cần Shift mới cho webview nhận file thả vào). Kéo từ Explorer của chính VS Code hay từ editor thì tab không đọc được file, nên hãy dùng nút kẹp giấy. File chờ hiện phía trên ô nhập (ảnh có thumbnail), có ✕ để bỏ; gửi với ô nhập trống thì chỉ gửi file. File chờ gửi bị bỏ khi `/new` hoặc khi đóng tab. Giới hạn và cách gửi ảnh giống chat trên terminal.
 - Reload cửa sổ hay đóng VS Code sẽ dừng bước đang chạy. Quyết định đang chờ được hoãn, yêu cầu quyền chưa trả lời bị từ chối, và run vẫn tiếp tục được. Extension không bao giờ tự chạy lại task; nó hiện nút **Resume** để bạn bấm.
-- Bản đầu chỉ hỗ trợ VS Code desktop với thư mục local. Chưa hỗ trợ Remote SSH, WSL, container hay VS Code web.
+- Bản đầu chỉ hỗ trợ VS Code desktop với thư mục local (hoặc không mở folder nào, khi đó là thư mục home). Chưa hỗ trợ Remote SSH, WSL, container hay VS Code web.
 
 Chi tiết xem [extensions/vscode/README.md](../extensions/vscode/README.md). Khi phát triển, mở repo trong VS Code rồi nhấn F5 (**Run agentduo extension**).
 

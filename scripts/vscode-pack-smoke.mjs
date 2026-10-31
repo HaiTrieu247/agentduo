@@ -17,7 +17,7 @@ const fail = (message) => {
 /** Every file the VSIX may hold, under extension/. vsce adds the manifest files at the top level. */
 const allowed = [
   /^package\.json$/, /^readme\.md$/i, /^license(\.txt)?$/i, /^media\/agentduo(-light|-dark)?\.svg$/,
-  /^dist\/extension\.cjs$/, /^dist\/webview\/main\.js$/, /^dist\/webview\/styles\.css$/, /^dist\/webview\/codicon(\.css|\.ttf|-LICENSE\.txt)$/,
+  /^dist\/extension\.cjs$/, /^dist\/webview\/(main|sidebar)\.js$/, /^dist\/webview\/(styles|sidebar)\.css$/, /^dist\/webview\/codicon(\.css|\.ttf|-LICENSE\.txt)$/,
   /^runtime\/package\.json$/, /^runtime\/worker\.js$/, /^runtime\/schemas\/[a-z_]+\.schema\.json$/,
 ];
 
@@ -75,7 +75,7 @@ try {
   const stray = files.filter((f) => !allowed.some((re) => re.test(f)));
   if (stray.length) fail(`the VSIX holds files it should not:\n  ${stray.join("\n  ")}`);
   for (const need of [
-    "package.json", "dist/extension.cjs", "dist/webview/main.js", "dist/webview/styles.css", "dist/webview/codicon.css", "dist/webview/codicon.ttf",
+    "package.json", "dist/extension.cjs", "dist/webview/main.js", "dist/webview/styles.css", "dist/webview/sidebar.js", "dist/webview/sidebar.css", "dist/webview/codicon.css", "dist/webview/codicon.ttf",
     "dist/webview/codicon-LICENSE.txt", "runtime/package.json", "runtime/worker.js",
   ]) {
     if (!files.includes(need)) fail(`the VSIX is missing ${need}`);

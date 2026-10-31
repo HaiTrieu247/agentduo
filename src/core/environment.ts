@@ -1,7 +1,7 @@
 import { existsSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { resolveBinary } from "../agents/resolve.js";
+import { homeFolder, isHomeFolder } from "../paths.js";
 import { ConfigError, defaultConfig, loadConfig, userConfigPath, validateConfig, type Backend, type ConfigData } from "./config.js";
 import { runDoctor, type Check } from "./doctor.js";
 import { Git } from "./git.js";
@@ -28,7 +28,7 @@ export class EnvironmentError extends Error {
 }
 
 export function expandHome(path: string, env: NodeJS.ProcessEnv): string {
-  return path === "~" || path.startsWith("~/") ? join(env.HOME || homedir(), path.slice(1)) : path;
+  return path === "~" || path.startsWith("~/") ? join(homeFolder(env), path.slice(1)) : path;
 }
 
 /**
@@ -85,7 +85,12 @@ export interface RunnableNeeds {
 export function runnableProblem(env: Pick<WorkspaceEnv, "workspace" | "isRepo">, cfg: ConfigData, source: string,
   processEnv: NodeJS.ProcessEnv, o: RunnableNeeds = {}): RunnableProblem | null {
   if (o.repo !== false && !env.isRepo) {
-    return { kind: "not_repo", message: `${env.workspace} is not inside a git repository (run 'git init' here, or 'duo init' to be asked)` };
+    return {
+      kind: "not_repo",
+      message: isHomeFolder(env.workspace, processEnv)
+        ? `${env.workspace} is your home folder, not a git repository: run the pipeline from a project folder inside one`
+        : `${env.workspace} is not inside a git repository (run 'git init' here, or 'duo init' to be asked)`,
+    };
   }
   try {
     validateConfig(cfg, source || undefined);

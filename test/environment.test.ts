@@ -86,6 +86,9 @@ describe("runnableProblem", () => {
     expect(runnableProblem({ workspace: "/x", isRepo: false }, ok, "", env)).toEqual({
       kind: "not_repo", message: "/x is not inside a git repository (run 'git init' here, or 'duo init' to be asked)",
     });
+    // In the home folder, nothing says to put the whole home in a repository.
+    expect(runnableProblem({ workspace: "/x", isRepo: false }, ok, "", { ...env, HOME: "/x" })?.message)
+      .toBe("/x is your home folder, not a git repository: run the pipeline from a project folder inside one");
     // The chat opens anywhere; a run checks for the repository itself.
     expect(runnableProblem({ workspace: "/x", isRepo: false }, ok, "", env, { repo: false })).toBeNull();
     const bad = { ...ok, limits: { ...ok.limits, max_retries: -1 } };

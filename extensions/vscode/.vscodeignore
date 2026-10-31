@@ -1,5 +1,6 @@
-# The VSIX holds only what runs: the host and webview bundles, the icon font (with its CC BY 4.0 licence), the engine
-# worker with its schemas, the icon, the manifest, README and LICENSE. Everything else (sources, tests, run data, fixtures) stays out.
+# The VSIX holds only what runs: the host and webview bundles (a tab's and the Account & Usage view's), the icon font
+# (with its CC BY 4.0 licence), the engine worker with its schemas, the icon, the manifest, README and LICENSE.
+# Everything else (sources, tests, run data, fixtures) stays out.
 **
 !package.json
 !README.md
@@ -10,6 +11,8 @@
 !dist/extension.cjs
 !dist/webview/main.js
 !dist/webview/styles.css
+!dist/webview/sidebar.js
+!dist/webview/sidebar.css
 !dist/webview/codicon.css
 !dist/webview/codicon.ttf
 !dist/webview/codicon-LICENSE.txt

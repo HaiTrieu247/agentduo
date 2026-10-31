@@ -32,7 +32,7 @@ const ask = (id: string, rules = ["Bash(npm test:*)"]): PermissionRequest =>
 const requested = (request: PermissionRequest): DuoEvent => ({ type: "permission.requested", role: "implementer", agent: "claude", request });
 const answered = (id: string, answer: PermissionAnswer): DuoEvent => ({ type: "permission.answered", role: "implementer", agent: "claude", id, answer });
 const usageOf = (percent: number): AgentUsage => ({
-  account: "subscription", groups: [{ title: null, limits: [{ label: "Current session", usedPercent: percent, resets: "Resets Oct 29 at 3pm (Asia/Saigon)" }] }], notes: [], details: null,
+  account: "subscription", email: null, groups: [{ title: null, limits: [{ label: "Current session", usedPercent: percent, resets: "Resets Oct 29 at 3pm (Asia/Saigon)" }] }], notes: [], details: null,
 });
 
 describe("view reducer", () => {

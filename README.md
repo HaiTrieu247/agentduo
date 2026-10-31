@@ -102,9 +102,10 @@ agentduo 0.5.0 · chat
 - **Typing `/`** opens a list of the commands and their words, each with what it does, filtered as you type: Up/Down
   picks, Tab or Enter fills it in, Enter again sends, Esc closes the list.
 - **Permission prompts and decisions** appear in place of the input line.
-- **`/usage`** opens a panel in place of the input, like Claude Code's own `/usage`: how much of their plans' limits both
-  agents have used, with a bar per limit and when it resets, then Claude's "What's contributing to your limits usage?".
-  Neither lookup calls a model: Claude's is `claude -p /usage`; Codex's comes from `codex app-server` (`account/read`
+- **`/usage`** opens a panel in place of the input, like Claude Code's own `/usage`: each agent's account (plan and
+  email), how much of its plan's limits it has used, with a bar per limit and when it resets, then Claude's "What's
+  contributing to your limits usage?". Neither lookup calls a model: Claude's is `claude -p /usage`, with
+  `claude auth status` for its account; Codex's comes from `codex app-server` (`account/read`
   and `account/rateLimits/read`, as Codex's IDE extension asks it, with your `-c`/`--enable`/`--disable` overrides),
   because Codex's own `/status` exists only in its TUI. The panel opens at once and each agent's part fills in as it
   answers (in about two seconds; each gets 15 s); if one fails, only its part says why. ↑↓ scroll it, `r` looks again,
@@ -162,8 +163,10 @@ Outside the chat, `duo --accept-edits "<task>"` does what `/mode acceptEdits` do
 
 `extensions/vscode` holds the same chat as a VS Code sidebar. It has a timeline of both agents, the HUMAN_REVIEW and
 permission prompts above the composer, and buttons that open the plan, review and report, plus the run's changes in
-the diff editor. It runs this package's engine with your Node (≥ 22.12) and shares the configuration, runs and lock with
-`duo`, so a run started in one can be resumed in the other. Install it from the Marketplace
+the diff editor. Its Activity Bar view shows both agents' accounts and limits (**Account & Usage**) above the
+workspace's conversations. It runs this package's engine with your Node (≥ 22.12) and shares the configuration, runs and lock with
+`duo`, so a run started in one can be resumed in the other. With no folder open, it works in your home folder, as `duo`
+started there does. Install it from the Marketplace
 (`HaiTrieuThinh.agentduo-vscode`), or build a VSIX with `npm run package:vscode` and install it with
 `code --install-extension extensions/vscode/agentduo-vscode-*.vsix`.
 See [extensions/vscode/README.md](extensions/vscode/README.md) for requirements, usage and current limits.

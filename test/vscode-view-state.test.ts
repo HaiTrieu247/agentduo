@@ -181,7 +181,7 @@ describe("view state", () => {
     expect(placeholder({ ...initialState("active"), status: "idle" })).toMatch(/^Ask Codex…/);
     expect(placeholder({ ...initialState("active"), status: "running" })).toContain("next step");
     expect(placeholder({ ...initialState("active"), status: "paused" })).toContain("/resume continues the stopped run");
-    expect(placeholder(initialState("no-folder"))).toContain("Open a folder");
+    expect(placeholder(initialState("choose-folder"))).toContain("Choose a workspace folder");
     expect(placeholder({ ...initialState("active"), status: "idle" }, "pipeline")).toMatch(/^A task for the pipeline/);
     expect(placeholder({ ...initialState("active"), status: "running" }, "pipeline")).toContain("next step");
     expect(placeholder({ ...initialState("active"), status: "idle" }, "discuss")).toMatch(/^A question to discuss: Codex answers, Claude reviews/);

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 let root: string | undefined;
@@ -20,3 +21,9 @@ export function packageRoot(): string {
 export function packageVersion(): string {
   return JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")).version;
 }
+
+/** The user's home folder, the one `~` names. */
+export const homeFolder = (env: NodeJS.ProcessEnv): string => env.HOME || homedir();
+
+/** `dir` is the home folder itself: there, nothing says to `git init` (that would put the whole home in a repository). */
+export const isHomeFolder = (dir: string, env: NodeJS.ProcessEnv): boolean => resolve(dir) === resolve(homeFolder(env));

@@ -63,6 +63,10 @@ describe("runDoctor", () => {
       ok: false, required: false, message: `workspace not inside a git repository: ${plain} (the chat and /discuss work; a pipeline run needs 'git init' first)`,
     });
     expect(checks.find((c) => c.message.startsWith("codex supports"))).toMatchObject({ ok: true, message: expect.stringContaining("--skip-git-repo-check") });
+    // The home folder (VS Code with no folder open): no `git init` of the whole home.
+    const home = await runDoctor({ dir: plain, cfg: testConfig(new FakeClis(t.path)), sources: [], runsDir: join(plain, ".agentduo", "runs"), env: { ...process.env, HOME: plain } });
+    expect(home.find((c) => c.message.startsWith("workspace"))?.message)
+      .toBe(`workspace is your home folder, not a git repository: ${plain} (the chat and /discuss work; a pipeline run needs a project folder inside one)`);
   });
 
   it("checks a runs dir anywhere in the repository, which agentduo ignores itself", async () => {

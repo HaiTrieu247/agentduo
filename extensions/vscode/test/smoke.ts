@@ -1,10 +1,11 @@
 // Runs inside an Extension Development Host, started by scripts/test-vscode.mjs on a scratch git repository with fake
 // CLIs: activation, command registration, the chat in an editor tab and the worker it starts, the two content
 // providers, questions to Codex and Claude (one stopped before its answer), a second conversation in a tab of its own,
-// and a two-round pipeline run whose diff follows the run to its newer snapshot.
+// and a two-round pipeline run whose diff follows the run to its newer snapshot. Started again with no folder open (and
+// a scratch HOME), it checks that the Account & Usage view and a conversation's tab work in the home folder.
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import * as vscode from "vscode";
 import { approval, critique, finding, impl, plan, review } from "../../../test/helpers/builders.js";
@@ -111,6 +112,27 @@ const checks: Array<[string, (api: TestApi, ext: vscode.Extension<TestApi>) => P
     // Only what was typed (/usage) joins the conversation; the report stays in the panel.
     assert.deepEqual(api.state()!.timeline.slice(items).map((i) => i.kind), ["user"]);
   }],
+  ["shows both agents' accounts and limits in the Activity Bar's Account & Usage view, and looks them up again on ↻", async (api) => {
+    const items = api.state()!.timeline.length;
+    await vscode.commands.executeCommand("agentduo.account.focus");
+    const first = await until("the Account & Usage view's numbers", () => {
+      const a = api.account();
+      return a.usage && !a.refreshing ? a : null;
+    }, 15_000);
+    assert.equal(first.problem, null, first.problem ?? "");
+    for (const agent of ["claude", "codex"] as const) {
+      const part = first.usage![agent];
+      assert.equal(part.status, "ready", JSON.stringify(part));
+      assert.ok(part.status === "ready" && part.usage.account && part.usage.email && part.usage.groups.length, `${agent}: ${JSON.stringify(part)}`);
+    }
+    await vscode.commands.executeCommand("agentduo.refreshAccount");
+    await until("the numbers looked up again", () => {
+      const a = api.account();
+      return !a.refreshing && a.updatedAt! > first.updatedAt! ? a : null;
+    }, 15_000);
+    // The view is not a tab: nothing joins the conversation.
+    assert.equal(api.state()!.timeline.length, items);
+  }],
   ["attaches a picked file and a pasted image, and sends both with a message: Codex gets the images, the tab keeps no bytes", async (api) => {
     writeFileSync(process.env.FAKE_SCENARIO!, JSON.stringify({ chat_codex: [{ answer: "Two grey squares." }] }));
     const picked = join(mkdtempSync(join(tmpdir(), "agentduo-smoke-")), "picked.png");
@@ -185,13 +207,53 @@ const checks: Array<[string, (api: TestApi, ext: vscode.Extension<TestApi>) => P
   }],
 ];
 
+/** With no folder open: agentduo works in the home folder (the scratch HOME the runner made, whose config names the fake CLIs). */
+const homeChecks: typeof checks = [
+  ["shows both agents' accounts and limits in the Account & Usage view with no folder open, before any tab", async (api) => {
+    assert.equal(vscode.workspace.workspaceFolders, undefined);
+    await vscode.commands.executeCommand("agentduo.account.focus");
+    const a = await until("the Account & Usage view's numbers", () => {
+      const v = api.account();
+      return v.usage && !v.refreshing ? v : null;
+    }, 15_000);
+    assert.equal(a.problem, null, a.problem ?? "");
+    for (const agent of ["claude", "codex"] as const) {
+      const part = a.usage![agent];
+      assert.ok(part.status === "ready" && part.usage.account && part.usage.email && part.usage.groups.length, `${agent}: ${JSON.stringify(part)}`);
+    }
+    assert.deepEqual(api.conversations(), []);
+  }],
+  ["opens a conversation's tab in the home folder, answers in it and keeps it in ~/.agentduo; a pipeline asks for a project folder", async (api) => {
+    const home = homedir();
+    await vscode.commands.executeCommand("agentduo.openChat");
+    const state = await until("the session to start", () => {
+      const s = api.state();
+      return s && s.session !== "starting" ? s : null;
+    });
+    assert.equal(state.problem, null, `the session reports a problem: ${state.problem?.message}`);
+    assert.equal(state.workspace, home);
+    await until("the home folder's note", () => api.state()!.timeline.some((i) => i.kind === "info" && i.text.startsWith("This is your home folder")));
+    writeFileSync(process.env.FAKE_SCENARIO!, JSON.stringify({ chat_codex: [{ answer: "Hi from home." }] }));
+    await api.submit("Hello from no folder?");
+    const answer = await until("Codex's answer", () => answers(api).find((t) => t.backend === "codex" && t.status));
+    assert.equal(answer.status, "success", answer.error ?? "");
+    assert.equal(answer.answer, "Hi from home.");
+    const [id] = api.conversations();
+    await until("the saved conversation", () => existsSync(join(home, ".agentduo", "runs", "conversations", id!, "conversation.json")));
+    await api.submit("Make app.txt fixed", "pipeline");
+    await until("the pipeline's refusal", () => api.state()!.timeline.some((i) => i.kind === "info" && i.tone === "error" && i.text.includes("it is your home folder")));
+    assert.equal(api.state()!.run, null);
+  }],
+];
+
 export async function run(): Promise<void> {
   const ext = vscode.extensions.getExtension<TestApi>(ID);
   assert.ok(ext, `${ID} is not loaded in the test host`);
   const api = await ext.activate();
   assert.ok(api, "the extension returns its test API in test mode");
   const failures: string[] = [];
-  for (const [name, check] of checks) {
+  const list = vscode.workspace.workspaceFolders?.length ? checks : homeChecks;
+  for (const [name, check] of list) {
     try {
       await check(api, ext);
       console.log(`  ✓ ${name}`);
@@ -200,6 +262,6 @@ export async function run(): Promise<void> {
       console.log(`  ✗ ${name}\n    ${(e as Error).stack ?? e}`);
     }
   }
-  if (failures.length) throw new Error(`${failures.length} of ${checks.length} smoke checks failed`);
-  console.log(`extension host smoke OK: ${checks.length} checks`);
+  if (failures.length) throw new Error(`${failures.length} of ${list.length} smoke checks failed`);
+  console.log(`extension host smoke OK: ${list.length} checks${list === homeChecks ? " with no folder open" : ""}`);
 }

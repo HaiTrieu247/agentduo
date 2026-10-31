@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { claudeUsage, codexUsage, readClaudeUsage, readCodexUsage, resetText } from "../src/core/usage.js";
+import { claudeAccount, claudeUsage, codexUsage, readClaudeAccount, readClaudeUsage, readCodexUsage, resetText } from "../src/core/usage.js";
 import { testConfig } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { tempDir } from "./helpers/tmp.js";
@@ -35,7 +35,30 @@ describe("usage: Claude's /usage", () => {
 
   it("keeps what it cannot read as limits, verbatim, so nothing Claude says is lost", () => {
     const u = claudeUsage("You are using API billing.\n\n  No plan limits apply.\n");
-    expect(u).toEqual({ account: null, groups: [], notes: ["You are using API billing.", "", "  No plan limits apply."], details: null });
+    expect(u).toEqual({ account: null, email: null, groups: [], notes: ["You are using API billing.", "", "  No plan limits apply."], details: null });
+  });
+});
+
+describe("usage: Claude's account", () => {
+  const status = (o: Record<string, unknown>) => ({ loggedIn: true, apiProvider: "firstParty", ...o });
+
+  it("reads a real `claude auth status`: the plan of a claude.ai login and its email, nothing of the organization", () => {
+    expect(claudeAccount(JSON.parse(fixture("claude-auth-status.json")))).toEqual({ status: "ready", account: "Max", email: "user@example.com" });
+    expect(claudeAccount(status({ authMethod: "claude.ai", email: "a@b.c", subscriptionType: "pro" }))).toEqual({ status: "ready", account: "Pro", email: "a@b.c" });
+    expect(claudeAccount(status({ authMethod: "claude.ai", email: "a@b.c", subscriptionType: null }))).toEqual({ status: "ready", account: "Claude account", email: "a@b.c" });
+  });
+
+  it("says how Claude Code signs in without a plan: an API key (with the Console's email when it has one), a token, a provider", () => {
+    expect(claudeAccount(status({ authMethod: "api_key", apiKeySource: "ANTHROPIC_API_KEY" }))).toEqual({ status: "ready", account: "API key", email: null });
+    expect(claudeAccount(status({ authMethod: "api_key", apiKeySource: "/login managed key", email: "a@b.c" }))).toEqual({ status: "ready", account: "API key", email: "a@b.c" });
+    expect(claudeAccount(status({ authMethod: "oauth_token" }))).toEqual({ status: "ready", account: "OAuth token", email: null });
+    expect(claudeAccount(status({ authMethod: "third_party", apiProvider: "bedrock" }))).toEqual({ status: "ready", account: "Amazon Bedrock", email: null });
+    expect(claudeAccount(status({ authMethod: "none", apiProvider: "gateway", email: "a@b.c" }))).toEqual({ status: "ready", account: "Cloud gateway", email: "a@b.c" });
+  });
+
+  it("tells a signed-out Claude Code from an answer it cannot read", () => {
+    expect(claudeAccount({ loggedIn: false, authMethod: "none", apiProvider: "firstParty" })).toEqual({ status: "signedOut" });
+    expect(claudeAccount("Logged in")).toEqual({ status: "error", error: "claude auth status said nothing about the account" });
   });
 });
 
@@ -44,7 +67,8 @@ describe("usage: Codex's account and rate limits", () => {
     expect(codexUsage(real(), TZ)).toEqual({
       status: "ready",
       usage: {
-        account: "ChatGPT Plus · user@example.com",
+        account: "ChatGPT Plus",
+        email: "user@example.com",
         groups: [{
           title: null,
           limits: [
@@ -73,7 +97,7 @@ describe("usage: Codex's account and rate limits", () => {
 
   it("says that an API key has no plan limits, rather than failing", () => {
     const state = codexUsage({ account: { result: { account: { type: "apiKey" }, requiresOpenaiAuth: true } }, rateLimits: { error: "chatgpt authentication required" } }, TZ);
-    expect(state).toEqual({ status: "ready", usage: { account: "API key", groups: [], notes: ["Codex signs in with an API key: there are no plan limits to show."], details: null } });
+    expect(state).toEqual({ status: "ready", usage: { account: "API key", email: null, groups: [], notes: ["Codex signs in with an API key: there are no plan limits to show."], details: null } });
   });
 
   it("fails with what to do when Codex is not signed in", () => {
@@ -84,7 +108,7 @@ describe("usage: Codex's account and rate limits", () => {
   it("keeps the account when only the limits could not be read", () => {
     const answers = real();
     const state = codexUsage({ ...answers, rateLimits: { error: "backend unavailable" } }, TZ);
-    expect(state).toMatchObject({ status: "ready", usage: { account: "ChatGPT Plus · user@example.com", groups: [], notes: ["Codex could not read its limits: backend unavailable"] } });
+    expect(state).toMatchObject({ status: "ready", usage: { account: "ChatGPT Plus", email: "user@example.com", groups: [], notes: ["Codex could not read its limits: backend unavailable"] } });
   });
 
   it("says when a limit resets as Claude does: the day, then the hour, with minutes only when they are not :00", () => {
@@ -106,12 +130,24 @@ describe("usage: asking the CLIs", () => {
   });
   const options = (cfg = testConfig(fake)) => ({ cfg, workspace: t.path, env: process.env, timeZone: TZ });
 
-  it("runs `claude -p /usage`, which calls no model", async () => {
-    fake.setScenario({ usage: { claude: { text: fixture("claude-usage.txt") } } });
+  it("runs `claude -p /usage` and `claude auth status`, neither of which calls a model, and gives the plan and email of the second", async () => {
+    fake.setScenario({ usage: { claude: { text: fixture("claude-usage.txt"), auth: JSON.parse(fixture("claude-auth-status.json")) } } });
     const state = await readClaudeUsage(options());
-    expect(state).toMatchObject({ status: "ready", usage: { account: "subscription" } });
-    expect(fake.usageCalls()).toEqual([{ backend: "claude", args: ["-p", "/usage"] }]);
+    expect(state).toMatchObject({ status: "ready", usage: { account: "Max", email: "user@example.com", groups: [{ limits: [{ label: "Current session", usedPercent: 46 }, {}, {}] }] } });
+    expect(fake.usageCalls().sort((a, b) => a.args[0]!.localeCompare(b.args[0]!))).toEqual([{ backend: "claude", args: ["-p", "/usage"] }, { backend: "claude", args: ["auth", "status"] }]);
     expect(fake.calls()).toEqual([]);
+  });
+
+  it("keeps the account /usage names when `claude auth status` cannot say (an older Claude Code)", async () => {
+    fake.setScenario({ usage: { claude: { text: fixture("claude-usage.txt"), authExit: 1 } } });
+    expect(await readClaudeUsage(options())).toMatchObject({ status: "ready", usage: { account: "subscription", email: null } });
+    expect(await readClaudeAccount(options())).toEqual({ status: "error", error: "claude auth status failed (exit code 1): error: unknown command 'auth'" });
+  });
+
+  it("says that Claude Code is signed out, as `claude auth status` tells, rather than how /usage failed", async () => {
+    fake.setScenario({ usage: { claude: { exit: 1, stderr: "Not logged in · Please run /login", auth: { loggedIn: false, authMethod: "none", apiProvider: "firstParty" } } } });
+    expect(await readClaudeAccount(options())).toEqual({ status: "signedOut" });
+    expect(await readClaudeUsage(options())).toEqual({ status: "error", error: "Claude Code is not signed in: run claude auth login" });
   });
 
   it("says why Claude's usage is missing: a failed call, or no CLI", async () => {
@@ -128,7 +164,7 @@ describe("usage: asking the CLIs", () => {
     const cfg = testConfig(fake);
     cfg.codex.args = ["-c", "model_provider=\"openai\"", "--profile", "work", "--enable", "x"];
     const state = await readCodexUsage(options(cfg));
-    expect(state).toMatchObject({ status: "ready", usage: { account: "ChatGPT Plus · user@example.com" } });
+    expect(state).toMatchObject({ status: "ready", usage: { account: "ChatGPT Plus", email: "user@example.com" } });
     const [call] = fake.usageCalls();
     expect(call).toEqual({ backend: "codex", args: ["app-server", "-c", "model_provider=\"openai\"", "--enable", "x"], methods: ["initialize", "initialized", "account/read", "account/rateLimits/read"] });
   });

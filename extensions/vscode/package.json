@@ -55,6 +55,13 @@
     "views": {
       "agentduo": [
         {
+          "type": "webview",
+          "id": "agentduo.account",
+          "name": "Account & Usage",
+          "icon": "media/agentduo.svg",
+          "contextualTitle": "agentduo"
+        },
+        {
           "id": "agentduo.conversations",
           "name": "Conversations",
           "icon": "media/agentduo.svg",
@@ -79,6 +86,7 @@
       { "command": "agentduo.openChanges", "title": "Open Changes", "category": "agentduo" },
       { "command": "agentduo.openReport", "title": "Open Report", "category": "agentduo" },
       { "command": "agentduo.usage", "title": "Usage: Claude Code and Codex Plan Limits", "category": "agentduo" },
+      { "command": "agentduo.refreshAccount", "title": "Refresh Account & Usage", "category": "agentduo", "icon": "$(refresh)" },
       { "command": "agentduo.doctor", "title": "Doctor: Check CLIs, Config and Workspace", "category": "agentduo" },
       { "command": "agentduo.openConfiguration", "title": "Open Configuration", "category": "agentduo" },
       { "command": "agentduo.chooseWorkspace", "title": "Choose Workspace Folder", "category": "agentduo" }
@@ -98,6 +106,8 @@
         { "command": "agentduo.chooseWorkspace", "when": "activeWebviewPanelId == 'agentduo.conversation' && workspaceFolderCount > 1", "group": "2_tools@4" }
       ],
       "view/title": [
+        { "command": "agentduo.refreshAccount", "when": "view == agentduo.account", "group": "navigation@1" },
+        { "command": "agentduo.usage", "when": "view == agentduo.account", "group": "2_tools@1" },
         { "command": "agentduo.newTask", "when": "view == agentduo.conversations", "group": "navigation@1" },
         { "command": "agentduo.doctor", "when": "view == agentduo.conversations", "group": "2_tools@1" },
         { "command": "agentduo.openConfiguration", "when": "view == agentduo.conversations", "group": "2_tools@2" },

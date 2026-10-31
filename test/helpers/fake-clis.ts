@@ -65,7 +65,7 @@ export class FakeClis {
     return this.entries().filter((e) => !e.permission && !e.doctor && !e.catalog && !e.usage).map((e) => e as unknown as FakeCall).filter((c) => !role || c.role === role);
   }
 
-  /** Every `claude -p /usage` and finished `codex app-server` run: its arguments, and the methods the app server was asked. */
+  /** Every `claude -p /usage`, `claude auth status` and finished `codex app-server` run: its arguments, and the methods the app server was asked. */
   usageCalls(): Array<{ backend: string; args: string[]; methods?: string[] }> {
     return this.entries().flatMap((e) => (e.usage ? [{ backend: e.backend as string, args: e.args as string[], ...(e.methods ? { methods: e.methods as string[] } : {}) }] : []));
   }

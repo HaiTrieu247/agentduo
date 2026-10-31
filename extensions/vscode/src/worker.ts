@@ -81,6 +81,8 @@ async function dispatch(s: RuntimeSession, request: WorkerRequest): Promise<Work
       return s.listChanges(request.conversation);
     case "readSnapshotFile":
       return s.readSnapshotFile(request.runId, { base: request.base, snapshot: request.snapshot }, request.side, request.path);
+    case "accountUsage":
+      return s.accountUsage();
     case "doctor":
       return { checks: await s.doctor() };
     case "shutdown":
@@ -117,7 +119,7 @@ async function handle(raw: unknown): Promise<void> {
     try {
       await reply(await session.initialize());
       // Only once the answer is on its way: a model found later then arrives as an update after it, never before.
-      session.startDiscovery();
+      if (request.discover) session.startDiscovery();
     } catch (e) {
       await fail(e);
     }

@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { killAllActive } from "../../../src/agents/process.js";
-import { Chat, NOT_REPO_NOTE, resumeHint, type ChatUi } from "../../../src/chat.js";
+import { Chat, notRepoNote, resumeHint, type ChatUi } from "../../../src/chat.js";
 import { AttachmentError } from "../../../src/core/attachments.js";
 import { isPermissionMode, parseInput, type Backend, type SettingCommand } from "../../../src/core/commands.js";
 import { ConfigError, type ConfigData } from "../../../src/core/config.js";
@@ -12,13 +12,14 @@ import type { Review } from "../../../src/core/outputs.js";
 import { findingsMarkdown } from "../../../src/core/render.js";
 import { permissionMode, settingsView, type SettingsView } from "../../../src/core/settings.js";
 import { acquireWorkspaceLock, LockError, RunStore, workspaceBusy, workspaceLockHolder, type RunState } from "../../../src/core/state.js";
+import { readClaudeUsage, readCodexUsage } from "../../../src/core/usage.js";
 import { EventBus, type DuoEvent, type HumanReview, type ModelMap, type PermissionAnswer } from "../../../src/events.js";
 import { packageVersion } from "../../../src/paths.js";
 import { PIPELINE } from "../../../src/ui/format.js";
 import { DecisionBroker, PermissionBroker } from "./decisionBroker.js";
 import type {
-  ArtifactContent, ArtifactName, ChangeList, DecisionAnswer, FocusedRun, InitializeResult, PipelineStep, Problem, Route, SettingRequest, SnapshotFile,
-  SnapshotSide, UiUpdate, WorkerErrorCode, WorkerResults,
+  AccountUsage, ArtifactContent, ArtifactName, ChangeList, DecisionAnswer, FocusedRun, InitializeResult, PipelineStep, Problem, Route, SettingRequest,
+  SnapshotFile, SnapshotSide, UiUpdate, WorkerErrorCode, WorkerResults,
 } from "./protocol.js";
 
 /** After a shutdown asks the agents to stop, give them this long before they are killed outright. */
@@ -121,6 +122,8 @@ export class RuntimeSession {
   private readonly chosen = new Map<string, Backend>();
   /** The settings changed in this session, in order: each tab follows them, also one opened later. */
   private readonly changed: SettingCommand[] = [];
+  /** Stops the Account & Usage view's lookups at shutdown. */
+  private readonly lookups = new AbortController();
 
   constructor(private readonly o: { workspace: string; configPath: string | null; env: NodeJS.ProcessEnv; sink: RuntimeSink }) {
     this.ui = this.uiFor(null);
@@ -194,7 +197,7 @@ export class RuntimeSession {
       ...result, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, configSources: env.sources,
       pipeline: pipelineOf(env.cfg), mode: safePermissionMode(env.cfg), models: this.modelsFor(env).current(), settings: safeSettings(env.cfg), warnings: env.warnings,
       problem: runnableProblem(env, env.cfg, env.sources.join(", "), this.o.env, { repo: false }) ?? locked,
-      hint: resumeHint(env.runsDir, env.workspace) ?? (env.isRepo ? null : NOT_REPO_NOTE),
+      hint: resumeHint(env.runsDir, env.workspace) ?? (env.isRepo ? null : notRepoNote(env.workspace, this.o.env)),
     };
   }
 
@@ -448,6 +451,7 @@ export class RuntimeSession {
     this.stopped ??= (async () => {
       this.closing = true;
       this.models?.close();
+      this.lookups.abort();
       const hard = setTimeout(() => killAllActive(), HARD_KILL_MS);
       try {
         await this.stopTabs(true);
@@ -572,6 +576,26 @@ export class RuntimeSession {
     if (blob.length > MAX_DIFF_BYTES) return { missing: false, binary: false, tooLarge: true, text: null };
     if (isBinary(blob)) return { missing: false, binary: true, tooLarge: false, text: null };
     return { missing: false, binary: false, tooLarge: false, text: blob.toString("utf8") };
+  }
+
+  /**
+   * The Account & Usage view: both agents' accounts and limits, as /usage looks them up (no model call, no lock), with
+   * the config the next agent call gets. Runs beside whatever else runs; a broken config fails it as doctor says it.
+   */
+  async accountUsage(): Promise<AccountUsage> {
+    if (this.closing) throw new SessionError("shutting_down", "the worker is shutting down");
+    let cfg = this.config();
+    if (!cfg) {
+      try {
+        cfg = (await this.prepare()).cfg;
+      } catch (e) {
+        if (e instanceof EnvironmentError || e instanceof ConfigError) throw new SessionError("config", e.message.replace(/\n\s*/g, " "));
+        throw e;
+      }
+    }
+    const o = { cfg, workspace: this.env?.workspace ?? this.o.workspace, env: this.o.env, signal: this.lookups.signal };
+    const [claude, codex] = await Promise.all([readClaudeUsage(o), readCodexUsage(o)]);
+    return { claude, codex };
   }
 
   async doctor(): Promise<Check[]> {
