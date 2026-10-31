@@ -1,6 +1,6 @@
 // What the Activity Bar's Account & Usage view shows, as rows (no DOM, so it is tested as is): each agent with its
 // plan and email, then each of its limits with a meter, as Claude Code's own sidebar shows its account and usage.
-import type { UsageState } from "../../../src/core/usage.js";
+import type { AgentUsage, UsageState } from "../../../src/core/usage.js";
 import type { Agent } from "../../../src/events.js";
 
 export interface AccountRow {
@@ -23,7 +23,13 @@ export function accountRows(agent: Agent, state: UsageState | null): AccountRow[
   if (!state || state.status === "loading") return [...rows, { kind: "muted", text: "loading…" }];
   if (state.status === "error") return [...rows, { kind: "error", text: state.error }];
   if (ready!.email) rows.push({ kind: "field", text: "Email", value: ready!.email });
-  for (const group of ready!.groups) {
+  return [...rows, ...limitRows(ready!)];
+}
+
+/** An account's limits, each with its meter and when it resets, then what else the CLI said (the desktop's cards too). */
+export function limitRows(usage: AgentUsage): AccountRow[] {
+  const rows: AccountRow[] = [];
+  for (const group of usage.groups) {
     if (group.title) rows.push({ kind: "group", text: group.title });
     for (const limit of group.limits) {
       const percent = Math.min(100, Math.max(0, limit.usedPercent));
@@ -31,8 +37,13 @@ export function accountRows(agent: Agent, state: UsageState | null): AccountRow[
       if (limit.resets) rows.push({ kind: "muted", text: limit.resets });
     }
   }
-  for (const note of ready!.notes) if (note.trim()) rows.push({ kind: "text", text: note.trim() });
+  for (const note of usage.notes) if (note.trim()) rows.push({ kind: "text", text: note.trim() });
   return rows;
+}
+
+/** A meter's colour class: warning from 70%, full from 90%. */
+export function meterLevel(percent: number): "" | "high" | "full" {
+  return percent >= 90 ? "full" : percent >= 70 ? "high" : "";
 }
 
 /** "Updated just now", "Updated 4 min ago", "Updated 2 h ago": how old the numbers shown are. */

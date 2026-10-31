@@ -1,6 +1,6 @@
 import { accessSync, constants, existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { extname, isAbsolute, join } from "node:path";
 
 function isExecutable(path: string, platform: NodeJS.Platform): boolean {
   try {
@@ -25,6 +25,16 @@ function compareVersions(a: number[], b: number[]): number {
   return 0;
 }
 
+/**
+ * A variable as Windows reads it: names are case-insensitive there, and a copied environment may say Path, not PATH
+ * (an app opened from the Start menu, an environment built by a host). Elsewhere names are exact.
+ */
+export function envValue(env: NodeJS.ProcessEnv, name: string, platform: NodeJS.Platform = process.platform): string | undefined {
+  if (platform !== "win32") return env[name];
+  if (env[name] !== undefined) return env[name];
+  return Object.entries(env).find(([k]) => k.toUpperCase() === name.toUpperCase())?.[1];
+}
+
 export function resolveBinary(configured: string, backend: "codex" | "claude",
   env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string | null {
   const home = env.HOME || env.USERPROFILE || homedir();
@@ -32,8 +42,11 @@ export function resolveBinary(configured: string, backend: "codex" | "claude",
   if (expanded.includes("/") || expanded.includes("\\") || isAbsolute(expanded)) {
     return isExecutable(expanded, platform) ? expanded : null;
   }
-  const exts = platform === "win32" ? (env.PATHEXT || ".EXE;.CMD;.BAT").split(";").map((e) => e.toLowerCase()) : [""];
-  for (const dir of (env.PATH || "").split(platform === "win32" ? ";" : ":")) {
+  const pathext = (envValue(env, "PATHEXT", platform) || ".EXE;.CMD;.BAT").split(";").filter(Boolean).map((e) => e.toLowerCase());
+  // A name that has its extension already (claude.exe) is taken as given; never a bare `codex` beside codex.cmd (npm's
+  // shell script for Git Bash, which Windows cannot start).
+  const exts = platform !== "win32" ? [""] : pathext.includes(extname(expanded).toLowerCase()) ? [""] : pathext;
+  for (const dir of (envValue(env, "PATH", platform) || "").split(platform === "win32" ? ";" : ":")) {
     if (!dir) continue;
     for (const ext of exts) {
       const candidate = join(dir, expanded + ext);

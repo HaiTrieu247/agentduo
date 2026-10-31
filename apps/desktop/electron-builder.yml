@@ -1,0 +1,96 @@
+# agentduo desktop: native packages for macOS, Windows and Linux (electron-builder 26).
+#   npm run package:mac | package:win | package:linux   (each on its own OS; see README.md)
+#   npm run pack:dir                                     (unpacked app for this OS, then npm run test:pack)
+# Only the build output goes in: no node_modules (the app has no dependencies; main with electron-updater, preload and
+# worker are bundled), no sources. The engine worker, its package.json (named agentduo) and the schemas go outside the ASAR archive
+# (resources/runtime), where the worker's packageRoot() finds them and Electron-as-Node can run them.
+appId: io.github.haitrieu247.agentduo
+productName: AgentDuo
+copyright: Copyright © 2026 Thinh Hai Trieu
+directories:
+  output: release
+  buildResources: resources
+files:
+  - package.json
+  - dist/main/**
+  - dist/preload/**
+  - dist/renderer/**
+  - "!**/*.map"
+asar: true
+extraResources:
+  - from: dist/runtime
+    to: runtime
+  - from: ../../LICENSE
+    to: LICENSE.txt
+# Fuses are flipped on the packed executable before it is signed: RunAsNode stays on (the worker runs on it), Node
+# options and the inspector are off in release builds. See scripts/fuses.mjs.
+afterPack: ./scripts/fuses.mjs
+# Every platform's icon (icns, ico, Linux PNGs) is made from this 1024 px PNG, rendered from resources/icon.svg by
+# scripts/icon.mjs.
+icon: resources/icon.png
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+# Where an installed app looks for a new version (electron-updater, src/main/updates.ts): this repository's published
+# GitHub Releases. Packaging writes the feeds (latest.yml, latest-mac.yml, latest-linux.yml, beside the installers) and
+# each app's app-update.yml, but never uploads (scripts/package.mjs passes --publish never):
+# .github/workflows/release.yml does.
+publish:
+  provider: github
+  owner: HaiTrieu247
+  repo: agentduo
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  hardenedRuntime: true
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.plist
+  # "-": ad-hoc signing, so the app runs on Apple silicon without a certificate. A Developer ID build sets CSC_LINK
+  # and CSC_NAME (or AGENTDUO_MAC_IDENTITY) to the certificate name, which scripts/package.mjs passes as mac.identity.
+  identity: "-"
+  # Notarization needs an Apple Developer account (APPLE_API_KEY… or APPLE_ID…); turn it on with -c.mac.notarize=true.
+  notarize: false
+
+dmg:
+  writeUpdateInfo: false
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  # Unsigned unless a certificate is given (CSC_LINK / WIN_CSC_LINK and CSC_KEY_PASSWORD, or azureSignOptions).
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  differentialPackage: false
+
+linux:
+  category: Development
+  maintainer: Thinh Hai Trieu <thinhhaitrieu@users.noreply.github.com>
+  synopsis: Codex plans and reviews, Claude Code critiques and implements
+  executableName: agentduo
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+
+deb:
+  # The default after-install script makes chrome-sandbox root:root 4755 where user namespaces are missing, and
+  # installs this AppArmor profile (Ubuntu 24.04+, which restricts unprivileged user namespaces).
+  appArmorProfile: resources/apparmor-profile
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libuuid1
+    - libsecret-1-0

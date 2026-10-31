@@ -29,7 +29,14 @@ export function workerEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return out;
 }
 
-export type NodeLookup = { ok: true; path: string; version: string } | { ok: false; message: string };
+/**
+ * How the worker is started. node: `path` is a Node (VS Code's extension, which never uses its own Electron). electron:
+ * `path` is an Electron binary run as Node (ELECTRON_RUN_AS_NODE=1), the desktop app's own executable, so the
+ * desktop needs no Node of its own; the worker removes that variable before anything it starts sees it.
+ */
+export type WorkerLaunch = "node" | "electron";
+
+export type NodeLookup = { ok: true; path: string; version: string; launch?: WorkerLaunch } | { ok: false; message: string };
 
 function executable(path: string): boolean {
   try {
@@ -107,7 +114,9 @@ export class WorkerClient {
   private exited: Promise<void> | null = null;
   private stopping = false;
 
-  constructor(private readonly o: { node: string; script: string; cwd: string; env: NodeJS.ProcessEnv; generation: number; log(line: string): void }) {}
+  constructor(private readonly o: {
+    node: string; script: string; cwd: string; env: NodeJS.ProcessEnv; generation: number; log(line: string): void; launch?: WorkerLaunch;
+  }) {}
 
   get generation(): number {
     return this.o.generation;
@@ -123,9 +132,10 @@ export class WorkerClient {
 
   start(): Promise<Hello> {
     if (this.child) throw new Error("worker already started");
+    const env = workerEnv(this.o.env);
+    if (this.o.launch === "electron") env.ELECTRON_RUN_AS_NODE = "1";
     const child = fork(this.o.script, [], {
-      execPath: this.o.node, execArgv: [], cwd: this.o.cwd, env: workerEnv(this.o.env), stdio: ["ignore", "pipe", "pipe", "ipc"],
-      serialization: "json", windowsHide: true,
+      execPath: this.o.node, execArgv: [], cwd: this.o.cwd, env, stdio: ["ignore", "pipe", "pipe", "ipc"], serialization: "json", windowsHide: true,
     });
     this.child = child;
     for (const stream of [child.stdout, child.stderr]) {

@@ -1,7 +1,10 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { configFromSaved, ConfigError, defaultConfig, loadConfig, userConfigPath } from "../src/core/config.js";
+import { configFromSaved, ConfigError, defaultConfig, loadConfig, userConfigPath, validateConfig } from "../src/core/config.js";
+import {
+  clearConfiguration, ConfigurationError, readConfiguration, updateConfiguration, type ConfigurationOptions, type ConfigurationView,
+} from "../src/core/configuration.js";
 import { tempDir } from "./helpers/tmp.js";
 
 const dirs: Array<{ cleanup(): void }> = [];
@@ -133,5 +136,113 @@ describe("saved configs and paths", () => {
     expect(userConfigPath({ XDG_CONFIG_HOME: "/x" }, "linux")).toBe(join("/x", "agentduo", "config.yaml"));
     expect(userConfigPath({ HOME: "/h" }, "darwin")).toBe(join("/h", ".config", "agentduo", "config.yaml"));
     expect(userConfigPath({ APPDATA: "C:\\AppData" }, "win32")).toContain("agentduo");
+  });
+});
+
+describe("configuration service (the desktop's Settings)", () => {
+  const read = (o: ConfigurationOptions) => readConfiguration(o);
+  const entry = (v: ConfigurationView, key: string) => v.entries.find((e) => e.key === key)!;
+  const file = (path: string) => (existsSync(path) ? readFileSync(path, "utf8") : null);
+
+  it("reads the user config alone when no project is open, and writes it", () => {
+    const { env } = setup(undefined, "codex:\n  model: gpt-user\n");
+    const o = { workspace: null, env };
+    let v = read(o);
+    expect(v.files.map((f) => [f.scope, f.exists])).toEqual([["global", true]]);
+    expect(entry(v, "codex.model")).toMatchObject({ effective: "gpt-user", source: "global", global: { value: "gpt-user" }, project: null });
+    expect(entry(v, "limits.max_retries")).toMatchObject({ effective: 1, source: "default", live: "next-run" });
+    expect(v.storage).toMatchObject({ runsDir: null, source: "default" });
+    v = updateConfiguration(o, "global", "limits.max_retries", 3);
+    expect(entry(v, "limits.max_retries")).toMatchObject({ effective: 3, source: "global" });
+    expect(file(userConfigPath(env))).toContain("max_retries: 3");
+    expect(() => updateConfiguration(o, "project", "limits.max_retries", 2)).toThrow(ConfigurationError);
+  });
+
+  it("names each key's source, what the project hides, and the session's own values", () => {
+    const { dir, env } = setup("claude:\n  model: opus\n  role_args:\n    implementer: [--permission-mode, auto]\n",
+      "claude:\n  model: sonnet\n  role_args:\n    plan_reviewer: [--max-turns, '3']\nagents:\n  implementer: codex\n");
+    const session = loadConfig({ dir, env, validate: false }).data;
+    session.claude.max_budget_usd = 4;
+    const v = read({ workspace: dir, env, session });
+    expect(entry(v, "claude.model")).toMatchObject({ effective: "opus", source: "project", projectOverridesGlobal: true, global: { value: "sonnet" } });
+    expect(entry(v, "claude.role_args.implementer")).toMatchObject({ source: "project", projectOverridesGlobal: false });
+    expect(entry(v, "claude.role_args.plan_reviewer")).toMatchObject({ source: "global", effective: ["--max-turns", "3"] });
+    expect(entry(v, "claude.role_args.planner")).toMatchObject({ source: "default", effective: null, removable: true });
+    expect(entry(v, "agents.implementer")).toMatchObject({ source: "global", effective: "codex", live: "next-run" });
+    expect(entry(v, "claude.max_budget_usd")).toMatchObject({ source: "session", effective: 4, session: { value: 4 } });
+    expect(v.storage).toMatchObject({ runsDir: join(dir, ".agentduo", "runs"), value: ".agentduo/runs", source: "default" });
+    expect(v.lockedBy).toBeNull();
+  });
+
+  it("clears a project key to inherit the user config again (never null), and tells null (the default) apart", () => {
+    const { dir, env } = setup("# mine\nclaude:\n  model: opus\n", "claude:\n  model: sonnet\n");
+    const o = { workspace: dir, env };
+    const project = join(dir, ".agentduo", "config.yaml");
+    let v = clearConfiguration(o, "project", "claude.model");
+    expect(entry(v, "claude.model")).toMatchObject({ effective: "sonnet", source: "global", project: null });
+    expect(file(project)).not.toMatch(/model|null/);
+    expect(file(project)).toContain("# mine");
+    // null is a value of its own: the CLI's default, set here, hiding the user config's model.
+    v = updateConfiguration(o, "project", "claude.model", null);
+    expect(entry(v, "claude.model")).toMatchObject({ effective: null, source: "project", project: { value: null }, projectOverridesGlobal: true });
+    v = clearConfiguration(o, "project", "claude.model");
+    expect(entry(v, "claude.model").effective).toBe("sonnet");
+    // Per role: clearing the implementer's args leaves the other roles' as they were.
+    updateConfiguration(o, "project", "codex.role_args.planner", ["--x"]);
+    updateConfiguration(o, "global", "codex.role_args.code_reviewer", ["--y"]);
+    v = clearConfiguration(o, "project", "codex.role_args.planner");
+    expect(entry(v, "codex.role_args.planner")).toMatchObject({ effective: null, source: "default" });
+    expect(entry(v, "codex.role_args.code_reviewer")).toMatchObject({ effective: ["--y"], source: "global" });
+    // A global change never takes the project's values along.
+    expect(file(userConfigPath(env))).not.toContain("opus");
+  });
+
+  it("shows a file that is not valid YAML with where it breaks, and leaves it alone", () => {
+    const { dir, env } = setup("claude:\n  model: [opus\n", "codex:\n  model: gpt-user\n");
+    const o = { workspace: dir, env };
+    const project = join(dir, ".agentduo", "config.yaml");
+    const v = read(o);
+    const broken = v.files.find((f) => f.scope === "project")!;
+    expect(broken.error?.message).toBeTruthy();
+    expect(broken.error?.line).toBeGreaterThan(0);
+    // The rest still shows.
+    expect(entry(v, "codex.model")).toMatchObject({ effective: "gpt-user", source: "global" });
+    expect(() => updateConfiguration(o, "project", "claude.model", "opus")).toThrow(/Fix the file by hand/);
+    expect(() => clearConfiguration(o, "project", "claude.model")).toThrow(ConfigurationError);
+    expect(file(project)).toBe("claude:\n  model: [opus\n");
+    // The other file can still be changed.
+    expect(entry(updateConfiguration(o, "global", "limits.max_retries", 2), "limits.max_retries").effective).toBe(2);
+  });
+
+  it("lets a config with wrong values be fixed one field at a time, and never saves a value that adds a problem", () => {
+    const { dir, env } = setup("limits:\n  max_retries: lots\n  agent_timeout_sec: 0\n");
+    const o = { workspace: dir, env };
+    let v = read(o);
+    expect(v.errors).toEqual(expect.arrayContaining(["limits.max_retries must be an integer >= 0", "limits.agent_timeout_sec must be a positive integer"]));
+    expect(entry(v, "limits.max_retries").errors).toEqual(["limits.max_retries must be an integer >= 0"]);
+    v = updateConfiguration(o, "project", "limits.max_retries", 2);
+    expect(entry(v, "limits.max_retries")).toMatchObject({ effective: 2, errors: [] });
+    expect(v.errors).toEqual(["limits.agent_timeout_sec must be a positive integer"]);
+    v = updateConfiguration(o, "project", "limits.agent_timeout_sec", 600);
+    expect(v.errors).toEqual([]);
+    expect(() => validateConfig(loadConfig({ dir, env, validate: false }).data)).not.toThrow();
+    // A value a key cannot take is refused before anything is written.
+    const before = file(join(dir, ".agentduo", "config.yaml"));
+    expect(() => updateConfiguration(o, "project", "agents.planner", "gemini")).toThrow("agents.planner must be one of codex, claude");
+    expect(() => updateConfiguration(o, "project", "paths.runs_dir", "/tmp/x")).toThrow("not a setting");
+    expect(file(join(dir, ".agentduo", "config.yaml"))).toBe(before);
+  });
+
+  it("says when another process holds the workspace, and where the runs directory comes from", () => {
+    const { dir, env } = setup("paths:\n  runs_dir: .runs\n");
+    const runsDir = join(dir, ".runs");
+    mkdirSync(runsDir, { recursive: true });
+    // This process's lock is not another process's; a live other pid is.
+    writeFileSync(join(runsDir, ".lock"), String(process.ppid));
+    const v = read({ workspace: dir, env });
+    expect(v.storage).toMatchObject({ runsDir, value: ".runs", source: "project" });
+    expect(v.lockedBy).toBe(process.ppid);
+    // A change is still written; that process reads it when it restarts.
+    expect(entry(updateConfiguration({ workspace: dir, env }, "project", "claude.model", "opus"), "claude.model").effective).toBe("opus");
   });
 });

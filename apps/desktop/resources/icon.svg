@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>agentduo</title>
+  <!-- The app icon, on the macOS icon grid (an 824 px rounded square in a 1024 px canvas): agentduo's mark, Codex
+       (teal) and Claude Code (amber) on opposite corners of one loop, each handing its work along to the other.
+       After a change, render resources/icon.png with: node scripts/icon.mjs -->
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2c2e33"/>
+      <stop offset="1" stop-color="#16171a"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.03"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.06"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000000" flood-opacity="0.32"/>
+    </filter>
+    <!-- Each handoff stops short of the agent it reaches. -->
+    <mask id="to-claude" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <circle cx="682" cy="682" r="118" fill="#000"/>
+    </mask>
+    <mask id="to-codex" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <circle cx="342" cy="342" r="118" fill="#000"/>
+    </mask>
+  </defs>
+  <g filter="url(#shadow)">
+    <rect x="100" y="100" width="824" height="824" rx="185.4" fill="url(#body)"/>
+  </g>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="184" fill="none" stroke="url(#rim)" stroke-width="3"/>
+  <g fill="none" stroke-width="52" stroke-linecap="round">
+    <path d="M342 342H578A104 104 0 0 1 682 446V682" stroke="#14a892" mask="url(#to-claude)"/>
+    <path d="M682 682H446A104 104 0 0 1 342 578V342" stroke="#e0832f" mask="url(#to-codex)"/>
+  </g>
+  <circle cx="342" cy="342" r="96" fill="#14a892"/>
+  <circle cx="682" cy="682" r="96" fill="#e0832f"/>
+</svg>

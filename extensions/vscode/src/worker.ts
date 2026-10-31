@@ -1,9 +1,13 @@
-// The engine process of the VS Code extension: runs agentduo's Chat and Workflow under a real Node (>= 22.12),
-// forked by the extension host with an IPC channel. stdout/stderr only ever reach the extension's output channel.
+// The engine process of the VS Code extension and of the desktop app: runs agentduo's Chat and Workflow under a Node
+// >= 22.12 (an external one for VS Code, Electron's own as Node for the desktop), forked by its host with an IPC
+// channel. stdout/stderr only ever reach the host's log.
+import { resolve } from "node:path";
 import { killAllActive } from "../../../src/agents/process.js";
+import { clearConfiguration, ConfigurationError, readConfiguration, updateConfiguration, type ConfigurationOptions } from "../../../src/core/configuration.js";
+import { ConfigError } from "../../../src/core/config.js";
 import { packageVersion } from "../../../src/paths.js";
 import {
-  parseRequestEnvelope, PROTOCOL_VERSION, ProtocolError, type RequestEnvelope, type WorkerErrorData, type WorkerMessage, type WorkerRequest,
+  CONFIGURATION_REQUESTS, parseRequestEnvelope, PROTOCOL_VERSION, ProtocolError, type RequestEnvelope, type WorkerErrorData, type WorkerMessage, type WorkerRequest,
   type WorkerResults,
 } from "./protocol.js";
 import { RuntimeSession, SessionError } from "./runtimeSession.js";
@@ -14,9 +18,12 @@ if (major < 22 || (major === 22 && minor < 12)) {
   process.exit(3);
 }
 if (!process.send) {
-  process.stderr.write("the agentduo worker is started by the VS Code extension, with an IPC channel\n");
+  process.stderr.write("the agentduo worker is started by the VS Code extension or the desktop app, with an IPC channel\n");
   process.exit(2);
 }
+// The IPC channel is up: what set it up (and what made Electron run as Node) must not reach the agents, the gates or
+// anything they start, which would otherwise take an Electron binary for Node or a closed file for a channel.
+for (const name of ["ELECTRON_RUN_AS_NODE", "NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE", "NODE_UNIQUE_ID"]) delete process.env[name];
 
 let generation = -1;
 let session: RuntimeSession | null = null;
@@ -34,6 +41,7 @@ const tag = () => ({ protocol: PROTOCOL_VERSION, generation });
 function errorData(e: unknown): WorkerErrorData {
   if (e instanceof SessionError) return { code: e.code, message: e.message };
   if (e instanceof ProtocolError) return { code: "bad_request", message: e.message };
+  if (e instanceof ConfigurationError || e instanceof ConfigError) return { code: "config", message: e.message };
   return { code: "internal", message: e instanceof Error ? e.message : String(e) };
 }
 
@@ -83,6 +91,15 @@ async function dispatch(s: RuntimeSession, request: WorkerRequest): Promise<Work
       return s.readSnapshotFile(request.runId, { base: request.base, snapshot: request.snapshot }, request.side, request.path);
     case "accountUsage":
       return s.accountUsage();
+    case "readConfiguration":
+    case "updateConfiguration":
+    case "clearConfiguration":
+    case "syncConfiguration":
+      if (request.workspace && resolve(request.workspace) !== resolve(s.workspace)) throw new SessionError("bad_request", `this worker is for ${s.workspace}, not ${request.workspace}`);
+      if (request.type === "readConfiguration") return s.readConfiguration();
+      if (request.type === "syncConfiguration") return s.syncConfiguration();
+      if (request.type === "updateConfiguration") return s.updateConfiguration(request.scope, request.key, request.value);
+      return s.clearConfiguration(request.scope, request.key);
     case "doctor":
       return { checks: await s.doctor() };
     case "shutdown":
@@ -114,6 +131,7 @@ async function handle(raw: unknown): Promise<void> {
         ui: (update, conversation) => void send({ kind: "ui", ...tag(), conversation, update }),
         decisionOpened: (conversation, requestId, review, views) => void send({ kind: "decision", ...tag(), conversation, requestId, review, views }),
         decisionClosed: (conversation, requestId) => void send({ kind: "decisionClosed", ...tag(), conversation, requestId }),
+        configWritten: (scope) => void send({ kind: "configWritten", ...tag(), scope }),
       },
     });
     try {
@@ -122,6 +140,18 @@ async function handle(raw: unknown): Promise<void> {
       if (request.discover) session.startDiscovery();
     } catch (e) {
       await fail(e);
+    }
+    return;
+  }
+  // Settings work before initialize too (and when it failed): they only read and write config files.
+  if (!session && (CONFIGURATION_REQUESTS as readonly string[]).includes(request.type)) {
+    // No generation is ours yet: the answer carries the one the host asked with.
+    const own = { protocol: PROTOCOL_VERSION, generation: envelope.generation };
+    try {
+      const result = configurationOf(request as Extract<WorkerRequest, { type: (typeof CONFIGURATION_REQUESTS)[number] }>);
+      await send({ kind: "response", ...own, id, ok: true, result });
+    } catch (e) {
+      await send({ kind: "response", ...own, id, ok: false, error: errorData(e) });
     }
     return;
   }
@@ -134,6 +164,15 @@ async function handle(raw: unknown): Promise<void> {
     await fail(e);
   }
   if (request.type === "shutdown") await exit(0);
+}
+
+/** A configuration request with no session: the files it names, with no session values (nothing ran here). */
+function configurationOf(request: Extract<WorkerRequest, { type: (typeof CONFIGURATION_REQUESTS)[number] }>) {
+  const o: ConfigurationOptions = { workspace: request.workspace, configPath: request.configPath, env: process.env };
+  // Nothing ran here yet, so there is nothing to follow a file change: the files as they are now.
+  if (request.type === "readConfiguration" || request.type === "syncConfiguration") return readConfiguration(o);
+  if (request.scope === "session") throw new SessionError("bad_request", "there is no session to change: open a conversation first");
+  return request.type === "updateConfiguration" ? updateConfiguration(o, request.scope, request.key, request.value) : clearConfiguration(o, request.scope, request.key);
 }
 
 /** Shutdown, a lost IPC channel or a signal: settle what waits on the user, stop the run, free the lock, then leave. */

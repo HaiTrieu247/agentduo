@@ -117,6 +117,35 @@ describe("vscode worker: one conversation per tab", () => {
     expect(third[third.indexOf("--permission-mode") + 1]).toBe("auto");
   });
 
+  it("has every tab follow a command typed in one of them, and tells the host when it wrote the user config", async () => {
+    fake.setScenario({ chat_codex: [{ answer: "one" }, { answer: "two" }, { answer: "three" }] });
+    const { h } = await open();
+    await say(h, "tab-a", "hello");
+    await h.waitFor(isEvent("turn.finished"));
+    const written = () => h.messages.filter((m) => m.kind === "configWritten");
+    // Typed in tab B, this chat only: tab A's next question gets it; no file was written.
+    await say(h, "tab-b", "/codex model typed-model");
+    await say(h, "tab-a", "again");
+    await h.nth(isEvent("turn.finished"), 1);
+    expect(fake.calls("chat_codex")[1]!.args.join(" ")).toContain("typed-model");
+    // --save writes the workspace's file: only this worker reads it, so the host is not told.
+    await say(h, "tab-b", "/codex model saved-model --save");
+    expect(written()).toHaveLength(0);
+    // --global writes the user config: the host is told (other workspaces read it), and tab A follows here.
+    await say(h, "tab-b", "/codex model global-model --global");
+    await h.waitFor((m) => m.kind === "configWritten" && m.scope === "global");
+    expect(written()).toHaveLength(1);
+    const user = readFileSync(join(t.path, "xdg", "agentduo", "config.yaml"), "utf8");
+    expect(user).toContain("global-model");
+    await say(h, "tab-a", "once more");
+    await h.nth(isEvent("turn.finished"), 2);
+    expect(fake.calls("chat_codex")[2]!.args.join(" ")).toContain("global-model");
+    // What the session reads of the files is what it wrote: the host's sync after it changes nothing.
+    await h.client.request({ type: "syncConfiguration", workspace: repo, configPath: null });
+    const view = await h.client.request({ type: "readConfiguration", workspace: repo, configPath: null });
+    expect(view.entries.find((e) => e.key === "codex.model")).toMatchObject({ effective: "global-model", session: { value: "global-model" } });
+  });
+
   it("stops what runs in a tab that is closed, and lets its conversation go", async () => {
     fake.setScenario({ chat_codex: [{ sleep: 20_000, answer: "too late" }, { answer: "fresh" }] });
     const { h } = await open();
@@ -539,5 +568,83 @@ describe("vscode worker: attached files", () => {
     expect(existsSync(join(b.root, b.attachment.id))).toBe(true);
     await h.client.request({ type: "closeConversation", conversation: "tab-a" });
     expect(existsSync(join(b.root, b.attachment.id))).toBe(false);
+  });
+});
+
+describe("vscode worker: configuration (the desktop's Settings)", () => {
+  const env = () => ({ ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg") });
+  const entry = (v: { entries: Array<{ key: string }> }, key: string) => v.entries.find((e) => e.key === key) as Record<string, unknown>;
+
+  it("reads and writes the config files before initialize and with no project, taking no lock and opening no chat", async () => {
+    writeWorkspaceConfig(repo, fake);
+    const h = new WorkerHarness({ script: worker.script, workspace: repo, env: env() });
+    harnesses.push(h);
+    await h.client.start();
+    const global = await h.client.request({ type: "updateConfiguration", workspace: null, configPath: null, scope: "global", key: "limits.max_retries", value: 2 });
+    expect(entry(global, "limits.max_retries")).toMatchObject({ effective: 2, source: "global" });
+    expect(readFileSync(join(t.path, "xdg", "agentduo", "config.yaml"), "utf8")).toContain("max_retries: 2");
+    const project = await h.client.request({ type: "updateConfiguration", workspace: repo, configPath: null, scope: "project", key: "claude.model", value: "opus" });
+    expect(entry(project, "claude.model")).toMatchObject({ effective: "opus", source: "project" });
+    await expect(h.client.request({ type: "updateConfiguration", workspace: repo, configPath: null, scope: "session", key: "claude.model", value: "x" }))
+      .rejects.toMatchObject({ code: "bad_request" });
+    await expect(h.client.request({ type: "updateConfiguration", workspace: repo, configPath: null, scope: "project", key: "agents.planner", value: "gemini" }))
+      .rejects.toMatchObject({ code: "config", message: expect.stringContaining("agents.planner") });
+    expect(existsSync(lockFile())).toBe(false);
+    expect(fake.calls()).toEqual([]);
+  });
+
+  it("changes the config while another process holds the workspace, and says that process reads it after a restart", async () => {
+    writeWorkspaceConfig(repo, fake);
+    const release = acquireWorkspaceLock(runsDir);
+    try {
+      const { h, init } = await open({ config: false });
+      expect(init.problem).toMatchObject({ kind: "locked" });
+      const v = await h.client.request({ type: "updateConfiguration", workspace: null, configPath: null, scope: "project", key: "limits.max_review_rounds", value: 7 });
+      expect(v.lockedBy).toBe(process.pid);
+      expect(entry(v, "limits.max_review_rounds")).toMatchObject({ effective: 7, source: "project" });
+    } finally {
+      release();
+    }
+  });
+
+  it("has every tab follow a file change and a session value, unless the session set the key itself; reset brings the file's back", async () => {
+    fake.setScenario({ chat_claude: [{ answer: "one" }] });
+    const { h } = await open();
+    const ask = async (n: number) => {
+      await h.client.request({ type: "submit", conversation: C, text: "/claude hi", route: "message" });
+      await h.nth(isEvent("turn.finished"), n);
+      const args = fake.calls("chat_claude")[n]!.args;
+      return args.includes("--model") ? args[args.indexOf("--model") + 1] : null;
+    };
+    const set = (scope: "project" | "session", value: unknown) =>
+      h.client.request({ type: "updateConfiguration", workspace: repo, configPath: null, scope, key: "claude.model", value });
+    await ask(0);
+    let v = await set("project", "haiku");
+    expect(entry(v, "claude.model")).toMatchObject({ effective: "haiku", source: "project", session: null });
+    expect(await ask(1)).toBe("haiku");
+    v = await set("session", "opus");
+    expect(entry(v, "claude.model")).toMatchObject({ effective: "opus", source: "session", project: { value: "haiku" } });
+    expect(await ask(2)).toBe("opus");
+    // The file changes again: the session's own value still wins.
+    await set("project", "sonnet");
+    expect(await ask(3)).toBe("opus");
+    v = await h.client.request({ type: "clearConfiguration", workspace: repo, configPath: null, scope: "session", key: "claude.model" });
+    expect(entry(v, "claude.model")).toMatchObject({ effective: "sonnet", source: "project", session: null });
+    expect(await ask(4)).toBe("sonnet");
+    // Reset to inherit: the key leaves the file, and the default (no --model) applies again.
+    v = await h.client.request({ type: "clearConfiguration", workspace: repo, configPath: null, scope: "project", key: "claude.model" });
+    expect(entry(v, "claude.model")).toMatchObject({ effective: null, source: "default", project: null });
+    expect(await ask(5)).toBeNull();
+  });
+});
+
+describe("vscode worker: what its agents inherit", () => {
+  it("keeps its IPC channel's variables (and Electron's run-as-Node switch) from the agents it starts", async () => {
+    fake.setScenario({ chat_claude: [{ answer: "hi" }] });
+    const { h } = await open();
+    await h.client.request({ type: "submit", conversation: C, text: "/claude hello", route: "message" });
+    await h.waitFor(isEvent("turn.finished"));
+    expect(fake.calls("chat_claude")).toHaveLength(1);
+    expect(fake.calls("chat_claude")[0]!.leaked).toBeUndefined();
   });
 });

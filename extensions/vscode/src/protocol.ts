@@ -6,6 +6,7 @@ import {
   CLAUDE_EFFORTS, CODEX_EFFORTS, CODEX_PRESETS, PERMISSION_MODES, RULE_KINDS, type Backend, type SettingCommand,
 } from "../../../src/core/commands.js";
 import type { Check } from "../../../src/core/doctor.js";
+import type { ConfigScope, ConfigurationView } from "../../../src/core/configuration.js";
 import type { CodexCatalog } from "../../../src/core/models.js";
 import type { SettingsView } from "../../../src/core/settings.js";
 import type { UsageReport, UsageState } from "../../../src/core/usage.js";
@@ -22,8 +23,11 @@ import type { ViewAction, ViewState } from "../webview/state.js";
  * 7: Claude Code's permission modes (manual, acceptEdits, auto) in place of edits ask|auto: `cycleMode`, `mode` updates.
  * 8: the Activity Bar's Account & Usage view: `accountUsage`, both agents' accounts and limits, for no conversation; an
  *    `initialize` with `discover: false` looks no model up (the worker that only answers that view).
+ * 9: the desktop's Settings: `readConfiguration`, `updateConfiguration` and `clearConfiguration`, which need no
+ *    conversation and no lock, and are answered before `initialize` too (for the workspace they name);
+ *    `syncConfiguration`, after another process (the desktop's host, another project's worker) wrote a file.
  */
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 
 export const BACKENDS = ["codex", "claude"] as const;
 /** How the composer's text is meant: a message (to the recipient, or a slash command), a pipeline task, or a question to discuss. */
@@ -101,9 +105,32 @@ export type WorkerRequest =
   | { type: "readSnapshotFile"; runId: string; base: string; snapshot: string; side: SnapshotSide; path: string }
   /** The Account & Usage view: both agents' accounts and limits, as /usage looks them up, with the workspace's config. */
   | { type: "accountUsage" }
+  /**
+   * Settings: the configuration's layers and sources. `workspace`/`configPath` name the files when the worker is not
+   * initialized (null workspace: the user config only); an initialized worker answers for its own workspace.
+   */
+  | ({ type: "readConfiguration" } & ConfigTarget)
+  /** One key set in the user config, the workspace's file, or this session only. */
+  | ({ type: "updateConfiguration"; scope: ConfigScope; key: string; value: unknown } & ConfigTarget)
+  /** One key back to what it inherits: removed from that file, or this session's own value dropped. */
+  | ({ type: "clearConfiguration"; scope: ConfigScope; key: string } & ConfigTarget)
+  /**
+   * The files were written elsewhere (the user config, from another project's Settings): the worker reads them again,
+   * and its chats follow each key whose value they changed, as after a change of its own.
+   */
+  | ({ type: "syncConfiguration" } & ConfigTarget)
   | { type: "doctor" }
   | { type: "shutdown" };
 export type RequestType = WorkerRequest["type"];
+
+/** The files a configuration request is about, for a worker that is not initialized (an initialized one has its own). */
+export interface ConfigTarget {
+  workspace: string | null;
+  configPath: string | null;
+}
+
+/** The requests a worker answers before (and whatever) `initialize` answered: they touch files only. */
+export const CONFIGURATION_REQUESTS = ["readConfiguration", "updateConfiguration", "clearConfiguration", "syncConfiguration"] as const;
 
 export interface RequestEnvelope {
   protocol: number;
@@ -199,6 +226,10 @@ export interface WorkerResults {
   listChanges: ChangeList;
   readSnapshotFile: SnapshotFile;
   accountUsage: AccountUsage;
+  readConfiguration: ConfigurationView;
+  updateConfiguration: ConfigurationView;
+  clearConfiguration: ConfigurationView;
+  syncConfiguration: ConfigurationView;
   doctor: { checks: Check[] };
   shutdown: { stopped: true };
 }
@@ -239,7 +270,9 @@ export type WorkerMessage =
   /** `conversation` null: an update for the whole workspace (models, settings, the session), for every tab. */
   | { kind: "ui"; protocol: number; generation: number; conversation: string | null; update: UiUpdate }
   | { kind: "decision"; protocol: number; generation: number; conversation: string; requestId: string; review: HumanReview; views: ArtifactName[] }
-  | { kind: "decisionClosed"; protocol: number; generation: number; conversation: string; requestId: string };
+  | { kind: "decisionClosed"; protocol: number; generation: number; conversation: string; requestId: string }
+  /** A chat command wrote the user config (--global): other workspaces' workers read it again (syncConfiguration). */
+  | { kind: "configWritten"; protocol: number; generation: number; scope: "global" };
 
 // ------------------------------------------------------------------ webview ↔ host
 export const WEBVIEW_COMMANDS = [
@@ -488,11 +521,33 @@ function settingRequest(o: Obj): SettingRequest {
 
 const route = (v: unknown): Route => (v === undefined ? "message" : oneOf(v, ROUTES, "route"));
 
+export const CONFIG_SCOPES = ["global", "project", "session"] as const;
+
+function configTarget(o: Obj): ConfigTarget {
+  return { workspace: o.workspace === undefined || o.workspace === null ? null : hostPath(o.workspace), configPath: optionalText(o.configPath, "configPath") };
+}
+
+/** A key of SETTING_KEYS by its shape (the worker checks it is one): dotted lowercase names. */
+function settingKeyName(v: unknown): string {
+  const key = text(v, "key", 200);
+  if (!/^[a-z_]+(\.[a-z_]+){1,2}$/.test(key)) throw new ProtocolError("key is not a setting key");
+  return key;
+}
+
+/** A setting's value: JSON of a setting's shape (a string, a number, a boolean, null or a list of strings), small. */
+function settingValue(v: unknown): unknown {
+  if (v === null || typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v))) return v;
+  if (typeof v === "string") return text(v, "value", MAX_SETTING);
+  if (Array.isArray(v) && v.length <= 200 && v.every((x) => typeof x === "string" && x.length <= MAX_SETTING)) return [...v];
+  throw new ProtocolError("value must be a string, a number, a boolean, null or a list of strings");
+}
+
 export function parseRequest(v: unknown): WorkerRequest {
   const o = obj(v, "request");
   const type = oneOf(o.type, [
     "initialize", "submit", "stageAttachment", "removeAttachment", "recipient", "setting", "interrupt", "cycleMode", "usage", "closeConversation", "decision",
     "permissionAnswer", "inspectFocusedRun", "readArtifact", "listChanges", "readSnapshotFile", "accountUsage", "doctor", "shutdown",
+    ...CONFIGURATION_REQUESTS,
   ] as const, "request.type");
   switch (type) {
     case "initialize":
@@ -523,6 +578,13 @@ export function parseRequest(v: unknown): WorkerRequest {
       return { type, requestId: requestId(o.requestId, "requestId"), answer: permissionAnswer(o.answer) };
     case "readArtifact":
       return { type, artifact: oneOf(o.artifact, ARTIFACTS, "artifact"), conversation: focusedOn(o.conversation) };
+    case "readConfiguration":
+    case "syncConfiguration":
+      return { type, ...configTarget(o) };
+    case "updateConfiguration":
+      return { type, ...configTarget(o), scope: oneOf(o.scope, CONFIG_SCOPES, "scope"), key: settingKeyName(o.key), value: settingValue(o.value) };
+    case "clearConfiguration":
+      return { type, ...configTarget(o), scope: oneOf(o.scope, CONFIG_SCOPES, "scope"), key: settingKeyName(o.key) };
     case "readSnapshotFile": {
       if (!isRunId(o.runId)) throw new ProtocolError("runId is not a run id");
       if (!isObjectId(o.base) || !isObjectId(o.snapshot)) throw new ProtocolError("base and snapshot must be commit ids");
@@ -542,7 +604,7 @@ export function parseRequestEnvelope(v: unknown): RequestEnvelope {
 /** The worker is our own code; this only guards against a mismatched or broken worker build. */
 export function parseWorkerMessage(v: unknown): WorkerMessage {
   const o = obj(v, "worker message");
-  const kind = oneOf(o.kind, ["hello", "response", "event", "ui", "decision", "decisionClosed"] as const, "kind");
+  const kind = oneOf(o.kind, ["hello", "response", "event", "ui", "decision", "decisionClosed", "configWritten"] as const, "kind");
   if (int(o.protocol, "protocol") !== PROTOCOL_VERSION) throw new ProtocolError(`worker speaks protocol ${String(o.protocol)}, expected ${PROTOCOL_VERSION}`);
   if (kind !== "hello") int(o.generation, "generation");
   switch (kind) {
@@ -567,6 +629,9 @@ export function parseWorkerMessage(v: unknown): WorkerMessage {
     case "decisionClosed":
       conversationId(o.conversation);
       requestId(o.requestId, "requestId");
+      break;
+    case "configWritten":
+      oneOf(o.scope, ["global"] as const, "scope");
       break;
   }
   return o as unknown as WorkerMessage;

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened runtime entitlements for agentduo, for the app and the helpers it starts.
+  - allow-jit, allow-unsigned-executable-memory: V8 (the renderer and the engine worker, which is this same binary run
+    as Node with ELECTRON_RUN_AS_NODE) generates code at run time.
+  - disable-library-validation: an ad-hoc signed app (no Team ID) cannot load its own frameworks under library
+    validation; Developer ID builds keep it so the worker binary loads the same frameworks.
+  Nothing else (no camera, microphone, network server or Apple Events).
+-->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+  </dict>
+</plist>

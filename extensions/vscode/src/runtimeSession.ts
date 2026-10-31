@@ -1,16 +1,22 @@
 import { resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { killAllActive } from "../../../src/agents/process.js";
-import { Chat, notRepoNote, resumeHint, type ChatUi } from "../../../src/chat.js";
+import { Chat, notRepoNote, resumeHint, type ChatUi, type SaveFlags } from "../../../src/chat.js";
 import { AttachmentError } from "../../../src/core/attachments.js";
-import { isPermissionMode, parseInput, type Backend, type SettingCommand } from "../../../src/core/commands.js";
+import { parseInput, type Backend } from "../../../src/core/commands.js";
 import { ConfigError, type ConfigData } from "../../../src/core/config.js";
+import {
+  ConfigurationError, filesConfiguration, readConfiguration, clearConfiguration, updateConfiguration, type ConfigScope, type ConfigurationView,
+} from "../../../src/core/configuration.js";
 import { Conversation } from "../../../src/core/conversation.js";
 import type { Check } from "../../../src/core/doctor.js";
 import { diagnose, EnvironmentError, prepareEnvironment, runnableProblem, type WorkspaceEnv } from "../../../src/core/environment.js";
 import { ModelRegistry, resolvingModels } from "../../../src/core/models.js";
 import type { Review } from "../../../src/core/outputs.js";
 import { findingsMarkdown } from "../../../src/core/render.js";
-import { permissionMode, settingsView, type SettingsView } from "../../../src/core/settings.js";
+import {
+  permissionMode, SETTING_KEYS, settings, settingsView, valueAt, withChange, type SettingChange, type SettingsView,
+} from "../../../src/core/settings.js";
 import { acquireWorkspaceLock, LockError, RunStore, workspaceBusy, workspaceLockHolder, type RunState } from "../../../src/core/state.js";
 import { readClaudeUsage, readCodexUsage } from "../../../src/core/usage.js";
 import { EventBus, type DuoEvent, type HumanReview, type ModelMap, type PermissionAnswer } from "../../../src/events.js";
@@ -39,6 +45,8 @@ export interface RuntimeSink {
   ui(update: UiUpdate, conversation: string | null): void;
   decisionOpened(conversation: string, requestId: string, review: HumanReview, views: ArtifactName[]): void;
   decisionClosed(conversation: string, requestId: string): void;
+  /** A chat wrote the user config (--global): the host has other workspaces' sessions read it again. */
+  configWritten(scope: "global"): void;
 }
 
 /** One conversation of the workspace (an extension tab) in this worker: its chat, and the questions it asks the user. */
@@ -120,8 +128,17 @@ export class RuntimeSession {
   private models: ModelRegistry | null = null;
   /** Who plain messages go to in tabs whose chat does not exist yet, so the choice is not lost. */
   private readonly chosen = new Map<string, Backend>();
-  /** The settings changed in this session, in order: each tab follows them, also one opened later. */
-  private readonly changed: SettingCommand[] = [];
+  /**
+   * The settings changed in this session, in order (without those a later one supersedes): each tab follows them,
+   * also one opened later. They come from a tab's own commands and from Settings (its session values, and what a file
+   * change made of the effective config).
+   */
+  private changed: SettingChange[] = [];
+  /**
+   * The files' configuration as this session last read it (when it read the config, and after each file change it
+   * made or was told of): a key whose value in the files moves away from it is followed by every tab.
+   */
+  private seen: ConfigData | null = null;
   /** Stops the Account & Usage view's lookups at shutdown. */
   private readonly lookups = new AbortController();
 
@@ -171,8 +188,14 @@ export class RuntimeSession {
     return !!this.release;
   }
 
+  /** The folder this worker works in. */
+  get workspace(): string {
+    return resolve(this.o.workspace);
+  }
+
   private async prepare(): Promise<WorkspaceEnv> {
     this.env = await prepareEnvironment({ cwd: this.o.workspace, configPath: this.o.configPath ?? undefined, env: this.o.env });
+    this.seen = filesConfiguration(this.configurationOptions(null));
     return this.env;
   }
 
@@ -263,10 +286,10 @@ export class RuntimeSession {
     const models = this.modelsFor(env);
     const chat = new Chat({
       cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, userConfigFile: env.userConfigFile, bus, decider: decisions, permissions, ui, env: this.o.env, models,
-      conversationId: conversation, busyElsewhere: () => this.runningElsewhere(conversation),
+      conversationId: conversation, busyElsewhere: () => this.runningElsewhere(conversation), changed: (change, wrote) => this.changedIn(conversation, change, wrote),
     });
-    // The settings changed in the other tabs of this session (already said and saved there).
-    for (const setting of this.changed) chat.applySetting(setting, { quiet: true });
+    // The settings changed in the other tabs of this session and in Settings (already said and saved there).
+    for (const change of this.changed) chat.follow(change);
     const chosen = this.chosen.get(conversation);
     this.chosen.delete(conversation);
     if (chosen) chat.selectRecipient(chosen);
@@ -342,24 +365,16 @@ export class RuntimeSession {
     });
   }
 
-  /** A setting from a tab, applied as the chat's own command would; once it changed something, every other tab follows. */
+  /** A setting from a tab, applied as the chat's own command would (every other tab follows it: changedIn). */
   applySetting(conversation: string, request: SettingRequest): Promise<void> {
     return this.serial(async () => {
       const chat = await this.ensureSession(conversation);
-      const before = JSON.stringify(chat.config);
       chat.applySetting(request.setting, { save: request.save, global: request.global, yes: request.yes });
-      // Only shown, refused (full access without --yes), or already so: nothing for the other tabs to follow.
-      if (JSON.stringify(chat.config) !== before) this.follow(conversation, request.setting);
     });
   }
 
   cycleMode(conversation: string): Promise<void> {
-    return this.serial(async () => {
-      const chat = await this.ensureSession(conversation);
-      chat.cycleMode();
-      const mode = permissionMode(chat.config);
-      if (isPermissionMode(mode)) this.follow(conversation, { target: "mode", mode });
-    });
+    return this.serial(async () => (await this.ensureSession(conversation)).cycleMode());
   }
 
   /** The tab's usage, looked up again for its usage panel, as /usage does. */
@@ -367,10 +382,149 @@ export class RuntimeSession {
     return this.serial(async () => (await this.ensureSession(conversation)).usage());
   }
 
-  /** The other tabs take the setting a tab changed, quietly (that tab said so and saved it); later tabs will too. */
-  private follow(origin: string, setting: SettingCommand): void {
-    this.changed.push(setting);
-    for (const [id, tab] of this.tabs) if (id !== origin) tab.chat.applySetting(setting, { quiet: true });
+  /**
+   * A tab's chat changed a setting (a command typed or picked, Shift+Tab): every other tab follows it. Written to a file,
+   * the files are what this session reads now (each key someone else changed there is followed too); written to the
+   * user config, the host is told, since every workspace reads that file (the desktop's other projects follow it).
+   */
+  private changedIn(conversation: string, change: SettingChange, wrote: SaveFlags): void {
+    this.follow(conversation, change);
+    if (!wrote.save && !wrote.global) return;
+    if (this.seen) this.followFiles(this.seen, this.sessionConfig());
+    if (wrote.global) this.o.sink.configWritten("global");
+  }
+
+  /**
+   * The other tabs take the setting a tab changed, quietly (that tab said so and saved it); later tabs will too. With
+   * `origin` null (Settings), every tab takes it.
+   */
+  private follow(origin: string | null, change: SettingChange): void {
+    this.changed = withChange(this.changed, change);
+    for (const [id, tab] of this.tabs) if (id !== origin) tab.chat.follow(change);
+  }
+
+  // ------------------------------------------------------------ configuration (the desktop's Settings)
+  private configurationOptions(session: ConfigData | null) {
+    return { workspace: resolve(this.o.workspace), configPath: this.o.configPath, env: this.o.env, session };
+  }
+
+  /**
+   * What new work of this session gets: a tab's chat config (they all follow the same settings), or, with none yet,
+   * the files' with this session's changes on top. Never takes the lock, never opens a chat.
+   */
+  private sessionConfig(): ConfigData {
+    const chat = this.config();
+    if (chat && this.tabs.size) return chat;
+    const cfg = filesConfiguration(this.configurationOptions(null));
+    for (const change of this.changed) change.apply(cfg);
+    return cfg;
+  }
+
+  /** Every layer of the configuration and each key's source, with this session's own values; reads only. */
+  readConfiguration(): ConfigurationView {
+    return readConfiguration(this.configurationOptions(this.sessionConfig()));
+  }
+
+  /**
+   * A Settings change. `session`: this session only (every tab follows it, nothing is written). `global`/`project`:
+   * written to that file (no lock, no chat); then each key whose effective value it changed is followed by every
+   * tab, unless the session has a value of its own for it (which wins). A run going keeps its next-run keys.
+   */
+  updateConfiguration(scope: ConfigScope, key: string, value: unknown): Promise<ConfigurationView> {
+    return this.serial(async () => {
+      if (scope === "session") {
+        let change: SettingChange;
+        try {
+          change = settings.value(key, value);
+        } catch (e) {
+          if (e instanceof ConfigError) throw new SessionError("bad_request", e.message);
+          throw e;
+        }
+        this.follow(null, change);
+        return this.configured();
+      }
+      return this.rewrite(() => updateConfiguration(this.configurationOptions(null), scope, key, value));
+    });
+  }
+
+  /**
+   * Back to what is inherited: `session` drops this session's own value (the files' applies again); `global`/`project`
+   * removes the key from that file.
+   */
+  clearConfiguration(scope: ConfigScope, key: string): Promise<ConfigurationView> {
+    return this.serial(async () => {
+      if (scope === "session") {
+        const files = filesConfiguration(this.configurationOptions(null));
+        const k = SETTING_KEYS.find((x) => x.key === key);
+        if (!k) throw new SessionError("bad_request", `'${key}' is not a setting agentduo can change`);
+        if (!isDeepStrictEqual(valueAt(this.sessionConfig(), k.path), valueAt(files, k.path))) this.follow(null, settings.value(key, valueAt(files, k.path)));
+        return this.configured();
+      }
+      return this.rewrite(() => clearConfiguration(this.configurationOptions(null), scope, key));
+    });
+  }
+
+  /** Writes a file, then has every tab follow each key whose effective value the write changed. */
+  private rewrite(write: () => ConfigurationView): ConfigurationView {
+    const before = this.seen ?? filesConfiguration(this.configurationOptions(null));
+    const session = this.sessionConfig();
+    try {
+      write();
+    } catch (e) {
+      if (e instanceof ConfigurationError) throw new SessionError("config", e.message);
+      throw e;
+    }
+    this.followFiles(before, session);
+    return this.configured();
+  }
+
+  /**
+   * The files were written by someone else (the desktop's host, or another project's worker, for the user config):
+   * read again, every tab follows each key they changed since this session last read them, as after its own write.
+   */
+  syncConfiguration(): Promise<ConfigurationView> {
+    return this.serial(async () => {
+      if (this.seen) this.followFiles(this.seen, this.sessionConfig());
+      else this.seen = filesConfiguration(this.configurationOptions(null));
+      return this.configured();
+    });
+  }
+
+  /**
+   * Each key whose value in the files is no longer `before`'s is followed by every tab (and later ones), unless the
+   * session has a value of its own for it (which wins): a project's override keeps the user config's change from
+   * reaching it, since the merged value does not move. A run going keeps its next-run keys (Chat.follow).
+   */
+  private followFiles(before: ConfigData, session: ConfigData): void {
+    const after = filesConfiguration(this.configurationOptions(null));
+    this.seen = after;
+    for (const k of SETTING_KEYS) {
+      const was = valueAt(before, k.path);
+      const now = valueAt(after, k.path);
+      // A key the session has a value of its own for keeps it; one that did not change needs nothing.
+      if (isDeepStrictEqual(was, now) || !isDeepStrictEqual(valueAt(session, k.path), was)) continue;
+      let change: SettingChange;
+      try {
+        change = settings.value(k.key, now);
+      } catch (e) {
+        // A value edited by hand that is not one: the files' problems say so; the chats keep what they had.
+        if (e instanceof ConfigError) continue;
+        throw e;
+      }
+      this.follow(null, change);
+    }
+  }
+
+  /** The configuration as it is now; the tabs (also those with no chat yet) show its settings, mode and pipeline. */
+  private configured(): ConfigurationView {
+    const cfg = this.sessionConfig();
+    const view = safeSettings(cfg);
+    if (!this.tabs.size && view) {
+      this.o.sink.ui({ type: "settings", settings: view }, null);
+      this.o.sink.ui({ type: "mode", mode: safePermissionMode(cfg) }, null);
+    }
+    this.o.sink.ui({ type: "pipeline", pipeline: pipelineOf(cfg) }, null);
+    return readConfiguration(this.configurationOptions(cfg));
   }
 
   /** Esc in a tab: stops its answer or discussion, or the running step (/resume re-runs it). */

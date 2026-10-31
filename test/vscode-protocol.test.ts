@@ -36,14 +36,34 @@ describe("worker requests", () => {
     expect([init({}), init({ discover: true }), init({ discover: false })].map((r) => r.type === "initialize" && r.discover)).toEqual([true, true, false]);
   });
 
-  it("is protocol 8 (the Account & Usage view's accountUsage); takes only the permission modes the chat offers", () => {
-    expect(PROTOCOL_VERSION).toBe(8);
+  it("is protocol 9 (the desktop's Settings); takes only the permission modes the chat offers", () => {
+    expect(PROTOCOL_VERSION).toBe(9);
     const setting = (s: unknown) => parseRequestEnvelope(envelope({ type: "setting", conversation: "c-1", setting: s })).request;
     for (const mode of ["manual", "acceptEdits", "auto"]) expect(setting({ target: "mode", mode })).toMatchObject({ setting: { target: "mode", mode } });
     expect(setting({ target: "mode" })).toMatchObject({ setting: { target: "mode" } });
     for (const s of [{ target: "mode", mode: "plan" }, { target: "mode", mode: "bypassPermissions" }, { target: "edits", mode: "auto" }]) {
       expect(() => setting(s), JSON.stringify(s)).toThrow(ProtocolError);
     }
+  });
+
+  it("takes configuration requests for a workspace by absolute path, a setting key and a small JSON value", () => {
+    const req = (o: object) => parseRequestEnvelope(envelope(o)).request;
+    expect(req({ type: "readConfiguration" })).toEqual({ type: "readConfiguration", workspace: null, configPath: null });
+    expect(req({ type: "syncConfiguration", workspace: "/home/me/proj" })).toEqual({ type: "syncConfiguration", workspace: "/home/me/proj", configPath: null });
+    expect(req({ type: "readConfiguration", workspace: "/home/me/proj" })).toEqual({ type: "readConfiguration", workspace: "/home/me/proj", configPath: null });
+    expect(req({ type: "updateConfiguration", workspace: null, scope: "global", key: "limits.max_retries", value: 2 }))
+      .toEqual({ type: "updateConfiguration", workspace: null, configPath: null, scope: "global", key: "limits.max_retries", value: 2 });
+    expect(req({ type: "updateConfiguration", scope: "project", key: "claude.args", value: ["--x", "y z"] })).toMatchObject({ value: ["--x", "y z"] });
+    expect(req({ type: "clearConfiguration", scope: "session", key: "claude.role_args.implementer" })).toMatchObject({ scope: "session", key: "claude.role_args.implementer" });
+    for (const bad of [
+      { type: "readConfiguration", workspace: "relative/path" },
+      { type: "updateConfiguration", scope: "everywhere", key: "claude.bin", value: "x" },
+      { type: "updateConfiguration", scope: "global", key: "../etc", value: "x" },
+      { type: "updateConfiguration", scope: "global", key: "claude.args", value: [1, 2] },
+      { type: "updateConfiguration", scope: "global", key: "claude.args", value: { a: 1 } },
+      { type: "updateConfiguration", scope: "global", key: "claude.bin", value: "x".repeat(5000) },
+      { type: "clearConfiguration", scope: "global" },
+    ]) expect(() => req(bad), JSON.stringify(bad).slice(0, 80)).toThrow(ProtocolError);
   });
 
   it("says where a setting is saved, as --save and --global do: nowhere when the request does not say", () => {
@@ -168,6 +188,10 @@ describe("worker messages", () => {
     expect(() => parseWorkerMessage({ kind: "event", protocol: 1, generation: 1, event: { type: "warning" } })).toThrow(/protocol 1/);
     expect(() => parseWorkerMessage({ kind: "decision", protocol: PROTOCOL_VERSION, generation: 1, requestId: "d", review: {} })).toThrow(ProtocolError);
     expect(() => parseWorkerMessage({ kind: "shell", protocol: 1 })).toThrow(ProtocolError);
+    // A chat wrote the user config: only that file is named; a project's is this worker's own business.
+    expect(parseWorkerMessage({ kind: "configWritten", protocol: PROTOCOL_VERSION, generation: 1, scope: "global" }).kind).toBe("configWritten");
+    expect(() => parseWorkerMessage({ kind: "configWritten", protocol: PROTOCOL_VERSION, generation: 1, scope: "project" })).toThrow(ProtocolError);
+    expect(() => parseWorkerMessage({ kind: "configWritten", protocol: PROTOCOL_VERSION, scope: "global" })).toThrow(ProtocolError);
   });
 });
 

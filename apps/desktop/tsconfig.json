@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowJs": false,
+    "jsx": "react-jsx",
+    "typeRoots": ["../../node_modules/@types"],
+    "types": ["node"],
+    "paths": {
+      "electron": ["./node_modules/electron/electron.d.ts"],
+      "vitest": ["../../node_modules/vitest"],
+      "vitest/*": ["../../node_modules/vitest/*"],
+      "yaml": ["../../node_modules/yaml"]
+    }
+  },
+  "include": ["src", "test", "vitest.config.mts", "vitest.e2e.mts"]
+}

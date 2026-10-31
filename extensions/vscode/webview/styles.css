@@ -382,6 +382,8 @@ body {
   color: var(--vscode-input-foreground);
   font: inherit;
 }
+/* The enclosing composer-box provides the focus indicator. */
+.composer-input:focus-visible { outline: none; }
 .composer-input::placeholder { color: var(--vscode-input-placeholderForeground, var(--muted)); }
 .composer-input:disabled { opacity: 0.6; }
 .composer-bar { display: flex; align-items: center; gap: 4px; min-width: 0; }

@@ -1,4 +1,5 @@
-// Stand-in for the codex / claude CLIs in tests: fake-agent.mjs <codex|claude> <cli args...>.
+// Stand-in for the codex / claude CLIs in tests: fake-agent.mjs <codex|claude> <cli args...>. A call logs `leaked`: the
+// host variables (ELECTRON_RUN_AS_NODE, NODE_CHANNEL_FD…) that reached it, which none should.
 // The prompt arrives on stdin; its "[orchestrator-role: X]" tag selects the next scripted response for
 // role X from $FAKE_SCENARIO (the last response repeats). Every call is appended to $FAKE_LOG.
 // A conversation prompt ("[agentduo-conversation]") is role "chat_<backend>" (else "chat"); its responses give an
@@ -16,6 +17,7 @@
 // `claude -p /usage` prints scenario.usage.claude.text (default: a short /usage); its exit and stderr fail it.
 // `claude auth status` prints scenario.usage.claude.auth as JSON (default: signed in to claude.ai with Max), exiting 1
 // when it is signed out as Claude does; scenario.usage.claude.authExit fails it with no JSON.
+// `codex login status` says it is logged in (scenario.usage.codex.loggedOut: it is not), as the desktop's first-run check asks.
 // `codex app-server` answers initialize, account/read (scenario.usage.codex.account) and account/rateLimits/read
 // (.rateLimits, or the error .rateLimitsError) until stdin closes; .hang never answers, .exit and .stderr fail it.
 import { execSync } from "node:child_process";
@@ -44,6 +46,7 @@ async function main() {
   if (backend === "claude" && args[0] === "-p" && args[1] === "/usage") return claudeUsage(args);
   if (backend === "claude" && args[0] === "auth" && args[1] === "status") return claudeAuth(args);
   if (backend === "codex" && args[0] === "app-server") return appServer(args);
+  if (backend === "codex" && args[0] === "login" && args[1] === "status") return codexLogin(args);
   const host = args.includes("--permission-prompt-tool");
   const streamed = backend === "claude" && args.includes("--input-format");
   const stdin = streamed ? createInterface({ input: process.stdin })[Symbol.asyncIterator]() : null;
@@ -76,7 +79,9 @@ async function main() {
   const unscripted = step === "critique" ? [{ answer: "Looks right.\nVERDICT: AGREE" }] : chat ? scenario.chat ?? [{ answer: `Answer from ${backend}.` }] : [{ raw: `no scripted response for role ${role}` }];
   const responses = scenario[role] ?? unscripted;
   const resp = responses[Math.min(n, responses.length - 1)];
-  appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend, role, call: n, args, prompt, ...(images.length ? { images } : {}) }) + "\n");
+  // What a host must keep to itself (Electron run as Node, its IPC channel): logged when it reached the agent.
+  const leaked = ["ELECTRON_RUN_AS_NODE", "NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE"].filter((k) => process.env[k] !== undefined);
+  appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend, role, call: n, args, prompt, ...(images.length ? { images } : {}), ...(leaked.length ? { leaked } : {}) }) + "\n");
 
   const writeFiles = (files) => {
     for (const [path, content] of Object.entries(files ?? {})) {
@@ -219,6 +224,14 @@ function claudeAuth(args) {
   const status = u.auth ?? { loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", email: "fake@anthropic.example", orgId: "org", orgName: "Org", subscriptionType: "max" };
   process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
   return status.loggedIn === false ? 1 : 0;
+}
+
+/** `codex login status`: what codex 0.164 prints (on stderr), with no model call. */
+function codexLogin(args) {
+  const u = usageScenario("codex");
+  if (process.env.FAKE_LOG) appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend: "codex", usage: true, args }) + "\n");
+  process.stderr.write(u.loggedOut ? "Not logged in\n" : "Logged in using ChatGPT\n");
+  return u.loggedOut ? 1 : 0;
 }
 
 /** `codex app-server`: JSON-RPC lines on stdin and stdout, as codex 0.164 speaks it (see fixtures/codex-account.json). */

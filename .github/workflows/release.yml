@@ -1,0 +1,137 @@
+# Releases the desktop app. A v* tag (npm version makes one) builds the installers on each OS, uploads them with their
+# update feeds (latest.yml, latest-mac.yml, latest-linux.yml) to a draft GitHub Release, and publishes it once every OS
+# has: a published release is what installed apps update from (electron-updater, apps/desktop/src/main/updates.ts).
+# Any OS failing leaves the draft unpublished, so no app is offered a release that lacks its installer.
+# Signing is optional: each certificate is used only when its secrets are set (apps/desktop/README.md, "Releasing").
+# The npm package and the VS Code extension are still published by hand.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag is the version of agentduo and of the desktop app
+        run: |
+          node -e '
+            const tag = process.env.GITHUB_REF_NAME;
+            const versions = ["package.json", "apps/desktop/package.json"].map((f) => require(`./${f}`).version);
+            if (versions.some((v) => `v${v}` !== tag)) throw new Error(`tag ${tag} but versions ${versions.join(", ")}: run npm version`);
+          '
+      - name: Draft the release (once, should the workflow run again)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME exists"
+            exit 0
+          fi
+          flags=(--draft --verify-tag --generate-notes --title "AgentDuo ${GITHUB_REF_NAME#v}")
+          # A pre-release version (v0.8.0-beta.1) is marked so: installed apps on a stable version skip it.
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" "${flags[@]}"
+
+  build:
+    needs: draft
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: mac
+          - os: windows-latest
+            target: win
+          - os: ubuntu-latest
+            target: linux
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/desktop/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix apps/desktop
+      - run: npm --prefix apps/desktop run typecheck
+      - run: npm --prefix apps/desktop test
+      # A secret that is not set is an empty string, which electron-builder would take for a certificate: each one goes
+      # into the environment only when it is set (still masked in the log).
+      - name: Signing, where its secrets are set
+        shell: bash
+        env:
+          MAC_CERTIFICATE: ${{ secrets.MAC_CERTIFICATE }}
+          MAC_CERTIFICATE_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+          MAC_IDENTITY: ${{ secrets.MAC_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WIN_CERTIFICATE: ${{ secrets.WIN_CERTIFICATE }}
+          WIN_CERTIFICATE_PASSWORD: ${{ secrets.WIN_CERTIFICATE_PASSWORD }}
+        run: |
+          set_env() { if [ -n "$2" ]; then printf '%s<<AGENTDUO_EOF\n%s\nAGENTDUO_EOF\n' "$1" "$2" >> "$GITHUB_ENV"; fi; }
+          if [ "$RUNNER_OS" = macOS ] && [ -n "$MAC_CERTIFICATE" ]; then
+            set_env CSC_LINK "$MAC_CERTIFICATE"
+            set_env CSC_KEY_PASSWORD "$MAC_CERTIFICATE_PASSWORD"
+            set_env AGENTDUO_MAC_IDENTITY "$MAC_IDENTITY"
+            if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+              set_env APPLE_ID "$APPLE_ID"
+              set_env APPLE_APP_SPECIFIC_PASSWORD "$APPLE_APP_SPECIFIC_PASSWORD"
+              set_env APPLE_TEAM_ID "$APPLE_TEAM_ID"
+              set_env AGENTDUO_NOTARIZE 1
+            fi
+          fi
+          if [ "$RUNNER_OS" = Windows ] && [ -n "$WIN_CERTIFICATE" ]; then
+            set_env WIN_CSC_LINK "$WIN_CERTIFICATE"
+            set_env WIN_CSC_KEY_PASSWORD "$WIN_CERTIFICATE_PASSWORD"
+          fi
+      - name: Package
+        run: npm --prefix apps/desktop run package:${{ matrix.target }}
+      # The packaged app, copied away from the checkout, started with a profile of its own (which checks no update).
+      - name: Package smoke (Linux, under Xvfb, without the SUID sandbox helper an unpacked app has)
+        if: runner.os == 'Linux'
+        env:
+          AGENTDUO_E2E_NO_SANDBOX: "1"
+        run: xvfb-run -a npm --prefix apps/desktop run test:pack
+      - name: Package smoke
+        if: runner.os != 'Linux'
+        run: npm --prefix apps/desktop run test:pack
+      - name: Upload the installers and the update feed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          cd apps/desktop/release
+          files=(*.dmg *.zip *.exe *.AppImage *.deb *.blockmap latest*.yml)
+          if [ ${#files[@]} -eq 0 ]; then echo "nothing was packaged"; exit 1; fi
+          ls -l "${files[@]}"
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Every OS's feed is in the release, then it is published
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          for feed in latest.yml latest-mac.yml latest-linux.yml; do
+            grep -qx "$feed" <<<"$assets" || { echo "the release has no $feed"; exit 1; }
+          done
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false

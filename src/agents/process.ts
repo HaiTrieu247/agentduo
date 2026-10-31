@@ -76,6 +76,11 @@ function quoteWindows(arg: string): string {
   return /[\s"&|<>^%]/.test(arg) ? `"${arg.replace(/"/g, '""')}"` : arg;
 }
 
+/** The command line cmd.exe gets for a .cmd/.bat shim (Node starts those only through a shell): each word quoted as needed. */
+export function windowsShimCommand(cmd: string, args: string[]): string {
+  return [cmd, ...args].map(quoteWindows).join(" ");
+}
+
 /**
  * Spawn a process in its own process group, feed `input` on stdin, report complete stdout lines as they
  * arrive, and enforce a timeout / abort signal by killing the whole tree.
@@ -84,7 +89,7 @@ export function runProcess(cmd: string, args: string[], opts: RunOptions): Promi
   return new Promise((resolvePromise, reject) => {
     // Node refuses to spawn .cmd/.bat shims without a shell (CVE-2024-27980).
     const winShim = isWindows && /\.(cmd|bat)$/i.test(cmd);
-    const command = winShim ? [cmd, ...args].map(quoteWindows).join(" ") : cmd;
+    const command = winShim ? windowsShimCommand(cmd, args) : cmd;
     const child = spawn(command, winShim ? [] : args, {
       cwd: opts.cwd,
       env: opts.env ?? process.env,

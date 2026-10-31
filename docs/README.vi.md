@@ -126,6 +126,10 @@ Chi tiết xem [extensions/vscode/README.md](../extensions/vscode/README.md). Kh
 
 Yêu cầu: Node.js ≥ 22.12, git, Codex CLI và Claude Code. Chạy pipeline (`duo "<task>"`, `/pipeline`) thì workspace phải nằm trong một git repo, vì agentduo chụp snapshot và tạo diff bằng git. Nếu chưa có, `duo init` sẽ hỏi có muốn `git init` không. Chat và `/discuss` thì chạy ở thư mục nào cũng được.
 
+## App desktop
+
+`apps/desktop` là AgentDuo, tức agentduo dưới dạng app Electron cho macOS, Windows và Linux, dùng chung engine với `duo` và extension: sidebar chứa project và hội thoại, chat ba bên, panel bên phải xem plan, diff thay đổi và kết quả kiểm tra, Settings với phạm vi global/project/phiên, và bước kiểm tra hai CLI khi mở lần đầu. App chạy engine bằng Node đi kèm Electron nên không cần cài Node riêng, nhưng vẫn cần Claude Code và Codex CLI đã cài và đăng nhập. Build từ source: `npm ci`, rồi `npm ci --prefix apps/desktop`, rồi `npm --prefix apps/desktop run dev`. Push một tag `v*` sẽ build bộ cài trên cả ba hệ điều hành và phát hành thành một GitHub Release; app đã cài tự cập nhật từ đó (bản macOS chỉ tự cài khi được ký bằng Developer ID, bản ký ad-hoc chỉ báo có bản mới để tải về). Cách đóng gói, cập nhật, phát hành, ký ứng dụng (cần chứng chỉ riêng) và nền tảng nào đã được kiểm chứng xem ở [apps/desktop/README.md](../apps/desktop/README.md).
+
 ## Workspace
 
 `duo` làm việc ở thư mục bạn gọi nó, hoặc ở `--dir PATH`:

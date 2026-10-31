@@ -112,6 +112,8 @@ export interface WorkspaceSessionOptions {
   onQuestion?(conversation: string, kind: "decision" | "permission", text: string): void;
   /** /new in a tab: the host opens a new tab with a new conversation; the old one keeps its own. */
   onNewConversation?(): void;
+  /** A chat command wrote the user config (--global); a host with other workspaces' sessions has them read it again. */
+  onConfigWritten?(scope: "global"): void;
 }
 
 export class WorkspaceSession {
@@ -356,7 +358,9 @@ export class WorkspaceSession {
     }
     const generation = this.o.nextGeneration();
     this.dispatch({ type: "workspace", session: "starting", workspace: this.o.workspace, generation }, null);
-    const client = new WorkerClient({ node: node.path, script: this.o.workerScript, cwd: this.o.workspace, env: this.o.env, generation, log: this.o.log });
+    const client = new WorkerClient({
+      node: node.path, script: this.o.workerScript, cwd: this.o.workspace, env: this.o.env, generation, log: this.o.log, launch: node.launch ?? "node",
+    });
     client.onMessage((m) => {
       if (this.spawned !== client) return;
       switch (m.kind) {
@@ -373,6 +377,9 @@ export class WorkspaceSession {
           break;
         case "decisionClosed":
           this.dispatch({ type: "decision.closed", id: m.requestId }, m.conversation);
+          break;
+        case "configWritten":
+          this.o.onConfigWritten?.(m.scope);
           break;
       }
     });
@@ -395,7 +402,7 @@ export class WorkspaceSession {
   /** Waits for the hello, then for `initialize`; once restart or dispose has let go of the worker, it gives up quietly. */
   private async launch(client: WorkerClient, node: Extract<NodeLookup, { ok: true }>, generation: number): Promise<WorkerClient | null> {
     const released = () => this.launching !== client;
-    this.o.log(`starting the worker with Node ${node.version} (${node.path}) in ${this.o.workspace}`);
+    this.o.log(`starting the worker with ${node.launch === "electron" ? "Electron's own" : ""} Node ${node.version} (${node.path}) in ${this.o.workspace}`.replace("  ", " "));
     try {
       const hello = await client.start();
       this.o.log(`worker ${hello.pid} up: agentduo ${hello.version} on Node ${hello.node}`);

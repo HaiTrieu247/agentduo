@@ -183,6 +183,16 @@ export function configFromFiles(files: string[]): ConfigData {
   return data as unknown as ConfigData;
 }
 
+/**
+ * Defaults ← each layer in order (a config file's parsed YAML mapping), unvalidated; unknown keys go to `warnings`.
+ * Throws ConfigError for a key that must be a mapping and is not.
+ */
+export function configFromLayers(layers: Array<Record<string, unknown>>, warnings: string[] = []): ConfigData {
+  let data = defaultConfig() as unknown as Record<string, unknown>;
+  for (const layer of layers) data = mergeInto(data, layer, "", warnings);
+  return data as unknown as ConfigData;
+}
+
 /** A run's saved config.json, merged over today's defaults so keys added later get their default value. */
 export function configFromSaved(raw: unknown): ConfigData {
   if (!isPlainObject(raw)) throw new ConfigError("saved run config is not a mapping");
@@ -194,6 +204,14 @@ const isNonNegInt = (v: unknown): boolean => Number.isInteger(v) && (v as number
 const isStringList = (v: unknown): boolean => Array.isArray(v) && v.every((x) => typeof x === "string");
 
 export function validateConfig(cfg: ConfigData, source?: string): void {
+  const errors = configErrors(cfg);
+  if (errors.length) {
+    throw new ConfigError(`invalid configuration${source ? ` (${source})` : ""}:\n  - ${errors.join("\n  - ")}`);
+  }
+}
+
+/** What is wrong with `cfg`, one line per key ("limits.max_retries must be an integer >= 0"); empty when nothing. */
+export function configErrors(cfg: ConfigData): string[] {
   const errors: string[] = [];
   for (const role of AGENT_ROLES) {
     if (cfg.agents[role] !== "codex" && cfg.agents[role] !== "claude") errors.push(`agents.${role} must be one of codex, claude`);
@@ -256,7 +274,5 @@ export function validateConfig(cfg: ConfigData, source?: string): void {
       else if (!isStringList(args)) errors.push(`${backend}.role_args.${role} must be a list of strings`);
     }
   }
-  if (errors.length) {
-    throw new ConfigError(`invalid configuration${source ? ` (${source})` : ""}:\n  - ${errors.join("\n  - ")}`);
-  }
+  return errors;
 }

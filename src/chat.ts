@@ -14,7 +14,8 @@ import { missingCli } from "./core/environment.js";
 import { Git } from "./core/git.js";
 import { ModelRegistry, withObserved } from "./core/models.js";
 import {
-  claudeDirs, claudeRules, describeSettings, permissionMode, saveGlobalSetting, saveSettings, settings, settingsView, type SettingChange, type SettingsView,
+  claudeDirs, claudeRules, describeSettings, permissionMode, saveGlobalSetting, saveSettings, settings, settingsView, withChange, type SettingChange,
+  type SettingsView,
 } from "./core/settings.js";
 import { nowIso, RunStore, type ConversationContext, type EarlierTask, type RunState } from "./core/state.js";
 import { readClaudeUsage, readCodexUsage, type UsageReport, type UsageState } from "./core/usage.js";
@@ -94,6 +95,11 @@ export interface ChatOptions {
   conversationId?: string;
   /** Why a pipeline cannot start now because another conversation of the workspace runs one; null when none does. */
   busyElsewhere?: () => string | null;
+  /**
+   * A setting the user changed in this chat (a command, the settings panel, Shift+Tab; never one it follows), with the
+   * files it was written to: the host has its other chats follow it, and tells whoever else reads a file written.
+   */
+  changed?: (change: SettingChange, wrote: SaveFlags) => void;
 }
 
 /**
@@ -187,8 +193,11 @@ export class Chat {
   private active: Execution | null = null;
   /** The config new runs and questions start with: the loaded one plus this chat's changes. */
   private readonly cfg: ConfigData;
-  /** This chat's setting changes, in order; replayed on a run resumed from its saved config (they are idempotent). */
-  private readonly changes: SettingChange[] = [];
+  /**
+   * This chat's setting changes, in order (without those a later one supersedes). The next-call ones are replayed on a
+   * run resumed from its saved config (they are idempotent); next-run ones never reach a run that started before.
+   */
+  private changes: SettingChange[] = [];
   /** Stopped with Esc: /resume continues it. */
   private paused: RunStore | null = null;
   private last: RunStore | null = null;
@@ -589,14 +598,13 @@ export class Chat {
    * One agent call of the conversation, with its turn's events around it. `turn.started` goes out now; the call itself
    * starts a microtask later, so the caller's active record exists before anything can finish.
    */
-  private callTurn(turn: Turn, prompt: string, signal: AbortSignal, place?: DiscussionPlace): Promise<TurnOutcome> {
+  private callTurn(turn: Turn, prompt: string, signal: AbortSignal, place?: DiscussionPlace, runner = this.directRunner()): Promise<TurnOutcome> {
     const conversation = this.conversation;
     const backend = turn.backend;
     // The CLI's own settings may have changed since the last look.
     this.models.refresh();
     const model = this.models.identity(backend);
     const signature = this.models.signature(backend);
-    const runner = this.directRunner();
     const ids = { conversationId: conversation.id, turnId: turn.id, backend };
     this.o.bus.emit({ type: "turn.started", ...ids, question: turn.question, model, ...(place ? { discussion: place } : {}) });
     return (async () => {
@@ -645,7 +653,11 @@ export class Chat {
     }
     const conversation = this.conversation;
     this.entitle(this.titleOf(question, files));
-    const maxRounds = this.cfg.limits.max_discussion_rounds;
+    // The discussion keeps the limits it started with (next-run settings), while each agent's options stay the chat's
+    // own objects, so a model or flag changed meanwhile reaches its next turn (next-call).
+    const snapshot: ConfigData = { ...this.cfg, limits: structuredClone(this.cfg.limits), agents: structuredClone(this.cfg.agents) };
+    const runner = new AgentRunner(snapshot, this.o.workspace, conversation.logDir, this.o.bus, { permissions: this.o.permissions, runsDir: this.o.runsDir });
+    const maxRounds = snapshot.limits.max_discussion_rounds;
     const d = conversation.beginDiscussion(answerer, critic, question, maxRounds, files);
     this.sentFiles(files);
     this.noteOmitted(d.context.omitted);
@@ -658,7 +670,7 @@ export class Chat {
     const step = async (kind: DiscussionStep, round: number): Promise<TurnOutcome> => {
       if (exec.abort.signal.aborted) return { status: "interrupted", answer: null, error: null, verdict: null, durationSec: 0, costUsd: 0, tokens: 0 };
       const { turn, prompt } = conversation.discussionTurn(d.id, kind, round, conversation.earlier, this.o.workspace);
-      const out = await this.callTurn(turn, prompt, exec.abort.signal, { id: d.id, step: kind, round });
+      const out = await this.callTurn(turn, prompt, exec.abort.signal, { id: d.id, step: kind, round }, runner);
       total.durationSec += out.durationSec;
       total.costUsd += out.costUsd;
       total.tokens += out.tokens;
@@ -828,10 +840,17 @@ export class Chat {
     return { task: firstLine(st.task, 200), outcome: parts.join("; ") };
   }
 
-  /** A stopped run's own config, with this chat's changes on top. */
+  /**
+   * A stopped run's own config, with this chat's next-call changes on top: who plays which role and the loop limits
+   * stay as the run saved them. A run with no saved config.json (an older agentduo's) takes the chat's, as said.
+   */
   private configOf(store: RunStore): ConfigData {
-    const cfg = store.exists("config.json") ? configFromSaved(store.readJson("config.json")) : structuredClone(this.cfg);
-    for (const change of this.changes) change.apply(cfg);
+    if (!store.exists("config.json")) {
+      this.o.ui.info(`Run ${store.taskId} has no saved config.json, so it continues with this chat's current settings (agents and limits included).`);
+      return structuredClone(this.cfg);
+    }
+    const cfg = configFromSaved(store.readJson("config.json"));
+    for (const change of this.changes) if (change.live === "next-call") change.apply(cfg);
     return cfg;
   }
 
@@ -874,7 +893,10 @@ export class Chat {
     }
     const paused = this.paused;
     this.paused = null;
+    const saved = target.exists("config.json");
     if (!this.start(target, state, cfg)) this.paused = paused;
+    // The chat's agent options it resumed with are the run's now: a later resume starts from them.
+    else if (saved) target.writeJson("config.json", cfg);
   }
 
   /** /new: forget the conversation and the earlier tasks; a stopped run keeps its files and stays resumable. */
@@ -906,49 +928,67 @@ export class Chat {
   }
 
   /**
-   * Applies a setting to new runs and questions and, from its next agent call, to the run that is going (whose saved
-   * config follows, so a resume keeps it); --save also writes it to the config file, --global to the user's.
+   * Applies a setting to new runs, questions and discussions. A next-call one also reaches the run that is going from
+   * its next agent call (its saved config follows, so a resume keeps it); a next-run one leaves that run as it started.
+   * --save also writes it to the config file, --global to the user's.
    */
   private change(change: SettingChange, flags: SaveFlags, text: () => string, quiet = false): void {
     change.apply(this.cfg);
-    this.changes.push(change);
+    this.changes = withChange(this.changes, change);
     const running = this.active?.kind === "pipeline" ? this.active : null;
-    if (running) {
+    const now = change.live === "next-call";
+    if (running && now) {
       change.apply(running.cfg);
       running.store.writeJson("config.json", running.cfg);
     }
-    const scope = quiet ? "" : this.persist(change, flags);
+    const saved = quiet ? null : this.persist(change, flags);
     this.o.ui.setMode(permissionMode(this.cfg));
     this.o.ui.setSettings?.(settingsView(this.cfg));
     this.models.refresh();
-    if (quiet) return;
-    const when = running ? " Applies from the next agent call of the current run." : this.active ? " Applies from the next question." : "";
-    this.o.ui.info(`${text()}${when}${scope}`);
+    if (!saved) return;
+    const when = running ? (now ? " Applies from the next agent call of the current run." : " Applies to the next run; the current run keeps its own.")
+      : this.active?.kind === "discussion" && !now ? " Applies to the next discussion." : this.active ? " Applies from the next question." : "";
+    this.o.ui.info(`${text()}${when}${saved.text}`);
+    this.o.changed?.(change, saved.wrote);
   }
 
-  /** Writes a change where --save and --global say; returns what the message about it says of that. */
-  private persist(change: SettingChange, flags: SaveFlags): string {
+  /**
+   * A change made elsewhere (another conversation of the workspace, or the desktop's Settings, which said so and saved
+   * it): this chat follows it quietly, with the same timing as its own changes.
+   */
+  follow(change: SettingChange): void {
+    this.change(change, {}, () => "", true);
+  }
+
+  /** Writes a change where --save and --global say; returns what the message about it says of that, and what was written. */
+  private persist(change: SettingChange, flags: SaveFlags): { text: string; wrote: SaveFlags } {
     const { configFile, userConfigFile } = this.o;
-    if (!flags.save && !flags.global) return " (this chat only; add --save to keep it in this workspace, or --global in every workspace)";
+    const wrote = { save: false, global: false };
+    if (!flags.save && !flags.global) return { text: " (this chat only; add --save to keep it in this workspace, or --global in every workspace)", wrote };
     const saved: string[] = [];
     let hidden: string[] = [];
     try {
       if (flags.save) {
         saveSettings(configFile, this.cfg, change.paths);
         saved.push(configFile);
+        wrote.save = true;
       }
       if (flags.global) {
         hidden = saveGlobalSetting(userConfigFile, configFile, change);
         saved.push(userConfigFile);
+        wrote.global = true;
       }
     } catch (e) {
       const failed = flags.save && !saved.length ? configFile : userConfigFile;
-      return `${saved.length ? `; saved to ${saved[0]}` : ""}; could not save it to ${failed}: ${(e as Error).message}`;
+      return { text: `${saved.length ? `; saved to ${saved[0]}` : ""}; could not save it to ${failed}: ${(e as Error).message}`, wrote };
     }
     const scope = `; saved to ${[...new Set(saved)].join(" and ")}`;
-    if (!hidden.length) return scope;
-    return `${scope}, but ${configFile} sets ${hidden.join(" and ")} too, which wins in this workspace: the saved setting will not apply here ` +
-      "next time (add --save to save it here as well)";
+    if (!hidden.length) return { text: scope, wrote };
+    return {
+      text: `${scope}, but ${configFile} sets ${hidden.join(" and ")} too, which wins in this workspace: the saved setting will not apply here ` +
+        "next time (add --save to save it here as well)",
+      wrote,
+    };
   }
 
   /**

@@ -12,6 +12,30 @@ export interface FakeCall {
   prompt: string;
   /** The images the call got as images: Claude's blocks (media type, base64 length), Codex's --image files; and their bytes' sha256. */
   images?: Array<{ mediaType?: string; base64?: number; file?: string; missing?: boolean; sha256?: string }>;
+  /** Host variables that reached the agent (ELECTRON_RUN_AS_NODE, NODE_CHANNEL_FD…); absent when none did. */
+  leaked?: string[];
+}
+
+/**
+ * What runs fake-agent.mjs: a Node, or an Electron binary with ELECTRON_RUN_AS_NODE=1 in `env` (the desktop's tests run
+ * under Electron, whose process.execPath would otherwise open a window). Never left to process.execPath silently.
+ */
+export interface FakeRuntime {
+  exec: string;
+  env?: Record<string, string>;
+}
+
+/** The shim's file name and text: a shell script on POSIX, a .cmd on Windows (as npm installs the real CLIs there). */
+export function fakeShim(name: "codex" | "claude", runtime: FakeRuntime, platform: NodeJS.Platform = process.platform, agent = FAKE_AGENT): { file: string; text: string } {
+  const env = Object.entries(runtime.env ?? {});
+  if (platform === "win32") {
+    // %* passes the arguments as cmd.exe got them, quotes included; `set "K=V"` keeps a value with spaces whole.
+    const sets = env.map(([k, v]) => `set "${k}=${v}"\r\n`).join("");
+    return { file: `${name}.cmd`, text: `@echo off\r\n${sets}"${runtime.exec}" "${agent}" ${name} %*\r\n` };
+  }
+  const q = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
+  const sets = env.map(([k, v]) => `${k}=${q(v)} `).join("");
+  return { file: name, text: `#!/bin/sh\n${sets}exec "${runtime.exec}" "${agent}" ${name} "$@"\n` };
 }
 
 /** Executables named codex/claude that run fake-agent.mjs against a scripted scenario. */
@@ -19,21 +43,31 @@ export class FakeClis {
   readonly bin: string;
   private readonly files: { FAKE_SCENARIO: string; FAKE_COUNTS: string; FAKE_LOG: string };
   private saved: Record<string, string | undefined> = {};
+  private readonly names = new Map<string, string>();
 
-  constructor(readonly dir: string) {
+  /** `runtime`: what runs the fake agent (default: this process's Node, which must be a Node). */
+  constructor(readonly dir: string, runtime: FakeRuntime = { exec: process.execPath }) {
     this.bin = join(dir, "bin");
     mkdirSync(this.bin, { recursive: true });
-    for (const name of ["codex", "claude"]) {
-      const path = join(this.bin, name);
-      writeFileSync(path, `#!/bin/sh\nexec "${process.execPath}" "${FAKE_AGENT}" ${name} "$@"\n`);
+    for (const name of ["codex", "claude"] as const) {
+      const shim = fakeShim(name, runtime);
+      const path = join(this.bin, shim.file);
+      writeFileSync(path, shim.text);
       chmodSync(path, 0o755);
+      this.names.set(name, path);
     }
     this.files = { FAKE_SCENARIO: join(dir, "scenario.json"), FAKE_COUNTS: join(dir, "counts.json"), FAKE_LOG: join(dir, "calls.jsonl") };
     this.setScenario({});
   }
 
+  /** The shim's path: `<bin>/codex`, or `<bin>\\codex.cmd` on Windows. */
   path(name: "codex" | "claude"): string {
-    return join(this.bin, name);
+    return this.names.get(name)!;
+  }
+
+  /** What the fake agents read and write their scenario, counts and log through (for a process given its own environment). */
+  get env(): Record<string, string> {
+    return { ...this.files };
   }
 
   setScenario(scenario: Record<string, unknown[] | Record<string, unknown>>): void {

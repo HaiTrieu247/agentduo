@@ -1,0 +1,12 @@
+# AppArmor profile for AgentDuo installed from the .deb (/opt/AgentDuo). Ubuntu 24.04+ forbids unprivileged user
+# namespaces to unconfined apps, which Chromium's sandbox needs: this profile allows them (userns) and confines
+# nothing else, so the sandbox keeps working without --no-sandbox. Installed by the package's after-install script.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile agentduo /opt/AgentDuo/agentduo flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides. See local/README for details.
+  include if exists <local/agentduo>
+}

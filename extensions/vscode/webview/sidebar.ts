@@ -1,7 +1,7 @@
 // The Activity Bar's Account & Usage view: both agents' accounts and limits, which the host looks up and sends whole.
 // Every string goes in as a text node; its two buttons only name what they want (refresh, details).
 import type { AccountHostMessage, AccountViewMessage, AccountViewState } from "../src/protocol.js";
-import { accountRows, updatedText, type AccountRow } from "./account.js";
+import { accountRows, meterLevel, updatedText, type AccountRow } from "./account.js";
 import { h, icon, providerMark } from "./dom.js";
 import type { Agent } from "../../../src/events.js";
 
@@ -21,7 +21,8 @@ function row(agent: Agent, r: AccountRow): HTMLElement {
       return h("div", { class: `row ${r.kind}` }, h("span", { class: "label", title: r.text }, r.text), value);
     case "bar": {
       const percent = r.percent ?? 0;
-      const fill = h("span", { class: `fill${percent >= 90 ? " full" : percent >= 70 ? " high" : ""}` });
+      const level = meterLevel(percent);
+      const fill = h("span", { class: level ? `fill ${level}` : "fill" });
       // Through the CSSOM: the page's policy allows no inline style attribute.
       fill.style.width = `${percent}%`;
       return h("div", { class: "meter", role: "meter", label: r.text, attrs: { "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(percent) } }, fill);

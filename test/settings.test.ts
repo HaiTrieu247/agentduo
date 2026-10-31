@@ -1,11 +1,14 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { defaultConfig } from "../src/core/config.js";
+import { ConfigError, defaultConfig } from "../src/core/config.js";
 import { ClaudeBackend } from "../src/agents/claude.js";
 import { CodexBackend } from "../src/agents/codex.js";
 import { modeLabel, nextMode } from "../src/core/commands.js";
-import { describeSettings, permissionMode, saveGlobalSetting, saveSettings, settings } from "../src/core/settings.js";
+import {
+  changeFor, checkSettingValue, clearSettings, describeSettings, permissionMode, saveGlobalSetting, saveSettings, SETTING_KEYS, settingKey, settings, supersedes,
+  withChange,
+} from "../src/core/settings.js";
 import { tempDir } from "./helpers/tmp.js";
 
 const dirs: Array<{ cleanup(): void }> = [];
@@ -151,8 +154,101 @@ describe("settings", () => {
     for (const s of ["model: opus", "auto", "model: gpt-5.5", "model_reasoning_effort=high"]) expect(text).toContain(s);
     expect(text).not.toContain("plan_reviewer");
     writeFileSync(ws, "claude:\n  role_args:\n    implementer: [--permission-mode, acceptEdits]\n");
-    expect(saveGlobalSetting(user, ws, settings.mode("auto"))).toEqual(["claude.role_args"]);
+    expect(saveGlobalSetting(user, ws, settings.mode("auto"))).toEqual(["claude.role_args.implementer"]);
     // The same file both ways (duo --config on the user config): nothing hides it.
     expect(saveGlobalSetting(user, user, settings.claudeModel("haiku"))).toEqual([]);
+  });
+
+  it("says when each change reaches work that is going: agent options from the next call, roles and limits from the next run", () => {
+    const now = [settings.mode("auto"), settings.claudeModel("opus"), settings.claudeEffort("high"), settings.claudeRule("allow", "Read"), settings.claudeRemoveRule("Read"),
+      settings.claudeAddDir("/x"), settings.codexModel("gpt-5.5", null), settings.codexPermissions("auto")];
+    expect(now.map((c) => c.live)).toEqual(Array(now.length).fill("next-call"));
+    const live = Object.fromEntries(SETTING_KEYS.map((k) => [k.key, k.live]));
+    for (const key of ["claude.bin", "codex.bin", "claude.model", "codex.args", "claude.role_args.implementer", "codex.role_args.code_reviewer", "claude.max_budget_usd",
+      "claude.permission_prompts"]) expect(live[key], key).toBe("next-call");
+    for (const key of ["agents.planner", "agents.implementer", "limits.max_retries", "limits.agent_timeout_sec", "limits.max_consecutive_gate_failures",
+      "limits.max_discussion_rounds", "limits.max_planning_rounds"]) expect(live[key], key).toBe("next-run");
+    // The workspace lock lives in the runs directory: Settings never moves it.
+    expect(settingKey("paths.runs_dir")).toBeNull();
+    expect(SETTING_KEYS.filter((k) => k.key.startsWith("limits."))).toHaveLength(Object.keys(defaultConfig().limits).length);
+  });
+
+  it("sets a key whole, in place, and checks its value as the config does", () => {
+    const cfg = defaultConfig();
+    const claude = cfg.claude;
+    const roles = cfg.claude.role_args;
+    settings.value("claude.bin", "/opt/claude").apply(cfg);
+    settings.value("claude.args", ["--verbose"]).apply(cfg);
+    settings.value("claude.role_args.plan_reviewer", ["--max-turns", "3"]).apply(cfg);
+    settings.value("agents.implementer", "codex").apply(cfg);
+    settings.value("limits.max_retries", 0).apply(cfg);
+    settings.value("claude.max_budget_usd", 2.5).apply(cfg);
+    // The backends hold cfg.claude and its role_args: they keep their identity.
+    expect(cfg.claude).toBe(claude);
+    expect(cfg.claude.role_args).toBe(roles);
+    expect(cfg.claude).toMatchObject({ bin: "/opt/claude", args: ["--verbose"], max_budget_usd: 2.5, role_args: { plan_reviewer: ["--max-turns", "3"] } });
+    expect([cfg.agents.implementer, cfg.limits.max_retries]).toEqual(["codex", 0]);
+    settings.value("claude.role_args.plan_reviewer", undefined).apply(cfg);
+    expect(cfg.claude.role_args).toEqual({});
+    const args = ["--a"];
+    settings.value("codex.args", args).apply(cfg);
+    args.push("--b");
+    expect(cfg.codex.args).toEqual(["--a"]);
+    for (const [key, value] of [["limits.max_retries", -1], ["limits.agent_timeout_sec", 0], ["limits.max_review_rounds", 1.5], ["agents.planner", "gemini"],
+      ["claude.args", "--x"], ["claude.args", [1]], ["claude.bin", ""], ["claude.permission_prompts", "maybe"], ["claude.max_budget_usd", -2], ["codex.model", "two words"]] as const) {
+      expect(() => settings.value(key, value), `${key}=${JSON.stringify(value)}`).toThrow(ConfigError);
+    }
+    expect(() => settings.value("paths.runs_dir", "/elsewhere")).toThrow("not a setting");
+    expect(() => settings.value("claude.bin", undefined)).toThrow("cannot be removed");
+    expect(checkSettingValue(settingKey("limits.agent_idle_timeout_sec")!, 0)).toBeNull();
+    expect(checkSettingValue(settingKey("claude.model")!, null)).toBeNull();
+  });
+
+  it("drops an earlier change once a later one sets the same keys whole, so a replay never brings it back", () => {
+    const rule = settings.claudeRule("allow", "Read");
+    const whole = settings.value("claude.args", ["--x"]);
+    expect(supersedes(whole, rule)).toBe(true);
+    expect(supersedes(rule, whole)).toBe(false);
+    // codexModel also sets codex.model: a change of codex.args alone leaves it.
+    expect(supersedes(settings.value("codex.args", []), settings.codexModel("o3", "high"))).toBe(false);
+    expect(supersedes(settings.value("claude.role_args.implementer", ["--y"]), settings.mode("auto"))).toBe(true);
+    const list = withChange(withChange(withChange([], rule), settings.claudeModel("opus")), whole);
+    expect(list).toEqual([expect.objectContaining({ paths: [["claude", "model"]] }), whole]);
+    const cfg = defaultConfig();
+    for (const c of [...list, ...list]) c.apply(cfg);
+    expect(cfg.claude.args).toEqual(["--x"]);
+    expect(changeFor({ target: "claude.model" })).toBeNull();
+    expect(changeFor({ target: "codex.permissions", preset: "read-only" })?.paths).toEqual([["codex", "args"]]);
+  });
+
+  it("removes a key from a config file to inherit again, with its comments kept and no null left behind", () => {
+    const t = tempDir();
+    dirs.push(t);
+    const file = join(t.path, "ws", ".agentduo", "config.yaml");
+    mkdirSync(join(t.path, "ws", ".agentduo"), { recursive: true });
+    writeFileSync(file, "# mine\nclaude:\n  model: opus # keep\n  role_args:\n    implementer: [--permission-mode, auto]\nlimits:\n  max_retries: 2\n");
+    expect(clearSettings(file, [["claude", "role_args", "implementer"]])).toBe(true);
+    let text = readFileSync(file, "utf8");
+    expect(text).not.toContain("role_args");
+    expect(text).not.toContain("null");
+    for (const s of ["# mine", "model: opus # keep", "max_retries: 2"]) expect(text).toContain(s);
+    expect(clearSettings(file, [["claude", "model"], ["limits", "max_retries"]])).toBe(true);
+    text = readFileSync(file, "utf8");
+    expect(text).not.toMatch(/claude:|limits:|null/);
+    expect(clearSettings(file, [["codex", "model"]])).toBe(false);
+    expect(clearSettings(join(t.path, "none.yaml"), [["codex", "model"]])).toBe(false);
+    // A mode removed for the implementer is removed from the file, never written as null.
+    const cfg = defaultConfig();
+    writeFileSync(file, "claude:\n  role_args:\n    implementer: [--permission-mode, auto]\n    planner: [--x]\n");
+    const manual = settings.mode("manual");
+    cfg.claude.role_args = { implementer: ["--permission-mode", "auto"], planner: ["--x"] };
+    manual.apply(cfg);
+    saveSettings(file, cfg, manual.paths);
+    text = readFileSync(file, "utf8");
+    expect(text).not.toContain("implementer");
+    expect(text).toContain("planner");
+    writeFileSync(file, "claude: [unclosed\n");
+    expect(() => clearSettings(file, [["claude", "model"]])).toThrow(ConfigError);
+    expect(readFileSync(file, "utf8")).toBe("claude: [unclosed\n");
   });
 });

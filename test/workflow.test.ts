@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Chat, type ChatUi } from "../src/chat.js";
 import { AttachmentStore } from "../src/core/attachments.js";
+import { settings } from "../src/core/settings.js";
 import { EventBus, type Message } from "../src/events.js";
 import { approval, critique, finding, impl, issue, plan, review } from "./helpers/builders.js";
 import { testConfig, type ConfigOverrides } from "./helpers/config.js";
@@ -454,6 +455,136 @@ describe("Workflow after a chat discussion", () => {
       const prompt = fake.calls(role)[0]!.prompt;
       expect(prompt, role).toContain("**Codex, after discussing it with Claude Code:**\nSYNTHESIS: keep the old format readable for old readers.");
       for (const draft of ["DRAFT: keep it.", "DRAFT 2:", "REVIEW: say why."]) expect(prompt, role).not.toContain(draft);
+    }
+  });
+});
+
+describe("Workflow with settings changed while it runs", () => {
+  const ui = (): ChatUi & { lines: string[] } => {
+    const lines: string[] = [];
+    return { lines, info: (t) => void lines.push(t), setStatus: () => {}, setMode: () => {}, setRecipient: () => {}, setModels: () => {}, exit: () => {} };
+  };
+  const newChat = (u: ChatUi, bus: EventBus) => new Chat({
+    cfg: h.cfg, workspace: h.repo, runsDir: h.runsDir, configFile: join(h.repo, ".agentduo", "config.yaml"),
+    userConfigFile: join(h.runsDir, "..", "user-config.yaml"), bus, decider: new ScriptedDecider(), ui: u,
+  });
+  /** A second claude, at another path: its calls carry --via-alt, so the log tells which binary ran. */
+  const altClaude = () => {
+    const path = join(t.path, "alt", "claude");
+    mkdirSync(join(t.path, "alt"), { recursive: true });
+    writeFileSync(path, readFileSync(fake.path("claude"), "utf8").replace('claude "$@"', 'claude --via-alt "$@"'), { mode: 0o755 });
+    return path;
+  };
+  const savedConfig = () => JSON.parse(readRun("config.json"));
+
+  it("keeps the run's roles and limits, and gives agent options to its next call; the next run gets them all", async () => {
+    const bus = new EventBus();
+    const u = ui();
+    const chat = newChat(u, bus);
+    const alt = altClaude();
+    fake.setScenario({ ...happy(), planner: [{ sleep: 1200, output: plan() }] });
+    bus.on((e) => {
+      if (e.type !== "phase.started" || e.phase !== "PLAN") return;
+      setTimeout(() => {
+        chat.follow(settings.value("agents.plan_reviewer", "codex"));
+        chat.follow(settings.value("agents.implementer", "codex"));
+        chat.follow(settings.value("limits.max_retries", 0));
+        chat.follow(settings.value("limits.agent_timeout_sec", 7));
+        chat.follow(settings.value("limits.max_consecutive_gate_failures", 1));
+        chat.follow(settings.value("claude.bin", alt));
+        chat.follow(settings.value("claude.role_args.plan_reviewer", ["--max-turns", "9"]));
+      }, 200);
+    });
+    try {
+      await chat.submit("/pipeline Make app.txt fixed");
+      await chat.idle();
+      expect(stateOf(h).phase).toBe("DONE");
+      // The roles stayed as the run started: Claude critiqued and implemented, through the binary set meanwhile.
+      for (const role of ["plan_reviewer", "implementer"]) {
+        const calls = fake.calls(role);
+        expect(calls.map((c) => c.backend), role).toEqual(["claude"]);
+        expect(calls[0]!.args, role).toContain("--via-alt");
+      }
+      expect(fake.calls("plan_reviewer")[0]!.args).toEqual(expect.arrayContaining(["--max-turns", "9"]));
+      const saved = savedConfig();
+      expect(saved.agents).toMatchObject({ plan_reviewer: "claude", implementer: "claude" });
+      expect(saved.limits).toMatchObject({ max_retries: h.cfg.limits.max_retries, agent_timeout_sec: h.cfg.limits.agent_timeout_sec, max_consecutive_gate_failures: 3 });
+      expect(saved.claude.bin).toBe(alt);
+      expect(saved.claude.role_args.plan_reviewer).toEqual(["--max-turns", "9"]);
+      expect(u.lines.some((l) => l.includes("from the next agent call"))).toBe(false); // followed quietly
+      // A new run takes every change: Codex critiques and implements, with the new limits.
+      fake.setScenario({ ...happy(), plan_reviewer: [{ output: critique(true) }], implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }] });
+      await chat.submit("/pipeline Make app.txt fixed again");
+      await chat.idle();
+      expect(fake.calls("plan_reviewer").map((c) => c.backend)).toEqual(["claude", "codex"]);
+      expect(fake.calls("implementer").map((c) => c.backend)).toEqual(["claude", "codex"]);
+      expect(savedConfig().limits).toMatchObject({ max_retries: 0, agent_timeout_sec: 7, max_consecutive_gate_failures: 1 });
+    } finally {
+      await chat.stop();
+    }
+  });
+
+  it("resumes a stopped run with its saved roles and limits, and the chat's agent options on top", async () => {
+    const bus = new EventBus();
+    const u = ui();
+    const chat = newChat(u, bus);
+    fake.setScenario({ ...happy(), plan_reviewer: [{ sleep: 3000, output: critique(true) }] });
+    let stopped = false;
+    bus.on((e) => {
+      if (e.type !== "phase.started" || e.phase !== "PLAN_REVIEW" || stopped) return;
+      stopped = true;
+      setTimeout(() => chat.escape(), 300);
+    });
+    try {
+      await chat.submit("/pipeline Make app.txt fixed");
+      await chat.idle();
+      expect(stateOf(h).inProgress?.phase ?? stateOf(h).phase).toBe("PLAN_REVIEW");
+      chat.follow(settings.value("agents.implementer", "codex"));
+      chat.follow(settings.value("limits.max_review_rounds", 9));
+      chat.follow(settings.claudeModel("opus"));
+      fake.setScenario(happy());
+      await chat.submit("/resume");
+      await chat.idle();
+      expect(stateOf(h).phase).toBe("DONE");
+      expect(fake.calls("implementer").map((c) => c.backend)).toEqual(["claude"]);
+      expect(fake.calls("implementer")[0]!.args).toEqual(expect.arrayContaining(["--model", "opus"]));
+      const saved = savedConfig();
+      expect(saved.agents.implementer).toBe("claude");
+      expect(saved.limits.max_review_rounds).toBe(h.cfg.limits.max_review_rounds);
+      expect(saved.claude.model).toBe("opus");
+      expect(stateOf(h).limits.reviewRounds).toBe(h.cfg.limits.max_review_rounds);
+    } finally {
+      await chat.stop();
+    }
+  });
+
+  it("keeps a discussion's round limit as it started, while a model changed meanwhile reaches its next turn", async () => {
+    const bus = new EventBus();
+    const chat = newChat(ui(), bus);
+    const finished: number[] = [];
+    bus.on((e) => {
+      if (e.type === "discussion.finished") finished.push(e.rounds);
+      if (e.type === "turn.started" && e.discussion?.step === "answer") {
+        setTimeout(() => {
+          chat.follow(settings.value("limits.max_discussion_rounds", 1));
+          chat.follow(settings.claudeModel("opus"));
+        }, 100);
+      }
+    });
+    fake.setScenario({
+      discuss_answer: [{ sleep: 700, answer: "v1" }], discuss_critique: [{ answer: "No.\nVERDICT: REVISE" }], discuss_revise: [{ answer: "v2" }],
+      discuss_synthesis: [{ answer: "done" }],
+    });
+    try {
+      chat.selectRecipient("codex");
+      await chat.submit("/discuss Which queue?");
+      await chat.idle();
+      // Three reviews (the limit it started with), not one; Claude, the critic, ran its reviews with the new model.
+      expect(finished).toEqual([3]);
+      expect(fake.calls("discuss_critique").map((c) => c.args.includes("opus"))).toEqual([true, true, true]);
+      expect(chat.config.limits.max_discussion_rounds).toBe(1);
+    } finally {
+      await chat.stop();
     }
   });
 });

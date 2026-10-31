@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountView, PERIOD_MS, STALE_MS } from "../extensions/vscode/src/accountView.js";
 import type { AccountHostMessage, AccountUsage } from "../extensions/vscode/src/protocol.js";
-import { accountRows, updatedText } from "../extensions/vscode/webview/account.js";
+import { accountRows, limitRows, meterLevel, updatedText } from "../extensions/vscode/webview/account.js";
 import type { AgentUsage } from "../src/core/usage.js";
 
 // The view needs only Uri from VS Code (vi.mock is hoisted above the imports); a WebviewView is faked below.
@@ -40,6 +40,12 @@ describe("Account & Usage view: rows", () => {
       { kind: "bar", text: "130% used", percent: 100 },
       { kind: "text", text: "Credits: 12.5" },
     ]);
+  });
+
+  it("gives the limits alone (as the desktop's cards show them under the account), and colours a meter by how full it is", () => {
+    expect(limitRows(claude)).toEqual(accountRows("claude", { status: "ready", usage: claude }).slice(2));
+    expect(limitRows({ ...codex, groups: [], notes: [" "] })).toEqual([]);
+    expect([0, 69, 70, 89, 90, 100].map(meterLevel)).toEqual(["", "", "high", "high", "full", "full"]);
   });
 
   it("names both agents whatever happened: still loading, failed, or signed in with no plan or email", () => {

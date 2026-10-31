@@ -171,6 +171,18 @@ started there does. Install it from the Marketplace
 `code --install-extension extensions/vscode/agentduo-vscode-*.vsix`.
 See [extensions/vscode/README.md](extensions/vscode/README.md) for requirements, usage and current limits.
 
+## Desktop app
+
+`apps/desktop` is AgentDuo, agentduo as an Electron app for macOS, Windows and Linux, on the same engine as `duo` and
+the extension: a sidebar of projects and conversations, the three-way chat, an inspector for the plan, the changes as a
+diff and the checks, Settings with global/project/session scopes, and a first-run check of both CLIs. It runs the engine
+on the Node inside Electron, so it needs no Node of its own; it does need Claude Code and Codex CLI installed and signed
+in.
+Build it from source (`npm ci`, then `npm ci --prefix apps/desktop`, then `npm --prefix apps/desktop run dev`). A pushed
+`v*` tag builds its installers on all three systems and publishes them as a GitHub Release, which installed apps update
+from. Packaging, updates, releasing, signing and what has been verified on which OS are in
+[apps/desktop/README.md](apps/desktop/README.md).
+
 ## The workspace
 
 `duo` works in the directory you call it from, or in `--dir PATH`:
