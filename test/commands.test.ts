@@ -111,7 +111,7 @@ describe("commands: completion", () => {
 
 describe("/attach, /attachments, /detach", () => {
   it("read one path as a shell reads one word, with no expansion of its own", () => {
-    const path = (s: string) => parsePathArg(s);
+    const path = (s: string) => parsePathArg(s, "linux");
     expect(path("screenshots/bug.png")).toEqual({ path: "screenshots/bug.png", home: false });
     expect(path("'My notes.pdf'")).toEqual({ path: "My notes.pdf", home: false });
     expect(path('"My notes.pdf"')).toEqual({ path: "My notes.pdf", home: false });
@@ -142,10 +142,27 @@ describe("/attach, /attachments, /detach", () => {
     expect(path('"open')).toEqual({ error: 'a " is not closed' });
   });
 
+  it("read a backslash as Windows' path separator there, never as an escape, and ~\\ as the home directory too", () => {
+    const path = (s: string) => parsePathArg(s, "win32");
+    expect(path("C:\\Users\\me\\notes.md")).toEqual({ path: "C:\\Users\\me\\notes.md", home: false });
+    expect(path('"C:\\Users\\me\\My notes.md"')).toEqual({ path: "C:\\Users\\me\\My notes.md", home: false });
+    expect(path("'C:\\Users\\me\\it''s.md'")).toEqual({ path: "C:\\Users\\me\\its.md", home: false });
+    expect(path('"\\\\server\\share\\a.png"')).toEqual({ path: "\\\\server\\share\\a.png", home: false });
+    expect(path("shots\\bug.png")).toEqual({ path: "shots\\bug.png", home: false });
+    expect(path("~\\Desktop\\a.png")).toEqual({ path: "\\Desktop\\a.png", home: true });
+    expect(path('"~\\Desktop\\My notes.pdf"')).toEqual({ path: "\\Desktop\\My notes.pdf", home: true });
+    expect(path("~/Desktop/a.png")).toEqual({ path: "/Desktop/a.png", home: true });
+    expect(path(".\\~\\a.png")).toEqual({ path: ".\\~\\a.png", home: false });
+    expect(path("C:\\My notes.md")).toEqual({ error: "one path at a time: put it in quotes" });
+    expect(parseInput("/attach C:\\Users\\me\\notes.md", "win32")).toEqual({ kind: "attach", path: "C:\\Users\\me\\notes.md", home: false });
+    // Elsewhere the same line reads as a shell reads it: the backslashes escape the letters after them.
+    expect(parseInput("/attach C:\\Users\\me\\notes.md", "linux")).toEqual({ kind: "attach", path: "C:Usersmenotes.md", home: false });
+  });
+
   it("parse as commands, leaving the settings' words as they were", () => {
-    expect(parseInput("/attach 'a b.png'")).toEqual({ kind: "attach", path: "a b.png", home: false });
+    expect(parseInput("/attach 'a b.png'", "linux")).toEqual({ kind: "attach", path: "a b.png", home: false });
     expect(parseInput("/attach")).toEqual({ kind: "usage", text: expect.stringMatching(/^usage: \/attach <path>/) });
-    expect(parseInput("/attach a b")).toEqual({ kind: "usage", text: expect.stringMatching(/^one path at a time/) });
+    expect(parseInput("/attach a b", "linux")).toEqual({ kind: "usage", text: expect.stringMatching(/^one path at a time/) });
     expect(parseInput("/attachments")).toEqual({ kind: "command", name: "attachments", arg: "" });
     expect(parseInput("/detach 2")).toEqual({ kind: "detach", target: "2" });
     expect(parseInput("/detach all")).toEqual({ kind: "detach", target: "all" });
@@ -165,14 +182,22 @@ describe("/attach, /attachments, /detach", () => {
     const fromUsage = examples(usageLine.text);
     expect(fromUsage).toEqual(["/attach screenshots/bug.png", '/attach "~/Desktop/My notes.pdf"']);
     const fromDocs = [...examples(readme("README.md")), ...examples(readme("docs/README.vi.md"))];
-    expect(fromDocs).toEqual(['/attach "~/Desktop/My notes.pdf"', "/attach shots/bug\\ 2.png", '/attach "~/Desktop/Ghi chú.pdf"', "/attach shots/loi\\ 2.png"]);
-    const read = Object.fromEntries([...fromUsage, ...fromDocs].map((e) => [e, parseInput(e)]));
+    expect(fromDocs).toEqual([
+      '/attach "~/Desktop/My notes.pdf"', "/attach shots/bug\\ 2.png", '/attach "C:\\Users\\me\\My notes.pdf"',
+      '/attach "~/Desktop/Ghi chú.pdf"', "/attach shots/loi\\ 2.png", '/attach "C:\\Users\\me\\Ghi chú.pdf"',
+    ]);
+    // The Windows examples read the same on Windows and elsewhere; the others as a shell reads them.
+    const windows = (e: string) => e.includes("C:");
+    const read = Object.fromEntries([...fromUsage, ...fromDocs].map((e) => [e, parseInput(e, windows(e) ? "win32" : "linux")]));
+    for (const e of fromDocs.filter(windows)) expect(parseInput(e, "linux"), e).toEqual(read[e]);
     expect(read).toEqual({
       "/attach screenshots/bug.png": { kind: "attach", path: "screenshots/bug.png", home: false },
       '/attach "~/Desktop/My notes.pdf"': { kind: "attach", path: "/Desktop/My notes.pdf", home: true },
       "/attach shots/bug\\ 2.png": { kind: "attach", path: "shots/bug 2.png", home: false },
       '/attach "~/Desktop/Ghi chú.pdf"': { kind: "attach", path: "/Desktop/Ghi chú.pdf", home: true },
       "/attach shots/loi\\ 2.png": { kind: "attach", path: "shots/loi 2.png", home: false },
+      '/attach "C:\\Users\\me\\My notes.pdf"': { kind: "attach", path: "C:\\Users\\me\\My notes.pdf", home: false },
+      '/attach "C:\\Users\\me\\Ghi chú.pdf"': { kind: "attach", path: "C:\\Users\\me\\Ghi chú.pdf", home: false },
     });
   });
 });

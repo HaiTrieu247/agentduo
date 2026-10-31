@@ -259,8 +259,11 @@ const SIMPLE: Record<string, ChatCommand> = {
  * space, as a terminal writes a dropped file). Quoted and unquoted parts join ('it'"'"'s' is it's; 'it''s' is its).
  * Unlike a shell, a path that starts with ~ or ~/ means the home directory inside quotes too ("~/My notes.pdf"), as
  * people write it; \~ or ./~ names a directory called ~. No ~user, no globs, no variables. The text is not normalized.
+ * On Windows (`platform` win32) a backslash is the path separator, never an escape: C:\Users\me\a.png reads as typed,
+ * a path with spaces goes in quotes, and ~\ is the home directory too.
  */
-export function parsePathArg(input: string): { path: string; home: boolean } | { error: string } {
+export function parsePathArg(input: string, platform?: NodeJS.Platform): { path: string; home: boolean } | { error: string } {
+  const windows = platform === "win32";
   const s = input.trim();
   let out = "";
   /** The path starts with an escaped character (\~): it is only itself. */
@@ -275,28 +278,29 @@ export function parsePathArg(input: string): { path: string; home: boolean } | {
     } else if (c === '"') {
       let j = i + 1;
       for (; j < s.length && s[j] !== '"'; j++) {
-        if (s[j] === "\\" && j + 1 < s.length && '"\\$`'.includes(s[j + 1]!)) j++;
+        if (!windows && s[j] === "\\" && j + 1 < s.length && '"\\$`'.includes(s[j + 1]!)) j++;
         out += s[j];
       }
       if (j >= s.length) return { error: 'a " is not closed' };
       i = j;
-    } else if (c === "\\") {
+    } else if (c === "\\" && !windows) {
       if (i + 1 < s.length) {
         if (!out) escapedFirst = true;
         out += s[++i];
       }
     } else if (/\s/.test(c)) {
-      return { error: "one path at a time: put it in quotes, or escape its spaces with \\" };
+      return { error: windows ? "one path at a time: put it in quotes" : "one path at a time: put it in quotes, or escape its spaces with \\" };
     } else out += c;
   }
   if (!out) return { error: "no path" };
-  return !escapedFirst && (out === "~" || out.startsWith("~/")) ? { path: out.slice(1), home: true } : { path: out, home: false };
+  const home = out === "~" || out.startsWith("~/") || (windows && out.startsWith("~\\"));
+  return !escapedFirst && home ? { path: out.slice(1), home: true } : { path: out, home: false };
 }
 
 const ATTACH_USAGE = 'usage: /attach <path>, e.g. /attach screenshots/bug.png or /attach "~/Desktop/My notes.pdf" (one file at a time)';
 
-/** What a line typed in the chat asks for. */
-export function parseInput(raw: string): ParsedInput {
+/** What a line typed in the chat asks for. `platform`: how /attach reads a backslash (see parsePathArg). */
+export function parseInput(raw: string, platform?: NodeJS.Platform): ParsedInput {
   const text = raw.trim();
   if (!text) return { kind: "empty" };
   if (!text.startsWith("/")) return { kind: "message", text };
@@ -317,7 +321,7 @@ export function parseInput(raw: string): ParsedInput {
       return modeCommand(rest);
     case "attach": {
       if (!rest) return usage(ATTACH_USAGE);
-      const parsed = parsePathArg(rest);
+      const parsed = parsePathArg(rest, platform);
       return "error" in parsed ? usage(`${parsed.error}. ${ATTACH_USAGE}`) : { kind: "attach", ...parsed };
     }
     case "detach":

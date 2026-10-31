@@ -20,9 +20,11 @@
 // `codex login status` says it is logged in (scenario.usage.codex.loggedOut: it is not), as the desktop's first-run check asks.
 // `codex app-server` answers initialize, account/read (scenario.usage.codex.account) and account/rateLimits/read
 // (.rateLimits, or the error .rateLimitsError) until stdin closes; .hang never answers, .exit and .stderr fail it.
+// A response's `pid` names a file (relative to the working directory) the agent writes its process id to, the process
+// a stop must end: on Windows the agent runs under the cmd.exe of its .cmd shim, so only the tree kill reaches it.
 import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -110,6 +112,11 @@ async function main() {
     if ((reply.updatedPermissions ?? []).some((u) => u.type === "setMode")) writeFiles({ "fake-mode-changed.txt": "the session mode was changed\n" });
   }
   for (const path of resp.delete ?? []) rmSync(path);
+  if (resp.pid) {
+    // Whole once it exists: a test waits for the file, then reads it.
+    writeFileSync(`${resp.pid}.tmp`, String(process.pid));
+    renameSync(`${resp.pid}.tmp`, resp.pid);
+  }
   for (const command of resp.shell ?? []) {
     try {
       execSync(command, { stdio: "ignore" });

@@ -19,7 +19,7 @@ import { ScriptedDecider } from "./helpers/harness.js";
 import { png } from "./helpers/images.js";
 import { makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
-import { waitUntil } from "./helpers/vscode.js";
+import { pidAlive, waitUntil } from "./helpers/vscode.js";
 
 class FakeUi implements ChatUi {
   readonly lines: string[] = [];
@@ -292,7 +292,7 @@ describe("Chat: /discuss", () => {
   it("stops at Esc keeping nothing, and turns other questions away meanwhile", async () => {
     const chat = newChat();
     fake.setScenario({
-      discuss_answer: [{ answer: "v1" }], discuss_critique: [{ shell: ["echo $PPID > agent.pid"], sleep: 20_000, answer: "late\nVERDICT: AGREE" }], chat_codex: [{ answer: "next" }],
+      discuss_answer: [{ answer: "v1" }], discuss_critique: [{ pid: "agent.pid", sleep: 20_000, answer: "late\nVERDICT: AGREE" }], chat_codex: [{ answer: "next" }],
     });
     await chat.submit("/discuss A slow question?");
     await waitUntil(() => existsSync(join(repo, "agent.pid")), 10_000, "the reviewer to start");
@@ -313,7 +313,7 @@ describe("Chat: /discuss", () => {
     const chat = newChat();
     fake.setScenario({
       discuss_answer: [{ answer: "AGREED VERSION" }], discuss_critique: [{ answer: "Yes.\nVERDICT: AGREE" }],
-      discuss_synthesis: [{ shell: ["echo $PPID > agent.pid"], sleep: 20_000, answer: "late synthesis" }], chat_codex: [{ answer: "next" }],
+      discuss_synthesis: [{ pid: "agent.pid", sleep: 20_000, answer: "late synthesis" }], chat_codex: [{ answer: "next" }],
     });
     await chat.submit("/discuss A slow synthesis?");
     await waitUntil(() => existsSync(join(repo, "agent.pid")), 10_000, "the synthesis to start");
@@ -501,16 +501,19 @@ describe("Chat: a conversation with both agents", () => {
 
   it("returns from submit before the answer, and Esc stops the agent before it answers", async () => {
     const chat = newChat();
-    fake.setScenario({ chat_codex: [{ shell: ["echo $PPID > agent.pid"], sleep: 20_000, answer: "too late" }] });
+    fake.setScenario({ chat_codex: [{ pid: "agent.pid", sleep: 20_000, answer: "too late" }] });
     const t0 = Date.now();
     await chat.submit("Think hard");
     expect(Date.now() - t0).toBeLessThan(2000);
     expect(ui.statuses.at(-1)).toBe("answering");
     await waitUntil(() => existsSync(join(repo, "agent.pid")), 10_000, "the agent to start");
+    const agent = Number(readFileSync(join(repo, "agent.pid"), "utf8"));
+    expect(pidAlive(agent)).toBe(true);
     await chat.submit("/codex another question"); // busy, not queued and not a note
     expect(ui.lines.at(-1)).toContain("still answering");
     chat.escape();
     await chat.idle();
+    await waitUntil(() => !pidAlive(agent), 5000, "the agent to die");
     expect(Date.now() - t0).toBeLessThan(15_000);
     expect(answers()).toEqual([expect.objectContaining({ status: "interrupted", answer: null })]);
     expect(ui.statuses.at(-1)).toBe("idle");
@@ -1012,7 +1015,9 @@ describe("Chat: attached files", () => {
   it("sends the waiting files with the next message, natively and listed once, and keeps them with the exchange", async () => {
     const chat = newChat();
     await chat.submit(`/attach "${userFile("Ảnh chụp.png")}"`);
-    await chat.submit(`/attach ${userFile("notes.md", "# notes\n").replace(/ /g, "\\ ")}`);
+    // Spaces escaped, as a terminal writes a dropped file; Windows has no such escape (a backslash separates folders).
+    const notes = userFile("notes.md", "# notes\n");
+    await chat.submit(`/attach ${process.platform === "win32" ? `"${notes}"` : notes.replace(/ /g, "\\ ")}`);
     expect(ui.lines.at(-1)).toMatch(/^Attached notes\.md \(text\/markdown, 8 B\)\. The 2 files go with your next message/);
     await chat.submit("/attachments");
     expect(ui.lines.at(-1)).toBe("2 files go with your next message:\n  1. Ảnh chụp.png (PNG 64×32, " + shot.length + " B)\n  2. notes.md (text/markdown, 8 B)\n/detach <n|all> removes one, or all.");
@@ -1076,20 +1081,23 @@ describe("Chat: attached files", () => {
 
   it("reads ~/ as the home directory, in quotes too, as /attach's usage line writes it", async () => {
     const chat = newChat();
-    const home = process.env.HOME;
-    process.env.HOME = join(t.path, "home");
+    // The home directory: HOME, or USERPROFILE on Windows.
+    const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+    process.env.HOME = process.env.USERPROFILE = join(t.path, "home");
     try {
       userFile("My notes.pdf", "%PDF-1.4\n");
       await chat.submit('/attach "~/My notes.pdf"');
       await chat.submit("/attach ~/'My notes.pdf'");
       expect(chat.pending.map((a) => a.name)).toEqual(["My notes.pdf", "My notes.pdf"]);
-      // An escaped ~ is a folder of the workspace.
-      await chat.submit("/attach \\~/a.png");
-      expect(ui.errors.at(-1)).toMatch(/~\/a\.png: no such file/);
+      // An escaped ~ (on Windows, .\~) is a folder of the workspace.
+      await chat.submit(process.platform === "win32" ? "/attach .\\~\\a.png" : "/attach \\~/a.png");
+      expect(ui.errors.at(-1)).toContain(`${join(repo, "~", "a.png")}: no such file`);
       expect(ui.errors.at(-1)).not.toContain(join(t.path, "home"));
     } finally {
-      if (home === undefined) delete process.env.HOME;
-      else process.env.HOME = home;
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
     }
   });
 

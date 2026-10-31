@@ -9,6 +9,7 @@ import {
 } from "../extensions/vscode/src/artifacts.js";
 import type { ChangeList } from "../extensions/vscode/src/protocol.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
+import { userConfigEnv } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { git, makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
@@ -39,7 +40,7 @@ const ROUND1 = "b".repeat(40);
 const ROUND2 = "c".repeat(40);
 
 async function openWorker(workspace: string, generation = 1): Promise<WorkerHarness> {
-  const h = new WorkerHarness({ script: worker.script, workspace, env: { ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg") }, generation });
+  const h = new WorkerHarness({ script: worker.script, workspace, env: { ...process.env, ...userConfigEnv(join(t.path, "xdg")) }, generation });
   harnesses.push(h);
   await h.client.start();
   await h.client.request({ type: "initialize", workspace, configPath: null, discover: true });

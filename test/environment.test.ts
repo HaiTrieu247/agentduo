@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ConfigError, defaultConfig } from "../src/core/config.js";
 import { diagnose, EnvironmentError, expandHome, prepareEnvironment, runnableProblem } from "../src/core/environment.js";
-import { testConfig } from "./helpers/config.js";
+import { testConfig, userConfigEnv } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
@@ -17,7 +17,7 @@ function setup() {
   const t = tempDir();
   dirs.push(t);
   const repo = makeRepo(t.path);
-  const env: NodeJS.ProcessEnv = { ...process.env, HOME: join(t.path, "home"), XDG_CONFIG_HOME: join(t.path, "xdg") };
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: join(t.path, "home"), ...userConfigEnv(join(t.path, "xdg")) };
   const writeConfig = (dir: string, yaml: string) => {
     mkdirSync(join(dir, ".agentduo"), { recursive: true });
     writeFileSync(join(dir, ".agentduo", "config.yaml"), yaml);
@@ -46,8 +46,10 @@ describe("prepareEnvironment", () => {
     expect((await prepareEnvironment({ cwd: repo, env })).runsDir).toBe(join(t.path, "home", "agentduo-runs"));
     writeConfig(repo, "paths:\n  runs_dir:\n");
     expect((await prepareEnvironment({ cwd: repo, env })).runsDir).toBe(join(repo, ".agentduo", "runs"));
-    expect(expandHome("~", { HOME: "/h" })).toBe("/h");
+    expect(expandHome("~", { HOME: "/h" })).toBe(join("/h"));
     expect(expandHome("~user/x", { HOME: "/h" })).toBe("~user/x");
+    // ~\ is the home directory on Windows only, where \ separates folders.
+    expect(expandHome("~\\runs", { HOME: "/h" })).toBe(process.platform === "win32" ? join("/h", "runs") : "~\\runs");
   });
 
   it("layers the user config under the workspace one, or reads --config (relative to cwd) instead", async () => {

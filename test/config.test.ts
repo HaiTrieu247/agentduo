@@ -5,6 +5,7 @@ import { configFromSaved, ConfigError, defaultConfig, loadConfig, userConfigPath
 import {
   clearConfiguration, ConfigurationError, readConfiguration, updateConfiguration, type ConfigurationOptions, type ConfigurationView,
 } from "../src/core/configuration.js";
+import { userConfigEnv } from "./helpers/config.js";
 import { tempDir } from "./helpers/tmp.js";
 
 const dirs: Array<{ cleanup(): void }> = [];
@@ -23,7 +24,7 @@ function setup(dirYaml?: string, userYaml?: string) {
     mkdirSync(join(xdg, "agentduo"), { recursive: true });
     writeFileSync(join(xdg, "agentduo", "config.yaml"), userYaml);
   }
-  return { dir, env: { XDG_CONFIG_HOME: xdg, HOME: t.path } as NodeJS.ProcessEnv };
+  return { dir, env: { ...userConfigEnv(xdg), HOME: t.path } as NodeJS.ProcessEnv };
 }
 
 describe("loadConfig", () => {
@@ -107,7 +108,7 @@ describe("loadConfig", () => {
       expect(() => loadConfig({ dir, env }), yaml).toThrow(expected);
     }
     const both = setup("", "limits:\n  max_retries: -1\n");
-    expect(() => loadConfig({ dir: both.dir, env: both.env })).toThrow(/xdg\/agentduo\/config\.yaml/);
+    expect(() => loadConfig({ dir: both.dir, env: both.env })).toThrow(join("xdg", "agentduo", "config.yaml"));
   });
 
   it("lets any backend take any role", () => {

@@ -1,7 +1,7 @@
 // The extension host's per-folder session, against the real worker: presentation state, snapshots for a view that
 // comes and goes, questions that survive it, and a worker that dies.
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -12,7 +12,7 @@ import { reduce, type ViewState } from "../extensions/vscode/webview/state.js";
 import { NOT_REPO_NOTE } from "../src/chat.js";
 import { RunStore } from "../src/core/state.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
-import type { ConfigOverrides } from "./helpers/config.js";
+import { type ConfigOverrides, userConfigEnv } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { png } from "./helpers/images.js";
 import { makeRepo } from "./helpers/repo.js";
@@ -55,7 +55,7 @@ const happy = () => ({
 function session(o: { overrides?: ConfigOverrides; node?: boolean; script?: string; env?: NodeJS.ProcessEnv; onNewConversation?: () => void } = {}): WorkspaceSession {
   writeWorkspaceConfig(repo, fake, o.overrides);
   const s = new WorkspaceSession({
-    workspace: repo, configPath: null, workerScript: o.script ?? worker.script, env: { ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg"), ...o.env },
+    workspace: repo, configPath: null, workerScript: o.script ?? worker.script, env: { ...process.env, ...userConfigEnv(join(t.path, "xdg")), ...o.env },
     resolveNode: () => (o.node === false ? { ok: false, message: "agentduo needs Node >= 22.12; found only /usr/bin/node (18.0.0)" } : { ok: true, path: process.execPath, version: process.versions.node }),
     nextGeneration: () => ++generation, log: () => undefined, onNewConversation: o.onNewConversation,
   });
@@ -464,7 +464,7 @@ describe("WorkspaceSession: attached files", () => {
     await until(s, (x) => x.timeline.some((i) => i.kind === "answer"), "the answer");
     const user = tab.state.timeline.find((i) => i.kind === "user");
     expect(user?.kind === "user" && user.attachments?.map((a) => a.name)).toEqual(["one.png", "two.png"]);
-    expect(fake.calls("chat_codex")[0]!.images!.map((i) => i.file!.split("/").at(-1))).toEqual(["one.png", "two.png"]);
+    expect(fake.calls("chat_codex")[0]!.images!.map((i) => basename(i.file!))).toEqual(["one.png", "two.png"]);
   });
 
   it("finds a tab's attachments under a runs_dir outside the workspace", async () => {

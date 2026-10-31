@@ -114,7 +114,9 @@ agentduo 0.5.0 · chat
   question, `/discuss`, `/pipeline` task or note. Quote a path with spaces or escape them, the way the shell reads one word:
   `/attach "~/Desktop/My notes.pdf"`, `/attach shots/bug\ 2.png`. A literal `'` goes in double quotes (`"it's.png"`);
   `'it''s'` reads as `its`, as in the shell. A relative path starts from the workspace, `~/` from your home directory,
-  quoted or not (`\~` or `./~` for a folder named `~`); nothing is globbed or expanded. `/attachments` lists the waiting files, `/detach <n|all>` removes them. Enter on an
+  quoted or not (`\~` or `./~` for a folder named `~`); nothing is globbed or expanded. On Windows a backslash separates
+  folders and escapes nothing, so a path with spaces goes in quotes (`/attach "C:\Users\me\My notes.pdf"`), and `~\` is
+  your home directory too. `/attachments` lists the waiting files, `/detach <n|all>` removes them. Enter on an
   empty line sends the files alone (to the agent named under the input, or as a note while the pipeline works). The
   terminal does not read images from the clipboard: save the image, then `/attach` it.
   - agentduo copies each file, bytes unchanged, into `.agentduo/runs/conversations/<id>/attachments/` (a pipeline task's

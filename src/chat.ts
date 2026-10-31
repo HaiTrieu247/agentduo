@@ -291,7 +291,7 @@ export class Chat {
    * run. A line that sends something takes the waiting files with it, once it is accepted; anything else leaves them.
    */
   async submit(raw: string, o: SubmitOptions = {}): Promise<void> {
-    const input = parseInput(raw);
+    const input = parseInput(raw, process.platform);
     const ui = this.o.ui;
     switch (input.kind) {
       case "empty": {

@@ -89,6 +89,7 @@ describe("AttachmentStore", () => {
     expect(a.path.endsWith(nfd)).toBe(true);
     expect(safeFileName("../../etc/passwd")).toBe("passwd");
     expect(safeFileName("a:b|c?.txt")).toBe("a_b_c_.txt");
+    expect(safeFileName("C:\\Users\\me\\a.png")).toBe("a.png");
     expect(safeFileName("..")).toBe("file");
     expect(safeFileName(`${"x".repeat(300)}.png`)).toMatch(/^x+\.png$/);
     expect(safeFileName(`${"x".repeat(300)}.png`).length).toBe(120);

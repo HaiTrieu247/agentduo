@@ -8,6 +8,7 @@ import { LogBuffer } from "../src/main/diagnostics.js";
 import { PreferencesStore } from "../src/main/preferences.js";
 import { ProjectManager } from "../src/main/projects.js";
 import { ResourceTokens } from "../src/main/resources.js";
+import { userConfigEnv } from "../../../test/helpers/config.js";
 
 const good: SenderInfo = { senderId: 3, windowId: 3, mainFrame: true, url: "agentduo://app/index.html" };
 
@@ -74,7 +75,7 @@ describe("Dispatcher", () => {
     });
     const opened: string[] = [];
     const d = new Dispatcher({
-      projects, prefs, logs: new LogBuffer(), userData: dir, logsDir: join(dir, "logs"), env: () => ({ HOME: dir, XDG_CONFIG_HOME: join(dir, "config") }), launcher: () => null,
+      projects, prefs, logs: new LogBuffer(), userData: dir, logsDir: join(dir, "logs"), env: () => ({ HOME: dir, ...userConfigEnv(join(dir, "config")) }), launcher: () => null,
       snapshot: () => ({ prefs: prefs.prefs, projects: projects.summaries(), active: projects.active, platform: process.platform, versions: { app: "0", electron: "0", chrome: "0", node: "0" }, userData: dir, dark: false, update: { status: "off", reason: "test" } }),
       shell: { chooseFolder: async () => dir, chooseBinary: async () => null, saveFile: async () => null, openPath: async (p) => void opened.push(p), openExternal: async (u) => void opened.push(u) },
       ...extra,

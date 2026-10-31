@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Chat, type ChatUi } from "../src/chat.js";
 import { AttachmentStore } from "../src/core/attachments.js";
@@ -470,9 +470,10 @@ describe("Workflow with settings changed while it runs", () => {
   });
   /** A second claude, at another path: its calls carry --via-alt, so the log tells which binary ran. */
   const altClaude = () => {
-    const path = join(t.path, "alt", "claude");
+    // The fake's shim: a shell script passing "$@", or on Windows a claude.cmd passing %*.
+    const path = join(t.path, "alt", basename(fake.path("claude")));
     mkdirSync(join(t.path, "alt"), { recursive: true });
-    writeFileSync(path, readFileSync(fake.path("claude"), "utf8").replace('claude "$@"', 'claude --via-alt "$@"'), { mode: 0o755 });
+    writeFileSync(path, readFileSync(fake.path("claude"), "utf8").replace(/ claude ("\$@"|%\*)/, " claude --via-alt $1"), { mode: 0o755 });
     return path;
   };
   const savedConfig = () => JSON.parse(readRun("config.json"));

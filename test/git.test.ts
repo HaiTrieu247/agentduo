@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Git } from "../src/core/git.js";
@@ -47,7 +47,8 @@ describe("Git", () => {
     expect(await g.nameStatus(before, await g.worktreeTree())).toEqual([["A", "tệp.txt"]]);
   });
 
-  it("keeps names with tabs and quotes intact", async () => {
+  // Windows allows neither a tab nor a " in a file name.
+  it.skipIf(process.platform === "win32")("keeps names with tabs and quotes intact", async () => {
     const { repo } = newRepo();
     const g = new Git(repo);
     const before = await g.worktreeTree();
@@ -132,7 +133,8 @@ describe("Git", () => {
     const { tmp, repo } = newRepo();
     const g = new Git(repo);
     expect(await g.isRepo()).toBe(true);
-    expect(await g.toplevel()).toBe(repo);
+    // Git names it its own way on Windows (C:/Users/runneradmin/… for C:\Users\RUNNER~1\…): the same folder.
+    expect(realpathSync.native(await g.toplevel())).toBe(realpathSync.native(repo));
     expect([await g.head(), await g.branch()]).toEqual([git(repo, "rev-parse", "HEAD"), "main"]);
     expect(await g.isIgnored(".agentduo/runs")).toBe(true);
     expect(await g.isIgnored("src")).toBe(false);

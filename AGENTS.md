@@ -20,6 +20,7 @@ A prompt that starts with `[agentduo-conversation]` is a turn of the chat's thre
 - Desktop (`apps/desktop`): a private package with its own lockfile and devDependencies only (`electron`, `electron-builder`, `@electron/fuses`, `electron-updater` (bundled into main), `playwright`); it builds from the checkout with the root toolchain, so install the root first, then `npm ci --prefix apps/desktop`. Its version follows the root's (`scripts/sync-vscode-version.mjs`). Run `npm --prefix apps/desktop run typecheck`, `test`, `build`, and `test:e2e` when you change it.
 - `src/core` and `src/agents` never import from `src/ui`. Everything that reaches the screen is an `EventBus` event (`src/events.ts`), and human decisions come back through the `Decider` interface.
 - Tests: `npm test` (vitest). When you change a workflow transition, add a scenario to `test/workflow.test.ts`; those scenarios drive `test/fake-agent.mjs` through real subprocesses. When a CLI's stream format changes, refresh `test/fixtures/*.jsonl` from a real run, with personal paths replaced by `/repo`.
+- CI runs the tests on Windows too. A test names the user config folder with `userConfigEnv` (`test/helpers/config.ts`), never `XDG_CONFIG_HOME` alone: Windows reads `%APPDATA%`, so it would use the real user config. Compare paths built with `join`, not ones written with `/`, and use `FakeClis.path()` for a fake CLI (a `.cmd` shim on Windows).
 
 ## Gotchas
 

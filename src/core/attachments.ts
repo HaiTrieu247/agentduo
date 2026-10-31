@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, extname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { ATTACHMENT_LIMITS, formatBytes, isAttachmentId, type Attachment, type ImageFormat } from "./attachment-types.js";
 import { atomicWrite } from "./state.js";
 
@@ -122,7 +122,8 @@ export function mediaTypeOf(name: string, head: Buffer): string {
  * at most 120 characters (the extension kept). Unicode is left as it is (no normalization).
  */
 export function safeFileName(name: string): string {
-  let s = basename(name.replace(/\\/g, "/")).replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/g, "_").trim();
+  // posix: on Windows, basename would read "a:b.txt" as drive a: and keep only "b.txt".
+  let s = posix.basename(name.replace(/\\/g, "/")).replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/g, "_").trim();
   if (!s || s === "." || s === "..") s = "file";
   if (s.length > 120) {
     const ext = extname(s).slice(0, 20);
@@ -133,7 +134,7 @@ export function safeFileName(name: string): string {
 
 /** The name shown for a file: its own, without control characters, at most 255 characters. */
 export function displayName(name: string): string {
-  const s = basename(name.replace(/\\/g, "/")).replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  const s = posix.basename(name.replace(/\\/g, "/")).replace(/[\u0000-\u001f\u007f]/g, "").trim();
   return (s || "file").slice(0, 255);
 }
 

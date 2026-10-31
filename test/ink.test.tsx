@@ -1,6 +1,6 @@
 import { Box } from "ink";
 import { render } from "ink-testing-library";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentUsage } from "../src/core/usage.js";
 import { EventBus, type Activity, type DuoEvent, type HistoryEntry, type PermissionAnswer, type PermissionRequest, type Phase, type Role } from "../src/events.js";
 import { App } from "../src/ui/ink/App.js";
@@ -368,9 +368,12 @@ describe("Ink components", () => {
     await wait();
     expect(app.lastFrame()).toContain("asks to use Bash");
     expect(app.lastFrame()).not.toContain("Type a task…"); // the input line's placeholder
-    app.stdin.write("\r");
-    await wait();
-    expect(given).toEqual(["p1"]);
+    // Ink listens for keys from an effect that may run after the frame is drawn: on a busy machine, an Enter sent at
+    // once can come before it. An Enter that reached the prompt answers at once, so it is sent again only until then.
+    await vi.waitFor(() => {
+      if (!given.length) app.stdin.write("\r");
+      expect(given).toEqual(["p1"]);
+    }, { timeout: 2000, interval: 50 });
     bus.emit(answered("p1", { decision: "once" }));
     bus.emit({ type: "human.required", runId: "r1", review });
     await wait();

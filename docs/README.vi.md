@@ -66,7 +66,8 @@ Code và Codex; pipeline đầy đủ chỉ chạy khi bạn yêu cầu:
   theo cách shell đọc một từ: `/attach "~/Desktop/Ghi chú.pdf"`, `/attach shots/loi\ 2.png`. Dấu nháy đơn literal thì
   đặt trong nháy kép (`"it's.png"`); `'it''s'` được đọc thành `its`, giống shell. Đường dẫn tương đối tính từ workspace,
   `~/` tính từ thư mục home, dù có nằm trong nháy hay không (thư mục tên `~` thì viết `\~` hoặc `./~`); agentduo không
-  glob hay mở rộng biến. `/attachments` liệt kê các file đang chờ, `/detach
+  glob hay mở rộng biến. Trên Windows, dấu `\` là dấu phân cách thư mục chứ không dùng để escape, nên đường dẫn có dấu
+  cách phải đặt trong nháy (`/attach "C:\Users\me\Ghi chú.pdf"`), và `~\` cũng là thư mục home. `/attachments` liệt kê các file đang chờ, `/detach
   <n|all>` bỏ file. Enter trên dòng trống sẽ gửi riêng các file (cho agent ghi dưới ô nhập, hoặc thành ghi chú khi
   pipeline đang chạy). Terminal không đọc ảnh từ clipboard: hãy lưu ảnh ra file rồi `/attach`.
   - agentduo chép nguyên bytes của từng file vào `.agentduo/runs/conversations/<id>/attachments/` (file của task pipeline

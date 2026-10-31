@@ -6,7 +6,7 @@ import { applyColorPreference, chatAvailable, isBackgroundFromPs, main, pinTermi
 import { acquireWorkspaceLock, RunStore } from "../src/core/state.js";
 import { packageVersion } from "../src/paths.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
-import { testConfig, type ConfigOverrides } from "./helpers/config.js";
+import { type ConfigOverrides, testConfig, userConfigEnv } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { git, makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
@@ -37,7 +37,7 @@ async function cli(args: string[], cwd = repo, extra: Partial<CliIO> = {}): Prom
     stdout: { write: (s: string) => { out += s; } },
     stderr: { write: (s: string) => { err += s; } },
     stdin: {},
-    env: { ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg"), CI: "" },
+    env: { ...process.env, ...userConfigEnv(join(t.path, "xdg")), CI: "" },
     cwd,
     ...extra,
   };
@@ -105,7 +105,7 @@ describe("cli", () => {
     mkdirSync(join(repo, ".agentduo"), { recursive: true });
     writeFileSync(join(repo, ".agentduo", "config.yaml"), "codex:\n  extra_args: [x]\npaths:\n  runs_dir: ~/duo-runs\n");
     const home = join(t.path, "home");
-    const r = await cli(["list"], repo, { env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(t.path, "xdg"), CI: "" } });
+    const r = await cli(["list"], repo, { env: { ...process.env, HOME: home, ...userConfigEnv(join(t.path, "xdg")), CI: "" } });
     expect(r.out).toContain(`no runs in ${join(home, "duo-runs")}`);
     expect(r.err).toContain("warning: ");
     expect(r.err).toContain("'codex.extra_args' was renamed to 'codex.args' (ignored)");

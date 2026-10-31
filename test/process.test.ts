@@ -18,14 +18,15 @@ describe("runProcess", () => {
     expect(lines).toEqual(["one", "two", "three"]);
   });
 
-  it.skipIf(process.platform === "win32")("kills the whole process tree on timeout", async () => {
+  it("kills the whole process tree on timeout", async () => {
     const code = "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); console.log(c.pid); setInterval(() => {}, 1000);";
     const r = await runProcess(node, ["-e", code], { cwd, timeoutMs: 500, killGraceMs: 200 });
     expect(r.timedOut).toBe(true);
     expect(r.code).toBeNull();
     const grandchild = Number(r.stdout.trim());
-    await new Promise((res) => setTimeout(res, 500));
-    expect(() => process.kill(grandchild, 0)).toThrow();
+    expect(grandchild).toBeGreaterThan(0);
+    // POSIX kills the group at once; Windows' taskkill /T takes a moment longer.
+    await vi.waitFor(() => expect(() => process.kill(grandchild, 0)).toThrow(), { timeout: 5000, interval: 100 });
   });
 
   it("stops when the abort signal fires", async () => {

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/core/config.js";
 import { detectGates, initRepo, renderConfigYaml } from "../src/core/init.js";
+import { userConfigEnv } from "./helpers/config.js";
 import { git, makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
 
@@ -44,7 +45,7 @@ describe("initRepo", () => {
     expect(yaml).toContain('#     command: "npm run test"');
     expect(yaml).toContain("uncomment");
     expect(yaml).toContain("role_args");
-    expect(loadConfig({ dir: repo, env: { XDG_CONFIG_HOME: join(parent, "xdg") } }).data.gates).toEqual([]);
+    expect(loadConfig({ dir: repo, env: userConfigEnv(join(parent, "xdg")) }).data.gates).toEqual([]);
     expect(initRepo(repo)).toMatchObject({ created: false, ignoreCreated: false });
     expect(readFileSync(join(repo, ".agentduo", ".gitignore"), "utf8")).toBe("runs/\n");
     expect(existsSync(join(repo, ".gitignore"))).toBe(false);

@@ -99,9 +99,11 @@ describe("ClaudeParser", () => {
       JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", is_error: true, content: "String not found in file" }] } }),
       JSON.stringify({ type: "result", subtype: "success", is_error: false, total_cost_usd: 0.5, permission_denials: [{ tool_name: "Bash", tool_use_id: "t2" }] }),
     ]);
+    // The path as the platform writes it: src\x.ts on Windows.
+    const x = join("src", "x.ts");
     expect(summary(events)).toEqual([
-      "edit:running:Edit  src/x.ts", "command:running:Bash  git push", "say:ok:Done.",
-      "command:denied:Bash  git push", "edit:error:Edit  src/x.ts", "usage:0.5:", "end",
+      `edit:running:Edit  ${x}`, "command:running:Bash  git push", "say:ok:Done.",
+      "command:denied:Bash  git push", `edit:error:Edit  ${x}`, "usage:0.5:", "end",
     ]);
     expect(events[0]).toMatchObject({ activity: { added: 3, removed: 2 } });
     // The label shows the command's first line; Copy copies all of it.
@@ -134,7 +136,7 @@ describe("ClaudeParser", () => {
       const events = p.feed(JSON.stringify({ type: "assistant", uuid: "a", message: { content: [
         { type: "tool_use", id: "w", name: "Write", input: { file_path: join(t.path, "link", "src", "new.ts"), content: "a\nb\n" } },
       ] } }));
-      expect(events[0]).toMatchObject({ activity: { label: "Write src/new.ts", added: 2 } });
+      expect(events[0]).toMatchObject({ activity: { label: `Write ${join("src", "new.ts")}`, added: 2 } });
     } finally {
       t.cleanup();
     }

@@ -10,7 +10,7 @@ import { main, type CliIO } from "../src/cli.js";
 import { acquireWorkspaceLock, RunStore } from "../src/core/state.js";
 import type { Attachment } from "../src/core/attachment-types.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
-import type { ConfigOverrides } from "./helpers/config.js";
+import { type ConfigOverrides, userConfigEnv } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { png } from "./helpers/images.js";
 import { makeRepo } from "./helpers/repo.js";
@@ -55,7 +55,7 @@ const happy = () => ({
 
 async function open(o: { overrides?: ConfigOverrides; config?: boolean; generation?: number; discover?: boolean } = {}) {
   if (o.config !== false) writeWorkspaceConfig(repo, fake, o.overrides);
-  const h = new WorkerHarness({ script: worker.script, workspace: repo, env: { ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg") }, generation: o.generation });
+  const h = new WorkerHarness({ script: worker.script, workspace: repo, env: { ...process.env, ...userConfigEnv(join(t.path, "xdg")) }, generation: o.generation });
   harnesses.push(h);
   await h.client.start();
   const init = await h.client.request({ type: "initialize", workspace: repo, configPath: null, discover: o.discover ?? true });
@@ -64,8 +64,6 @@ async function open(o: { overrides?: ConfigOverrides; config?: boolean; generati
 
 const lockFile = () => join(runsDir, ".lock");
 const latest = () => RunStore.open(runsDir).loadState();
-/** The fake agent records its own pid (the shell's parent), so a test can check it is gone. */
-const recordPid = (file: string) => `echo $PPID > ${file}`;
 
 describe("vscode worker: one conversation per tab", () => {
   const say = (h: WorkerHarness, conversation: string, text: string, route: "message" | "pipeline" = "message") =>
@@ -376,7 +374,7 @@ describe("vscode worker", () => {
 
     it("stops a running agent within the grace period; the run stays resumable and the lock is freed", async () => {
       const { h } = await open();
-      fake.setScenario({ ...happy(), implementer: [{ shell: [recordPid("agent.pid")], activities: [{ tool: "Read", input: { file_path: "app.txt" } }], sleep: 60_000, output: impl() }] });
+      fake.setScenario({ ...happy(), implementer: [{ pid: "agent.pid", activities: [{ tool: "Read", input: { file_path: "app.txt" } }], sleep: 60_000, output: impl() }] });
       await h.client.request({ type: "submit", conversation: C, text: "Make app.txt fixed", route: "pipeline" });
       await h.waitFor(isEvent("agent.activity", (e) => e.role === "implementer"));
       const agent = Number(readFileSync(join(repo, "agent.pid"), "utf8"));
@@ -427,7 +425,7 @@ describe("vscode worker", () => {
 
     it("cleans up on its own when the extension host goes away", async () => {
       const { h } = await open();
-      fake.setScenario({ ...happy(), implementer: [{ shell: [recordPid("agent.pid")], activities: [{ tool: "Read", input: { file_path: "app.txt" } }], sleep: 60_000, output: impl() }] });
+      fake.setScenario({ ...happy(), implementer: [{ pid: "agent.pid", activities: [{ tool: "Read", input: { file_path: "app.txt" } }], sleep: 60_000, output: impl() }] });
       await h.client.request({ type: "submit", conversation: C, text: "Make app.txt fixed", route: "pipeline" });
       await h.waitFor(isEvent("agent.activity", (e) => e.role === "implementer"));
       const agent = Number(readFileSync(join(repo, "agent.pid"), "utf8"));
@@ -462,13 +460,13 @@ describe("vscode worker", () => {
     const plain = join(t.path, "plain");
     mkdirSync(plain);
     writeWorkspaceConfig(plain, fake);
-    const h = new WorkerHarness({ script: worker.script, workspace: plain, env: { ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg") } });
+    const h = new WorkerHarness({ script: worker.script, workspace: plain, env: { ...process.env, ...userConfigEnv(join(t.path, "xdg")) } });
     harnesses.push(h);
     await h.client.start();
     const init = await h.client.request({ type: "initialize", workspace: plain, configPath: null, discover: true });
     expect([init.problem, init.hint]).toEqual([null, NOT_REPO_NOTE]);
     // The home folder (VS Code with no folder open) says so, and no `git init` there.
-    const home = new WorkerHarness({ script: worker.script, workspace: plain, env: { ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg"), HOME: plain } });
+    const home = new WorkerHarness({ script: worker.script, workspace: plain, env: { ...process.env, ...userConfigEnv(join(t.path, "xdg")), HOME: plain } });
     harnesses.push(home);
     await home.client.start();
     expect((await home.client.request({ type: "initialize", workspace: plain, configPath: null, discover: false })).hint).toBe(HOME_NOTE);
@@ -519,7 +517,7 @@ describe("vscode worker", () => {
     let err = "";
     const io: CliIO = {
       stdout: { write: () => true }, stderr: { write: (s: string) => { err += s; } }, stdin: {},
-      env: { ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg"), CI: "" }, cwd: repo,
+      env: { ...process.env, ...userConfigEnv(join(t.path, "xdg")), CI: "" }, cwd: repo,
     };
     expect(await main(["Another task"], io)).toBe(1);
     expect(err).toContain(`another agentduo run is active in this workspace (pid ${h.client.pid})`);
@@ -549,7 +547,7 @@ describe("vscode worker: attached files", () => {
     await h.client.request({ type: "submit", conversation: "tab-a", text: "", route: "message", attachments: [r.attachment.id] });
     await h.waitFor((m) => m.kind === "event" && m.conversation === "tab-a" && m.event.type === "turn.finished");
     const call = fake.calls("chat_codex")[0]!;
-    expect(call.args.at(-2)!.endsWith(`/${r.attachment.path}`)).toBe(true);
+    expect(call.args.at(-2)).toBe(`--image=${join(runsDir, ...r.attachment.path.split("/"))}`);
     expect(call.prompt).toContain("Look at the attached file(s).");
     expect(h.messages.some((m) => m.kind === "ui" && m.conversation === "tab-a" && m.update.type === "sent" && m.update.files.length === 1)).toBe(true);
     expect(files(h, "tab-a").at(-1)).toEqual([]);
@@ -572,7 +570,7 @@ describe("vscode worker: attached files", () => {
 });
 
 describe("vscode worker: configuration (the desktop's Settings)", () => {
-  const env = () => ({ ...process.env, XDG_CONFIG_HOME: join(t.path, "xdg") });
+  const env = () => ({ ...process.env, ...userConfigEnv(join(t.path, "xdg")) });
   const entry = (v: { entries: Array<{ key: string }> }, key: string) => v.entries.find((e) => e.key === key) as Record<string, unknown>;
 
   it("reads and writes the config files before initialize and with no project, taking no lock and opening no chat", async () => {

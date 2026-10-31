@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import YAML from "yaml";
 import type { ConfigurationView } from "../../../src/core/configuration.js";
+import { userConfigEnv } from "../../../test/helpers/config.js";
 import { fakeShim, FakeClis } from "../../../test/helpers/fake-clis.js";
 import { makeRepo } from "../../../test/helpers/repo.js";
 import { tempDir } from "../../../test/helpers/tmp.js";
@@ -42,7 +43,7 @@ interface Harness {
 function harness(o: { worker?: string; env?: NodeJS.ProcessEnv } = {}): Harness {
   const prefsFile = join(t.path, "prefs.json");
   const prefs = new PreferencesStore(prefsFile);
-  const env = o.env ?? { HOME: t.path, XDG_CONFIG_HOME: join(t.path, "xdg") };
+  const env = o.env ?? { HOME: t.path, ...userConfigEnv(join(t.path, "xdg")) };
   const events: DesktopEvent[] = [];
   const projects = new ProjectManager({
     prefs, tokens: new ResourceTokens(), host: { pickFiles: async () => [], copy: () => undefined }, workerScript: o.worker ?? join(t.path, "none.js"), env: () => env,
@@ -105,7 +106,7 @@ describe("with real workers", () => {
   });
   afterEach(() => fake.restore());
 
-  const env = () => ({ ...process.env, HOME: t.path, XDG_CONFIG_HOME: join(t.path, "xdg") });
+  const env = () => ({ ...process.env, HOME: t.path, ...userConfigEnv(join(t.path, "xdg")) });
   const userConfig = () => join(t.path, "xdg", "agentduo", "config.yaml");
   const writeYaml = (file: string, data: unknown) => {
     mkdirSync(join(file, ".."), { recursive: true });

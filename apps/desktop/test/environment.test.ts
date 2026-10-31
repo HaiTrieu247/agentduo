@@ -13,7 +13,8 @@ beforeEach(() => {
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 
 describe("launcherEnvironment", () => {
-  it("adds the login shell's PATH and the install directories after the app's own, each once", async () => {
+  // A ':'-separated PATH cannot hold the Windows folder (C:\…) this test needs to exist.
+  it.skipIf(process.platform === "win32")("adds the login shell's PATH and the install directories after the app's own, each once", async () => {
     const run: ShellRunner = async () => ({ code: 0, stdout: `motd\n${shellCommand("/bin/zsh")[3]!.includes("printf") ? "" : ""}__AGENTDUO_PATH__/opt/tools/bin:/usr/bin\n`, error: null });
     const marker = parseShellPath("x\n__AGENTDUO_PATH__/a:/b\n");
     // the marker the module uses is private: find it from what it parses

@@ -27,8 +27,10 @@ export class EnvironmentError extends Error {
   override name = "EnvironmentError";
 }
 
+/** `~` and `~/…` (on Windows `~\…` too) as the home directory; any other path as it is. */
 export function expandHome(path: string, env: NodeJS.ProcessEnv): string {
-  return path === "~" || path.startsWith("~/") ? join(homeFolder(env), path.slice(1)) : path;
+  const home = path === "~" || path.startsWith("~/") || (process.platform === "win32" && path.startsWith("~\\"));
+  return home ? join(homeFolder(env), path.slice(1)) : path;
 }
 
 /**
