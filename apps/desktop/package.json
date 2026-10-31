@@ -1,7 +1,7 @@
 {
   "name": "agentduo-desktop",
   "productName": "AgentDuo",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "private": true,
   "description": "agentduo as a desktop app: Codex plans and reviews, Claude Code critiques and implements, in one window.",
   "license": "MIT",
