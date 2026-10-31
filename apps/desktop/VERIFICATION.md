@@ -2,6 +2,30 @@
 
 This file lists only what was run, with its results. If an OS, a package type or CI is not listed below, it has not been verified yet.
 
+## 2026-10-31 · CI on macOS, Windows and Linux (GitHub Actions, branch fix/windows)
+
+Workflow `desktop` [run 41214497535](https://github.com/HaiTrieu247/agentduo/actions/runs/41214497535) (windows-latest,
+macos-latest, ubuntu-latest; Node 24, Electron 45.2.1 with its Node 24.22.1) passed on all three, and `ci`
+[run 41214497296](https://github.com/HaiTrieu247/agentduo/actions/runs/41214497296) passed the root tests on all three
+with Node 22 and 24.
+
+| Check | Windows | macOS | Linux (under Xvfb) |
+|---|---|---|---|
+| Root `npm test` | 520 pass, 10 skipped (POSIX only: names with tabs, SIGKILL, shell-script binaries) | 530 pass | 530 pass |
+| Desktop `npm test` | 89 pass, 4 skipped (the login shell PATH and the POSIX CLI probe) | 93 pass | 93 pass |
+| Electron E2E, dev build, fake CLIs (`.cmd` shims on Windows) | 10 pass | 10 pass | 10 pass (`--no-sandbox`) |
+| `pack:dir`, then `test:pack` on a copy outside the checkout | pass (`win-unpacked\AgentDuo.exe`) | pass (`AgentDuo.app`) | pass (`linux-unpacked`, `--no-sandbox`) |
+
+The package smoke test checks the same on each: runtime outside the ASAR archive, release fuses, the bundled Node runs
+as Node, the worker says hello, and the app starts with a profile of its own and shows its window.
+
+Fixed on the way: `/attach` read a Windows path's backslashes as escapes; the E2E passed the app folder with a trailing
+backslash, which Playwright's quoting on Windows turned into an escaped quote, so Electron never found the app;
+the smoke test removed the profile before the app's helpers had exited; the tests used the real `%APPDATA%`.
+
+Not run on Windows or Linux: installing (NSIS, AppImage, deb; only the release workflow builds them), the real
+`claude.cmd` / `codex.cmd`, opening the app from the Start menu or a launcher, SmartScreen, and self-update.
+
 ## 2026-10-31 · Follow-up: self-update and the release workflow (macOS, Darwin 27.2, Apple Silicon arm64)
 
 - `npm run typecheck` and `npm test` pass (10 files, 93 tests). The new `test/updates.test.ts` drives the update state
@@ -98,8 +122,9 @@ Sandbox mode: Chromium sandbox on everywhere above (the default; `--no-sandbox` 
 ## Not verified yet
 
 - Opening the dmg and running the macOS x64 build (both were built in the self-update follow-up above, not run).
-- Windows (NSIS) and Linux (AppImage, deb): nothing has been run on either OS, including the Windows `.cmd` fake CLIs, the Linux sandbox helper and the AppArmor profile.
-- `.github/workflows/desktop.yml` and `.github/workflows/release.yml`: added, but not pushed and never run.
+- Windows (NSIS) and Linux (AppImage, deb) installers: built only by the release workflow, never installed. The tests,
+  the E2E and the unpacked package ran on both in CI (see the CI section above); the real CLIs, the Linux sandbox
+  helper and the AppArmor profile did not.
 - Self-update end to end (a published release, then an installed app finding, downloading and installing the next one).
 - Real CLIs driving real agent work (chat, pipeline) in the desktop. Only the read-only sign-in check ran against them.
 - Developer ID signing and notarization: these need your own certificates (see the README). An ad-hoc signed app downloaded from elsewhere is still stopped by Gatekeeper.
