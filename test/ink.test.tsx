@@ -12,6 +12,19 @@ import { StepBlock } from "../src/ui/ink/StepBlock.js";
 import { initialView, reduce, type StepView, type ViewState } from "../src/ui/ink/store.js";
 
 const wait = (ms = 60) => new Promise((r) => setTimeout(r, ms));
+/**
+ * Sends keys until `check` passes. Ink listens for keys from an effect that may run after the frame is drawn, so on a
+ * busy machine keys sent to a prompt or panel just shown can come before it and are lost. A key that was handled makes
+ * `check` pass, and then nothing more is sent.
+ */
+const pressUntil = (send: () => void, check: () => void) => vi.waitFor(() => {
+  try {
+    check();
+  } catch (e) {
+    send();
+    throw e;
+  }
+}, { timeout: 3000, interval: 50 });
 const phase = (p: Phase, role: Role, agent: "codex" | "claude", round = 1): DuoEvent =>
   ({ type: "phase.started", step: 1, phase: p, round, role, agent, planning: { round: 1, limit: 4 }, impl: { round, limit: 5 } });
 const act = (id: string, label: string, status: Activity["status"], extra: Partial<Activity> = {}): DuoEvent =>
@@ -209,9 +222,7 @@ describe("Ink components", () => {
     await wait();
     expect(app.lastFrame()).toContain("Bash  npm test");
     expect(app.lastFrame()).not.toContain("rm -rf build");
-    app.stdin.write("\r");
-    await wait();
-    expect(given).toEqual([["p1", { decision: "once" }]]);
+    await pressUntil(() => app.stdin.write("\r"), () => expect(given).toEqual([["p1", { decision: "once" }]]));
     app.unmount();
   });
 
@@ -303,9 +314,7 @@ describe("Ink components", () => {
     for (const text of ["Claude Code · subscription", "Current session", `${"█".repeat(18)}${"░".repeat(22)}  46% used`, "Resets Oct 29 at 3pm", "Codex is not signed in", "r refresh · Esc close"]) {
       expect(frame).toContain(text);
     }
-    app.stdin.write("r");
-    await wait();
-    expect(refreshes).toBe(1);
+    await pressUntil(() => app.stdin.write("r"), () => expect(refreshes).toBe(1));
     app.stdin.write("\u001B");
     await wait();
     expect(escapes).toBe(0);
@@ -345,9 +354,10 @@ describe("Ink components", () => {
     expect(app.lastFrame()).toContain("Claude Code · subscription");
     expect(app.lastFrame()).not.toContain("detail line 60");
     expect(app.lastFrame()).toMatch(/↑↓ scroll/);
-    for (let i = 0; i < 80; i++) app.stdin.write("\u001B[B");
-    await wait(150);
-    expect(app.lastFrame()).toContain("detail line 60");
+    // More ↓ than lines: the panel stops at its last one.
+    await pressUntil(() => {
+      for (let i = 0; i < 80; i++) app.stdin.write("\u001B[B");
+    }, () => expect(app.lastFrame()).toContain("detail line 60"));
     expect(app.lastFrame()).not.toContain("Claude Code · subscription");
     bus.emit(requested(ask("p1")));
     await wait();
@@ -368,12 +378,7 @@ describe("Ink components", () => {
     await wait();
     expect(app.lastFrame()).toContain("asks to use Bash");
     expect(app.lastFrame()).not.toContain("Type a task…"); // the input line's placeholder
-    // Ink listens for keys from an effect that may run after the frame is drawn: on a busy machine, an Enter sent at
-    // once can come before it. An Enter that reached the prompt answers at once, so it is sent again only until then.
-    await vi.waitFor(() => {
-      if (!given.length) app.stdin.write("\r");
-      expect(given).toEqual(["p1"]);
-    }, { timeout: 2000, interval: 50 });
+    await pressUntil(() => app.stdin.write("\r"), () => expect(given).toEqual(["p1"]));
     bus.emit(answered("p1", { decision: "once" }));
     bus.emit({ type: "human.required", runId: "r1", review });
     await wait();

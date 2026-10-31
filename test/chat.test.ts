@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Chat, HOME_NOTE, NOT_REPO_NOTE, type ChatUi } from "../src/chat.js";
 import type { Attachment } from "../src/core/attachment-types.js";
@@ -1025,7 +1025,7 @@ describe("Chat: attached files", () => {
     await chat.idle();
     const call = fake.calls("chat_codex")[0]!;
     expect(call.images).toEqual([expect.objectContaining({ sha256: sha(shot) })]);
-    expect(call.prompt.split("/attachments/").length - 1).toBe(2);
+    expect(call.prompt.split(`${sep}attachments${sep}`).length - 1).toBe(2);
     expect(call.prompt).toContain("### Files the user attached to this message");
     expect(chat.pending).toEqual([]);
     expect(ui.sentFiles).toEqual([["Ảnh chụp.png", "notes.md"]]);
