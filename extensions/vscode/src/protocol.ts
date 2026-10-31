@@ -266,6 +266,8 @@ export type WebviewMessage =
   | { type: "decision"; generation: number; id: string; decision: DecisionChoice; note: string | null }
   | { type: "permission"; generation: number; id: string; answer: PermissionAnswer }
   | { type: "command"; name: WebviewCommand }
+  /** Copy (a code block, a command an agent ran): the host puts `text` on the clipboard. */
+  | { type: "copy"; text: string }
   /** The answer to `prepareReload`: the files the page read are all with the host, so a reload loses none. */
   | { type: "readyToReload" };
 
@@ -311,6 +313,8 @@ export class ProtocolError extends Error {
 }
 
 const MAX_TEXT = 100_000;
+/** As long as all the answers a tab keeps (MAX_ANSWER_CHARS), so a code block of any of them copies whole. */
+const MAX_COPY = 2_000_000;
 /** A file of the largest size a message takes, once base64-encoded. */
 export const MAX_UPLOAD_CHARS = base64Size(ATTACHMENT_LIMITS.fileBytes);
 const MAX_NAME = 255;
@@ -577,7 +581,7 @@ export function parseWebviewMessage(v: unknown): WebviewMessage {
   const o = obj(v, "webview message");
   const type = oneOf(o.type, [
     "ready", "submit", "attach", "upload", "detach", "recipient", "setting", "interrupt", "cycleMode", "usage", "decision", "permission", "command",
-    "readyToReload",
+    "copy", "readyToReload",
   ] as const, "type");
   switch (type) {
     case "submit":
@@ -599,6 +603,8 @@ export function parseWebviewMessage(v: unknown): WebviewMessage {
       return { type, generation: int(o.generation, "generation"), id: requestId(o.id, "id"), answer: permissionAnswer(o.answer) };
     case "command":
       return { type, name: oneOf(o.name, WEBVIEW_COMMANDS, "name") };
+    case "copy":
+      return { type, text: text(o.text, "text", MAX_COPY) };
     default:
       return { type };
   }

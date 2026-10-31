@@ -40,6 +40,8 @@ export interface Actions {
   decide(id: string, decision: DecisionChoice, note: string | null): void;
   permit(id: string, answer: PermissionAnswer): void;
   command(name: WebviewCommand): void;
+  /** Copy: the host puts `text` on the clipboard. */
+  copy(text: string): void;
   draft(text: string): void;
 }
 
@@ -54,6 +56,26 @@ function button(label: string, onClick: () => void, o: { class?: string; title?:
 function linkButton(label: string, iconName: string, onClick: () => void): HTMLButtonElement {
   const b = h("button", { class: "link", attrs: { type: "button" } }, icon(iconName), label);
   b.addEventListener("click", onClick);
+  return b;
+}
+
+/** Copy `text` (`what`: "code", "command"), shown on hover or focus; its tick says it went to the clipboard. */
+function copyButton(text: string, what: string, actions: Actions): HTMLButtonElement {
+  const label = `Copy ${what}`;
+  const b = h("button", { class: "icon-btn copy-btn", title: label, label, attrs: { type: "button" } }, icon("copy"));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  b.addEventListener("click", () => {
+    actions.copy(text);
+    b.replaceChildren(icon("check"));
+    b.title = "Copied";
+    b.setAttribute("aria-label", "Copied");
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      b.replaceChildren(icon("copy"));
+      b.title = label;
+      b.setAttribute("aria-label", label);
+    }, 1500);
+  });
   return b;
 }
 
@@ -107,7 +129,7 @@ function inlineNodes(nodes: Inline[]): Node[] {
 
 const HEADINGS = ["h3", "h4", "h5", "h6"] as const;
 
-function blockNodes(blocks: Block[]): HTMLElement[] {
+function blockNodes(blocks: Block[], actions: Actions): HTMLElement[] {
   return blocks.map((b): HTMLElement => {
     switch (b.type) {
       case "paragraph":
@@ -115,14 +137,16 @@ function blockNodes(blocks: Block[]): HTMLElement[] {
       case "heading":
         return h(HEADINGS[Math.min(b.level, HEADINGS.length) - 1]!, { class: `md-h md-h${b.level}` }, ...inlineNodes(b.children));
       case "code":
-        return h("pre", { class: "md-pre", label: b.lang ? `${b.lang} code` : "code", attrs: { tabindex: "0" } }, h("code", {}, b.text));
+        return h("div", { class: "md-code-block" },
+          h("pre", { class: "md-pre", label: b.lang ? `${b.lang} code` : "code", attrs: { tabindex: "0" } }, h("code", {}, b.text)),
+          copyButton(b.text, "code", actions));
       case "list": {
-        const el = h(b.ordered ? "ol" : "ul", { class: "md-list" }, ...b.items.map((item) => h("li", {}, ...blockNodes(item))));
+        const el = h(b.ordered ? "ol" : "ul", { class: "md-list" }, ...b.items.map((item) => h("li", {}, ...blockNodes(item, actions))));
         if (b.ordered && b.start !== 1) el.setAttribute("start", String(b.start));
         return el;
       }
       case "quote":
-        return h("blockquote", { class: "md-quote" }, ...blockNodes(b.children));
+        return h("blockquote", { class: "md-quote" }, ...blockNodes(b.children, actions));
       case "rule":
         return h("hr", { class: "md-rule" });
       case "table": {
@@ -136,8 +160,8 @@ function blockNodes(blocks: Block[]): HTMLElement[] {
 }
 
 /** An answer as the agent wrote it: its Markdown as elements and text nodes, never as markup. */
-export function markdownBody(text: string): HTMLElement {
-  return h("div", { class: "md" }, ...blockNodes(parseMarkdown(text)));
+export function markdownBody(text: string, actions: Actions): HTMLElement {
+  return h("div", { class: "md" }, ...blockNodes(parseMarkdown(text), actions));
 }
 
 const inlineText = (text: string): Node[] => inlineNodes(parseInline(text));
@@ -151,28 +175,29 @@ function row(cls: string, ...children: Child[]): HTMLElement {
   return h("li", { class: `row ${cls}` }, h("span", { class: "dot", attrs: { "aria-hidden": "true" } }), h("div", { class: "row-body" }, ...children));
 }
 
-function activityRow(a: Activity): HTMLElement {
+function activityRow(a: Activity, actions: Actions): HTMLElement {
   const p = activityParts(a);
   return row(`row-act act-${a.kind} ${STATUS_CLASS[a.status]}`,
     h("span", { class: "sr-only" }, `${STATUS_WORD[a.status]}: `),
     p.tool ? h("strong", { class: "tool" }, p.tool) : null,
     h("span", { class: "tool-text" }, p.text),
-    p.diff ? h("span", { class: "diff" }, h("span", { class: "diff-add" }, `+${p.diff.added}`), h("span", { class: "diff-del" }, `−${p.diff.removed}`)) : null);
+    p.diff ? h("span", { class: "diff" }, h("span", { class: "diff-add" }, `+${p.diff.added}`), h("span", { class: "diff-del" }, `−${p.diff.removed}`)) : null,
+    a.command ? copyButton(a.command, "command", actions) : null);
 }
 
 /** A step's or an answer's activities: the latest ones while it works, folded into one row once it is done. */
-function activityRows(activities: Activity[], dropped: number, live: boolean): HTMLElement[] {
+function activityRows(activities: Activity[], dropped: number, live: boolean, actions: Actions): HTMLElement[] {
   const visible = activities.filter((a) => a.kind !== "think");
   if (live) {
     const shown = visible.slice(-8);
     const hidden = dropped + visible.length - shown.length;
-    return [...(hidden > 0 ? [row("row-more", h("span", { class: "muted" }, `${hidden} earlier`))] : []), ...shown.map(activityRow)];
+    return [...(hidden > 0 ? [row("row-more", h("span", { class: "muted" }, `${hidden} earlier`))] : []), ...shown.map((a) => activityRow(a, actions))];
   }
   if (!visible.length) return [];
   const n = visible.length;
   return [row("row-fold", h("details", {},
     h("summary", {}, `${n} action${n === 1 ? "" : "s"}${dropped ? ` (+${dropped} not shown)` : ""}`, icon("chevron-right", "fold-chevron")),
-    h("ol", { class: "rail" }, ...visible.map(activityRow))))];
+    h("ol", { class: "rail" }, ...visible.map((a) => activityRow(a, actions)))))];
 }
 
 /** While nothing it does shows yet, a live card says it is at work. */
@@ -212,7 +237,7 @@ function stepCard(step: StepCard, actions: Actions, live: { now: number } | null
   const time = live ? formatClock((live.now - step.startedAt) / 1000) : formatDuration(step.durationSec);
   const meta = [`${stageName(step.phase)} r${step.round}`, time, live ? "" : usageText(step.costUsd, step.tokens)].filter(Boolean).join(" · ");
   const rows = [
-    ...activityRows(step.activities, step.dropped, !!live),
+    ...activityRows(step.activities, step.dropped, !!live, actions),
     ...(live && !step.message ? working(step.activities, "Working…") : []),
     step.message ? messageRow(step.message, actions) : null,
     step.entry && (!step.message || warn) ? row(`row-text ${warn ? "s-warn" : "s-ok"}`, h("span", { class: warn ? "warn-text" : "" }, `${step.entry.status}: ${step.entry.summary}`)) : null,
@@ -228,7 +253,7 @@ function verdictChip(place: NonNullable<TurnCard["discussion"]>): HTMLElement | 
   return h("span", { class: `verdict verdict-${place.verdict ?? "none"}` }, verdictText(place.verdict));
 }
 
-function answerCard(t: TurnCard, live: { now: number } | null): HTMLElement {
+function answerCard(t: TurnCard, actions: Actions, live: { now: number } | null): HTMLElement {
   const p = PROVIDERS[t.backend];
   const time = live ? formatClock((live.now - t.startedAt) / 1000) : formatDuration(t.durationSec);
   const meta = [time, live ? "" : usageText(t.costUsd, t.tokens)].filter(Boolean).join(" · ");
@@ -238,12 +263,12 @@ function answerCard(t: TurnCard, live: { now: number } | null): HTMLElement {
     ? [h("span", { class: "role", title: modelTitle(t.model) }, live ? discussionDoing(place) : discussionStepText(place)), verdictChip(place)]
     : [h("span", { class: "model", title: modelTitle(t.model) }, shortModel(t.model))];
   const body = live ? working(t.activities, place?.step === "critique" ? "Reviewing…" : place?.step === "synthesis" ? "Synthesizing…" : "Thinking…")
-    : t.status === "success" ? [row("row-text row-answer", markdownBody(t.answer ?? ""))]
+    : t.status === "success" ? [row("row-text row-answer", markdownBody(t.answer ?? "", actions))]
       : t.status === "interrupted" ? [row("row-text s-warn", h("span", { class: "warn-text" }, "Stopped before it answered."))]
         : [row("row-text s-err", h("span", { class: "err-text", role: "alert" }, `No answer: ${t.error ?? "the call failed"}`))];
   return h("article", { class: `turn turn-${t.backend}${live ? " live" : ""}${!live && t.status !== "success" ? " failed" : ""}`, label: `${p.agent} (${p.company}) answer` },
     cardHead(speaker(t.backend), head, meta),
-    h("ol", { class: "rail" }, ...activityRows(t.activities, t.dropped, !!live), ...body));
+    h("ol", { class: "rail" }, ...activityRows(t.activities, t.dropped, !!live, actions), ...body));
 }
 
 const OUTCOME_ICON: Record<NonNullable<DiscussionCard["status"]>, { icon: string; tone: string }> = {
@@ -254,14 +279,14 @@ const OUTCOME_ICON: Record<NonNullable<DiscussionCard["status"]>, { icon: string
  * A /discuss: while it goes on, each turn whole as it finishes and the one under way; once it is over, how it ended,
  * its turns folded, and its answer (the response) whole.
  */
-function discussionCard(d: DiscussionCard, live: { now: number; turn: TurnCard | null } | null): HTMLElement {
+function discussionCard(d: DiscussionCard, actions: Actions, live: { now: number; turn: TurnCard | null } | null): HTMLElement {
   const who = `${PROVIDERS[d.answerer].agent} answers · ${PROVIDERS[d.critic].agent} reviews`;
   const title = h("span", { class: "speaker-id" }, icon("comment-discussion"), h("strong", {}, "Discussion"));
   if (live) {
     const meta = [formatClock((live.now - d.startedAt) / 1000), `at most ${d.maxRounds} review${d.maxRounds === 1 ? "" : "s"}`].join(" · ");
     return h("article", { class: "turn discussion live", label: "Discussion" },
       cardHead(title, [h("span", { class: "role" }, who)], meta),
-      h("div", { class: "discussion-turns" }, ...d.turns.map((t) => answerCard(t, null)), live.turn ? answerCard(live.turn, live) : null));
+      h("div", { class: "discussion-turns" }, ...d.turns.map((t) => answerCard(t, actions, null)), live.turn ? answerCard(live.turn, actions, live) : null));
   }
   const o = OUTCOME_ICON[d.status ?? "error"];
   const status = { status: d.status ?? "error", answerer: d.answerer, critic: d.critic, rounds: d.rounds ?? 0 };
@@ -272,11 +297,11 @@ function discussionCard(d: DiscussionCard, live: { now: number; turn: TurnCard |
     cardHead(title, [h("span", { class: "role" }, who)], meta),
     h("div", { class: `discussion-outcome note-${o.tone}` }, icon(o.icon, "note-icon"), h("span", {}, discussionOutcome(status)), d.error ? h("span", { class: "err-text" }, `: ${d.error}`) : null),
     n ? h("details", { class: "discussion-fold" }, h("summary", {}, `${n} turn${n === 1 ? "" : "s"}`, icon("chevron-right", "fold-chevron")),
-      h("div", { class: "discussion-turns" }, ...d.turns.map((t) => answerCard(t, null)))) : null,
+      h("div", { class: "discussion-turns" }, ...d.turns.map((t) => answerCard(t, actions, null)))) : null,
     d.answer !== null && d.answer !== undefined
       ? h("section", { class: "discussion-final", label: "Final answer" },
         h("div", { class: "final-head" }, providerMark(by), h("strong", {}, "Final answer"), h("span", { class: "muted" }, `· ${PROVIDERS[by].agent}`)),
-        markdownBody(d.answer))
+        markdownBody(d.answer, actions))
       : null);
 }
 
@@ -309,9 +334,9 @@ function timelineItem(item: TimelineItem, actions: Actions): HTMLElement {
     case "step":
       return stepCard(item.step, actions, null);
     case "answer":
-      return answerCard(item.turn, null);
+      return answerCard(item.turn, actions, null);
     case "discussion":
-      return discussionCard(item.discussion, null);
+      return discussionCard(item.discussion, actions, null);
     case "warning":
       return note("warning", "warn", h("span", { class: "sr-only" }, "warning: "), item.text);
     case "permission":
@@ -1174,7 +1199,7 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   function renderLive(s: ViewState): void {
     const now = { now: Date.now() };
     const step = s.current && (s.current.activities.length || s.status === "running" || s.current.message) ? [stepCard(s.current, actions, now)] : [];
-    const answering = s.discussion ? [discussionCard(s.discussion, { ...now, turn: s.turn })] : s.turn ? [answerCard(s.turn, now)] : [];
+    const answering = s.discussion ? [discussionCard(s.discussion, actions, { ...now, turn: s.turn })] : s.turn ? [answerCard(s.turn, actions, now)] : [];
     live.replaceChildren(...step, ...answering);
   }
 

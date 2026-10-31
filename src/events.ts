@@ -12,6 +12,8 @@ export interface Activity {
   kind: "read" | "search" | "edit" | "command" | "say" | "think" | "submit" | "other";
   label: string;
   status: "running" | "ok" | "error" | "denied";
+  /** A command's whole text, which its label shows only the first line of: what Copy copies. */
+  command?: string;
   exitCode?: number;
   added?: number;
   removed?: number;

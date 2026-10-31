@@ -55,6 +55,10 @@ export class ConversationPanel {
         if (this.asked) this.reload(true);
         return;
       }
+      if (message.type === "copy") {
+        vscode.env.clipboard.writeText(message.text).then(undefined, (e: unknown) => host.log(`could not copy: ${(e as Error).message}`));
+        return;
+      }
       if (message.type === "ready") {
         this.ready = true;
         this.asked = false;

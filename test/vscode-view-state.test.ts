@@ -72,6 +72,7 @@ describe("view state", () => {
       ev({ type: "gate.completed", name: "test", command: "npm test", passed: false, exitCode: 1 }),
       ev({ type: "agent.retry", role: "implementer", agent: "claude", attempt: 2, max: 2, reason: "bad json\nmore" }));
     expect(s.current!.activities.map((a) => [a.id, a.status])).toEqual([["gate-test", "error"], ["retry-implementer-2", "error"]]);
+    expect(s.current!.activities[0]!.command).toBe("npm test"); // what its Copy copies
     s = run(s, ev({ type: "permission.requested", role: "implementer", agent: "claude", request: request("p1") }),
       ev({ type: "permission.requested", role: "implementer", agent: "claude", request: request("p1") }));
     expect(s.permissions).toHaveLength(1);

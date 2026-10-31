@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ClaudeParser } from "../src/agents/claude.js";
 import { CodexParser, unwrapShell } from "../src/agents/codex.js";
-import { extractJson, type ParsedEvent, type StreamParser } from "../src/agents/types.js";
+import { extractJson, MAX_COMMAND_CHARS, type ParsedEvent, type StreamParser } from "../src/agents/types.js";
 import { tempDir } from "./helpers/tmp.js";
 
 const fixture = (name: string) =>
@@ -36,7 +36,7 @@ describe("CodexParser", () => {
       JSON.stringify({ type: "turn.failed", error: { message: "boom" } }),
     ]);
     expect(summary(events)).toEqual(["command:error:exec  npm test"]);
-    expect(events[0]).toMatchObject({ activity: { exitCode: 1 } });
+    expect(events[0]).toMatchObject({ activity: { exitCode: 1, command: "npm test" } });
     expect(p.error).toBe("boom");
   });
 
@@ -47,6 +47,23 @@ describe("CodexParser", () => {
     expect(unwrapShell("git status")).toBe("git status");
     expect(unwrapShell(`/bin/zsh -lc "pwd && rg --files -g 'AGENTS.md'"`)).toBe("pwd && rg --files -g 'AGENTS.md'");
     expect(unwrapShell('/bin/zsh -lc "echo \\"hi\\" \\$HOME"')).toBe('echo "hi" $HOME');
+  });
+});
+
+describe("a command's whole text", () => {
+  it("is kept for Copy up to MAX_COMMAND_CHARS; a longer one (a script written inline) keeps only its label", () => {
+    const codex = (command: string) => new CodexParser().feed(JSON.stringify({ type: "item.started", item: { id: "c", type: "command_execution", command, status: "in_progress" } }));
+    const claude = (command: string) => new ClaudeParser("/repo").feed(JSON.stringify({
+      type: "assistant", uuid: "a", message: { id: "m", content: [{ type: "tool_use", id: "t", name: "Bash", input: { command } }] },
+    }));
+    const fits = `cat > a.txt <<'EOF'\n${"x".repeat(MAX_COMMAND_CHARS - 24)}\nEOF`;
+    const long = `cat > a.txt <<'EOF'\n${"x".repeat(MAX_COMMAND_CHARS)}\nEOF`;
+    for (const parse of [codex, claude]) {
+      expect(parse(fits)).toMatchObject([{ activity: { command: fits } }]);
+      const [cut] = parse(long);
+      expect(cut).toMatchObject({ activity: { label: expect.stringContaining("cat > a.txt <<'EOF'") } });
+      expect(cut).not.toHaveProperty("activity.command");
+    }
   });
 });
 
@@ -87,6 +104,8 @@ describe("ClaudeParser", () => {
       "command:denied:Bash  git push", "edit:error:Edit  src/x.ts", "usage:0.5:", "end",
     ]);
     expect(events[0]).toMatchObject({ activity: { added: 3, removed: 2 } });
+    // The label shows the command's first line; Copy copies all of it.
+    expect(events[1]).toMatchObject({ activity: { command: "git push\nmore" } });
   });
   it("turns a real permission prompt (host mode) into a request with the rules Claude suggests", () => {
     const p = new ClaudeParser("/repo");

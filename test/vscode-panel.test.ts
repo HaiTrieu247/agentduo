@@ -5,12 +5,16 @@ import { initialState, readyAttachments, reduce, shownImages, type ViewState } f
 import { FileQueue, type FileReading } from "../extensions/vscode/webview/uploads.js";
 import type { Attachment } from "../src/core/attachment-types.js";
 
-// The panel needs only Uri from VS Code (vi.mock is hoisted above the imports); a WebviewPanel is faked below.
+/** What the panel put on the clipboard. */
+const clipboard = vi.hoisted(() => [] as string[]);
+
+// The panel needs only Uri and the clipboard from VS Code (vi.mock is hoisted above the imports); a WebviewPanel is faked below.
 vi.mock("vscode", () => ({
   Uri: {
     joinPath: (base: { fsPath: string }, ...parts: string[]) => ({ fsPath: [base.fsPath, ...parts].join("/") }),
     file: (fsPath: string) => ({ fsPath }),
   },
+  env: { clipboard: { writeText: async (text: string) => void clipboard.push(text) } },
 }));
 
 type Options = { localResourceRoots?: Array<{ fsPath: string }> };
@@ -163,5 +167,15 @@ describe("a conversation tab's resource roots", () => {
     expect(t.p.allow(ROOT)).toBe(true);
     expect(t.reloads()).toBe(0);
     expect(t.roots()).toEqual(["/ext/dist/webview", ROOT]);
+  });
+});
+
+describe("a conversation tab's Copy", () => {
+  it("puts the text on the clipboard itself: the host hears nothing of it", () => {
+    const t = setup();
+    t.say({ type: "ready" });
+    t.say({ type: "copy", text: "npm test -- --run\n" });
+    expect(clipboard).toEqual(["npm test -- --run\n"]);
+    expect(t.heard.map((m) => m.type)).toEqual(["ready"]);
   });
 });

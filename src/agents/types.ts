@@ -125,6 +125,15 @@ export function firstLine(text: string, max = 120): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
+/** The longest command an activity keeps whole for Copy: a longer one is a script written inline, shown by its label only. */
+export const MAX_COMMAND_CHARS = 20_000;
+
+/** A command activity's `command`: its whole text, unless it is longer than MAX_COMMAND_CHARS. */
+export function wholeCommand(text: string): { command?: string } {
+  const command = text.trim();
+  return command && command.length <= MAX_COMMAND_CHARS ? { command } : {};
+}
+
 function realpathOrSelf(path: string): string {
   try {
     return realpathSync(path);

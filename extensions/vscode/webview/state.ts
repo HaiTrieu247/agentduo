@@ -357,10 +357,10 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
     case "agent.usage":
       return { ...s, live: { costUsd: e.costUsd ?? s.live.costUsd, tokens: e.tokens ?? s.live.tokens } };
     case "gate.started":
-      return withActivity(s, { id: `gate-${e.name}`, kind: "command", label: `gate  ${e.name}: ${e.command}`, status: "running" });
+      return withActivity(s, { id: `gate-${e.name}`, kind: "command", label: `gate  ${e.name}: ${e.command}`, command: e.command, status: "running" });
     case "gate.completed":
       return withActivity(s, {
-        id: `gate-${e.name}`, kind: "command", label: `gate  ${e.name}: ${e.command}`, status: e.passed ? "ok" : "error", exitCode: e.exitCode ?? undefined,
+        id: `gate-${e.name}`, kind: "command", label: `gate  ${e.name}: ${e.command}`, command: e.command, status: e.passed ? "ok" : "error", exitCode: e.exitCode ?? undefined,
       });
     case "message": {
       const current = s.current ?? newStep("HUMAN_REVIEW", 0, now, undefined, e.message.from);

@@ -218,8 +218,9 @@ body {
   border-radius: 3px;
 }
 .md-code { padding: 1px 4px; }
+.md-code-block { position: relative; margin: 0 0 8px; }
 .md-pre {
-  margin: 0 0 8px;
+  margin: 0;
   padding: 8px 10px;
   border-radius: var(--radius);
   background: var(--code-bg);
@@ -232,6 +233,19 @@ body {
 }
 .md-pre code { color: inherit; background: none; padding: 0; font: inherit; }
 .md-pre:focus-visible, .md-table-wrap:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+/* Copy: in a code block's corner, over the code (so opaque), or after a command's row; shown on hover and on focus. */
+.copy-btn { opacity: 0; }
+.md-code-block:hover > .copy-btn, .md-code-block:focus-within > .copy-btn, .row-act:hover .copy-btn, .copy-btn:focus { opacity: 1; }
+.md-code-block > .copy-btn, .md-code-block > .copy-btn:hover {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  border: 1px solid var(--border);
+  background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+}
+.md-code-block > .copy-btn:hover { color: var(--vscode-foreground); }
+.row-act .copy-btn { width: 18px; height: 16px; margin-left: 4px; vertical-align: middle; }
+.row-act .copy-btn .codicon { font-size: 12px; }
 .md-quote { margin: 0 0 8px; padding: 0 0 0 10px; border-left: 3px solid var(--vscode-textBlockQuote-border, var(--border)); color: var(--muted); }
 .md-rule { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 /* A link's target is its tooltip: the sidebar shows it, it does not follow it. */

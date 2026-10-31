@@ -3,6 +3,7 @@ import { DecisionBroker, PermissionBroker } from "../extensions/vscode/src/decis
 import {
   isWorkspacePath, MAX_UPLOAD_CHARS, parseAccountViewMessage, parseRequestEnvelope, parseWebviewMessage, parseWorkerMessage, PROTOCOL_VERSION, ProtocolError,
 } from "../extensions/vscode/src/protocol.js";
+import { MAX_ANSWER_CHARS } from "../extensions/vscode/webview/state.js";
 import type { HumanReview, PermissionRequest } from "../src/events.js";
 
 const envelope = (request: unknown) => ({ protocol: PROTOCOL_VERSION, generation: 3, id: 7, request });
@@ -138,6 +139,13 @@ describe("webview messages", () => {
     ]) {
       expect(() => parseWebviewMessage(raw), JSON.stringify(raw)).toThrow(ProtocolError);
     }
+  });
+
+  it("takes a Copy's text as it is, as long as the longest answer the view keeps", () => {
+    expect(parseWebviewMessage({ type: "copy", text: "  npm test\n" })).toEqual({ type: "copy", text: "  npm test\n" });
+    expect(parseWebviewMessage({ type: "copy", text: "x".repeat(MAX_ANSWER_CHARS) })).toMatchObject({ type: "copy" });
+    expect(() => parseWebviewMessage({ type: "copy", text: "x".repeat(MAX_ANSWER_CHARS + 1) })).toThrow(/too long/);
+    expect(() => parseWebviewMessage({ type: "copy" })).toThrow(ProtocolError);
   });
 });
 

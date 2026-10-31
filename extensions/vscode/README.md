@@ -92,7 +92,9 @@ Click the agentduo button in an editor's title bar (beside Claude Code's and Cod
 - Each answer and each pipeline step is drawn on a line of dots, as in VS Code's own chat views: one row per tool the
   agent used (Bash, Read, Edit…), folded once it is done, then the answer. Answers are shown whole, with Claude's or
   OpenAI's logo and the model they ran on. Their Markdown (headings, lists, code, tables, quotes) is rendered as text
-  elements, never as HTML, and links show their target as a tooltip without opening it.
+  elements, never as HTML, and links show their target as a tooltip without opening it. Each code block, and each
+  command an agent ran (the whole command, not only the first line its row shows), has a Copy button that appears on
+  hover or focus.
 - **agentduo: Open Chat** puts the cursor in the composer. Enter sends and Shift+Enter starts a new line; while an IME
   is composing, Enter only commits the word. The mode chip opens Claude Code's mode menu (Manual, Edit automatically,
   Auto), for Claude in the chat and as the pipeline's implementer; Shift+Tab in the composer switches to the next mode,

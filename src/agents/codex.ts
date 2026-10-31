@@ -4,7 +4,7 @@ import type { Activity } from "../events.js";
 import { resolveBinary } from "./resolve.js";
 import { schemaPath } from "./schema.js";
 import {
-  AgentFailure, BinaryNotFound, extractJson, firstLine,
+  AgentFailure, BinaryNotFound, extractJson, firstLine, wholeCommand,
   type AgentBackend, type AgentMeta, type BuildArgs, type FinalOutput, type ParsedEvent, type StreamParser,
 } from "./types.js";
 
@@ -62,9 +62,10 @@ export class CodexParser implements StreamParser {
       case "command_execution": {
         const done = completed || item.status === "completed" || failed;
         const exitCode = typeof item.exit_code === "number" ? item.exit_code : undefined;
+        const command = unwrapShell(String(item.command ?? ""));
         return {
-          id, kind: "command", label: `exec  ${firstLine(unwrapShell(String(item.command ?? "")))}`,
-          status: !done ? "running" : exitCode === 0 && !failed ? "ok" : "error", exitCode,
+          id, kind: "command", label: `exec  ${firstLine(command)}`,
+          status: !done ? "running" : exitCode === 0 && !failed ? "ok" : "error", exitCode, ...wholeCommand(command),
         };
       }
       case "agent_message": {

@@ -5,7 +5,7 @@ import type { Activity, PermissionAnswer } from "../events.js";
 import { resolveBinary } from "./resolve.js";
 import { loadSchema } from "./schema.js";
 import {
-  AgentFailure, BinaryNotFound, extractJson, firstLine, relPath,
+  AgentFailure, BinaryNotFound, extractJson, firstLine, relPath, wholeCommand,
   type AgentBackend, type AgentMeta, type BuildArgs, type FinalOutput, type NativeImage, type ParsedEvent, type StreamParser,
 } from "./types.js";
 
@@ -157,7 +157,7 @@ export class ClaudeParser implements StreamParser {
       case "NotebookEdit":
         return { id, kind: "edit", label: `Edit  ${path(input.notebook_path)}`, status: "running" };
       case "Bash":
-        return { id, kind: "command", label: `Bash  ${firstLine(String(input.command ?? ""))}`, status: "running" };
+        return { id, kind: "command", label: `Bash  ${firstLine(String(input.command ?? ""))}`, status: "running", ...wholeCommand(String(input.command ?? "")) };
       case "StructuredOutput":
         return { id, kind: "submit", label: "submitting result", status: "running" };
       case "TodoWrite":

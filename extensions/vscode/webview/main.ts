@@ -26,6 +26,7 @@ const ui = createUi(document.getElementById("app")!, {
   decide: (id, decision, note) => state && vscode.postMessage({ type: "decision", generation: state.generation, id, decision, note }),
   permit: (id, answer) => state && vscode.postMessage({ type: "permission", generation: state.generation, id, answer }),
   command: (name) => vscode.postMessage({ type: "command", name }),
+  copy: (text) => vscode.postMessage({ type: "copy", text }),
   // The webview is recreated whenever its tab is shown again; a half-typed message survives that.
   draft: (text) => {
     draft = text;
