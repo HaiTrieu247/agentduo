@@ -1,13 +1,13 @@
 # The VSIX holds only what runs: the host and webview bundles (a tab's and the Account & Usage view's), the icon font
-# (with its CC BY 4.0 licence), the engine worker with its schemas, the icon, the manifest, README and LICENSE.
+# (with its CC BY 4.0 licence), the engine worker with its schemas, the icons, the manifest, README and LICENSE.
 # Everything else (sources, tests, run data, fixtures) stays out.
 **
 !package.json
 !README.md
 !LICENSE
+!media/icon.png
 !media/agentduo.svg
-!media/agentduo-light.svg
-!media/agentduo-dark.svg
+!media/agentduo-color.svg
 !dist/extension.cjs
 !dist/webview/main.js
 !dist/webview/styles.css

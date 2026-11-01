@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="226 226 572 572">
+  <title>agentduo</title>
+  <!-- The app's mark (apps/desktop/resources/icon.svg) in its colours, without its tile: Codex (teal) and Claude Code
+       (amber) on opposite corners of one loop. For a conversation's tab and the Open Chat button. -->
+  <g fill="none" stroke-width="56" stroke-linecap="round">
+    <path d="M342 342H578A104 104 0 0 1 682 446V538" stroke="#14a892"/>
+    <path d="M682 682H446A104 104 0 0 1 342 578V486" stroke="#e0832f"/>
+  </g>
+  <circle cx="342" cy="342" r="100" fill="#14a892"/>
+  <circle cx="682" cy="682" r="100" fill="#e0832f"/>
+</svg>

@@ -1,7 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="226 226 572 572">
   <title>agentduo</title>
-  <circle cx="7" cy="9" r="4"/>
-  <circle cx="17" cy="15" r="4"/>
-  <path d="M11 9h3.5a2.5 2.5 0 0 1 2.5 2.5V11"/>
-  <path d="M13 15H9.5A2.5 2.5 0 0 1 7 12.5V13"/>
+  <!-- The app's mark (apps/desktop/resources/icon.svg) in one colour, for the activity bar and the views, which VS Code
+       draws as a mask in the theme's colour. -->
+  <g fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round">
+    <path d="M342 342H578A104 104 0 0 1 682 446V538"/>
+    <path d="M682 682H446A104 104 0 0 1 342 578V486"/>
+  </g>
+  <circle cx="342" cy="342" r="100" fill="currentColor"/>
+  <circle cx="682" cy="682" r="100" fill="currentColor"/>
 </svg>

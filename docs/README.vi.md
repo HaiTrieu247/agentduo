@@ -1,3 +1,5 @@
+<img src="../apps/desktop/resources/icon.png" alt="" width="96">
+
 # agentduo (tiếng Việt)
 
 agentduo là kênh giao tiếp giữa hai agent lập trình. **Codex** lập kế hoạch và review. **Claude Code** phản biện kế hoạch rồi implement. agentduo chuyển các thông điệp có cấu trúc giữa hai bên, điều phối vòng lặp, và hiển thị live trên terminal từng hành động của mỗi agent cùng những gì hai agent chuyển cho nhau.

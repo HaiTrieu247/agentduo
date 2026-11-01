@@ -1,6 +1,7 @@
 // Renders the app icon's source (resources/icon.svg) into resources/icon.png, 1024×1024, from which electron-builder
-// makes every platform's icon (icns, ico, Linux PNGs). It draws with the Chromium of apps/desktop's Electron, so it
-// needs no image tool. Run it after changing icon.svg, and commit both files.
+// makes every platform's icon (icns, ico, Linux PNGs), and into the VS Code extension's Marketplace icon
+// (extensions/vscode/media/icon.png, 256×256). It draws with the Chromium of apps/desktop's Electron, so it needs no
+// image tool. Run it after changing icon.svg, and commit the SVG and both PNGs.
 //   node scripts/icon.mjs [<svg> <png> [<size>]]
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -9,25 +10,33 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const desktop = fileURLToPath(new URL("..", import.meta.url));
-const [svg = join(desktop, "resources", "icon.svg"), png = join(desktop, "resources", "icon.png"), size = "1024"] = process.argv.slice(2);
+const source = join(desktop, "resources", "icon.svg");
+const args = process.argv.slice(2);
+/** [svg, png, size] triples: the one asked for, or both icons made from the app's SVG. */
+const jobs = args.length
+  ? [[args[0], args[1], args[2] ?? "1024"]]
+  : [[source, join(desktop, "resources", "icon.png"), "1024"], [source, join(desktop, "..", "..", "extensions", "vscode", "media", "icon.png"), "256"]];
 
 if (!process.versions.electron) {
   const electron = createRequire(join(desktop, "package.json"))("electron");
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
-  const r = spawnSync(electron, [fileURLToPath(import.meta.url), resolve(svg), resolve(png), size], { stdio: "inherit", env });
+  const flat = jobs.flatMap(([svg, png, size]) => [resolve(svg), resolve(png), size]);
+  const r = spawnSync(electron, [fileURLToPath(import.meta.url), ...flat], { stdio: "inherit", env });
   process.exit(r.status ?? 1);
 }
 
 // Electron emits "ready" only once this module's top-level awaits settle, so the rendering must not await it here.
 const { app, BrowserWindow } = await import("electron");
 app.dock?.hide();
-app.whenReady().then(render).then(() => app.quit(), (e) => {
+app.whenReady().then(async () => {
+  for (let i = 0; i < args.length; i += 3) await render(args[i], args[i + 1], args[i + 2]);
+}).then(() => app.quit(), (e) => {
   console.error(e);
   app.exit(1);
 });
 
-async function render() {
+async function render(svg, png, size) {
   const n = Number(size);
   const win = new BrowserWindow({ show: false, webPreferences: { offscreen: true, sandbox: true, contextIsolation: true } });
   await win.loadURL("about:blank");

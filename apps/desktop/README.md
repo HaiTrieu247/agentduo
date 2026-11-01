@@ -48,9 +48,11 @@ on the package instead of the build output.
 
 The app icon's source is `resources/icon.svg`, drawn on the macOS icon grid (an 824 px rounded square in a 1024 px
 canvas). `node scripts/icon.mjs` renders it into `resources/icon.png` (1024 px) with the desktop's own Electron, so it
-needs no image tool, and electron-builder makes the icns, ico and Linux icons from that PNG. After changing the SVG,
-render it again and commit both files. The build copies the PNG to `dist/main` for the window on Windows and Linux and
-the Dock of `npm run dev` on a Mac.
+needs no image tool, and electron-builder makes the icns, ico and Linux icons from that PNG. The same run renders the
+VS Code extension's Marketplace icon (`extensions/vscode/media/icon.png`, 256 px); the extension's small marks
+(`media/agentduo.svg` in one colour for the activity bar, `media/agentduo-color.svg` for its tab and button) and the
+README's logo are the same mark. After changing the SVG, render it again and commit the SVG and both PNGs. The build
+copies the app's PNG to `dist/main` for the window on Windows and Linux and the Dock of `npm run dev` on a Mac.
 
 ## Using it
 

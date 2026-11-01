@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -73,6 +73,19 @@ describe("extension manifest", () => {
     expect(registered).toEqual(declared);
     expect(declared).toEqual(expect.arrayContaining(["agentduo.openChat", "agentduo.stop", "agentduo.resume", "agentduo.newTask", "agentduo.openPlan",
       "agentduo.openChanges", "agentduo.openReport", "agentduo.doctor", "agentduo.openConfiguration"]));
+  });
+
+  it("wears the app's icon: a 256 px PNG on the Marketplace, and every icon it names in the extension", () => {
+    expect(manifest.icon).toBe("media/icon.png");
+    const png = readFileSync(join(ext, manifest.icon));
+    expect(png.subarray(1, 4).toString("latin1")).toBe("PNG");
+    expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([256, 256]);
+    const { viewsContainers, views, commands } = manifest.contributes;
+    const named = [...viewsContainers.activitybar, ...Object.values(views).flat(), ...commands]
+      .map((c) => (c as { icon?: string }).icon)
+      .filter((icon): icon is string => !!icon && !icon.startsWith("$("));
+    expect(named.length).toBeGreaterThan(0);
+    for (const icon of named) expect(existsSync(join(ext, icon)), icon).toBe(true);
   });
 
   it("leaves the npm package as it was: no new runtime dependency, the extension not in its files", () => {

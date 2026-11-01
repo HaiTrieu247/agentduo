@@ -36,7 +36,7 @@ export class ConversationPanel {
     this.bundle = root;
     this.roots = [...roots];
     panel.webview.options = this.options();
-    panel.iconPath = { light: vscode.Uri.joinPath(extensionUri, "media", "agentduo-light.svg"), dark: vscode.Uri.joinPath(extensionUri, "media", "agentduo-dark.svg") };
+    panel.iconPath = vscode.Uri.joinPath(extensionUri, "media", "agentduo-color.svg");
     panel.webview.html = webviewHtml({
       cspSource: panel.webview.cspSource, nonce: makeNonce(),
       scriptUri: panel.webview.asWebviewUri(vscode.Uri.joinPath(root, "main.js")).toString(),

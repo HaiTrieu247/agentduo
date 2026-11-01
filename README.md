@@ -1,3 +1,5 @@
+<img src="apps/desktop/resources/icon.png" alt="" width="96">
+
 # agentduo
 
 A channel between two coding agents. **Codex** plans and reviews; **Claude Code** critiques the plan and implements it. agentduo relays their structured messages, runs the loop, and shows in a live terminal UI what each agent is doing and what they hand each other.

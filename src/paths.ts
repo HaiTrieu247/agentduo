@@ -18,6 +18,14 @@ export function packageRoot(): string {
   }
 }
 
+/**
+ * Names agentduo's package for code bundled away from it: the desktop's main process runs from the ASAR archive,
+ * whose package.json is agentduo-desktop's, so it gives its runtime directory.
+ */
+export function setPackageRoot(dir: string): void {
+  root = dir;
+}
+
 export function packageVersion(): string {
   return JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")).version;
 }

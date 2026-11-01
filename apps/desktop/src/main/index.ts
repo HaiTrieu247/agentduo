@@ -5,6 +5,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, Noti
 import { AppImageUpdater, autoUpdater, type AppUpdater } from "electron-updater";
 import { readFileSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { setPackageRoot } from "../../../../src/paths.js";
 import { EVENT_CHANNEL, INVOKE_CHANNEL, type AppSnapshot, type DesktopEvent, type LauncherInfo, type MenuCommand } from "../shared/protocol.js";
 import { LogBuffer } from "./diagnostics.js";
 import { launcherEnvironment } from "./environment.js";
@@ -76,6 +77,9 @@ async function main(): Promise<void> {
 
   const problems = runtimeProblems(runtime);
   if (problems.length) log(`the engine runtime is incomplete: ${problems.join("; ")}`);
+  // Main runs from the ASAR archive, whose package.json is agentduo-desktop's; agentduo's (whose version main gives the
+  // Codex app server with no project open) is the runtime's.
+  else setPackageRoot(runtime);
   const staging = join(app.getPath("temp"), `agentduo-staging-${process.pid}`);
   rmSync(staging, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });

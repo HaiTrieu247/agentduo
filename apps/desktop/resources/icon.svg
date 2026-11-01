@@ -2,7 +2,7 @@
   <title>agentduo</title>
   <!-- The app icon, on the macOS icon grid (an 824 px rounded square in a 1024 px canvas): agentduo's mark, Codex
        (teal) and Claude Code (amber) on opposite corners of one loop, each handing its work along to the other.
-       After a change, render resources/icon.png with: node scripts/icon.mjs -->
+       After a change, render resources/icon.png and the VS Code extension's icon with: node scripts/icon.mjs -->
   <defs>
     <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#2c2e33"/>
