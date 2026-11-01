@@ -241,7 +241,7 @@ const homeChecks: typeof checks = [
     const [id] = api.conversations();
     await until("the saved conversation", () => existsSync(join(home, ".agentduo", "runs", "conversations", id!, "conversation.json")));
     await api.submit("Make app.txt fixed", "pipeline");
-    await until("the pipeline's refusal", () => api.state()!.timeline.some((i) => i.kind === "info" && i.tone === "error" && i.text.includes("it is your home folder")));
+    await until("the pipeline's refusal", () => api.state()!.timeline.some((i) => i.kind === "info" && i.tone === "error" && i.text.includes(`${home} is your home folder`)));
     assert.equal(api.state()!.run, null);
   }],
 ];
