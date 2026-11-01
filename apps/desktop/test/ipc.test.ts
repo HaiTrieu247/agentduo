@@ -76,7 +76,7 @@ describe("Dispatcher", () => {
     const opened: string[] = [];
     const d = new Dispatcher({
       projects, prefs, logs: new LogBuffer(), userData: dir, logsDir: join(dir, "logs"), env: () => ({ HOME: dir, ...userConfigEnv(join(dir, "config")) }), launcher: () => null,
-      snapshot: () => ({ prefs: prefs.prefs, projects: projects.summaries(), active: projects.active, platform: process.platform, versions: { app: "0", electron: "0", chrome: "0", node: "0" }, userData: dir, dark: false, update: { status: "off", reason: "test" } }),
+      snapshot: () => ({ prefs: prefs.prefs, projects: projects.summaries(), active: projects.active, platform: process.platform, arch: process.arch, versions: { app: "0", electron: "0", chrome: "0", node: "0" }, userData: dir, dark: false, update: { status: "off", reason: "test" } }),
       shell: { chooseFolder: async () => dir, chooseBinary: async () => null, saveFile: async () => null, openPath: async (p) => void opened.push(p), openExternal: async (u) => void opened.push(u) },
       ...extra,
     });
@@ -165,6 +165,8 @@ describe("Dispatcher", () => {
     expect(opened[0]).toMatch(/^https:\/\//);
     await d.handle(good, { method: "link.open", link: "agentduo-releases" });
     expect(opened[1]).toBe("https://github.com/HaiTrieu247/agentduo/releases/latest");
+    await d.handle(good, { method: "link.open", link: "agentduo-website" });
+    expect(opened[2]).toBe("https://agentduo.netlify.app/");
     expect(await d.handle(good, { method: "folder.open", projectId: null, folder: "userData" })).toEqual({ ok: true, result: { opened: dir } });
   });
 });

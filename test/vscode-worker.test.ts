@@ -10,7 +10,7 @@ import { main, type CliIO } from "../src/cli.js";
 import { acquireWorkspaceLock, RunStore } from "../src/core/state.js";
 import type { Attachment } from "../src/core/attachment-types.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
-import { type ConfigOverrides, userConfigEnv } from "./helpers/config.js";
+import { type ConfigOverrides, userConfigEnv, userDataEnv } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { png } from "./helpers/images.js";
 import { makeRepo } from "./helpers/repo.js";
@@ -456,11 +456,12 @@ describe("vscode worker", () => {
     expect(latest().phase).toBe("DONE");
   });
 
-  it("opens in a folder outside a git repository: questions are answered, a pipeline waits for `git init`", async () => {
+  it("opens in a folder outside a git repository: questions are answered, and a pipeline runs with agentduo's own snapshots", async () => {
     const plain = join(t.path, "plain");
     mkdirSync(plain);
-    writeWorkspaceConfig(plain, fake);
-    const h = new WorkerHarness({ script: worker.script, workspace: plain, env: { ...process.env, ...userConfigEnv(join(t.path, "xdg")) } });
+    writeWorkspaceConfig(plain, fake, { gates: [] });
+    const data = join(t.path, "data");
+    const h = new WorkerHarness({ script: worker.script, workspace: plain, env: { ...process.env, ...userConfigEnv(join(t.path, "xdg")), ...userDataEnv(data) } });
     harnesses.push(h);
     await h.client.start();
     const init = await h.client.request({ type: "initialize", workspace: plain, configPath: null, discover: true });
@@ -475,10 +476,13 @@ describe("vscode worker", () => {
     await h.client.request({ type: "submit", conversation: C, text: "Hello?", route: "message" });
     const answered = await h.waitFor(isEvent("turn.finished"));
     expect(answered.kind === "event" && answered.event).toMatchObject({ status: "success", answer: "Hi." });
+    fake.setScenario(happy());
     await h.client.request({ type: "submit", conversation: C, text: "Make app.txt fixed", route: "pipeline" });
-    await h.waitFor((m) => m.kind === "ui" && m.conversation === C && m.update.type === "info" && m.update.text.includes("A pipeline run needs a git repository"));
-    expect(fake.calls().map((c) => c.role)).toEqual(["chat_codex"]);
-    expect(h.events().some((e) => e.type === "run.started")).toBe(false);
+    await h.waitFor(finished("DONE"));
+    const st = RunStore.open(join(plain, ".agentduo", "runs")).loadState();
+    expect(st.git).toMatchObject({ mode: "internal", gitDir: expect.stringContaining(join(data, "agentduo", "repositories")) });
+    expect(existsSync(join(plain, ".git"))).toBe(false);
+    expect(fake.calls("code_reviewer")[0]!.args).toContain("--skip-git-repo-check");
   });
 
   it("reports a missing CLI, a broken config and a lock held by the CLI, without calling an agent", async () => {

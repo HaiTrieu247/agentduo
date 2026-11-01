@@ -28,6 +28,8 @@ export interface StructuredCall extends WithAttachments {
   logPrefix: string;
   check?: (data: any) => string[];
   signal?: AbortSignal;
+  /** The workspace may be in no git repository (its snapshots are agentduo's own): Codex must start there anyway. */
+  skipGitRepoCheck?: boolean;
 }
 
 /** A conversation turn: `backend` answers in prose; no schema, no role, one attempt (the user asks again if it fails). */
@@ -210,7 +212,7 @@ export class AgentRunner {
         binary = backend.binary();
         args = o.mode === "text"
           ? backend.buildArgs({ mode: "text", lastMessageFile, askPermissions: host, images })
-          : backend.buildArgs({ schemaName: o.schemaName, lastMessageFile, role: o.agentRole, askPermissions: host, images });
+          : backend.buildArgs({ schemaName: o.schemaName, lastMessageFile, role: o.agentRole, askPermissions: host, images, skipGitRepoCheck: o.skipGitRepoCheck });
       } catch (e) {
         if (e instanceof BinaryNotFound) return finish(false, attempt, null, e.message);
         throw e;

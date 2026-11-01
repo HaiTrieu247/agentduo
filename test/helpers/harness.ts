@@ -20,6 +20,8 @@ export interface Harness {
   events: DuoEvent[];
   /** Answers Claude's permission prompts in host mode; absent = nobody can answer. */
   permissions?: PermissionDecider;
+  /** The workflow's environment (its data root); absent: this process's. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export function makeHarness(repo: string, cfg: ConfigData): Harness {
@@ -39,13 +41,13 @@ export function newWorkflow(h: Harness, task: string, decider: Decider = new Scr
     prepare(state);
     store.saveState(state);
   }
-  return { wf: new Workflow({ cfg: h.cfg, repo: h.repo, store, state, bus, decider, permissions: h.permissions }), bus };
+  return { wf: new Workflow({ cfg: h.cfg, repo: h.repo, store, state, bus, decider, permissions: h.permissions, env: h.env }), bus };
 }
 
 export function resumedWorkflow(h: Harness, opts: { decider?: Decider } = {}): { wf: Workflow; bus: EventBus } {
   const bus = busFor(h);
   const store = RunStore.open(h.runsDir);
-  const wf = new Workflow({ cfg: h.cfg, repo: h.repo, store, state: store.loadState(), bus, decider: opts.decider ?? new ScriptedDecider(), permissions: h.permissions });
+  const wf = new Workflow({ cfg: h.cfg, repo: h.repo, store, state: store.loadState(), bus, decider: opts.decider ?? new ScriptedDecider(), permissions: h.permissions, env: h.env });
   return { wf, bus };
 }
 

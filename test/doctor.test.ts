@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runDoctor } from "../src/core/doctor.js";
-import { testConfig } from "./helpers/config.js";
+import { testConfig, userDataEnv } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
@@ -52,21 +52,27 @@ describe("runDoctor", () => {
     expect(quiet).not.toContain("implementer edits rely on");
   });
 
-  it("only notes a folder outside a git repository, where the chat works and a run does not", async () => {
+  it("says where pipeline snapshots go outside a git repository, and when a pipeline cannot run there", async () => {
     const t = tempDir();
     dirs.push(t);
     const plain = join(t.path, "plain");
     mkdirSync(plain);
-    const checks = await runDoctor({ dir: plain, cfg: testConfig(new FakeClis(t.path)), sources: [], runsDir: join(plain, ".agentduo", "runs") });
+    const env = { ...process.env, ...userDataEnv(join(t.path, "data")) };
+    const checks = await runDoctor({ dir: plain, cfg: testConfig(new FakeClis(t.path)), sources: [], runsDir: join(plain, ".agentduo", "runs"), env });
     expect(checks.filter((c) => !c.ok && c.required)).toEqual([]);
     expect(checks.find((c) => c.message.startsWith("workspace"))).toEqual({
-      ok: false, required: false, message: `workspace not inside a git repository: ${plain} (the chat and /discuss work; a pipeline run needs 'git init' first)`,
+      ok: true, required: false,
+      message: `workspace not inside a git repository: ${plain} (pipeline snapshots go to agentduo's own repository under ${join(t.path, "data", "agentduo", "repositories")}; no git init needed)`,
     });
     expect(checks.find((c) => c.message.startsWith("codex supports"))).toMatchObject({ ok: true, message: expect.stringContaining("--skip-git-repo-check") });
-    // The home folder (VS Code with no folder open): no `git init` of the whole home.
-    const home = await runDoctor({ dir: plain, cfg: testConfig(new FakeClis(t.path)), sources: [], runsDir: join(plain, ".agentduo", "runs"), env: { ...process.env, HOME: plain } });
-    expect(home.find((c) => c.message.startsWith("workspace"))?.message)
-      .toBe(`workspace is your home folder, not a git repository: ${plain} (the chat and /discuss work; a pipeline run needs a project folder inside one)`);
+    // The home folder (VS Code with no folder open): a pipeline needs a project folder.
+    const home = await runDoctor({ dir: plain, cfg: testConfig(new FakeClis(t.path)), sources: [], runsDir: join(plain, ".agentduo", "runs"), env: { ...env, HOME: plain } });
+    expect(home.find((c) => c.message.startsWith("workspace"))).toEqual({
+      ok: false, required: false, message: `workspace is your home folder: ${plain} (the chat and /discuss work; a pipeline run needs a project folder)`,
+    });
+    // agentduo's data root inside the workspace: its snapshots would take in themselves.
+    const inside = await runDoctor({ dir: plain, cfg: testConfig(new FakeClis(t.path)), sources: [], runsDir: join(plain, ".agentduo", "runs"), env: { ...process.env, ...userDataEnv(join(plain, "data")) } });
+    expect(inside.find((c) => c.message.startsWith("pipeline snapshots:"))).toMatchObject({ ok: false, required: false, message: expect.stringContaining(`which is inside ${plain}`) });
   });
 
   it("checks a runs dir anywhere in the repository, which agentduo ignores itself", async () => {

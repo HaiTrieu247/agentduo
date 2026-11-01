@@ -6,7 +6,7 @@ A channel between two coding agents. **Codex** plans and reviews; **Claude Code*
 
 agentduo adds no rules of its own: permissions, sandboxes and conventions come from each CLI's configuration and your repository's `AGENTS.md` / `CLAUDE.md`.
 
-Tiếng Việt: [docs/README.vi.md](docs/README.vi.md)
+Website: [agentduo.netlify.app](https://agentduo.netlify.app/) · Tiếng Việt: [docs/README.vi.md](docs/README.vi.md)
 
 ```text
 ● PLAN r1  Codex (planner)                                      32s · 33k tok
@@ -37,8 +37,10 @@ When a limit is reached, an agent fails or blocks, or a critical finding appears
 
 ## Requirements
 
-- Node.js ≥ 22.12 and git. A pipeline run (`duo "<task>"`, `/pipeline`) needs the workspace to be inside a git repository,
-  because it snapshots and diffs your files; `duo init` offers to run `git init`. The chat and `/discuss` work in any folder.
+- Node.js ≥ 22.12 and git. A pipeline run (`duo "<task>"`, `/pipeline`) snapshots and diffs your files with git, in
+  your repository or, in a folder that has none, in a repository of agentduo's own (see
+  [Folders without a git repository](#folders-without-a-git-repository)): no `git init` needed. The chat and `/discuss`
+  work in any folder, also without git.
 - [Codex CLI](https://developers.openai.com/codex/cli/): run `npm i -g @openai/codex`, then `codex login`.
 - [Claude Code](https://code.claude.com/docs/en/overview): the `claude` command. If it is installed only through the VS Code, Cursor or Windsurf extension, agentduo finds the bundled binary.
 
@@ -197,6 +199,33 @@ from. Packaging, updates, releasing, signing and what has been verified on which
 
 If an agent changes files outside the workspace (elsewhere in the same repository), agentduo warns on screen and in the report, with paths relative to the workspace (`../shared/x.ts`), but does not stop the run.
 
+### Folders without a git repository
+
+In a workspace inside a git repository, a run keeps its snapshots there, as unreferenced commits under
+`refs/agentduo/<run-id>/` (your index, HEAD and branches are never touched). In a folder with no git repository, it
+keeps them in a bare repository of its own, made for that run, and says so when it starts:
+
+- where: `<data>/agentduo/repositories/<id>.git`, with `<data>` being `$XDG_DATA_HOME` or `~/.local/share` on Linux and
+  macOS, `%LOCALAPPDATA%` (else `%APPDATA%`) on Windows. Nothing is created in your folder: no `.git`, no index. The run
+  records the repository in its `state.json`, and checks it again (its place under that folder, and a marker naming the
+  run and the workspace) each time it opens it, and before it goes on, that its snapshots are whole;
+- what: every file of the workspace, as `git add` would take it: your `.gitignore` files (nested ones too) are followed,
+  and the run's data, `.claude/settings.local.json` and every `.git` are left out. A nested repository's files are
+  snapshotted as plain files (committed or not), so a change inside it is in the diff; that repository's own index,
+  HEAD and `info/exclude` play no part and are left as they are;
+- a resume, the report's diff stat, `/diff`, and Changes in the extension and the app read the run's own repository,
+  also if the folder got a `git init` later; the run never switches to another repository. If that repository is gone,
+  the run says so and waits: `--decision abort` still ends it;
+- Codex starts outside a repository there, so its calls get the protocol flag `--skip-git-repo-check`;
+- the reviewer gets the diff in its prompt, and the whole diff is kept as `diff.r<round>.patch` in the run directory;
+  the report shows the `git --git-dir … diff` that reads the snapshots from anywhere.
+
+Limits: the home folder itself takes no pipeline run (open a project folder); neither does a folder that contains
+agentduo's data folder. A large folder without a `.gitignore` (a `node_modules`, build output) is snapshotted whole,
+which takes time and space; the run reuses its stat cache between snapshots. The repositories stay after the run so
+its history can be read; delete `<data>/agentduo/repositories/<id>.git` yourself once you no longer need that run.
+One pipeline runs at a time in a workspace.
+
 ## Permissions and scope
 
 agentduo passes only the flags its protocol needs: streaming JSON, the output schema, and the prompt on stdin. None of them grants a permission.
@@ -241,7 +270,8 @@ agentduo reports what the agents did; it does not block it. Two kinds of change 
 - files changed by a planning or reviewing agent;
 - files changed outside the workspace.
 
-Nothing is ever committed or pushed by agentduo: review the changes with `git diff` and commit them yourself.
+Nothing is ever committed or pushed by agentduo: review the changes with `git diff` (or the report's command, in a
+folder without a repository) and commit them yourself.
 
 ## Commands
 
@@ -252,7 +282,7 @@ Nothing is ever committed or pushed by agentduo: review the changes with `git di
 | `duo resume [id]` | Continue the latest (or given) run with the config it started with (`--reload-config` to use today's); `--decision resume\|revise\|abort [--note "..."]` answers a pending decision |
 | `duo status [id]`, `duo list` | Progress, history and where the files are |
 | `duo doctor` | Check the CLIs and config without calling models |
-| `duo init` | Create `.agentduo/config.yaml` and `.agentduo/.gitignore`, and offer `git init` |
+| `duo init` | Create `.agentduo/config.yaml` and `.agentduo/.gitignore`, and offer `git init` (a run does not need it) |
 
 Every command also takes `--dir PATH`, `--config PATH`, `--plain`, `-v/--verbose` and `--no-color`, before or after the command name. The UI switches to plain timestamped lines with `--plain`, in CI, when stdout is not a terminal, or when the process runs in the background (`duo … &`).
 
@@ -298,6 +328,7 @@ Everything about a run lives in `.agentduo/runs/<run-id>/`:
 - `config.json`: the config the run started with;
 - `report.md`: timeline, gates, diff stat, unresolved issues, warnings, cost and tokens;
 - the plans, the critiques, and every agent's JSON (with task id, round, timestamp, git SHA and plan version);
+- `diff.r<round>.patch`: the whole diff each code review was given;
 - `logs/`: the prompt, the command line, the raw event stream and stderr of every CLI call.
 
 The runs directory carries its own `.gitignore`, so run data stays out of `git status` and out of commits, even without `duo init`.
@@ -320,6 +351,10 @@ The runs directory carries its own `.gitignore`, so run data stays out of `git s
   - With a Codex implementer, see **Codex** under [Permissions and scope](#permissions-and-scope).
 - **A config change has no effect on `duo resume`.** A run keeps the config it started with. Use `duo resume --reload-config` to apply your `config.yaml` changes. Changes to Claude Code or Codex settings apply without it.
 - **A task that starts with `-`** is read as an option. Put `--` before it: `duo -- "-x is broken"`.
+- **"Git is not installed"** when a run starts: install git (the chat and `/discuss` work without it). **"cannot use its
+  snapshot repository"** or **"the snapshots of run … are damaged"** on resume: the run's own repository was moved or
+  deleted, or files were deleted from it (see [Folders without a git repository](#folders-without-a-git-repository));
+  abort the run and start a new one.
 - **The terminal behaves oddly after agentduo was killed with `kill -9`.** Run `reset`. A SIGKILL gives no process a chance to restore the terminal.
 - **Costs.** `claude.args: [--strict-mcp-config, --no-session-persistence]` skips loading your MCP servers for agentduo runs, which makes each call noticeably cheaper. `claude.max_budget_usd` caps the cost of each call.
 - **Windows** is experimental and not covered by CI.
@@ -340,7 +375,7 @@ npm run test:vscode        # smoke test in a downloaded VS Code; on Linux run it
 npm run package:vscode     # extensions/vscode/agentduo-vscode-<version>.vsix (local, not published)
 npm run test:pack:vscode   # package, check the VSIX contents, run its worker outside the checkout
 
-npm version patch          # bump package.json and extensions/vscode/package.json, commit and tag (publishes nothing)
+npm version patch          # bump the root, extension and desktop versions, commit and tag (publishes nothing)
 ```
 
 The extension's design notes are in `docs/superpowers/specs/2026-10-28-agentduo-vscode-design.md`.

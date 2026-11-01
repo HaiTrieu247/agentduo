@@ -1,6 +1,6 @@
 # agentduo for VS Code
 
-The [agentduo](https://github.com/HaiTrieu247/agentduo) channel in a VS Code sidebar. Codex plans and reviews
+The [agentduo](https://agentduo.netlify.app/) channel in a VS Code sidebar. Codex plans and reviews
 the code, and Claude Code critiques the plan and implements it. The extension runs the same engine as the `duo` CLI and
 uses the same configuration, run directory and lock. A run started in one can be resumed in the other.
 
@@ -8,7 +8,8 @@ uses the same configuration, run directory and lock. A run started in one can be
 
 - VS Code desktop 1.95 or later, with a local, trusted folder, or no folder at all: then agentduo works in your home
   folder, and its conversations and config go to `~/.agentduo`, as `duo` started there does. Questions and discussions
-  work in any folder; the Pipeline needs the folder to be inside a git repository (run `git init` there first), so in
+  work in any folder. The Pipeline needs git, but no repository: in a folder without one, a run keeps its snapshots in
+  a repository of agentduo's own, outside the folder (see "Folders without a git repository" in the main README). In
   the home folder it asks you to open a project folder.
 - Node 22.12 or later. VS Code's own Node is not used. The extension takes the first suitable `node` on the
   `PATH` VS Code sees, or the path in the `agentduo.nodePath` setting.
@@ -111,7 +112,8 @@ Click the agentduo button in an editor's title bar (beside Claude Code's and Cod
 - The `⋯` menu and the links under each step open the plan, review, feedback and report of the run in an editor. **Changes** lists the files
   the run changed and opens them in VS Code's diff editor. The diff goes from the run's baseline snapshot to its latest
   snapshot, so edits you made before the run are not included. Opening Changes again after another round shows that
-  round's snapshot. A diff that is already open keeps the snapshot it was opened at.
+  round's snapshot. A diff that is already open keeps the snapshot it was opened at. A run in a folder without a git
+  repository is read from its own repository, also after a reload or a later `git init`.
 - **agentduo: Doctor** checks Node, the CLIs, the configuration and the workspace, and writes the results to the
   **agentduo** output channel. **agentduo: Open Configuration** opens `.agentduo/config.yaml`.
 

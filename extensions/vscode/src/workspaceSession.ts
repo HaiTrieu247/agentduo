@@ -18,7 +18,7 @@ const FLUSH_MS = 16;
 /** What a tab shows is saved at most this often while it changes (and when the tab or the session goes). */
 const SAVE_MS = 1000;
 const VIEW_FILE = "view.json";
-const PROBLEM_CODES = new Set<string>(["environment", "config", "not_repo", "missing_cli", "locked"]);
+const PROBLEM_CODES = new Set<string>(["environment", "config", "not_repo", "git", "missing_cli", "locked"]);
 
 export type WorkspaceChoice = { kind: "none" } | { kind: "choose"; folders: string[] } | { kind: "folder"; path: string };
 

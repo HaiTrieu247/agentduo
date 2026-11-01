@@ -14,6 +14,7 @@ Run them in `website/`:
 | Command | What it does |
 | --- | --- |
 | `npm run build` | Builds every page in every language into `dist/` (cleaned first). Reads only local files, so it works offline. |
+| `npm run build:netlify` | What Netlify runs: `update:releases` (a failure only warns), then `build`, so a deploy shows the versions published at that moment. |
 | `npm run preview` | Serves `dist/` at <http://127.0.0.1:4173/> like a static host: `/docs` redirects to `/docs/`, a missing path answers 404 with the 404 page. `--port N` picks another port. |
 | `npm run check` | Checks the build: every local link, asset and `#fragment`, unique ids, titles, descriptions, `lang`, language links, the search indexes, the download links against the release snapshot, and the hosting files. |
 | `npm test` | The website's tests (`node:test`): release data, search, URL and SEO rules, the whole build, the preview server and the tutorial/config examples. |
@@ -88,11 +89,20 @@ Add the locale to `locales`, `localeNames`, `htmlLang` and `ogLocale` in `site.c
 
 ## Release data
 
-The download page and the Releases page read `data/releases.json` and `data/channels.json`, committed in the
-repository, so building needs no network and a visitor never waits on GitHub's API: every download button is a plain
-link to the installer on GitHub Releases. The site never hosts installers.
+The download page and the Releases page read `data/releases.json` and `data/channels.json`, so a visitor never waits
+on GitHub's API: every download button is a plain link to the installer on GitHub Releases. The site never hosts
+installers.
 
-After publishing a release:
+The versions follow releases by themselves. `npm version patch` (or `minor`) in the repository root bumps the source;
+nothing is published yet, so the site keeps offering the last published release (its download page says which version
+the source is at). Once the release workflow has published the GitHub Release, it calls the Netlify build hook
+(`NETLIFY_BUILD_HOOK`, see [Deploying to Netlify](#deploying-to-netlify)), and the deploy's `build:netlify` reads the
+published versions from GitHub, npm and the Marketplace before it builds. Without the hook, the next deploy picks the
+release up. Should the refresh fail during a deploy (rate limit, an API down), the deploy warns and builds from the
+committed snapshots.
+
+The committed snapshots are what `npm run build` uses offline and what a deploy falls back on. Refresh them now and then
+(after a release, say) and commit them:
 
 ```sh
 cd website
@@ -109,15 +119,16 @@ npm run update:releases          # GITHUB_TOKEN=… is optional (higher rate lim
   `node scripts/update-releases.mjs --import DIR` with `DIR/github.json` (the releases API list), `DIR/npm.json` (the
   registry document) and `DIR/marketplace.json` (the extensionquery answer).
 - `data/signing.json` is kept by hand: for each release, how the installers were signed, with the release workflow's
-  log lines as evidence. A newer release without an entry is shown as "not checked". Read the macOS and Windows jobs'
-  logs of the release run (`signing file=…`, `skipped macOS notarization`, `signing is skipped`) and add the entry.
+  log lines as evidence. A newer release without an entry is shown as "not checked" (its versions and downloads are
+  still shown). Read the macOS and Windows jobs' logs of the release run (`signing file=…`, `skipped macOS
+  notarization`, `signing is skipped`) and add the entry.
 
 Then `npm run build && npm run check && npm test`.
 
 ## The public address (SITE_URL)
 
-No official domain is assumed. The build takes the public origin from `SITE_URL`, else from Netlify's `URL` (set
-during Netlify builds). `DEPLOY_PRIME_URL` and the preview server are never used.
+The site lives at <https://agentduo.netlify.app/>, but no address is written into the code. The build takes the
+public origin from `SITE_URL`, else from Netlify's `URL` (set during Netlify builds). `DEPLOY_PRIME_URL` and the preview server are never used.
 
 - The origin must be `https://host` or `http://host` with no path, query, fragment, user name or loopback address. The
   site is built for the root of its host; serving it from a sub-folder is not supported.
@@ -136,16 +147,27 @@ SITE_URL=https://agentduo.example npm run build      # your real domain
 Nothing is deployed by this repository. Two ways:
 
 **Git integration (recommended).** In Netlify, add a site from the GitHub repository and set **Base directory** to
-`website`. `website/netlify.toml` gives the build command (`npm run build`), the publish folder (`dist`) and Node 22.
-Netlify sets `URL` to the site's main address, so canonical URLs and the sitemap use it; set `SITE_URL` in the site's
-environment variables when you add a custom domain. No Netlify file is needed at the repository root.
+`website`. `website/netlify.toml` gives the build command (`npm run build:netlify`), the publish folder (`dist`) and
+Node 22. Netlify sets `URL` to the site's main address (<https://agentduo.netlify.app/>), so canonical URLs and the
+sitemap use it; set `SITE_URL` in the site's environment variables when you add a custom domain. No Netlify file is
+needed at the repository root.
+
+So that a release shows on the site as soon as it is published:
+
+1. In Netlify, *Site configuration → Build & deploy → Build hooks*: add a hook for the `main` branch and copy its URL.
+2. In GitHub, *Settings → Secrets and variables → Actions*: add it as the secret `NETLIFY_BUILD_HOOK`. The release
+   workflow calls it after publishing; without it, it says so and the release waits for the next deploy.
+3. Optional: a `GITHUB_TOKEN` environment variable in Netlify (a fine-grained token with read-only access to public
+   repositories) raises GitHub's rate limit, which Netlify's shared build machines can hit.
 
 **Drag and drop.** Build locally with the real address, then drag the `website/dist` folder onto Netlify's deploy
-page (its contents become the site's root):
+page (its contents become the site's root). A drag-and-drop deploy is not rebuilt by the hook: refresh the release
+data first.
 
 ```sh
 cd website
-SITE_URL=https://your-site.netlify.app npm run build
+npm run update:releases
+SITE_URL=https://agentduo.netlify.app npm run build
 npm run check
 ```
 

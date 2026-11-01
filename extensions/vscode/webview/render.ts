@@ -638,6 +638,7 @@ const PROBLEM_ACTIONS: Record<string, Array<{ command: WebviewCommand; label: st
   config: [{ command: "openConfiguration", label: "Open configuration" }, { command: "doctor", label: "Doctor" }],
   missing_cli: [{ command: "doctor", label: "Doctor" }, { command: "openConfiguration", label: "Open configuration" }],
   not_repo: [{ command: "doctor", label: "Doctor" }],
+  git: [{ command: "doctor", label: "Doctor" }],
   environment: [{ command: "chooseWorkspace", label: "Choose folder" }],
   locked: [{ command: "restart", label: "Check again" }],
 };

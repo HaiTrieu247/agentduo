@@ -23,7 +23,12 @@ export interface PromptContext {
   attachments?: Attachment[];
   /** Where attached files are (the task's, the notes', the conversation's); without it no file is listed. */
   locate?: Locate;
+  /** The run keeps its snapshots in agentduo's own Git repository, outside the workspace (which may have none). */
+  internalSnapshots?: boolean;
 }
+
+const INTERNAL_SNAPSHOTS = "- Snapshots: agentduo keeps this run's snapshots in a Git repository of its own, outside the workspace. The workspace " +
+  "may have no git repository, and `git diff`, `git show` or `git log` there do not see these snapshots.\n";
 
 /** The first line of a conversation prompt: not an orchestrator role, so no schema and no role instructions. */
 export const CONVERSATION_MARKER = "[agentduo-conversation]";
@@ -59,7 +64,8 @@ function header(role: string, title: string, ctx: PromptContext): string {
     NAMES[a.implementer] + "; code reviewer: " + NAMES[a.code_reviewer] + ".\n" +
     "Follow your own configuration and the repository's instructions (AGENTS.md / CLAUDE.md).\n\n" +
     "- Workspace: `" + ctx.repo + "`\n" +
-    "- Task ID: `" + ctx.taskId + "`\n";
+    "- Task ID: `" + ctx.taskId + "`\n" +
+    (ctx.internalSnapshots ? INTERNAL_SNAPSHOTS : "");
 }
 
 function gateList(gates: GateConfig[]): string {
@@ -374,16 +380,22 @@ export function implementer(ctx: PromptContext, round: number, planMd: string, f
   return out.join("\n");
 }
 
+/**
+ * `fullDiff`: the file with the whole diff, which a run with agentduo's own snapshot repository names when `diff` is
+ * cut short (git in the workspace cannot reach those snapshots); a native run names the `git diff` to run instead.
+ */
 export function codeReviewer(ctx: PromptContext, round: number, planMd: string, base: string, snapshot: string, gateResults: GateResult[],
-  diffStat: string, diff: string, truncated: boolean, previousFindings: Finding[], implReport: Implementation): string {
+  diffStat: string, diff: string, truncated: boolean, previousFindings: Finding[], implReport: Implementation, fullDiff?: string): string {
   const tests = implReport.tests_run.map((t) => "- `" + t.command + "` passed=" + t.passed + " " + t.notes).join("\n") || "_(none)_";
   const fence = fenceFor(diff);
   const stat = diffStat.trimEnd() || "(no changes)";
   const statFence = fenceFor(stat);
+  const whole = ctx.internalSnapshots && fullDiff ? "read the whole diff in `" + fullDiff + "`" : "run `git diff " + base + " " + snapshot + " -- .` for the full diff";
   const out = [
     header("code_reviewer", "Code Reviewer", ctx),
     `- Review round: ${round}\n` +
-      "- Revision under review: `" + snapshot + "` (agentduo snapshot of the workspace)\n" +
+      "- Revision under review: `" + snapshot + "` (agentduo snapshot of the workspace" +
+      (ctx.internalSnapshots ? ", in agentduo's own repository: review it from the diff below" : "") + ")\n" +
       "- Base revision: `" + base + "`\n",
     taskSection(ctx),
     earlier(ctx),
@@ -392,7 +404,7 @@ export function codeReviewer(ctx: PromptContext, round: number, planMd: string, 
     "## Quality gate results (run by agentduo on this revision)\n" + describeGates(gateResults) + "\n",
     "## Implementer's report\n" + implReport.summary + "\n\nTests the implementer says it ran:\n" + tests + "\n",
     "## Diff stat (base → revision)\n" + statFence + "\n" + stat + "\n" + statFence + "\n",
-    "## Diff" + (truncated ? " (TRUNCATED: run `git diff " + base + " " + snapshot + " -- .` for the full diff)" : "") + "\n" +
+    "## Diff" + (truncated ? " (TRUNCATED: " + whole + ")" : "") + "\n" +
       fence + "diff\n" + diff + "\n" + fence + "\n",
   ];
   if (previousFindings.length) {

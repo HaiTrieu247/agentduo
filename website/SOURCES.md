@@ -31,22 +31,22 @@ The tutorial project (`examples/first-task`) and every config example (`examples
 CLI stream formats and flags are verified by the repository against codex-cli 0.164 and Claude Code 2.1.31x
 (`AGENTS.md`); the site states only that, not wider compatibility.
 
-## Release channels (network, 2026-10-31T16:32Z)
+## Release channels (network, 2026-11-01T17:20Z)
 
 | Data | Source | Result |
 | --- | --- | --- |
-| Public GitHub Releases and assets | `https://api.github.com/repos/HaiTrieu247/agentduo/releases` | One public release, `v0.8.1` (published 2026-10-31T15:41:04Z), 14 assets. The `v0.8.0` release exists only as a draft and is not listed; its `compare/v0.8.0...v0.8.1` link in the notes does not make it a public release. |
-| npm | `https://registry.npmjs.org/agentduo` | `0.8.1`, published 2026-10-31T15:46:41Z (history back to 0.1.0 in `data/channels.json`). |
-| VS Code Marketplace | `https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery` (`HaiTrieuThinh.agentduo-vscode`) | `0.8.1`, published 2026-10-31T15:47:52Z. |
-| Version in source | `package.json`, `apps/desktop/package.json`, `extensions/vscode/package.json` | `0.8.1`. |
+| Public GitHub Releases and assets | `https://api.github.com/repos/HaiTrieu247/agentduo/releases` | Two public releases: `v0.8.2` (published 2026-11-01T15:48:40Z, the latest) and `v0.8.1` (2026-10-31T15:41:04Z), 12 assets each. The `v0.8.0` release exists only as a draft and is not listed; a `compare/v0.8.0...` link in the notes does not make it a public release. |
+| npm | `https://registry.npmjs.org/agentduo` | `0.8.2`, published 2026-11-01T15:45:04Z (history back to 0.1.0 in `data/channels.json`). |
+| VS Code Marketplace | `https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery` (`HaiTrieuThinh.agentduo-vscode`) | `0.8.2`, published 2026-11-01T15:49:08Z. |
+| Version in source | `package.json`, `apps/desktop/package.json`, `extensions/vscode/package.json` | `0.8.2`. |
 
-Installers in v0.8.1: `AgentDuo-0.8.1-mac-arm64.dmg`, `AgentDuo-0.8.1-mac-x64.dmg`, `AgentDuo-0.8.1-win-x64.exe`,
-`AgentDuo-0.8.1-linux-x86_64.AppImage`, `AgentDuo-0.8.1-linux-amd64.deb`. Not published: Windows arm64 and Linux
+Installers in v0.8.2: `AgentDuo-0.8.2-mac-arm64.dmg`, `AgentDuo-0.8.2-mac-x64.dmg`, `AgentDuo-0.8.2-win-x64.exe`,
+`AgentDuo-0.8.2-linux-x86_64.AppImage`, `AgentDuo-0.8.2-linux-amd64.deb`. Not published: Windows arm64 and Linux
 arm64. The Mac `.zip` files, `.blockmap` files and `latest*.yml` feeds are update files, not downloads.
 
-## Signing (release run 41215723680)
+## Signing (release run 41322755718)
 
-From the log of `https://github.com/HaiTrieu247/agentduo/actions/runs/41215723680` (recorded in `data/signing.json`):
+From the log of `https://github.com/HaiTrieu247/agentduo/actions/runs/41322755718`, the v0.8.2 release (recorded in `data/signing.json`):
 
 - macOS: `signing … identityName=- identityHash=none` (ad-hoc signature, no Developer ID) and
   `skipped macOS notarization reason=notarize options were set explicitly false`.

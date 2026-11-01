@@ -63,6 +63,8 @@ export type BuildArgs =
     schemaName: SchemaName;
     /** Config role of the call (plan sign-off uses "planner"); selects <backend>.role_args. */
     role: AgentRole;
+    /** The workspace may be in no git repository (a run with agentduo's own snapshot repository). */
+    skipGitRepoCheck?: boolean;
   } & CallArgs)
   | ({ mode: "text" } & CallArgs);
 

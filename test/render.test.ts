@@ -29,5 +29,13 @@ describe("render", () => {
       `git diff ${"a".repeat(12)} ${"b".repeat(12)} -- .`]) {
       expect(md).toContain(s);
     }
+    expect(md).not.toContain("**Snapshots:**");
+    // A run with agentduo's own repository: where it is, and a diff that needs no repository in the workspace.
+    st.git = { mode: "internal", repositoryId: "x", workspace: "/ws", gitDir: "/data/agentduo/repositories/x.git" };
+    const internal = reportMarkdown(st, "", null, null, "/runs/run-1");
+    expect(internal).toContain("- **Snapshots:** agentduo's own Git repository `/data/agentduo/repositories/x.git`");
+    expect(internal).toContain(`\`git --git-dir "/data/agentduo/repositories/x.git" diff ${"a".repeat(12)} ${"b".repeat(12)}\``);
+    expect(internal).toContain("diff.r<round>.patch");
+    expect(internal).not.toContain("-- .`");
   });
 });

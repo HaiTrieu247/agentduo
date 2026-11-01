@@ -81,4 +81,14 @@ describe("RunStore", () => {
     expect(store.readText("events.jsonl")).toContain('"type":"x"');
     expect(readdirSync(store.dir).filter((n) => n.endsWith(".tmp"))).toEqual([]);
   });
+
+  it("keeps where a run's snapshots are, and loads a run from before that knew nothing of it", () => {
+    const { store, state } = RunStore.create(runsDir(), "x", LIMITS);
+    expect([state.version, state.git]).toEqual([1, undefined]);
+    store.saveState(state);
+    expect(store.loadState().git).toBeUndefined();
+    state.git = { mode: "internal", repositoryId: "00000000-0000-4000-8000-000000000000", workspace: "/ws", gitDir: "/data/x.git" };
+    store.saveState(state);
+    expect(store.loadState()).toMatchObject({ version: 1, git: state.git });
+  });
 });

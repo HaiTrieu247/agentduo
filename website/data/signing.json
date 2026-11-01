@@ -2,9 +2,9 @@
   "schema": 1,
   "note": "Kept by hand: how each release's installers were signed, from the release workflow's log. The download page shows this only for the tag it names; a newer release without an entry is shown as not checked.",
   "releases": {
-    "v0.8.1": {
-      "checkedAt": "2026-10-31T16:20:00Z",
-      "evidence": "https://github.com/HaiTrieu247/agentduo/actions/runs/41215723680",
+    "v0.8.2": {
+      "checkedAt": "2026-11-01T17:20:00Z",
+      "evidence": "https://github.com/HaiTrieu247/agentduo/actions/runs/41322755718",
       "mac": {
         "signature": "ad-hoc",
         "developerId": false,
@@ -19,7 +19,7 @@
         "signature": "unsigned",
         "log": [
           "no code signing certificate configured, signing is skipped  path=release\\win-unpacked\\AgentDuo.exe",
-          "no code signing certificate configured, signing is skipped  path=release\\AgentDuo-0.8.1-win-x64.exe"
+          "no code signing certificate configured, signing is skipped  path=release\\AgentDuo-0.8.2-win-x64.exe"
         ]
       },
       "linux": {

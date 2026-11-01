@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 let root: string | undefined;
@@ -33,5 +33,50 @@ export function packageVersion(): string {
 /** The user's home folder, the one `~` names. */
 export const homeFolder = (env: NodeJS.ProcessEnv): string => env.HOME || homedir();
 
-/** `dir` is the home folder itself: there, nothing says to `git init` (that would put the whole home in a repository). */
+/** `dir` is the home folder itself, where a pipeline run would snapshot the whole home: a run asks for a project folder. */
 export const isHomeFolder = (dir: string, env: NodeJS.ProcessEnv): boolean => resolve(dir) === resolve(homeFolder(env));
+
+/**
+ * Where agentduo keeps data of its own, outside every workspace (the snapshot repositories of folders that have no git
+ * repository): %LOCALAPPDATA%\agentduo on Windows (else %APPDATA%), $XDG_DATA_HOME/agentduo or ~/.local/share/agentduo
+ * elsewhere. Null on Windows with neither variable set: there is no place for it then.
+ */
+export function dataRoot(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): string | null {
+  if (platform === "win32") {
+    const base = env.LOCALAPPDATA || env.APPDATA;
+    return base ? join(base, "agentduo") : null;
+  }
+  // The XDG spec says to ignore a relative XDG_DATA_HOME.
+  const xdg = env.XDG_DATA_HOME && isAbsolute(env.XDG_DATA_HOME) ? env.XDG_DATA_HOME : null;
+  return join(xdg ?? join(homeFolder(env), ".local", "share"), "agentduo");
+}
+
+/**
+ * `path` with every symlink resolved, also when it does not exist yet: its nearest existing ancestor is resolved and
+ * the rest appended. On Windows (case-insensitive) it is lower-cased, so two forms of one path compare equal.
+ */
+export function canonicalPath(path: string, platform: NodeJS.Platform = process.platform): string {
+  let head = resolve(path);
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      head = realpathSync.native(head);
+      break;
+    } catch {
+      const parent = dirname(head);
+      if (parent === head) break;
+      rest.unshift(basename(head));
+      head = parent;
+    }
+  }
+  const full = join(head, ...rest);
+  return platform === "win32" ? full.toLowerCase() : full;
+}
+
+/** A path `relative` gave leaves its base: `..`, `../…` or another root. `..data` is a child's name, inside. */
+export const leavesBase = (rel: string): boolean => rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+
+/** `path` is `dir` or inside it, both taken as canonical paths. */
+export function isWithin(path: string, dir: string): boolean {
+  return !leavesBase(relative(canonicalPath(dir), canonicalPath(path)));
+}

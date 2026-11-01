@@ -6,7 +6,7 @@ import { AppImageUpdater, autoUpdater, type AppUpdater } from "electron-updater"
 import { readFileSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { setPackageRoot } from "../../../../src/paths.js";
-import { EVENT_CHANNEL, INVOKE_CHANNEL, type AppSnapshot, type DesktopEvent, type LauncherInfo, type MenuCommand } from "../shared/protocol.js";
+import { EVENT_CHANNEL, INVOKE_CHANNEL, LINKS, type AppSnapshot, type DesktopEvent, type LauncherInfo, type MenuCommand } from "../shared/protocol.js";
 import { LogBuffer } from "./diagnostics.js";
 import { launcherEnvironment } from "./environment.js";
 import { Dispatcher } from "./ipc.js";
@@ -115,7 +115,7 @@ async function main(): Promise<void> {
   });
 
   const snapshot = (): AppSnapshot => ({
-    prefs: prefs.prefs, projects: projects.summaries(), active: projects.active, platform: process.platform, userData, dark: nativeTheme.shouldUseDarkColors,
+    prefs: prefs.prefs, projects: projects.summaries(), active: projects.active, platform: process.platform, arch: process.arch, userData, dark: nativeTheme.shouldUseDarkColors,
     versions: { app: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node },
     update: updates?.state ?? { status: "idle" },
   });
@@ -181,11 +181,13 @@ async function main(): Promise<void> {
 
   const menuCommand = (command: MenuCommand) => () => post({ type: "menu", command });
   const checkUpdates: MenuItemConstructorOptions = { label: "Check for Updates…", click: menuCommand("checkUpdates") };
+  // Settings → About on every OS, rather than the native panel (which shows no links on macOS or Windows).
+  const about: MenuItemConstructorOptions = { id: "about", label: `About ${app.name}`, click: menuCommand("about") };
   const template: MenuItemConstructorOptions[] = [
     ...(process.platform === "darwin" ? [{
       label: app.name,
       submenu: [
-        { role: "about" }, checkUpdates, { type: "separator" }, { role: "services" }, { type: "separator" },
+        about, checkUpdates, { type: "separator" }, { role: "services" }, { type: "separator" },
         { role: "hide" }, { role: "hideOthers" }, { role: "unhide" }, { type: "separator" }, { role: "quit" },
       ] satisfies MenuItemConstructorOptions[],
     }] : []),
@@ -216,7 +218,9 @@ async function main(): Promise<void> {
       submenu: [
         ...(process.platform === "darwin" ? [] : [checkUpdates, { type: "separator" as const }]),
         { label: "Diagnostics", click: menuCommand("diagnostics") },
-        { label: "AgentDuo Guide", click: () => void shell.openExternal("https://github.com/HaiTrieu247/agentduo/tree/main/apps/desktop#readme") },
+        { label: "AgentDuo Website", click: () => void shell.openExternal(LINKS["agentduo-website"]) },
+        { label: "AgentDuo Guide", click: () => void shell.openExternal(LINKS["agentduo-desktop"]) },
+        ...(process.platform === "darwin" ? [] : [{ type: "separator" as const }, about]),
       ],
     },
   ];

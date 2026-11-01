@@ -1,9 +1,11 @@
 // Refreshes the release snapshots the site is built from: data/releases.json (public GitHub Releases and their
 // assets) and data/channels.json (the latest version on GitHub, npm and the VS Code Marketplace, each from its own
-// source). Run it by hand (npm run update:releases); the build never calls it, so a build needs no network.
+// source). `npm run build` never calls it, so a build needs no network; the Netlify build (npm run build:netlify) runs
+// it first, so a deploy shows the versions published at that moment.
 //
 //   node scripts/update-releases.mjs                 fetch from the public APIs (GITHUB_TOKEN, if set, raises GitHub's rate limit)
 //   node scripts/update-releases.mjs --import DIR    use saved answers instead: DIR/github.json, DIR/npm.json, DIR/marketplace.json
+//   node scripts/update-releases.mjs --keep-on-failure   a failure is only a warning (exit 0), for a build that goes on
 //
 // Every answer is validated before anything is written; on any failure the last good snapshots stay as they are and
 // the script exits with 1 and says what failed. GITHUB_TOKEN is sent only to api.github.com and never printed or saved.
@@ -91,11 +93,13 @@ function githubChannel(snapshot) {
   };
 }
 
+const KEEP_ON_FAILURE = process.argv.includes("--keep-on-failure");
+
 async function main() {
-  const args = process.argv.slice(2);
-  const importDir = args[0] === "--import" ? args[1] : null;
+  const args = process.argv.slice(2).filter((a) => a !== "--keep-on-failure");
+  const importDir = args[0] === "--import" && args.length === 2 ? args[1] : null;
   if (args.length && !importDir) {
-    console.error("usage: node scripts/update-releases.mjs [--import DIR]");
+    console.error("usage: node scripts/update-releases.mjs [--import DIR] [--keep-on-failure]");
     process.exit(2);
   }
   const checkedAt = new Date().toISOString();
@@ -122,6 +126,10 @@ async function main() {
 
 main().catch((e) => {
   console.error(`update-releases: ${e.message}`);
+  if (KEEP_ON_FAILURE) {
+    console.error("warning: the committed data/releases.json and data/channels.json are used as they are.");
+    return;
+  }
   console.error("The previous data/releases.json and data/channels.json were kept. Fix the cause, or save the API answers and use --import.");
   process.exit(1);
 });

@@ -1,9 +1,10 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ConfigError, defaultConfig } from "../src/core/config.js";
 import { diagnose, EnvironmentError, expandHome, prepareEnvironment, runnableProblem } from "../src/core/environment.js";
-import { testConfig, userConfigEnv } from "./helpers/config.js";
+import { GIT_MISSING } from "../src/core/run-git.js";
+import { testConfig, userConfigEnv, userDataEnv } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
@@ -17,7 +18,7 @@ function setup() {
   const t = tempDir();
   dirs.push(t);
   const repo = makeRepo(t.path);
-  const env: NodeJS.ProcessEnv = { ...process.env, HOME: join(t.path, "home"), ...userConfigEnv(join(t.path, "xdg")) };
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: join(t.path, "home"), ...userConfigEnv(join(t.path, "xdg")), ...userDataEnv(join(t.path, "data")) };
   const writeConfig = (dir: string, yaml: string) => {
     mkdirSync(join(dir, ".agentduo"), { recursive: true });
     writeFileSync(join(dir, ".agentduo", "config.yaml"), yaml);
@@ -76,6 +77,18 @@ describe("prepareEnvironment", () => {
     await expect(prepareEnvironment({ cwd: t.path, dir: "file", env })).rejects.toThrow(`not a directory: ${join(t.path, "file")}`);
     expect((await prepareEnvironment({ cwd: t.path, env })).isRepo).toBe(false);
   });
+
+  it("says where a new run would keep its snapshots: the repository, or agentduo's own outside a folder with none", async () => {
+    const { t, repo, env } = setup();
+    expect((await prepareEnvironment({ cwd: repo, env })).snapshots).toEqual({ mode: "native" });
+    mkdirSync(join(t.path, "plain"));
+    const plain = await prepareEnvironment({ cwd: join(t.path, "plain"), env });
+    expect([plain.isRepo, plain.snapshots]).toEqual([false, { mode: "internal", repositories: join(t.path, "data", "agentduo", "repositories") }]);
+    // Never where the snapshots would take in themselves.
+    expect((await prepareEnvironment({ cwd: t.path, env })).snapshots).toMatchObject({ mode: null, problem: { kind: "git" } });
+    // Only looks: nothing is created yet.
+    expect(existsSync(join(t.path, "data"))).toBe(false);
+  });
 });
 
 describe("runnableProblem", () => {
@@ -83,16 +96,16 @@ describe("runnableProblem", () => {
     const { t, repo, env } = setup();
     const fake = new FakeClis(t.path);
     const ok = testConfig(fake);
-    const ws = { workspace: repo, isRepo: true };
+    const ws = { snapshots: { mode: "native" } as const };
     expect(runnableProblem(ws, ok, "", env)).toBeNull();
-    expect(runnableProblem({ workspace: "/x", isRepo: false }, ok, "", env)).toEqual({
-      kind: "not_repo", message: "/x is not inside a git repository (run 'git init' here, or 'duo init' to be asked)",
-    });
-    // In the home folder, nothing says to put the whole home in a repository.
-    expect(runnableProblem({ workspace: "/x", isRepo: false }, ok, "", { ...env, HOME: "/x" })?.message)
-      .toBe("/x is your home folder, not a git repository: run the pipeline from a project folder inside one");
-    // The chat opens anywhere; a run checks for the repository itself.
-    expect(runnableProblem({ workspace: "/x", isRepo: false }, ok, "", env, { repo: false })).toBeNull();
+    // A folder with no git repository needs none: the run keeps its snapshots in agentduo's own.
+    expect(runnableProblem({ snapshots: { mode: "internal", repositories: "/data" } }, ok, "", env)).toBeNull();
+    const home = { mode: null, problem: { kind: "not_repo", message: "/x is your home folder" } } as const;
+    expect(runnableProblem({ snapshots: home }, ok, "", env)).toEqual({ kind: "not_repo", message: "/x is your home folder" });
+    const noGit = { mode: null, problem: { kind: "git", message: GIT_MISSING } } as const;
+    expect(runnableProblem({ snapshots: noGit }, ok, "", env)).toEqual({ kind: "git", message: GIT_MISSING });
+    // The chat opens anywhere, also without Git; a run checks where its snapshots go itself.
+    expect(runnableProblem({ snapshots: noGit }, ok, "", env, { repo: false })).toBeNull();
     const bad = { ...ok, limits: { ...ok.limits, max_retries: -1 } };
     expect(runnableProblem(ws, bad, "ws.yaml", env)).toMatchObject({ kind: "config", message: expect.stringContaining("invalid configuration (ws.yaml)") });
     const missing = { ...ok, codex: { ...ok.codex, bin: join(t.path, "missing") } };
@@ -110,7 +123,7 @@ describe("diagnose", () => {
     writeConfig(repo, "codex:\n  bin: 5\n");
     const checks = await diagnose(await prepareEnvironment({ cwd: repo, env }), env);
     expect(checks.find((c) => c.message.startsWith("config:"))).toMatchObject({ ok: false, message: expect.stringContaining("codex.bin must be a non-empty string") });
-    expect(checks.some((c) => c.message === `workspace inside a git repository: ${repo}`)).toBe(true);
+    expect(checks.some((c) => c.message === `workspace inside a git repository: ${repo} (pipeline snapshots go in it)`)).toBe(true);
     expect(defaultConfig().codex.bin).toBe("codex");
   });
 });

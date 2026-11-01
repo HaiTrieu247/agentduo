@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Chat, type ChatUi } from "../src/chat.js";
@@ -6,11 +6,13 @@ import { AttachmentStore } from "../src/core/attachments.js";
 import { settings } from "../src/core/settings.js";
 import { EventBus, type Message } from "../src/events.js";
 import { approval, critique, finding, impl, issue, plan, review } from "./helpers/builders.js";
-import { testConfig, type ConfigOverrides } from "./helpers/config.js";
+import { GIT_MISSING, MARKER, RunGitError } from "../src/core/run-git.js";
+import type { RunGit } from "../src/core/state.js";
+import { testConfig, userDataEnv, type ConfigOverrides } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { makeHarness, newWorkflow, resume, resumedWorkflow, runDirOf, ScriptedDecider, stateOf, type Harness } from "./helpers/harness.js";
 import { png } from "./helpers/images.js";
-import { git, makeRepo } from "./helpers/repo.js";
+import { CHECK_SCRIPT, git, makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
 
 let t: { path: string; cleanup(): void };
@@ -45,6 +47,7 @@ const happy = (): Scenario => ({
 });
 const messages = (): Message[] => h.events.flatMap((e) => (e.type === "message" ? [e.message] : []));
 const readRun = (name: string) => readFileSync(join(runDirOf(h), name), "utf8");
+const readRunOf = (x: Harness, name: string) => readFileSync(join(runDirOf(x), name), "utf8");
 
 describe("Workflow", () => {
   it("says on DONE which checks passed", async () => {
@@ -292,7 +295,10 @@ describe("Workflow", () => {
       const args = fake.calls(role)[0]!.args;
       expect(args).not.toContain("--sandbox");
       expect(args).toContain("x=1");
+      // Inside a repository Codex needs no protocol flag beyond its own.
+      expect(args).not.toContain("--skip-git-repo-check");
     }
+    expect(stateOf(h).git).toEqual({ mode: "native" });
     expect(fake.calls("plan_reviewer")[0]!.args).not.toContain("--tools");
     expect(fake.calls("plan_reviewer")[0]!.args).not.toContain("--permission-mode");
     expect(fake.calls("implementer")[0]!.args.slice(-2)).toEqual(["--permission-mode", "acceptEdits"]);
@@ -424,6 +430,200 @@ describe("Workflow", () => {
     await start(happy());
     const { wf } = resumedWorkflow(h);
     await expect(wf.applyDecision("resume")).rejects.toThrow("not waiting for a decision");
+  });
+});
+
+describe("Workflow in a native repository of another shape", () => {
+  it("runs in a repository with no commit yet, and in a linked worktree", async () => {
+    const unborn = join(t.path, "unborn");
+    mkdirSync(unborn);
+    git(unborn, "init", "-q", "-b", "main");
+    writeFileSync(join(unborn, "check.mjs"), CHECK_SCRIPT);
+    const u = makeHarness(unborn, testConfig(fake));
+    fake.setScenario(happy());
+    expect(await newWorkflow(u, "Make app.txt fixed").wf.run()).toBe(0);
+    const st = stateOf(u);
+    expect([st.git, st.base!.head, st.base!.branch]).toEqual([{ mode: "native" }, null, "main"]);
+    expect(git(unborn, "for-each-ref", "--format=%(refname)", "refs/agentduo")).toContain("/impl-r1");
+
+    const wt = join(t.path, "linked wt");
+    git(h.repo, "worktree", "add", "-q", "-b", "feature", wt);
+    const w = makeHarness(wt, testConfig(fake));
+    expect(await newWorkflow(w, "Make app.txt fixed").wf.run()).toBe(0);
+    expect([stateOf(w).git, stateOf(w).base!.branch]).toEqual([{ mode: "native" }, "feature"]);
+    expect(git(h.repo, "for-each-ref", "--format=%(refname)", `refs/agentduo/${stateOf(w).taskId}`)).toContain("/base");
+    expect(git(h.repo, "rev-parse", "HEAD")).toBe(head);
+  });
+});
+
+describe("Workflow in a folder with no git repository", () => {
+  let p: Harness;
+  let plain: string;
+  const internalOf = (st: { git?: RunGit }) => st.git as Extract<RunGit, { mode: "internal" }>;
+  const bare = (gitDir: string, ...args: string[]) => git(gitDir, ...args);
+  const codexCalls = () => fake.calls().filter((c) => c.backend === "codex");
+
+  beforeEach(() => {
+    plain = join(t.path, "plain project");
+    mkdirSync(plain);
+    writeFileSync(join(plain, "check.mjs"), CHECK_SCRIPT);
+    writeFileSync(join(plain, "README.md"), "demo\n");
+    writeFileSync(join(plain, "old.txt"), "old\n");
+    p = makeHarness(plain, testConfig(fake));
+    p.env = { ...process.env, ...userDataEnv(join(t.path, "data")) };
+  });
+  const run = (scenario: Scenario, overrides?: ConfigOverrides) => {
+    fake.setScenario(scenario);
+    if (overrides) p.cfg = testConfig(fake, overrides);
+    return newWorkflow(p, "Make app.txt fixed").wf.run();
+  };
+
+  it("snapshots, diffs and reviews in agentduo's own repository, and never creates a .git", async () => {
+    expect(await run({
+      ...happy(),
+      planner: [{ raw: "not json" }, { output: plan() }],
+      implementer: [{ write: { "app.txt": "fixed\n", "README.md": "changed\n" }, delete: ["old.txt"], output: impl() }],
+    })).toBe(0);
+    const st = stateOf(p);
+    const meta = internalOf(st);
+    expect([st.phase, meta.mode, meta.workspace]).toEqual(["DONE", "internal", plain]);
+    expect(meta.gitDir).toBe(join(t.path, "data", "agentduo", "repositories", `${meta.repositoryId}.git`));
+    expect(existsSync(join(plain, ".git"))).toBe(false);
+    expect([st.base!.head, st.base!.branch]).toEqual([null, null]);
+    const refs = bare(meta.gitDir, "for-each-ref", "--format=%(refname)", "refs/agentduo");
+    expect(refs).toContain(`refs/agentduo/${st.taskId}/base`);
+    expect(refs).toContain(`refs/agentduo/${st.taskId}/impl-r1`);
+    expect(JSON.parse(readRunOf(p, "implementation.r1.json")).changes).toEqual([
+      { status: "M", path: "README.md" }, { status: "A", path: "app.txt" }, { status: "D", path: "old.txt" },
+    ]);
+    // The reviewer gets the diff and is told where the snapshots are, never to run git in the workspace.
+    const prompt = fake.calls("code_reviewer")[0]!.prompt;
+    for (const text of ["+fixed", "-old", "+changed", "- Snapshots: agentduo keeps this run's snapshots in a Git repository of its own"]) expect(prompt).toContain(text);
+    expect(prompt).not.toContain("git diff " + st.base!.commit);
+    expect(JSON.parse(readRunOf(p, "review.json")).output.reviewed_commit).toBe(st.lastSnapshot!.commit);
+    expect(readRunOf(p, "diff.r1.patch")).toContain("+fixed");
+    // Every Codex call, retries included, starts outside a repository; Claude's need no such flag.
+    expect(codexCalls().map((c) => c.role)).toEqual(["planner", "planner", "plan_finalizer", "code_reviewer"]);
+    for (const call of codexCalls()) expect(call.args).toContain("--skip-git-repo-check");
+    for (const call of fake.calls().filter((c) => c.backend === "claude")) expect(call.args).not.toContain("--skip-git-repo-check");
+    expect(p.events.some((e) => e.type === "warning" && e.text.includes(`agentduo's own Git repository, ${meta.gitDir}`))).toBe(true);
+    expect(readRunOf(p, "report.md")).toContain(`agentduo's own Git repository \`${meta.gitDir}\``);
+  });
+
+  it("reviews changes inside nested repositories, committed or not, as plain files", async () => {
+    const lib = join(plain, "lib");
+    mkdirSync(lib);
+    git(lib, "init", "-q", "-b", "main");
+    git(lib, "config", "user.email", "t@example.com");
+    git(lib, "config", "user.name", "T");
+    git(lib, "config", "commit.gpgsign", "false");
+    writeFileSync(join(lib, "x.txt"), "one\n");
+    git(lib, "add", "-A");
+    git(lib, "commit", "-q", "-m", "x");
+    const libHead = git(lib, "rev-parse", "HEAD");
+    mkdirSync(join(plain, "fresh"));
+    git(join(plain, "fresh"), "init", "-q");
+    writeFileSync(join(plain, "fresh", "y.txt"), "one\n");
+    expect(await run({ ...happy(), implementer: [{ write: { "app.txt": "fixed\n", "lib/x.txt": "two\n", "fresh/y.txt": "two\n" }, output: impl() }] })).toBe(0);
+    expect(JSON.parse(readRunOf(p, "implementation.r1.json")).changes).toEqual([
+      { status: "A", path: "app.txt" }, { status: "M", path: "fresh/y.txt" }, { status: "M", path: "lib/x.txt" },
+    ]);
+    const prompt = fake.calls("code_reviewer")[0]!.prompt;
+    expect(prompt).toContain("lib/x.txt");
+    expect(prompt).toContain("fresh/y.txt");
+    const st = stateOf(p);
+    expect(bare(internalOf(st).gitDir, "ls-tree", "-r", st.lastSnapshot!.tree)).not.toMatch(/^160000|\scommit\s/m);
+    expect([git(lib, "rev-parse", "HEAD"), git(lib, "status", "--porcelain")]).toEqual([libHead, "M x.txt"]);
+  });
+
+  it("leaves a runs folder named like `..runs` out of the snapshots, as any runs folder inside the workspace", async () => {
+    p.runsDir = join(plain, "..runs");
+    expect(await run(happy())).toBe(0);
+    const st = stateOf(p);
+    expect(bare(internalOf(st).gitDir, "ls-tree", "-r", "--name-only", st.lastSnapshot!.tree).split("\n")).toEqual(["README.md", "app.txt", "check.mjs", "old.txt"]);
+  });
+
+  it("resumes in a new workflow with the same repository, base and refs, also after `git init`", async () => {
+    const scenario = { ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }, { output: review(false, [finding("F1")]) }, { output: review(true, [], ["F1"]) }] };
+    expect(await run(scenario, { limits: { max_review_rounds: 1 } })).toBe(2);
+    const first = stateOf(p);
+    expect(await resume(p, { decision: "resume" })).toBe(2);
+    expect(existsSync(join(plain, ".git"))).toBe(false);
+    // The folder becomes a repository: the run keeps the one it recorded.
+    git(plain, "init", "-q");
+    const calls = codexCalls().length;
+    expect(await resume(p, { decision: "resume" })).toBe(0);
+    const st = stateOf(p);
+    expect([st.phase, st.implRound, st.git, st.base]).toEqual(["DONE", 3, first.git, first.base]);
+    const refs = bare(internalOf(st).gitDir, "for-each-ref", "--format=%(refname)", "refs/agentduo");
+    for (const ref of ["base", "impl-r1-pre", "impl-r1", "impl-r2", "impl-r3"]) expect(refs).toContain(`refs/agentduo/${st.taskId}/${ref}`);
+    expect(git(plain, "for-each-ref", "refs/agentduo")).toBe("");
+    for (const call of codexCalls().slice(calls)) expect(call.args).toContain("--skip-git-repo-check");
+  });
+
+  it("leaves a run as it was when its snapshots cannot be opened, and still aborts it", async () => {
+    expect(await run({ ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }] }, { limits: { max_review_rounds: 1 } })).toBe(2);
+    const before = stateOf(p);
+    rmSync(internalOf(before).gitDir, { recursive: true, force: true });
+    const calls = fake.calls().length;
+    for (const decision of ["resume", "revise"] as const) {
+      const { wf } = resumedWorkflow(p);
+      await expect(wf.applyDecision(decision, "note")).rejects.toThrow(RunGitError);
+      const st = stateOf(p);
+      expect([st.phase, st.humanReview, st.history.length, st.humanNotes]).toEqual(["HUMAN_REVIEW", before.humanReview, before.history.length, []]);
+    }
+    // The decider's answer goes the same way, out of run().
+    await expect(resume(p, undefined, { decider: new ScriptedDecider([{ decision: "resume" }]) })).rejects.toThrow("it is missing (deleted or moved)");
+    expect(stateOf(p).phase).toBe("HUMAN_REVIEW");
+    expect(fake.calls()).toHaveLength(calls);
+    expect(await resume(p, { decision: "abort" })).toBe(3);
+    expect(stateOf(p).phase).toBe("ABORTED");
+  });
+
+  it("keeps the decision waiting when a snapshot's tree or a file in it is missing, before any phase changes", async () => {
+    expect(await run({ ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }] }, { limits: { max_review_rounds: 1 } })).toBe(2);
+    const before = stateOf(p);
+    const { gitDir } = internalOf(before);
+    const last = before.lastSnapshot!;
+    const calls = fake.calls().length;
+    // Its commit is still there; only what it holds is gone (snapshot objects are loose: no gc runs in the repository).
+    for (const [decision, oid] of [["resume", bare(gitDir, "rev-parse", `${last.commit}:app.txt`)], ["revise", last.tree]] as const) {
+      const file = join(gitDir, "objects", oid.slice(0, 2), oid.slice(2));
+      const bytes = readFileSync(file);
+      chmodSync(file, 0o644);
+      rmSync(file);
+      const { wf } = resumedWorkflow(p);
+      await expect(wf.applyDecision(decision, "note")).rejects.toThrow(`the snapshots of run ${before.taskId} in ${gitDir} are damaged`);
+      const st = stateOf(p);
+      expect([st.phase, st.humanReview, st.implRound, st.history.length, st.humanNotes]).toEqual(["HUMAN_REVIEW", before.humanReview, before.implRound, before.history.length, []]);
+      writeFileSync(file, bytes);
+    }
+    expect(fake.calls()).toHaveLength(calls);
+    // Whole again, the decision goes through.
+    const { wf } = resumedWorkflow(p);
+    await wf.applyDecision("resume");
+    expect(stateOf(p).phase).toBe("IMPLEMENT");
+  });
+
+  it("starts no agent when the run's snapshots cannot be set up, and continues once the cause is fixed", async () => {
+    p.env = { ...process.env, ...userDataEnv(join(plain, "data")) }; // inside the workspace: refused
+    fake.setScenario(happy());
+    const { wf } = newWorkflow(p, "Make app.txt fixed");
+    await expect(wf.run()).rejects.toThrow(`which is inside ${plain}`);
+    let st = stateOf(p);
+    expect([st.phase, st.inProgress, st.history, st.git]).toEqual(["PLAN", null, [], undefined]);
+    expect(fake.calls()).toEqual([]);
+    p.env = { ...process.env, ...userDataEnv(join(t.path, "data")) };
+    expect(await resume(p)).toBe(0);
+    st = stateOf(p);
+    expect([st.phase, st.git?.mode]).toEqual(["DONE", "internal"]);
+    expect(existsSync(join(internalOf(st).gitDir, MARKER))).toBe(true);
+    // Without Git, nothing starts either.
+    const empty = join(t.path, "no-git-bin");
+    mkdirSync(empty);
+    const noGit = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toUpperCase() !== "PATH")), PATH: empty };
+    p.env = noGit;
+    await expect(newWorkflow(p, "Another").wf.run()).rejects.toThrow(GIT_MISSING);
   });
 });
 

@@ -13,7 +13,8 @@ import { RunStore } from "../src/core/state.js";
 import type { UsageReport } from "../src/core/usage.js";
 import { EventBus, type Decider, type Decision, type DuoEvent, type ModelMap } from "../src/events.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
-import { testConfig } from "./helpers/config.js";
+import { GIT_MISSING } from "../src/core/run-git.js";
+import { testConfig, userDataEnv } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { ScriptedDecider } from "./helpers/harness.js";
 import { png } from "./helpers/images.js";
@@ -572,13 +573,14 @@ describe("Chat: a conversation with both agents", () => {
     expect(RunStore.list(runsDir)).toEqual([]);
   });
 
-  it("answers and discusses outside a git repository, where a run waits for `git init`", async () => {
+  it("answers, discusses and runs a pipeline outside a git repository, with its snapshots in agentduo's own repository", async () => {
     const plain = join(t.path, "plain");
     mkdirSync(plain);
     const plainRuns = join(plain, ".agentduo", "runs");
+    const data = join(t.path, "data");
     // No gate: check.mjs lives in the repository the other tests use.
     const chat = new Chat({ cfg: testConfig(fake, { gates: [] }), workspace: plain, runsDir: plainRuns, configFile: join(plain, ".agentduo", "config.yaml"),
-      userConfigFile: userConfig(), bus, decider: new ScriptedDecider(), ui });
+      userConfigFile: userConfig(), bus, decider: new ScriptedDecider(), ui, env: { ...process.env, ...userDataEnv(data) } });
     chats.push(chat);
     await chat.greet();
     expect(ui.lines).toContain(NOT_REPO_NOTE);
@@ -596,23 +598,26 @@ describe("Chat: a conversation with both agents", () => {
     expect(events.find((e) => e.type === "discussion.finished")).toMatchObject({ status: "agreed", answer: "Postgres." });
     expect(argsOf("discuss_critique")).not.toContain("--skip-git-repo-check"); // Claude needs no such flag
 
-    const asked = fake.calls().length;
-    const refusal = `A pipeline run needs a git repository, to snapshot and diff your files, and ${plain} is not inside one: run 'git init' here first. ` +
-      "Questions and /discuss work without it.";
-    for (const send of [() => chat.submit("/pipeline Make app.txt fixed"), () => chat.submitPipeline("Make app.txt fixed"), () => chat.submit("/resume")]) {
-      ui.errors.length = 0;
-      await send();
-      expect(ui.errors).toEqual([refusal]);
-    }
-    expect(fake.calls()).toHaveLength(asked);
-    expect(RunStore.list(plainRuns)).toEqual([]);
-
-    // Checked each time: once the folder is a repository, the next /pipeline runs, without the flag.
-    execFileSync("git", ["init", "-q"], { cwd: plain });
+    // No `git init`: the run's snapshots go to a repository of agentduo's own, and every Codex call says to start anyway.
     await chat.submit("/pipeline Make app.txt fixed");
     await chat.idle();
-    expect(RunStore.list(plainRuns).map((st) => st.phase)).toEqual(["DONE"]);
-    expect(argsOf("planner")).not.toContain("--skip-git-repo-check");
+    const [first] = RunStore.list(plainRuns);
+    expect([first!.phase, first!.git?.mode]).toEqual(["DONE", "internal"]);
+    expect(first!.git).toMatchObject({ gitDir: expect.stringContaining(join(data, "agentduo", "repositories")) });
+    expect(existsSync(join(plain, ".git"))).toBe(false);
+    for (const role of ["planner", "plan_finalizer", "code_reviewer"]) expect(argsOf(role)).toContain("--skip-git-repo-check");
+    expect(argsOf("implementer")).not.toContain("--skip-git-repo-check");
+    expect(events.some((e) => e.type === "warning" && e.text.includes("agentduo's own Git repository"))).toBe(true);
+    await chat.submit("/diff");
+    expect(ui.lines.at(-1)).toMatch(/── diff stat ──\n app\.txt \| 1 \+/);
+
+    // Checked each time: once the folder is a repository, the next /pipeline snapshots in it, without the flag.
+    execFileSync("git", ["init", "-q"], { cwd: plain });
+    const planned = fake.calls("planner").length;
+    await chat.submit("/pipeline Make app.txt fixed");
+    await chat.idle();
+    expect(RunStore.list(plainRuns).map((st) => [st.phase, st.git?.mode])).toEqual([["DONE", "internal"], ["DONE", "native"]]);
+    expect(argsOf("planner", planned)).not.toContain("--skip-git-repo-check");
   });
 
   it("in the home folder (VS Code with no folder open), says a pipeline needs a project folder, never to git init the home", async () => {
@@ -625,9 +630,28 @@ describe("Chat: a conversation with both agents", () => {
     expect(ui.lines).toContain(HOME_NOTE);
     expect(ui.lines).not.toContain(NOT_REPO_NOTE);
     await chat.submit("/pipeline Make app.txt fixed");
-    expect(ui.errors).toEqual([`A pipeline run needs a git repository, to snapshot and diff your files, and ${home} is not inside one: ` +
-      "it is your home folder: run the pipeline from a project folder inside one. Questions and /discuss work without it."]);
+    expect(ui.errors).toEqual([`A pipeline run cannot start here: ${home} is your home folder: run the pipeline from a project folder (it needs no git repository)`]);
     expect(RunStore.list(join(home, ".agentduo", "runs"))).toEqual([]);
+  });
+
+  it("without Git, answers questions and says a pipeline needs it", async () => {
+    const plain = join(t.path, "plain");
+    mkdirSync(plain);
+    const empty = join(t.path, "no-git-bin");
+    mkdirSync(empty);
+    const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toUpperCase() !== "PATH")), PATH: empty };
+    const chat = new Chat({ cfg: testConfig(fake, { gates: [] }), workspace: plain, runsDir: join(plain, ".agentduo", "runs"), configFile: join(plain, ".agentduo", "config.yaml"),
+      userConfigFile: userConfig(), bus, decider: new ScriptedDecider(), ui, env });
+    chats.push(chat);
+    await chat.greet();
+    expect(ui.lines).toContain(GIT_MISSING);
+    fake.setScenario({ chat_codex: [{ answer: "Hi." }] });
+    await chat.submit("Hello?");
+    await chat.idle();
+    expect(answers()).toEqual([expect.objectContaining({ status: "success", answer: "Hi." })]);
+    await chat.submit("/pipeline Make app.txt fixed");
+    expect(ui.errors).toEqual([`A pipeline run cannot start here: ${GIT_MISSING}`]);
+    expect(existsSync(join(plain, ".agentduo", "runs", "LATEST"))).toBe(false);
   });
 
   it("gives Claude in the chat the implementer's permission mode (/mode, Shift+Tab), and no other implementer flag", async () => {

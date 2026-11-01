@@ -10,6 +10,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "build:netlify": "node scripts/update-releases.mjs --keep-on-failure && node scripts/build.mjs",
     "check": "node scripts/check.mjs",
     "preview": "node scripts/preview.mjs",
     "test": "node --test test/*.test.mjs",

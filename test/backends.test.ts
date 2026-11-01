@@ -116,6 +116,14 @@ describe("CodexBackend", () => {
     for (const flag of PERMISSION_FLAGS) expect(planner).not.toContain(flag);
     const reviewer = backend.buildArgs({ schemaName: "review", lastMessageFile: "/tmp/last.json", role: "code_reviewer" });
     expect(reviewer.slice(-3)).toEqual(["--sandbox", "read-only", "-"]);
+    expect([...planner, ...reviewer]).not.toContain("--skip-git-repo-check");
+  });
+
+  it("lets a run with agentduo's own snapshot repository start outside a git repository, and nothing else", () => {
+    const backend = new CodexBackend(defaultConfig().codex, "/ws");
+    const args = backend.buildArgs({ schemaName: "review", lastMessageFile: "/tmp/last.json", role: "code_reviewer", skipGitRepoCheck: true });
+    expect(args).toEqual(["exec", "--json", "--color", "never", "--skip-git-repo-check", "--output-schema", schemaPath("review"), "--output-last-message",
+      "/tmp/last.json", "--cd", "/ws", ...defaultConfig().codex.args, "-"]);
   });
 
   it("passes each image as one --image=<path> token, so the - that reads the prompt from stdin stays last", () => {

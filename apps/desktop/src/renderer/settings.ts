@@ -1,11 +1,11 @@
 import { CONVERSATIONS_PROJECT_ID } from "../shared/protocol.js";
 // Settings: the desktop's own preferences (theme, font size, who a message goes to), both CLIs' state, agentduo's
 // configuration by layer (user config, the project's file, this session) with where each value comes from and when
-// a change applies, where data lives (read-only), and diagnostics. Every change goes through main, which uses the
+// a change applies, where data lives (read-only), diagnostics, and what the app is (About). Every change goes through main, which uses the
 // same configuration code as the CLI; nothing here writes a file.
 import type { ConfigEntry, ConfigurationView } from "../../../../src/core/configuration.js";
 import { CLAUDE_MODELS, type ModelChoice } from "../../../../src/core/commands.js";
-import type { AppSnapshot, CliStatus, ConfigScope, LauncherInfo, Preferences, UpdateState } from "../shared/protocol.js";
+import type { AppSnapshot, CliStatus, ConfigScope, LauncherInfo, LinkName, Preferences, UpdateState } from "../shared/protocol.js";
 import { busy, button, call, el, errorText, icon, meter } from "./bridge.js";
 import { FONT_RANGE } from "./theme.js";
 import { commitOnChange, optionsEditor } from "./argumentOptions.js";
@@ -15,9 +15,26 @@ import type { UsageState } from "../../../../src/core/usage.js";
 import { updateAction, updateLine } from "./update.js";
 import { USAGE_PERIOD_MS, USAGE_STALE_MS, type UsageStore } from "./usage.js";
 
-export type SettingsSection = "general" | "agents" | "configuration" | "storage" | "diagnostics";
+export type SettingsSection = "general" | "agents" | "configuration" | "storage" | "diagnostics" | "about";
 const SECTIONS: Array<[SettingsSection, string]> = [
   ["general", "General"], ["agents", "Claude & Codex"], ["configuration", "Configuration"], ["storage", "Data & storage"], ["diagnostics", "Diagnostics"],
+  ["about", "About"],
+];
+
+const OS_NAME: Partial<Record<NodeJS.Platform, string>> = { darwin: "macOS", win32: "Windows", linux: "Linux" };
+
+/** What About lists: the app's version, what it runs on and the system, as main's snapshot says them. */
+export function aboutFacts(s: Pick<AppSnapshot, "versions" | "platform" | "arch">): Array<[string, string]> {
+  return [
+    ["AgentDuo", s.versions.app], ["Electron", s.versions.electron], ["Chromium", s.versions.chrome], ["Node.js", s.versions.node],
+    ["System", `${OS_NAME[s.platform] ?? s.platform} (${s.arch})`],
+  ];
+}
+
+/** About's links, opened in the browser by name (main holds the addresses). */
+export const ABOUT_LINKS: Array<[string, LinkName, string]> = [
+  ["Website", "agentduo-website", "globe"], ["GitHub", "agentduo-github", "github"], ["Release notes", "agentduo-releases", "note"],
+  ["Report an issue", "agentduo-issues", "issues"],
 ];
 
 export interface SettingsHost {
@@ -662,6 +679,32 @@ export class SettingsPanel {
         button("Open desktop data", open("userData"), { class: "small", icon: "folder-opened" }),
         button("Open logs", open("logs"), { class: "small", icon: "output" })),
       el("p", { class: "muted small", text: "The runs folder also holds the workspace lock, so it is not changed from here. To move it, close agentduo (and any duo in that folder), set paths.runs_dir in the project's .agentduo/config.yaml, and open the project again." }),
+      status,
+    ];
+  }
+
+  // ------------------------------------------------------------------ about
+  private async about(): Promise<Node[]> {
+    const snap = this.host.snapshot();
+    const status = el("p", { class: "small status-line", attrs: { role: "status" } });
+    const facts = snap ? aboutFacts(snap) : [];
+    const copy = button("Copy", () => void busy(copy, status, async () => {
+      await navigator.clipboard.writeText(facts.map(([k, v]) => `${k}: ${v}`).join("\n"));
+      status.textContent = "Copied";
+    }), { class: "small", icon: "copy", disabled: !facts.length });
+    return [
+      el("div", { class: "about-head" },
+        el("img", { class: "about-icon", attrs: { src: "icon.svg", alt: "" } }),
+        el("div", {}, el("p", { class: "about-name", text: "AgentDuo" }), el("p", { class: "muted", text: snap ? `Version ${snap.versions.app}` : "" }))),
+      el("p", { text: "Codex plans and reviews, Claude Code critiques and implements, and you talk to both. The same engine as the duo command and the VS Code extension." }),
+      el("div", { class: "row-actions about-links" }, ...ABOUT_LINKS.map(([label, link, name]) =>
+        button(label, () => void busy(null, status, async () => void (await call({ method: "link.open", link }))), { class: "small", icon: name }))),
+      el("h3", { text: "Versions" }),
+      el("dl", { class: "facts about-facts" }, ...facts.flatMap(([k, v]) => [el("dt", { text: k }), el("dd", {}, el("code", { text: v }))])),
+      el("div", { class: "row-actions" }, copy),
+      el("h3", { text: "License" }),
+      el("p", { class: "muted small", text: "MIT License. © 2026 Thinh Hai Trieu. Built with Electron; icons from VS Code's Codicons (CC BY 4.0)." }),
+      el("p", { class: "muted small", text: "AgentDuo runs the Claude Code and Codex CLIs you installed and signed in to; it holds no credential of its own." }),
       status,
     ];
   }

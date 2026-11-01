@@ -23,6 +23,15 @@ export interface EarlierTask {
   outcome: string;
 }
 
+/**
+ * Where a run keeps its snapshots. native: the workspace's own git repository (and its refs/agentduo/…), as runs always
+ * did. internal: a bare repository agentduo created for this run under its data root (a folder with no git repository
+ * of its own), named by `repositoryId`; `gitDir` and `workspace` are what it was created for, checked on every open.
+ */
+export type RunGit =
+  | { mode: "native" }
+  | { mode: "internal"; repositoryId: string; workspace: string; gitDir: string };
+
 /** One question of the chat and the answer it got. */
 export interface Exchange {
   backend: "codex" | "claude";
@@ -73,6 +82,8 @@ export interface RunState {
   warnings: string[];
   /** The directory the run works in; absent in runs created before v2. */
   workspace?: string;
+  /** Where its snapshots are; absent until the run first prepares them, and in older runs (which are native). */
+  git?: RunGit;
   /** Earlier tasks of the chat this run was started from (empty outside a chat). */
   earlier?: EarlierTask[];
   /** The chat's conversation when this run started; absent outside a chat and in older runs. */

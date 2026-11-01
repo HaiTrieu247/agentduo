@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import YAML from "yaml";
 import type { ConfigurationView } from "../../../src/core/configuration.js";
-import { userConfigEnv } from "../../../test/helpers/config.js";
+import { RunStore } from "../../../src/core/state.js";
+import { approval, critique, impl, plan, review } from "../../../test/helpers/builders.js";
+import { userConfigEnv, userDataEnv } from "../../../test/helpers/config.js";
 import { fakeShim, FakeClis } from "../../../test/helpers/fake-clis.js";
 import { makeRepo } from "../../../test/helpers/repo.js";
 import { tempDir } from "../../../test/helpers/tmp.js";
@@ -16,7 +18,7 @@ import { PreferencesStore } from "../src/main/preferences.js";
 import { ProjectManager } from "../src/main/projects.js";
 import { ResourceTokens } from "../src/main/resources.js";
 import { CONVERSATIONS_PROJECT_ID } from "../src/shared/protocol.js";
-import type { Answer, DesktopEvent, SenderInfo } from "../src/shared/protocol.js";
+import type { Answer, ChangeFile, ChangeListView, DesktopEvent, SenderInfo } from "../src/shared/protocol.js";
 
 const good: SenderInfo = { senderId: 3, windowId: 3, mainFrame: true, url: "agentduo://app/index.html" };
 
@@ -54,7 +56,7 @@ function harness(o: { worker?: string; env?: NodeJS.ProcessEnv } = {}): Harness 
   const pick = { folder: null as string | null, binary: null as string | null };
   const d = new Dispatcher({
     projects, prefs, logs: new LogBuffer(), userData: t.path, logsDir: join(t.path, "logs"), env: () => env, launcher: () => null,
-    snapshot: () => ({ prefs: prefs.prefs, projects: projects.summaries(), active: projects.active, platform: process.platform, versions: { app: "0", electron: "0", chrome: "0", node: "0" }, userData: t.path, dark: false, update: { status: "off", reason: "test" } }),
+    snapshot: () => ({ prefs: prefs.prefs, projects: projects.summaries(), active: projects.active, platform: process.platform, arch: process.arch, versions: { app: "0", electron: "0", chrome: "0", node: "0" }, userData: t.path, dark: false, update: { status: "off", reason: "test" } }),
     shell: { chooseFolder: async () => pick.folder, chooseBinary: async () => pick.binary, saveFile: async () => null, openPath: async () => undefined, openExternal: async () => undefined },
   });
   return { d, projects, prefs, pick, events };
@@ -267,6 +269,47 @@ describe("with real workers", () => {
     expect(restarted.projects.draft(general, conversation)).toBe("A draft");
     await waitUntil(() => restarted.projects.session(general).conversation(conversation).state.timeline.some((i) => i.kind === "user" && i.text === "A general question"), 20_000, "the restored general conversation");
     expect(restarted.prefs.projects).toHaveLength(1);
+  }, 120_000);
+
+  it("runs a pipeline in a project folder with no git repository, and shows its changes from agentduo's own repository after a restart", async () => {
+    writeYaml(userConfig(), { claude: { bin: fake.path("claude") }, codex: { bin: fake.path("codex") } });
+    const withData = () => ({ ...env(), ...userDataEnv(join(t.path, "data")) });
+    const h = harness({ worker: worker.script, env: withData() });
+    const folder = join(t.path, "plain project");
+    mkdirSync(folder);
+    writeFileSync(join(folder, "old.txt"), "old\n");
+    h.pick.folder = folder;
+    const { id } = await ok<{ id: string }>(h.d.handle(good, { method: "project.open" }));
+    fake.setScenario({
+      planner: [{ output: plan() }], plan_reviewer: [{ output: critique(true) }], plan_finalizer: [{ output: approval(true) }],
+      implementer: [{ write: { "app.txt": "fixed\n", "logo.bin": "PNG\u0000\u0001binary" }, delete: ["old.txt"], output: impl() }],
+      code_reviewer: [{ output: review(true) }],
+    });
+    const { conversationId } = await ok<{ conversationId: string }>(h.d.handle(good, { method: "conversation.new", projectId: id }));
+    await h.projects.session(id).conversation(conversationId).submit("/pipeline Make app.txt fixed");
+    const runs = join(folder, ".agentduo", "runs");
+    await waitUntil(() => existsSync(join(runs, "LATEST")) && RunStore.open(runs).loadState().phase === "DONE", 60_000, "the run to finish");
+    expect(RunStore.open(runs).loadState().git?.mode).toBe("internal");
+    expect(existsSync(join(folder, ".git"))).toBe(false);
+
+    const changes = async (x: Harness) => {
+      const list = await ok<ChangeListView>(x.d.handle(good, { method: "changes.list", projectId: id, conversationId }));
+      const file = (path: string) => ok<ChangeFile>(x.d.handle(good, { method: "changes.file", projectId: id, listId: list.listId, index: list.changes.findIndex((c) => c.path === path) }));
+      return { list, file };
+    };
+    const first = await changes(h);
+    expect(first.list.changes.map((c) => `${c.status} ${c.path}`).sort()).toEqual(["A app.txt", "A logo.bin", "D old.txt"]);
+    expect((await first.file("app.txt")).after).toMatchObject({ text: "fixed\n" });
+    await h.projects.dispose();
+
+    // Started again: the run's changes come from the repository it recorded, text and binary alike.
+    const restarted = harness({ worker: worker.script, env: withData() });
+    await restarted.projects.session(id).start();
+    const again = await changes(restarted);
+    expect([again.list.base, again.list.snapshot]).toEqual([first.list.base, first.list.snapshot]);
+    expect(await again.file("app.txt")).toMatchObject({ before: { missing: true }, after: { text: "fixed\n" } });
+    expect(await again.file("old.txt")).toMatchObject({ before: { text: "old\n" }, after: { missing: true } });
+    expect((await again.file("logo.bin")).after).toMatchObject({ binary: true, text: null });
   }, 120_000);
 
   it("starts a new conversation with the default recipient, and keeps a saved one's", async () => {

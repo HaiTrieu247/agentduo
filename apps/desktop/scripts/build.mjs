@@ -53,6 +53,8 @@ if (only.includes("renderer")) {
   if (/\brequire\(["']node:|from ["']node:/.test(js)) throw new Error("the renderer bundle imports Node; it must not");
   copyFileSync(join(desktop, "src", "renderer", "index.html"), join(dir, "index.html"));
   copyFileSync(join(desktop, "src", "renderer", "styles.css"), join(dir, "styles.css"));
+  // The app icon for Settings → About (an image only: the page's policy runs no script, and an <img> SVG runs none).
+  copyFileSync(join(desktop, "resources", "icon.svg"), join(dir, "icon.svg"));
   copyFileSync(join(root, "extensions", "vscode", "webview", "styles.css"), join(dir, "webview.css"));
   // VS Code's icon font, which the reused chat UI draws its icons with. The font is CC BY 4.0: its licence goes along.
   const codicons = join(root, "node_modules", "@vscode", "codicons");

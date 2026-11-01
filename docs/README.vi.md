@@ -6,6 +6,8 @@ agentduo là kênh giao tiếp giữa hai agent lập trình. **Codex** lập k�
 
 agentduo **không có luật riêng**. Quyền, sandbox và quy ước đều lấy từ config của từng CLI và từ `AGENTS.md`/`CLAUDE.md` của repo.
 
+Website: [agentduo.netlify.app](https://agentduo.netlify.app/vi/)
+
 ## Cài đặt và bắt đầu
 
 ```bash
@@ -119,7 +121,7 @@ Không cần cài gói npm `agentduo`. Máy chỉ cần Node, git, Codex CLI và
 
 - Bấm icon agentduo trên Activity Bar sẽ thấy hai mục. **Account & Usage** hiện tài khoản của cả Claude Code lẫn Codex (gói, email) và hạn mức đã dùng, mỗi hạn mức một thanh tiến độ và giờ reset. **Conversations** liệt kê các cuộc trò chuyện. Số liệu được lấy khi mục hiện ra (lấy lại nếu đã cũ hơn 1 phút), khi bấm ↻, 5 phút một lần khi mục đang mở, và sau mỗi câu trả lời hay mỗi run (tối đa 1 lần mỗi phút). Mỗi lần lấy mất khoảng 2 giây và không gọi model. Mục bị thu gọn hay bị ẩn thì không lấy gì. **View details** mở khung Usage đầy đủ trong tab.
 - Mở sidebar không chạy gì cả. Run chỉ bắt đầu khi bạn gửi task. Với workspace nhiều thư mục, bạn chọn thư mục trước (**agentduo: Choose Workspace Folder**); trong lúc chưa chọn, mục Account & Usage dùng config của thư mục home.
-- Không mở folder nào thì agentduo làm việc trong thư mục home, giống khi chạy `duo` ở đó: cuộc trò chuyện và config nằm trong `~/.agentduo`. Hỏi đáp, `/discuss`, `/usage` và mục Account & Usage đều chạy được. Pipeline cần một folder dự án nằm trong git repo, nên ở thư mục home nó nhắc bạn mở folder đó (không bảo `git init` cả thư mục home).
+- Không mở folder nào thì agentduo làm việc trong thư mục home, giống khi chạy `duo` ở đó: cuộc trò chuyện và config nằm trong `~/.agentduo`. Hỏi đáp, `/discuss`, `/usage` và mục Account & Usage đều chạy được. Pipeline cần một folder dự án (không cần git repo), nên ở thư mục home nó nhắc bạn mở folder dự án.
 - Enter để gửi, Shift+Enter để xuống dòng. Khi agent đang chạy, nội dung bạn gửi là ghi chú cho bước kế tiếp. **Stop** (hoặc Esc trong ô nhập) dừng bước hiện tại; gửi lại sẽ chạy lại bước đó. Các lệnh `/new`, `/resume`, `/mode`, `/claude …`, `/codex …` giống hệt trong terminal. Nút chế độ dưới ô nhập mở menu Modes giống Claude Code (Manual, Edit automatically, Auto); Shift+Tab trong ô nhập chuyển sang chế độ kế tiếp.
 - **Đính kèm file:** nút kẹp giấy dưới ô nhập chọn được nhiều file bất kỳ. Bạn cũng có thể dán ảnh (Cmd/Ctrl+V), hoặc **giữ Shift** khi kéo file từ Finder/Explorer của hệ điều hành vào ô nhập (VS Code cần Shift mới cho webview nhận file thả vào). Kéo từ Explorer của chính VS Code hay từ editor thì tab không đọc được file, nên hãy dùng nút kẹp giấy. File chờ hiện phía trên ô nhập (ảnh có thumbnail), có ✕ để bỏ; gửi với ô nhập trống thì chỉ gửi file. File chờ gửi bị bỏ khi `/new` hoặc khi đóng tab. Giới hạn và cách gửi ảnh giống chat trên terminal.
 - Reload cửa sổ hay đóng VS Code sẽ dừng bước đang chạy. Quyết định đang chờ được hoãn, yêu cầu quyền chưa trả lời bị từ chối, và run vẫn tiếp tục được. Extension không bao giờ tự chạy lại task; nó hiện nút **Resume** để bạn bấm.
@@ -127,7 +129,7 @@ Không cần cài gói npm `agentduo`. Máy chỉ cần Node, git, Codex CLI và
 
 Chi tiết xem [extensions/vscode/README.md](../extensions/vscode/README.md). Khi phát triển, mở repo trong VS Code rồi nhấn F5 (**Run agentduo extension**).
 
-Yêu cầu: Node.js ≥ 22.12, git, Codex CLI và Claude Code. Chạy pipeline (`duo "<task>"`, `/pipeline`) thì workspace phải nằm trong một git repo, vì agentduo chụp snapshot và tạo diff bằng git. Nếu chưa có, `duo init` sẽ hỏi có muốn `git init` không. Chat và `/discuss` thì chạy ở thư mục nào cũng được.
+Yêu cầu: Node.js ≥ 22.12, git, Codex CLI và Claude Code. Pipeline (`duo "<task>"`, `/pipeline`) chụp snapshot và tạo diff bằng git: trong git repo của bạn, hoặc với folder chưa có repo thì trong một kho Git riêng của agentduo (xem [Folder chưa có git repo](#folder-chưa-có-git-repo)), nên không cần `git init`. Chat và `/discuss` chạy ở thư mục nào cũng được, kể cả khi máy chưa có git.
 
 ## App desktop
 
@@ -141,6 +143,18 @@ Yêu cầu: Node.js ≥ 22.12, git, Codex CLI và Claude Code. Chạy pipeline (
 - diff gửi cho reviewer chỉ gồm thay đổi trong thư mục đó.
 
 Nếu agent sửa file ngoài workspace (trong cùng repo), agentduo cảnh báo trên màn hình và trong report, với đường dẫn tính từ workspace (`../shared/x.ts`), nhưng không dừng run.
+
+### Folder chưa có git repo
+
+Workspace nằm trong git repo thì run lưu snapshot ngay trong repo đó (commit không gắn nhánh, dưới `refs/agentduo/<run-id>/`; index, HEAD và nhánh của bạn không bị đụng tới). Folder chưa có git repo thì run lưu snapshot trong một kho Git bare riêng do agentduo tạo cho run đó, và báo rõ khi bắt đầu:
+
+- Vị trí: `<data>/agentduo/repositories/<id>.git`, với `<data>` là `$XDG_DATA_HOME` hoặc `~/.local/share` trên Linux và macOS, `%LOCALAPPDATA%` (không có thì `%APPDATA%`) trên Windows. Không có gì được tạo trong folder của bạn: không `.git`, không index. Run ghi kho này vào `state.json` và kiểm tra lại mỗi lần mở (đúng vị trí dưới thư mục đó, và marker ghi run và workspace), rồi trước khi chạy tiếp, kiểm tra các snapshot của nó còn nguyên vẹn.
+- Nội dung: mọi file trong workspace như `git add` sẽ lấy: tôn trọng các file `.gitignore` (kể cả trong thư mục con), bỏ dữ liệu run, `.claude/settings.local.json` và mọi `.git`. File trong repo lồng nhau được chụp như file thường (đã commit hay chưa), nên thay đổi bên trong vẫn có trong diff; index, HEAD và `info/exclude` của repo đó không được dùng và giữ nguyên.
+- Resume, diff stat trong report, `/diff`, và Changes trong extension và app đều đọc kho riêng của run, kể cả khi folder được `git init` sau đó; run không bao giờ đổi sang kho khác. Nếu kho đó mất, run báo lỗi và chờ: `--decision abort` vẫn kết thúc được run.
+- Codex khởi động ngoài git repo nên các lần gọi Codex nhận cờ giao thức `--skip-git-repo-check`.
+- Reviewer nhận diff trong prompt; toàn bộ diff được lưu thành `diff.r<round>.patch` trong thư mục run, và report ghi lệnh `git --git-dir … diff` để xem snapshot từ bất kỳ đâu.
+
+Giới hạn: không chạy pipeline ngay tại thư mục home (hãy mở folder dự án), hay trong folder chứa thư mục dữ liệu của agentduo. Folder lớn mà thiếu `.gitignore` (`node_modules`, file build) sẽ bị chụp toàn bộ, tốn thời gian và dung lượng; run dùng lại stat cache giữa các lần chụp. Kho được giữ lại sau run để còn đọc lịch sử; khi không cần run đó nữa thì tự xóa `<data>/agentduo/repositories/<id>.git`. Mỗi workspace chỉ chạy một pipeline một lúc.
 
 Thư mục runs có `.gitignore` riêng, nên dữ liệu run không lọt vào `git status` hay commit, kể cả khi bạn chưa chạy `duo init`.
 
@@ -184,7 +198,7 @@ agentduo không chặn gì. Nó chỉ cảnh báo khi agent lập kế hoạch h
 | `duo "<task>"` | Tạo run mới (`--task-file`; task bắt đầu bằng `-` thì gõ `duo -- "-x …"`) |
 | `duo resume [id]` | Chạy tiếp với config lúc run bắt đầu (thêm `--reload-config` để dùng config hiện tại); `--decision resume\|revise\|abort [--note "..."]` để trả lời quyết định đang chờ |
 | `duo status`, `duo list` | Xem tiến độ |
-| `duo doctor`, `duo init` | Kiểm tra môi trường, tạo config |
+| `duo doctor`, `duo init` | Kiểm tra môi trường, tạo config (và hỏi có `git init` không; pipeline không cần) |
 
 Giao diện:
 - **Trong terminal:** giao diện live. Phím `v` bật/tắt chi tiết, `q` dừng sau bước hiện tại, `Ctrl-C` dừng ngay. Tại menu quyết định, `Ctrl-C` nghĩa là "Để sau".
@@ -220,6 +234,7 @@ Gate là tuỳ chọn. Mặc định không có gate: Claude tự chạy test th
   - Nếu Codex làm implementer, xem mục **Codex** ở phần [Quyền](#quyền).
 - **Sửa `config.yaml` rồi `duo resume` mà không có tác dụng:** run giữ config lúc nó bắt đầu. Dùng `duo resume --reload-config` để áp dụng config mới. Thay đổi trong settings của Claude Code hay Codex thì không cần lệnh này.
 - **Task bắt đầu bằng `-`** bị hiểu nhầm là option. Đặt `--` trước nó: `duo -- "-x bị lỗi"`.
+- **"Git is not installed"** khi bắt đầu run: cài git (chat và `/discuss` vẫn chạy không cần git). **"cannot use its snapshot repository"** hoặc **"the snapshots of run … are damaged"** khi resume: kho riêng của run đã bị di chuyển hoặc xóa, hoặc có file trong kho bị xóa (xem [Folder chưa có git repo](#folder-chưa-có-git-repo)); hãy abort run đó và tạo run mới.
 - **Terminal hiển thị lạ sau khi agentduo bị `kill -9`:** gõ `reset`.
 - **Giảm chi phí:** đặt `claude.args: [--strict-mcp-config, --no-session-persistence]` để agentduo không nạp các MCP server của bạn.
 - **Windows** ở mức thử nghiệm.

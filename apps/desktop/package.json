@@ -6,7 +6,7 @@
   "description": "agentduo as a desktop app: Codex plans and reviews, Claude Code critiques and implements, in one window.",
   "license": "MIT",
   "author": "Thinh Hai Trieu",
-  "homepage": "https://github.com/HaiTrieu247/agentduo",
+  "homepage": "https://agentduo.netlify.app/",
   "main": "dist/main/index.cjs",
   "scripts": {
     "build": "node scripts/build.mjs",

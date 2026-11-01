@@ -100,6 +100,20 @@ describe("prompts", () => {
     expect(prompts.fenceFor("no backticks")).toBe("```");
     expect(prompts.fenceFor("a ````` b")).toBe("``````");
   });
+
+  it("tells every role of a run with agentduo's own snapshots, and points the reviewer at the whole diff, never at git in the workspace", () => {
+    const sha = "b".repeat(40);
+    const internal = { ...ctx, internalSnapshots: true };
+    const cut = prompts.codeReviewer(internal, 1, "# Final plan", "a".repeat(40), sha, [], " app.txt | 1 +", "+x", true, [], impl(), "/runs/r/diff.r1.patch");
+    for (const s of ["- Snapshots: agentduo keeps this run's snapshots in a Git repository of its own", "TRUNCATED: read the whole diff in `/runs/r/diff.r1.patch`",
+      "in agentduo's own repository: review it from the diff below"]) expect(cut).toContain(s);
+    expect(cut).not.toContain("run `git diff");
+    expect(prompts.planner(internal, 1, 1, null, null)).toContain("- Snapshots: agentduo keeps");
+    // A native run's prompts are as they were.
+    const native = prompts.codeReviewer(ctx, 1, "# Final plan", "a".repeat(40), sha, [], " app.txt | 1 +", "+x", true, [], impl(), "/runs/r/diff.r1.patch");
+    expect(native).toContain("TRUNCATED: run `git diff " + "a".repeat(40) + " " + sha + " -- .` for the full diff");
+    expect(native).not.toContain("Snapshots:");
+  });
 });
 
 describe("prompts: a discussion", () => {

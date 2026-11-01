@@ -103,6 +103,9 @@ copies the app's PNG to `dist/main` for the window on Windows and Linux and the 
   workspace lock lives there.
 - **Diagnostics**: versions, the PATH the agents get and where it came from, both CLIs' status, `duo doctor`'s checks.
   *Export* writes what you saw in the preview; it leaves out credentials, prompts and attachments.
+- **About** (also *About AgentDuo* in the AgentDuo menu on macOS, Help on Windows and Linux): the app's version, its
+  Electron, Chromium and Node versions and the system (*Copy* puts them on the clipboard), links to the
+  [website](https://agentduo.netlify.app/), GitHub, the release notes and the issue tracker, and the license.
 
 The app's own data (preferences, known projects, drafts, logs) is in its user data folder:
 `~/Library/Application Support/AgentDuo` (macOS), `%APPDATA%\AgentDuo` (Windows), `~/.config/AgentDuo` (Linux).
@@ -159,7 +162,9 @@ git push origin main --follow-tags
    blockmaps and the update feed to the draft.
 3. **publish**: once every OS has uploaded, and the release holds `latest.yml`, `latest-mac.yml` and
    `latest-linux.yml`, it is published, and installed apps see it at their next check. Should one OS fail, the release
-   stays a draft: fix it, then run the failed jobs again (or delete the draft and the tag, and tag again).
+   stays a draft: fix it, then run the failed jobs again (or delete the draft and the tag, and tag again). Then it calls
+   the website's Netlify build hook (the secret `NETLIFY_BUILD_HOOK`, when set), and the website's deploy reads the
+   published versions, so its download page and version numbers follow the release (`website/README.md`, Release data).
 
 Signing is optional. Each certificate is used only when its repository secrets are set (*Settings → Secrets and
 variables → Actions*):

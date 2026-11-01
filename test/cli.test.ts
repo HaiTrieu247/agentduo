@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import YAML from "yaml";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -6,9 +6,10 @@ import { applyColorPreference, chatAvailable, isBackgroundFromPs, main, pinTermi
 import { acquireWorkspaceLock, RunStore } from "../src/core/state.js";
 import { packageVersion } from "../src/paths.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
-import { type ConfigOverrides, testConfig, userConfigEnv } from "./helpers/config.js";
+import { GIT_MISSING } from "../src/core/run-git.js";
+import { type ConfigOverrides, testConfig, userConfigEnv, userDataEnv } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
-import { git, makeRepo } from "./helpers/repo.js";
+import { CHECK_SCRIPT, git, makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
 
 let t: { path: string; cleanup(): void };
@@ -43,6 +44,14 @@ async function cli(args: string[], cwd = repo, extra: Partial<CliIO> = {}): Prom
   };
   const code = await main(args, io);
   return { code, out, err };
+}
+
+/** `env` with a PATH that has no git on it. */
+function withoutGit(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const empty = join(t.path, "no-git-bin");
+  mkdirSync(empty, { recursive: true });
+  const kept = Object.fromEntries(Object.entries(env).filter(([key]) => key.toUpperCase() !== "PATH"));
+  return { ...kept, PATH: empty };
 }
 
 const happy = () => ({
@@ -167,8 +176,14 @@ describe("cli", () => {
     expect(bare.err).toContain("in a terminal, `duo` alone opens a chat");
     const outside = join(t.path, "plain folder");
     mkdirSync(outside);
-    const notGit = await cli(["Fix"], outside);
-    expect([notGit.code, notGit.err.includes("is not inside a git repository (run 'git init' here, or 'duo init' to be asked)")]).toEqual([1, true]);
+    writeConfig(outside);
+    // A folder with no git repository is fine; the home folder is not, and nothing runs without Git.
+    const home = await cli(["Fix"], outside, { env: { ...process.env, ...userConfigEnv(join(t.path, "xdg")), CI: "", HOME: outside } });
+    expect([home.code, home.err]).toEqual([1, `error: ${outside} is your home folder: run the pipeline from a project folder (it needs no git repository)\n`]);
+    const noGit = await cli(["Fix"], outside, { env: withoutGit({ ...process.env, ...userConfigEnv(join(t.path, "xdg")), CI: "" }) });
+    expect([noGit.code, noGit.err]).toEqual([1, `error: ${GIT_MISSING}\n`]);
+    // Refused before the lock and the run: no run, no LATEST, no lock.
+    expect(readdirSync(join(outside, ".agentduo"))).toEqual(["config.yaml"]);
     const missingFile = await cli(["--task-file", join(t.path, "nope.md")]);
     expect([missingFile.code, missingFile.err.includes("cannot read task file")]).toEqual([1, true]);
     expect((await cli(["stauts"])).err).toContain("did you mean 'status'");
@@ -225,19 +240,73 @@ describe("cli", () => {
     expect(existsSync(store.path("config.json"))).toBe(true);
   });
 
+  it("runs and resumes in a folder with no git repository, keeping its snapshots in agentduo's own", async () => {
+    const plain = join(t.path, "plain project");
+    mkdirSync(plain);
+    writeFileSync(join(plain, "check.mjs"), CHECK_SCRIPT);
+    writeConfig(plain, { limits: { max_review_rounds: 1 } });
+    const data = join(t.path, "data");
+    const env = { ...process.env, ...userConfigEnv(join(t.path, "xdg")), ...userDataEnv(data), CI: "" };
+    fake.setScenario({ ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }, { output: review(true, [], ["F1"]) }] });
+    const first = await cli(["Make app.txt fixed"], plain, { env });
+    expect(first.code, first.err).toBe(2);
+    expect(first.out).toContain("This run keeps its snapshots in agentduo's own Git repository");
+    const store = RunStore.open(join(plain, ".agentduo", "runs"));
+    const st = store.loadState();
+    expect(st.git).toMatchObject({ mode: "internal", gitDir: expect.stringContaining(join(data, "agentduo", "repositories")) });
+    expect(existsSync(join(plain, ".git"))).toBe(false);
+    for (const call of fake.calls().filter((c) => c.backend === "codex")) expect(call.args).toContain("--skip-git-repo-check");
+    // A new process resumes with the same repository and base.
+    const resumed = await cli(["resume", "--decision", "resume"], plain, { env });
+    expect(resumed.code, resumed.err).toBe(0);
+    const done = store.loadState();
+    expect([done.phase, done.git, done.base]).toEqual(["DONE", st.git, st.base]);
+    expect(existsSync(join(plain, ".git"))).toBe(false);
+    expect(store.readText("report.md")).toContain(`agentduo's own Git repository \`${(st.git as { gitDir: string }).gitDir}\``);
+  });
+
+  it("leaves a run as it was when its snapshot repository is gone, and still aborts it", async () => {
+    const plain = join(t.path, "plain");
+    mkdirSync(plain);
+    writeFileSync(join(plain, "check.mjs"), CHECK_SCRIPT);
+    writeConfig(plain, { limits: { max_review_rounds: 1 } });
+    const env = { ...process.env, ...userConfigEnv(join(t.path, "xdg")), ...userDataEnv(join(t.path, "data")), CI: "" };
+    fake.setScenario({ ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }] });
+    expect((await cli(["Make app.txt fixed"], plain, { env })).code).toBe(2);
+    const store = RunStore.open(join(plain, ".agentduo", "runs"));
+    const before = store.loadState();
+    rmSync((before.git as { gitDir: string }).gitDir, { recursive: true, force: true });
+    const calls = fake.calls().length;
+    const r = await cli(["resume", "--decision", "resume"], plain, { env });
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("it is missing (deleted or moved)");
+    expect(r.err).toContain(`'duo resume ${before.taskId}'`);
+    expect(fake.calls()).toHaveLength(calls);
+    // Nothing changed, and nothing is left locked.
+    const after = store.loadState();
+    expect([after.phase, after.humanReview, after.history.length]).toEqual(["HUMAN_REVIEW", before.humanReview, before.history.length]);
+    expect([existsSync(store.path("lock")), existsSync(join(plain, ".agentduo", "runs", ".lock"))]).toEqual([false, false]);
+    // No other repository stands in: git init now makes no difference.
+    git(plain, "init", "-q");
+    expect((await cli(["resume", "--decision", "resume"], plain, { env })).code).toBe(1);
+    expect((await cli(["resume", "--decision", "abort"], plain, { env })).code).toBe(3);
+    expect(store.loadState().phase).toBe("ABORTED");
+  });
+
   it("init writes the config, and offers git init outside a repository", async () => {
     const other = join(t.path, "new project");
     mkdirSync(other);
     const asked: string[] = [];
     const r = await cli(["init"], other, { stdin: { isTTY: true }, ask: async (q) => { asked.push(q); return "y"; } });
     expect(r.code).toBe(0);
-    expect(asked[0]).toContain("Run 'git init' here?");
+    expect(asked[0]).toContain("a pipeline run does not need one");
+    expect(asked[0]).toContain("Run 'git init' here anyway?");
     expect(existsSync(join(other, ".git"))).toBe(true);
     expect(existsSync(join(other, ".agentduo", "config.yaml"))).toBe(true);
     const third = join(t.path, "third");
     mkdirSync(third);
     const quiet = await cli(["init"], third);
-    expect(quiet.out).toContain("run 'git init' here before 'duo run'");
+    expect(quiet.out).toContain("'duo run' works here without one");
     expect(existsSync(join(third, ".git"))).toBe(false);
   });
 

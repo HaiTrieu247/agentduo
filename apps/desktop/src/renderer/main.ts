@@ -407,6 +407,8 @@ function onDesktopEvent(e: DesktopEvent): void {
         case "checkUpdates":
           openSettings("general");
           return void checkUpdate();
+        case "about":
+          return openSettings("about");
       }
   }
 }

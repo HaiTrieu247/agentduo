@@ -110,13 +110,13 @@ export class CodexBackend implements AgentBackend {
   /**
    * A conversation turn (text mode) gets no schema and no role_args: only the args every call gets. It may run outside
    * a git repository, where `codex exec` refuses to start without --skip-git-repo-check (inside one the flag changes
-   * nothing); the workflow's calls always run inside one.
+   * nothing); so may a workflow call of a run with agentduo's own snapshot repository, which says so.
    */
   buildArgs(a: BuildArgs): string[] {
     return [
       "exec", "--json",
       "--color", "never",
-      ...(a.mode === "text" ? ["--skip-git-repo-check"] : ["--output-schema", schemaPath(a.schemaName)]),
+      ...(a.mode === "text" ? ["--skip-git-repo-check"] : [...(a.skipGitRepoCheck ? ["--skip-git-repo-check"] : []), "--output-schema", schemaPath(a.schemaName)]),
       "--output-last-message", a.lastMessageFile,
       "--cd", this.repo,
       ...(this.cfg.model ? ["--model", this.cfg.model] : []),

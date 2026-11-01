@@ -1,16 +1,20 @@
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { resolveBinary } from "../agents/resolve.js";
-import { homeFolder, isHomeFolder } from "../paths.js";
+import { homeFolder } from "../paths.js";
 import { ConfigError, defaultConfig, loadConfig, userConfigPath, validateConfig, type Backend, type ConfigData } from "./config.js";
 import { runDoctor, type Check } from "./doctor.js";
 import { Git } from "./git.js";
+import { preflightSnapshots, type SnapshotPreflight } from "./run-git.js";
 
 /** A workspace ready for a command: its config (loaded unvalidated), where its runs live, and what loading it noticed. */
 export interface WorkspaceEnv {
   workspace: string;
+  /** Inside a git repository (git found one from the workspace). */
   isRepo: boolean;
   git: Git;
+  /** Where a new run would keep its snapshots (its repository, or agentduo's own), or why it cannot start. */
+  snapshots: SnapshotPreflight;
   cfg: ConfigData;
   sources: string[];
   runsDir: string;
@@ -42,14 +46,15 @@ export async function prepareEnvironment(o: { cwd: string; dir?: string; configP
   if (!existsSync(workspace)) throw new EnvironmentError(`no such directory: ${workspace}`);
   if (!statSync(workspace).isDirectory()) throw new EnvironmentError(`not a directory: ${workspace}`);
   const git = new Git(workspace);
-  const isRepo = await git.isRepo();
+  const snapshots = await preflightSnapshots(workspace, o.env);
+  const isRepo = snapshots.mode === "native";
   const configPath = o.configPath ? resolve(o.cwd, o.configPath) : undefined;
   const loaded = loadConfig({ dir: workspace, configPath, env: o.env, validate: false });
   // An unusable runs_dir is rejected by validateConfig before a run; status and list fall back to the default.
   const configured = loaded.data.paths?.runs_dir;
   const runs = expandHome(typeof configured === "string" && configured ? configured : defaultConfig().paths.runs_dir, o.env);
   return {
-    workspace, isRepo, git, cfg: loaded.data, sources: loaded.sources, warnings: loaded.warnings,
+    workspace, isRepo, git, snapshots, cfg: loaded.data, sources: loaded.sources, warnings: loaded.warnings,
     runsDir: isAbsolute(runs) ? runs : join(workspace, runs),
     configFile: configPath ?? join(workspace, ".agentduo", "config.yaml"),
     userConfigFile: userConfigPath(o.env),
@@ -59,7 +64,8 @@ export async function prepareEnvironment(o: { cwd: string; dir?: string; configP
 /** A resumed run keeps the config it started with, so a fix made in config.yaml needs --reload-config. */
 export const SAVED_CONFIG_HINT = "this run uses the config it started with; pass --reload-config to apply changes to config.yaml";
 
-export type RunnableProblem = { kind: "not_repo" | "config" | "missing_cli"; message: string };
+/** not_repo: a pipeline cannot run in this folder (the home folder); git: Git is missing, or cannot keep the snapshots. */
+export type RunnableProblem = { kind: "not_repo" | "git" | "config" | "missing_cli"; message: string };
 
 /** The CLIs among `backends` that cannot be found, as the CLI says it; null when all are there. */
 export function missingCli(cfg: ConfigData, backends: readonly Backend[], processEnv: NodeJS.ProcessEnv, saved = false): RunnableProblem | null {
@@ -73,9 +79,9 @@ export function missingCli(cfg: ConfigData, backends: readonly Backend[], proces
 
 /**
  * What the work needs besides a valid config. `backends`: the CLIs that must be there (default: every one the
- * pipeline's roles use; none to open the chat, which checks each agent when it is asked). `repo`: a git repository
- * (default), which the workflow snapshots and diffs; the chat opens anywhere and checks it when a run starts.
- * `saved`: the config is a run's saved one.
+ * pipeline's roles use; none to open the chat, which checks each agent when it is asked). `repo`: a place for a new
+ * run's snapshots (default), the workspace's git repository or one of agentduo's own, which the workflow snapshots
+ * and diffs; the chat opens anywhere and checks it when a run starts. `saved`: the config is a run's saved one.
  */
 export interface RunnableNeeds {
   backends?: readonly Backend[];
@@ -84,16 +90,9 @@ export interface RunnableNeeds {
 }
 
 /** Why agents cannot run in this workspace with `cfg` for work that needs `o`, or null when they can. */
-export function runnableProblem(env: Pick<WorkspaceEnv, "workspace" | "isRepo">, cfg: ConfigData, source: string,
+export function runnableProblem(env: Pick<WorkspaceEnv, "snapshots">, cfg: ConfigData, source: string,
   processEnv: NodeJS.ProcessEnv, o: RunnableNeeds = {}): RunnableProblem | null {
-  if (o.repo !== false && !env.isRepo) {
-    return {
-      kind: "not_repo",
-      message: isHomeFolder(env.workspace, processEnv)
-        ? `${env.workspace} is your home folder, not a git repository: run the pipeline from a project folder inside one`
-        : `${env.workspace} is not inside a git repository (run 'git init' here, or 'duo init' to be asked)`,
-    };
-  }
+  if (o.repo !== false && env.snapshots.mode === null) return env.snapshots.problem;
   try {
     validateConfig(cfg, source || undefined);
   } catch (e) {

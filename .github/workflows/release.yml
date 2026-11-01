@@ -3,7 +3,8 @@
 # has: a published release is what installed apps update from (electron-updater, apps/desktop/src/main/updates.ts).
 # Any OS failing leaves the draft unpublished, so no app is offered a release that lacks its installer.
 # Signing is optional: each certificate is used only when its secrets are set (apps/desktop/README.md, "Releasing").
-# The npm package and the VS Code extension are still published by hand.
+# The npm package and the VS Code extension are still published by hand. Once published, the release starts a deploy of
+# the website (when NETLIFY_BUILD_HOOK is set), which reads the published versions as it builds.
 name: release
 on:
   push:
@@ -135,3 +136,17 @@ jobs:
             grep -qx "$feed" <<<"$assets" || { echo "the release has no $feed"; exit 1; }
           done
           gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
+      # The website reads the published versions when it builds (website/netlify.toml): a Netlify build hook (a secret,
+      # since anyone with its URL can start a deploy) rebuilds it now. The release is out either way, so a failed hook
+      # is only a warning.
+      - name: Rebuild the website, where its build hook is set
+        env:
+          NETLIFY_BUILD_HOOK: ${{ secrets.NETLIFY_BUILD_HOOK }}
+        run: |
+          if [ -z "$NETLIFY_BUILD_HOOK" ]; then
+            echo "NETLIFY_BUILD_HOOK is not set: the website shows this release from its next deploy"
+            exit 0
+          fi
+          curl -fsS -X POST -d '{}' "$NETLIFY_BUILD_HOOK" >/dev/null \
+            && echo "website deploy started" \
+            || echo "::warning::the website's build hook failed; deploy it from Netlify to show this release"

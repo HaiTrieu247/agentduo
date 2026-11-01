@@ -2,8 +2,103 @@
   "schema": 1,
   "repository": "HaiTrieu247/agentduo",
   "source": "https://api.github.com/repos/HaiTrieu247/agentduo/releases",
-  "checkedAt": "2026-10-31T16:32:38.705Z",
+  "checkedAt": "2026-11-01T17:20:38.416Z",
   "releases": [
+    {
+      "tag": "v0.8.2",
+      "version": "0.8.2",
+      "name": "AgentDuo 0.8.2",
+      "prerelease": false,
+      "publishedAt": "2026-11-01T15:48:40Z",
+      "url": "https://github.com/HaiTrieu247/agentduo/releases/tag/v0.8.2",
+      "notes": "**Full Changelog**: https://github.com/HaiTrieu247/agentduo/compare/v0.8.1...v0.8.2",
+      "assets": [
+        {
+          "name": "AgentDuo-0.8.2-linux-amd64.deb",
+          "size": 101086148,
+          "url": "https://github.com/HaiTrieu247/agentduo/releases/download/v0.8.2/AgentDuo-0.8.2-linux-amd64.deb",
+          "sha256": "8df517e5832376af237c306798c3318c9f4814f994ca598d4cda8a7b24a0e679",
+          "contentType": "application/x-debian-package"
+        },
+        {
+          "name": "AgentDuo-0.8.2-linux-x86_64.AppImage",
+          "size": 126228932,
+          "url": "https://github.com/HaiTrieu247/agentduo/releases/download/v0.8.2/AgentDuo-0.8.2-linux-x86_64.AppImage",
+          "sha256": "53de8ed0ee264f9817ba8e3b407d898821b2a3618d4083120ff5f63f18eabe33",
+          "contentType": "application/vnd.appimage"
+        },
+        {
+          "name": "AgentDuo-0.8.2-mac-arm64.dmg",
+          "size": 120090972,
+          "url": "https://github.com/HaiTrieu247/agentduo/releases/download/v0.8.2/AgentDuo-0.8.2-mac-arm64.dmg",
+          "sha256": "2c4a03ce95baf2a85ab537840b9d31f6ef2642a82e71cc7e46f56b7dd210dc0f",
+          "contentType": "application/x-apple-diskimage"
+        },
+        {
+          "name": "AgentDuo-0.8.2-mac-arm64.zip",
+          "size": 116460535,
+          "url": "https://github.com/HaiTrieu247/agentduo/releases/download/v0.8.2/AgentDuo-0.8.2-mac-arm64.zip",
+          "sha256": "641a12dd6a0cd751942ff605f304b9c839fd7c4214a055e8025404c7d6f59eac",
+          "contentType": "application/zip"
+        },
+        {
+          "name": "AgentDuo-0.8.2-mac-arm64.zip.blockmap",
+          "size": 122067,
+          "url": "https://github.com/HaiTrieu247/agentduo/releases/download/v0.8.2/AgentDuo-0.8.2-mac-arm64.zip.blockmap",
+          "sha256": "b8eb9904f1f1dc7e83f33242040e6fe356df489a5b781e34e94c2d8fcb49467f",
+          "contentType": "application/octet-stream"
+        },
+        {
+          "name": "AgentDuo-0.8.2-mac-x64.dmg",
+          "size": 127260790,
+          "url": "https://github.com/HaiTrieu247/agentduo/releases/download/v0.8.2/AgentDuo-0.8.2-mac-x64.dmg",
+          "sha256": "bd6113eb0be8aba7d625e442ab3e5c6198bba28f6f60eff20ba3532edabdafec",
+          "contentType": "application/x-apple-diskimage"
+        },
+        {
+          "name": "AgentDuo-0.8.2-mac-x64.zip",
+          "size": 123649846,
+          "url": "https://github.com/HaiTrieu247/agentduo/releases/download/v0.8.2/AgentDuo-0.8.2-mac-x64.zip",
+          "sha256": "a3f3b7d9378aff135970fb05f7b8bfcc842858c47d1b00173ed8f94fa5cbe7ca",
+          "contentType": "application/zip"
+        },
+        {
+          "name": "AgentDuo-0.8.2-mac-x64.zip.blockmap",
+          "size": 130943,
+          "url": "https://github.com/HaiTrieu247/agentduo/releases/download/v0.8.2/AgentDuo-0.8.2-mac-x64.zip.blockmap",
+          "sha256": "59cb8d9b0c0550596e25f4b0032b4585a666769f5797a9af8afd79ceace54fef",
+          "contentType": "application/octet-stream"
+        },
+        {
+          "name": "AgentDuo-0.8.2-win-x64.exe",
+          "size": 110950188,
+          "url": "https://github.com/HaiTrieu247/agentduo/releases/download/v0.8.2/AgentDuo-0.8.2-win-x64.exe",
+          "sha256": "e0dcd6340a8a1fb97f89ca4ebea17378d96f5688b3c2ba704789a5ac605d2a57",
+          "contentType": "application/x-msdownload"
+        },
+        {
+          "name": "latest-linux.yml",
+          "size": 555,
+          "url": "https://github.com/HaiTrieu247/agentduo/releases/download/v0.8.2/latest-linux.yml",
+          "sha256": "1af3bc5944601f15e9519ec374dc9c9c420fce8fabf9a173a1f6b01aa63b8814",
+          "contentType": "application/yaml"
+        },
+        {
+          "name": "latest-mac.yml",
+          "size": 508,
+          "url": "https://github.com/HaiTrieu247/agentduo/releases/download/v0.8.2/latest-mac.yml",
+          "sha256": "8531cb61d9466ca123737a53ee8ba05c92bdcfe15fe18313a793fbcad34b3f08",
+          "contentType": "application/octet-stream"
+        },
+        {
+          "name": "latest.yml",
+          "size": 329,
+          "url": "https://github.com/HaiTrieu247/agentduo/releases/download/v0.8.2/latest.yml",
+          "sha256": "58666ddd7ae776ed48631bb3627660e9df787b2709a695bf9c24425afe1c5a60",
+          "contentType": "application/octet-stream"
+        }
+      ]
+    },
     {
       "tag": "v0.8.1",
       "version": "0.8.1",

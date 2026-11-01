@@ -3,9 +3,9 @@ import { isAbsolute, join, posix, relative } from "node:path";
 import { runProcess } from "../agents/process.js";
 import { resolveBinary } from "../agents/resolve.js";
 import { loadSchema, SCHEMA_NAMES, strictProblems } from "../agents/schema.js";
-import { isHomeFolder } from "../paths.js";
 import type { ConfigData } from "./config.js";
 import { Git } from "./git.js";
+import { preflightSnapshots } from "./run-git.js";
 
 export interface Check {
   ok: boolean;
@@ -50,10 +50,16 @@ export async function runDoctor(o: { dir: string; cfg: ConfigData; sources: stri
   const gitVersion = await probe("git", ["--version"], o.dir);
   add(gitVersion.ok, gitVersion.ok ? gitVersion.out.trim() : "git is not installed");
   const git = new Git(o.dir);
-  const isRepo = await git.isRepo();
-  add(isRepo, isRepo ? `workspace inside a git repository: ${o.dir}`
-    : isHomeFolder(o.dir, env) ? `workspace is your home folder, not a git repository: ${o.dir} (the chat and /discuss work; a pipeline run needs a project folder inside one)`
-      : `workspace not inside a git repository: ${o.dir} (the chat and /discuss work; a pipeline run needs 'git init' first)`, false);
+  const snapshots = await preflightSnapshots(o.dir, env);
+  const isRepo = snapshots.mode === "native";
+  if (snapshots.mode === "native") add(true, `workspace inside a git repository: ${o.dir} (pipeline snapshots go in it)`, false);
+  else if (snapshots.mode === "internal") {
+    add(true, `workspace not inside a git repository: ${o.dir} (pipeline snapshots go to agentduo's own repository under ${snapshots.repositories}; no git init needed)`, false);
+  } else if (snapshots.problem.kind === "not_repo") {
+    add(false, `workspace is your home folder: ${o.dir} (the chat and /discuss work; a pipeline run needs a project folder)`, false);
+  } else {
+    add(false, `pipeline snapshots: ${snapshots.problem.message}`, false);
+  }
   add(!o.configError, o.configError ? `config: ${o.configError}` : `config: ${o.sources.length ? o.sources.join(", ") : "built-in defaults"}`);
   for (const name of SCHEMA_NAMES) {
     const problems = strictProblems(loadSchema(name));

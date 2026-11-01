@@ -7,13 +7,13 @@ import { readConfiguration } from "../../../src/core/configuration.js";
 import { checkSettingValue, settingKey } from "../../../src/core/settings.js";
 import { CLAUDE_MODELS } from "../../../src/core/commands.js";
 import { addableOptions, argumentRows, argumentTokens } from "../src/renderer/argumentOptions.js";
-import { CHOICES, cliAccount, cliStateWord, editorKind, formatValue, groupOf, modelChoices, parseEditorValue, settingUnit, sourceText } from "../src/renderer/settings.js";
+import { ABOUT_LINKS, aboutFacts, CHOICES, cliAccount, cliStateWord, editorKind, formatValue, groupOf, modelChoices, parseEditorValue, settingUnit, sourceText } from "../src/renderer/settings.js";
 import { accountRefreshTitle, projectBusy } from "../src/renderer/sidebar.js";
 import { turnEnded, UsageStore } from "../src/renderer/usage.js";
 import type { AccountUsage } from "../../../extensions/vscode/src/protocol.js";
 import { clampFontSize, resolveTheme } from "../src/renderer/theme.js";
 import { restartQuestion, updateAction, updateLine, updateNotice } from "../src/renderer/update.js";
-import type { CliStatus, ConversationItem } from "../src/shared/protocol.js";
+import { LINKS, type CliStatus, type ConversationItem } from "../src/shared/protocol.js";
 import type { UsageState } from "../../../src/core/usage.js";
 
 describe("theme", () => {
@@ -261,5 +261,19 @@ describe("chat status and gates", () => {
       { id: "x", kind: "read", label: "read a file", status: "ok" },
     ] } }];
     expect(gateActivities(s)).toEqual([{ label: "gate  test: npm test", status: "ok", exitCode: 0 }]);
+  });
+});
+
+describe("about", () => {
+  it("lists the app's version, what it runs on and the system by name", () => {
+    const facts = aboutFacts({ versions: { app: "0.8.2", electron: "45.2.1", chrome: "140.0.1", node: "24.1.0" }, platform: "darwin", arch: "arm64" });
+    expect(facts).toEqual([["AgentDuo", "0.8.2"], ["Electron", "45.2.1"], ["Chromium", "140.0.1"], ["Node.js", "24.1.0"], ["System", "macOS (arm64)"]]);
+    expect(aboutFacts({ versions: { app: "1", electron: "1", chrome: "1", node: "1" }, platform: "win32", arch: "x64" }).at(-1)).toEqual(["System", "Windows (x64)"]);
+    expect(aboutFacts({ versions: { app: "1", electron: "1", chrome: "1", node: "1" }, platform: "freebsd", arch: "x64" }).at(-1)).toEqual(["System", "freebsd (x64)"]);
+  });
+
+  it("links the website first, and only links main knows", () => {
+    expect(LINKS[ABOUT_LINKS[0]![1]]).toBe("https://agentduo.netlify.app/");
+    for (const [, link] of ABOUT_LINKS) expect(LINKS[link]).toMatch(/^https:\/\//);
   });
 });

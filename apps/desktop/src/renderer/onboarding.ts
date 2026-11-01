@@ -84,7 +84,7 @@ export class Onboarding {
         el("li", {}, "Claude Code: in a terminal run ", el("code", { text: "claude" }), " and type ", el("code", { text: "/login" }), "."),
         el("li", {}, "Codex: in a terminal run ", el("code", { text: "codex login" }), ".")),
       el("h2", { text: "3. Start chatting" }),
-      el("p", { class: "muted small", text: "Chat and /discuss work without a project. Open a project whenever you need to work on code; a pipeline needs a git repository." }),
+      el("p", { class: "muted small", text: "Chat and /discuss work without a project. Open a project whenever you need to work on code; a pipeline needs no git repository." }),
     ];
     const pick = button("Open project…", () => void busy(pick, status, async () => {
       if (await this.host.openProject()) await this.host.done();

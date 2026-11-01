@@ -19,7 +19,7 @@ import YAML from "yaml";
 import { userConfigPath } from "../../../../src/core/config.js";
 import { RunStore, type RunState } from "../../../../src/core/state.js";
 import { approval, critique, finding, impl, plan, review } from "../../../../test/helpers/builders.js";
-import { CHECK_GATE } from "../../../../test/helpers/config.js";
+import { CHECK_GATE, userDataEnv } from "../../../../test/helpers/config.js";
 import { FakeClis } from "../../../../test/helpers/fake-clis.js";
 import { png } from "../../../../test/helpers/images.js";
 import { makeRepo } from "../../../../test/helpers/repo.js";
@@ -164,6 +164,8 @@ beforeAll(async () => {
     ...process.env, AGENTDUO_DESKTOP_USER_DATA: join(scratch.path, "profile"), AGENTDUO_DESKTOP_TEST_FOLDER: repo, AGENTDUO_DESKTOP_LOG: "1",
     AGENTDUO_DESKTOP_UPDATE_CONFIG: updateConfig,
     HOME: join(scratch.path, "home"), USERPROFILE: join(scratch.path, "home"), XDG_CONFIG_HOME: config, APPDATA: config,
+    // Snapshot repositories of folders with no git repository: the test's own, never the user's.
+    ...userDataEnv(join(scratch.path, "data")),
   }).filter((e): e is [string, string] => typeof e[1] === "string" && e[0] !== "ELECTRON_RUN_AS_NODE"));
   mkdirSync(env.HOME!, { recursive: true });
   const user = userConfigPath(env);
@@ -477,6 +479,26 @@ describe("agentduo desktop", () => {
     expect(await notice.getAttribute("title")).toBe("AgentDuo 99.0.0 is out: download it from GitHub");
   });
 
+  it("shows About from the menu: the version, what it runs on, and the website in the browser", async () => {
+    // The browser is main's shell.openExternal: recorded here instead of opened.
+    await app!.evaluate(({ shell }) => {
+      const opened: string[] = [];
+      (globalThis as unknown as { opened: string[] }).opened = opened;
+      shell.openExternal = async (url: string) => void opened.push(url);
+    });
+    await app!.evaluate(({ Menu }) => Menu.getApplicationMenu()!.getMenuItemById("about")!.click());
+    await page.locator(".settings .about-head").waitFor({ timeout: 10_000 });
+    expect(await page.locator(".settings-nav .settings-tab.active").textContent()).toBe("About");
+    const state = await invoke<{ versions: { app: string; electron: string } }>({ method: "app.state" });
+    expect(await page.locator(".settings .about-head").textContent()).toContain(`Version ${state.versions.app}`);
+    expect(await page.locator(".settings .about-facts").textContent()).toContain(state.versions.electron);
+    expect(await page.locator(".settings .about-icon").evaluate((i) => (i as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+    if (process.env.AGENTDUO_E2E_SHOTS) await page.screenshot({ path: join(process.env.AGENTDUO_E2E_SHOTS, "about.png") });
+    await page.locator(".settings .about-links").getByRole("button", { name: "Website" }).click();
+    await expect.poll(() => app!.evaluate(() => (globalThis as unknown as { opened: string[] }).opened)).toEqual(["https://agentduo.netlify.app/"]);
+    await closeSettings();
+  });
+
   it("quits mid-run (freeing the lock), starts again on the same conversation, and resumes the run", async () => {
     const before = await activeConversation();
     fake.setScenario({ ...happyPlan(), implementer: [{ sleep: 60_000, write: { "app.txt": "fixed\n" }, output: impl() }], code_reviewer: [{ output: review(true) }] });
@@ -503,5 +525,45 @@ describe("agentduo desktop", () => {
     await quit();
     expect(existsSync(join(runsDir, ".lock"))).toBe(false);
     expect(log.some((l) => / up: agentduo .* on Node \d+/.test(l))).toBe(true);
+  });
+
+  it("runs a pipeline in a project folder with no git repository, and shows its changes again after a restart", async () => {
+    const plain = join(scratch.path, "plain project");
+    mkdirSync(plain);
+    writeFileSync(join(plain, "old.txt"), "old\n");
+    const plainRuns = join(plain, ".agentduo", "runs");
+    env.AGENTDUO_DESKTOP_TEST_FOLDER = plain;
+    fake.setScenario({ ...happyPlan(), implementer: [{ write: { "app.txt": "fixed\n" }, delete: ["old.txt"], output: impl() }], code_reviewer: [{ output: review(true) }] });
+    await launch();
+    await page.locator(`${SHOWN} .composer-input`).waitFor({ timeout: 30_000 });
+    const before = await activeConversation();
+    await page.locator(".sidebar").getByTitle("Open project…").first().click();
+    await page.locator(".sidebar .nav-item.project", { hasText: "plain project" }).waitFor({ timeout: 30_000 });
+    await expect.poll(async () => (await activeConversation()).projectId, { timeout: 30_000 }).not.toBe(before.projectId);
+    await expect.poll(async () => (await activeConversation()).conversationId, { timeout: 30_000 }).not.toBeNull();
+    await page.locator(`${SHOWN} .composer-input`).waitFor({ timeout: 30_000 });
+    await send("/pipeline Make app.txt fixed");
+    await waitUntil(() => RunStore.list(plainRuns).some((r) => r.phase === "DONE"), 90_000, "the run in the folder with no git repository");
+    expect(RunStore.list(plainRuns)[0]!.git?.mode).toBe("internal");
+    expect(existsSync(join(plain, ".git"))).toBe(false);
+
+    const showsChange = async () => {
+      const inspector = page.locator(".inspector");
+      if (await inspector.isHidden()) await page.locator(".topbar .icon-btn").click();
+      await inspector.locator(".tab", { hasText: "Changes" }).click();
+      await inspector.locator(".change-list .change", { hasText: "app.txt" }).click();
+      const added = inspector.locator("table.diff tr", { has: page.locator('td.mk[aria-label="added"]') });
+      await added.first().waitFor({ timeout: 10_000 });
+      expect(await added.locator("td.tx").allTextContents()).toEqual(["fixed"]);
+    };
+    await showsChange();
+    // Started again, its changes still come from the repository the run recorded.
+    const shown = await activeConversation();
+    await quit();
+    await launch();
+    await page.locator(`${SHOWN} .composer-input`).waitFor({ timeout: 30_000 });
+    expect(await activeConversation()).toEqual(shown);
+    await showsChange();
+    await quit();
   });
 });

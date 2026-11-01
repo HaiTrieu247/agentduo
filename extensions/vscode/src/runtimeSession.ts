@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { killAllActive } from "../../../src/agents/process.js";
-import { Chat, notRepoNote, resumeHint, type ChatUi, type SaveFlags } from "../../../src/chat.js";
+import { Chat, resumeHint, snapshotNote, type ChatUi, type SaveFlags } from "../../../src/chat.js";
 import { AttachmentError } from "../../../src/core/attachments.js";
 import { parseInput, type Backend } from "../../../src/core/commands.js";
 import { ConfigError, type ConfigData } from "../../../src/core/config.js";
@@ -14,6 +14,7 @@ import { diagnose, EnvironmentError, prepareEnvironment, runnableProblem, type W
 import { ModelRegistry, resolvingModels } from "../../../src/core/models.js";
 import type { Review } from "../../../src/core/outputs.js";
 import { findingsMarkdown } from "../../../src/core/render.js";
+import { openRunGit, RunGitError } from "../../../src/core/run-git.js";
 import {
   permissionMode, SETTING_KEYS, settings, settingsView, valueAt, withChange, type SettingChange, type SettingsView,
 } from "../../../src/core/settings.js";
@@ -220,7 +221,7 @@ export class RuntimeSession {
       ...result, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, configSources: env.sources,
       pipeline: pipelineOf(env.cfg), mode: safePermissionMode(env.cfg), models: this.modelsFor(env).current(), settings: safeSettings(env.cfg), warnings: env.warnings,
       problem: runnableProblem(env, env.cfg, env.sources.join(", "), this.o.env, { repo: false }) ?? locked,
-      hint: resumeHint(env.runsDir, env.workspace) ?? (env.isRepo ? null : notRepoNote(env.workspace, this.o.env)),
+      hint: resumeHint(env.runsDir, env.workspace) ?? snapshotNote(env.snapshots),
     };
   }
 
@@ -697,13 +698,26 @@ export class RuntimeSession {
     }
   }
 
+  /**
+   * Where a run's snapshots are read from: the repository it recorded (agentduo's own, checked), else the workspace's;
+   * never one found again now (the folder may have had `git init` since).
+   */
+  private snapshotsOf(st: RunState) {
+    try {
+      return openRunGit(st, this.env!.workspace, this.o.env);
+    } catch (e) {
+      if (e instanceof RunGitError) throw new SessionError("git", e.message);
+      throw e;
+    }
+  }
+
   /** What the run changed: its base snapshot against its last one, never HEAD (the workspace may have been dirty). */
   async listChanges(conversation: string | null): Promise<ChangeList> {
     const run = this.focus(conversation);
     if (!run || !this.env) throw new SessionError("no_run", "There is no run yet. Type a task to start one.");
     const st = run.state;
     if (!st.base || !st.lastSnapshot) return { runId: st.taskId, hasSnapshots: false, base: null, snapshot: null, changes: [] };
-    const changes = await this.env.git.nameStatus(st.base.tree, st.lastSnapshot.tree);
+    const changes = await this.snapshotsOf(st).nameStatus(st.base.tree, st.lastSnapshot.tree);
     this.listed.set(`${st.taskId} ${st.lastSnapshot.commit}`, st.lastSnapshot.tree);
     return {
       runId: st.taskId, hasSnapshots: true, base: st.base.commit, snapshot: st.lastSnapshot.commit,
@@ -723,9 +737,10 @@ export class RuntimeSession {
     if (pair.base !== st.base.commit) throw new SessionError("not_found", `${pair.base.slice(0, 12)} is not the base snapshot of run ${runId}`);
     const tree = pair.snapshot === st.lastSnapshot.commit ? st.lastSnapshot.tree : this.listed.get(`${runId} ${pair.snapshot}`);
     if (!tree) throw new SessionError("not_found", `${pair.snapshot.slice(0, 12)} is not a snapshot of run ${runId} listed here: open the changes again`);
-    const changes = await this.env.git.nameStatus(st.base.tree, tree);
+    const git = this.snapshotsOf(st);
+    const changes = await git.nameStatus(st.base.tree, tree);
     if (!changes.some(([, p]) => p === path)) throw new SessionError("not_found", `${path} is not among the changes of run ${runId}`);
-    const blob = await this.env.git.readBlob(side === "base" ? st.base.tree : tree, path);
+    const blob = await git.readBlob(side === "base" ? st.base.tree : tree, path);
     if (!blob) return { missing: true, binary: false, tooLarge: false, text: null };
     if (blob.length > MAX_DIFF_BYTES) return { missing: false, binary: false, tooLarge: true, text: null };
     if (isBinary(blob)) return { missing: false, binary: true, tooLarge: false, text: null };

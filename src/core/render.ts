@@ -63,7 +63,14 @@ export function reportMarkdown(st: RunState, diffStat: string, lastReview: Revie
     `- **Claude cost (reported):** $${(st.costUsd ?? 0).toFixed(2)} · **Tokens:** ${st.tokens ?? 0}`,
     "- **Run directory:** `" + runDir + "`",
   ];
-  if (st.base && st.lastSnapshot) {
+  if (st.git?.mode === "internal") {
+    lines.push("- **Snapshots:** agentduo's own Git repository `" + st.git.gitDir + "`, outside the workspace (kept after the run, to read its history)");
+  }
+  if (st.base && st.lastSnapshot && st.git?.mode === "internal") {
+    lines.push("- **Diff:** `git --git-dir \"" + st.git.gitDir + "\" diff " + st.base.commit.slice(0, 12) + " " + st.lastSnapshot.commit.slice(0, 12) +
+      "` (from anywhere; or open Changes in the editor or the app; each review's whole diff is `diff.r<round>.patch` in the run directory; " +
+      "changes are left in your files)");
+  } else if (st.base && st.lastSnapshot) {
     lines.push("- **Diff:** `git diff " + st.base.commit.slice(0, 12) + " " + st.lastSnapshot.commit.slice(0, 12) + " -- .` (run it in the workspace; changes are left uncommitted in your working tree)");
   }
   lines.push("\n## Timeline");

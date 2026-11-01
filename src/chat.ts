@@ -11,19 +11,18 @@ import { configFromSaved, type ConfigData } from "./core/config.js";
 import { Conversation, type Turn } from "./core/conversation.js";
 import { parseVerdict } from "./core/discussion.js";
 import { missingCli } from "./core/environment.js";
-import { Git } from "./core/git.js";
 import { ModelRegistry, withObserved } from "./core/models.js";
 import {
   claudeDirs, claudeRules, describeSettings, permissionMode, saveGlobalSetting, saveSettings, settings, settingsView, withChange, type SettingChange,
   type SettingsView,
 } from "./core/settings.js";
+import { openRunGit, preflightSnapshots, RunGitError, type SnapshotPreflight } from "./core/run-git.js";
 import { nowIso, RunStore, type ConversationContext, type EarlierTask, type RunState } from "./core/state.js";
 import { readClaudeUsage, readCodexUsage, type UsageReport, type UsageState } from "./core/usage.js";
 import { EXIT, Workflow } from "./core/workflow.js";
 import type {
   Decider, DiscussionPlace, DiscussionStatus, DiscussionStep, EventBus, ModelMap, PermissionDecider, TurnStatus, Verdict,
 } from "./events.js";
-import { isHomeFolder } from "./paths.js";
 import { formatCost, formatTokens, modelText, usageReportText } from "./ui/format.js";
 
 /** idle: ready; running: a pipeline run is going; answering: an agent answers a question; paused: a run was stopped with Esc. */
@@ -151,13 +150,18 @@ export function resumeHint(runsDir: string, workspace: string): string | null {
 }
 
 /** What the chat says as it opens outside a git repository (the extension too). */
-export const NOT_REPO_NOTE = "This folder is not inside a git repository: you can ask Claude and Codex and /discuss here, but a pipeline run " +
-  "needs one (run 'git init' here first).";
-/** The same in the home folder (VS Code with no folder open works there), where `git init` would take in the whole home. */
-export const HOME_NOTE = "This is your home folder, not a git repository: you can ask Claude and Codex and /discuss here, but a pipeline run " +
-  "needs a project folder inside one.";
+export const NOT_REPO_NOTE = "This folder is not inside a git repository, and a pipeline run needs none: it keeps its snapshots in a Git repository " +
+  "of agentduo's own, outside the folder (no .git is created here).";
+/** The same in the home folder (VS Code with no folder open works there), where a pipeline run would take in the whole home. */
+export const HOME_NOTE = "This is your home folder: you can ask Claude and Codex and /discuss here, but a pipeline run needs a project folder: " +
+  "open one (it needs no git repository).";
 
-export const notRepoNote = (workspace: string, env: NodeJS.ProcessEnv): string => (isHomeFolder(workspace, env) ? HOME_NOTE : NOT_REPO_NOTE);
+/** What the chat says as it opens about where a pipeline run would keep its snapshots; null in a git repository. */
+export function snapshotNote(plan: SnapshotPreflight): string | null {
+  if (plan.mode === "native") return null;
+  if (plan.mode === "internal") return NOT_REPO_NOTE;
+  return plan.problem.kind === "not_repo" ? HOME_NOTE : plan.problem.message;
+}
 
 /** The one thing agents do for this chat at a time: a pipeline run, the answer to a question, or a discussion. */
 type Execution =
@@ -210,13 +214,11 @@ export class Chat {
   private readonly models: ModelRegistry;
   private readonly ownModels: boolean;
   private readonly env: NodeJS.ProcessEnv;
-  private readonly git: Git;
   /** What stops the latest /usage's lookups: a refresh, or the chat stopping. */
   private usageAbort: AbortController | null = null;
   private readonly offBus: () => void;
 
   constructor(private readonly o: ChatOptions) {
-    this.git = new Git(o.workspace);
     this.cfg = structuredClone(o.cfg);
     this.env = o.env ?? process.env;
     this.conversation = o.conversationId ? Conversation.open(o.runsDir, o.conversationId) : new Conversation(o.runsDir);
@@ -281,7 +283,8 @@ export class Chat {
     this.o.ui.setSettings?.(settingsView(this.cfg));
     this.o.ui.setModels(this.models.current());
     this.models.refresh();
-    if (!(await this.git.isRepo())) this.o.ui.info(notRepoNote(this.o.workspace, this.env));
+    const note = snapshotNote(await preflightSnapshots(this.o.workspace, this.env));
+    if (note) this.o.ui.info(note);
     const hint = resumeHint(this.o.runsDir, this.o.workspace);
     if (hint) this.o.ui.info(hint);
   }
@@ -309,7 +312,7 @@ export class Chat {
         ui.info(`Your messages now go to ${AGENT_NAMES[input.backend]}. /claude or /codex switches; /pipeline <task> hands a task to both.`);
         return;
       case "pipeline":
-        if (await this.outsideRepo()) return;
+        if (await this.cannotSnapshot()) return;
         return this.withFiles(o, (files) => this.startPipeline(input.task, files));
       case "discuss":
         return this.withFiles(o, (files) => this.discuss(input.question, files));
@@ -338,7 +341,7 @@ export class Chat {
       this.o.ui.info("usage: /pipeline <task>, e.g. /pipeline Add JWT auth");
       return;
     }
-    if (await this.outsideRepo()) return;
+    if (await this.cannotSnapshot()) return;
     this.withFiles(o, (files) => this.startPipeline(text, files));
   }
 
@@ -743,14 +746,14 @@ export class Chat {
 
   // ------------------------------------------------------------------ pipeline
   /**
-   * A run snapshots and diffs the workspace with git: outside a repository it says so (the files waiting stay), and
-   * nothing starts. Checked each time, since `git init` may come during the chat.
+   * A run snapshots and diffs the workspace with git, in its repository or, in a folder with none, in one of agentduo's
+   * own. When neither can be (no Git, the home folder…) it says why, the files waiting stay, and nothing starts.
+   * Checked each time: Git may be installed, or `git init` run, during the chat.
    */
-  private async outsideRepo(): Promise<boolean> {
-    if (await this.git.isRepo()) return false;
-    const fix = isHomeFolder(this.o.workspace, this.env) ? "it is your home folder: run the pipeline from a project folder inside one" : "run 'git init' here first";
-    this.o.ui.info(`A pipeline run needs a git repository, to snapshot and diff your files, and ${this.o.workspace} is not inside one: ` +
-      `${fix}. Questions and /discuss work without it.`, "error");
+  private async cannotSnapshot(): Promise<boolean> {
+    const plan = await preflightSnapshots(this.o.workspace, this.env);
+    if (plan.mode !== null) return false;
+    this.o.ui.info(`A pipeline run cannot start here: ${plan.problem.message}`, "error");
     return true;
   }
 
@@ -793,7 +796,7 @@ export class Chat {
       return false;
     }
     this.models.refresh();
-    const workflow = new Workflow({ cfg, repo: this.o.workspace, store, state, bus: this.o.bus, decider: this.o.decider, permissions: this.o.permissions });
+    const workflow = new Workflow({ cfg, repo: this.o.workspace, store, state, bus: this.o.bus, decider: this.o.decider, permissions: this.o.permissions, env: this.env });
     this.escaped = false;
     const exec: Extract<Execution, { kind: "pipeline" }> = { kind: "pipeline", store, workflow, cfg, done: Promise.resolve() };
     const conversation = this.conversation;
@@ -802,14 +805,22 @@ export class Chat {
     exec.done = (async () => {
       await Promise.resolve();
       let code: number = EXIT.ERROR;
+      let unprepared = false;
       try {
         code = await workflow.run();
       } catch (e) {
+        unprepared = e instanceof RunGitError;
         this.o.ui.info(`error: ${(e as Error).message}`, "error");
       } finally {
         store.unlock();
       }
       this.last = store;
+      if (unprepared) {
+        // Its snapshots could not be set up or opened: the run is as it was, to continue once the cause is fixed.
+        this.paused = store;
+        this.o.ui.info(`Run ${store.taskId} is unchanged: fix this, then /resume continues it.`);
+        return;
+      }
       const st = store.loadState();
       if (code === EXIT.INTERRUPTED && this.escaped) {
         this.paused = store;
@@ -831,7 +842,7 @@ export class Chat {
     if (st.lastImplementation?.summary) parts.push(firstLine(st.lastImplementation.summary, 300));
     if (st.base && st.lastSnapshot) {
       try {
-        const files = (await this.git.nameStatus(st.base.tree, st.lastSnapshot.tree)).map(([, path]) => path);
+        const files = (await openRunGit(st, this.o.workspace, this.env).nameStatus(st.base.tree, st.lastSnapshot.tree)).map(([, path]) => path);
         if (files.length) parts.push(`files: ${files.slice(0, 12).join(", ")}${files.length > 12 ? ", …" : ""}`);
       } catch {
         // the outcome is a courtesy for the next run; a git hiccup must not end the chat
@@ -1064,7 +1075,15 @@ export class Chat {
       }
       case "diff": {
         const st = store?.loadState();
-        const stat = st?.base && st.lastSnapshot ? (await this.git.diffStat(st.base.commit, st.lastSnapshot.commit)).trimEnd() : "";
+        let stat = "";
+        if (st?.base && st.lastSnapshot) {
+          try {
+            stat = (await openRunGit(st, this.o.workspace, this.env).diffStat(st.base.commit, st.lastSnapshot.commit)).trimEnd();
+          } catch (e) {
+            ui.info(`Cannot read the snapshots of run ${st.taskId}: ${(e as Error).message}`, "error");
+            return;
+          }
+        }
         ui.info(stat ? `── diff stat ──\n${stat}` : "No changes yet.");
         return;
       }
@@ -1086,7 +1105,7 @@ export class Chat {
       case "usage":
         return this.usage();
       case "resume":
-        if (await this.outsideRepo()) return;
+        // The run's snapshots are where it recorded them, which the run checks before its next step or decision.
         return this.resume(arg, o);
       case "attachments":
         ui.info(this.attachmentsText());

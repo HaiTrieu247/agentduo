@@ -1,7 +1,7 @@
 // Run documents and diffs for the editor: the worker serves only named artifacts of a run and only files that run
 // changed (base snapshot ↔ last snapshot, scoped to the workspace); the host maps them to read-only URIs.
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -9,7 +9,8 @@ import {
 } from "../extensions/vscode/src/artifacts.js";
 import type { ChangeList } from "../extensions/vscode/src/protocol.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
-import { userConfigEnv } from "./helpers/config.js";
+import { RunStore } from "../src/core/state.js";
+import { userConfigEnv, userDataEnv } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { git, makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
@@ -39,8 +40,8 @@ const BASE = "a".repeat(40);
 const ROUND1 = "b".repeat(40);
 const ROUND2 = "c".repeat(40);
 
-async function openWorker(workspace: string, generation = 1): Promise<WorkerHarness> {
-  const h = new WorkerHarness({ script: worker.script, workspace, env: { ...process.env, ...userConfigEnv(join(t.path, "xdg")) }, generation });
+async function openWorker(workspace: string, generation = 1, env: NodeJS.ProcessEnv = { ...process.env, ...userConfigEnv(join(t.path, "xdg")) }): Promise<WorkerHarness> {
+  const h = new WorkerHarness({ script: worker.script, workspace, env, generation });
   harnesses.push(h);
   await h.client.start();
   await h.client.request({ type: "initialize", workspace, configPath: null, discover: true });
@@ -107,6 +108,39 @@ describe("run artifacts and changes (worker)", () => {
     const again = await openWorker(ws, 2);
     expect((await again.client.request({ type: "inspectFocusedRun", conversation: C }))?.runId).toBe(list.runId);
     expect((await again.client.request({ type: "readSnapshotFile", runId: list.runId, ...pair, side: "snapshot", path: "app.txt" })).text).toBe("fixed\n");
+  });
+
+  it("lists and reads a run's changes in a folder with no git repository, from agentduo's own, also after a reload and a later git init", async () => {
+    const plain = join(t.path, "plain");
+    mkdirSync(plain);
+    writeFileSync(join(plain, SPACED), "before\n");
+    writeFileSync(join(plain, "old.txt"), "old\n");
+    writeWorkspaceConfig(plain, fake, { gates: [] });
+    fake.setScenario(scenario({ write: { "app.txt": "fixed\n", [SPACED]: "after\n", "logo.bin": "PNG\u0000\u0001binary" }, delete: ["old.txt"] }));
+    const env = { ...process.env, ...userConfigEnv(join(t.path, "xdg")), ...userDataEnv(join(t.path, "data")) };
+    const h = await openWorker(plain, 1, env);
+    await h.client.request({ type: "submit", conversation: C, text: "Make app.txt fixed", route: "pipeline" });
+    await h.waitFor(finished("DONE"));
+    const list = await h.client.request({ type: "listChanges", conversation: C });
+    expect(list.changes.map((c) => `${c.status} ${c.path}`).sort()).toEqual(["A app.txt", "A logo.bin", "D old.txt", `M ${SPACED}`]);
+    const pair = { base: list.base!, snapshot: list.snapshot! };
+    const read = (w: WorkerHarness, side: "base" | "snapshot", path: string) => w.client.request({ type: "readSnapshotFile", runId: list.runId, ...pair, side, path });
+    expect([(await read(h, "base", SPACED)).text, (await read(h, "snapshot", SPACED)).text]).toEqual(["before\n", "after\n"]);
+    expect(await read(h, "snapshot", "logo.bin")).toMatchObject({ binary: true, text: null });
+    expect(await read(h, "snapshot", "old.txt")).toMatchObject({ missing: true });
+
+    // The folder becomes a repository: a new worker still reads the run from the repository it recorded.
+    await h.client.shutdown();
+    execFileSync("git", ["init", "-q"], { cwd: plain });
+    const again = await openWorker(plain, 2, env);
+    expect((await again.client.request({ type: "listChanges", conversation: C })).changes).toHaveLength(4);
+    expect((await read(again, "base", "old.txt")).text).toBe("old\n");
+    expect((await read(again, "snapshot", "app.txt")).text).toBe("fixed\n");
+    // Its repository gone: an error that says so, never another repository's files.
+    const { gitDir } = RunStore.open(join(plain, ".agentduo", "runs")).loadState().git as { gitDir: string };
+    rmSync(gitDir, { recursive: true, force: true });
+    await expect(read(again, "snapshot", "app.txt")).rejects.toMatchObject({ code: "git", message: expect.stringContaining("it is missing") });
+    await expect(again.client.request({ type: "listChanges", conversation: C })).rejects.toMatchObject({ code: "git" });
   });
 
   it("reads the snapshots a change list named, not the run's latest, across implementation rounds", async () => {

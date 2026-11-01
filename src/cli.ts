@@ -8,10 +8,10 @@ import { Chat, newRun } from "./chat.js";
 import { settings } from "./core/settings.js";
 import { configFromSaved, ConfigError, type ConfigData } from "./core/config.js";
 import { diagnose, EnvironmentError, prepareEnvironment, runnableProblem, type RunnableNeeds, type WorkspaceEnv } from "./core/environment.js";
-import { Git } from "./core/git.js";
 import { initRepo } from "./core/init.js";
 import type { Review } from "./core/outputs.js";
 import { findingsMarkdown } from "./core/render.js";
+import { openRunGit, RunGitError } from "./core/run-git.js";
 import { acquireWorkspaceLock, LockError, RunStore, type RunState } from "./core/state.js";
 import { DecisionError, EXIT, Workflow } from "./core/workflow.js";
 import { EventBus, type Decider, type Decision, type PermissionDecider } from "./events.js";
@@ -176,7 +176,7 @@ function availableViews(store: RunStore, st: RunState): ViewKind[] {
   return views;
 }
 
-async function readView(kind: ViewKind, store: RunStore, st: RunState, git: Git): Promise<string | null> {
+async function readView(kind: ViewKind, store: RunStore, st: RunState, workspace: string, env: NodeJS.ProcessEnv): Promise<string | null> {
   switch (kind) {
     case "plan":
       return store.exists("plan.final.md") ? store.readText("plan.final.md") : store.exists("plan.md") ? store.readText("plan.md") : null;
@@ -187,8 +187,14 @@ async function readView(kind: ViewKind, store: RunStore, st: RunState, git: Git)
     }
     case "feedback":
       return store.exists("plan-feedback.md") ? store.readText("plan-feedback.md") : null;
-    case "diffstat":
-      return st.base && st.lastSnapshot ? (await git.diffStat(st.base.commit, st.lastSnapshot.commit)) || "(no changes)" : null;
+    case "diffstat": {
+      if (!st.base || !st.lastSnapshot) return null;
+      try {
+        return (await openRunGit(st, workspace, env).diffStat(st.base.commit, st.lastSnapshot.commit)) || "(no changes)";
+      } catch (e) {
+        return `cannot read the run's snapshots: ${(e as Error).message}`;
+      }
+    }
   }
 }
 
@@ -234,20 +240,21 @@ async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, st
     const session = startInk({
       bus, version, verbose: !!opts.verbose, interactive, onStop, onInterrupt,
       views: () => availableViews(store, workflow?.state ?? state),
-      readView: (kind) => readView(kind, store, workflow?.state ?? state, env.git),
+      readView: (kind) => readView(kind, store, workflow?.state ?? state, env.workspace, io.env),
       stdout: io.stdout as NodeJS.WriteStream, stdin: io.stdin as NodeJS.ReadStream,
     });
     decider = session.decider;
     closeUi = session.close;
     if (interactive) permissions = session.permissions;
   }
-  workflow = new Workflow({ cfg, repo: env.workspace, store, state, bus, decider, permissions });
+  workflow = new Workflow({ cfg, repo: env.workspace, store, state, bus, decider, permissions, env: io.env });
   const offSignal = io.onSignal?.(onInterrupt);
   try {
     if (decision) await workflow.applyDecision(decision.decision, decision.note);
     return await workflow.run();
   } catch (e) {
     if (e instanceof DecisionError) throw new CliExit(EXIT.ERROR, e.message);
+    if (e instanceof RunGitError) throw new CliExit(EXIT.ERROR, `${e.message}\nrun ${store.taskId} is unchanged: fix this, then 'duo resume ${store.taskId}'`);
     throw e;
   } finally {
     store.unlock();
@@ -325,8 +332,8 @@ async function runCommand(io: CliIO, words: string[], opts: RunOptions, explicit
 
 /**
  * `duo` alone: a chat session in this workspace, holding its lock until the user leaves. It opens without either CLI
- * (help and settings need none) and outside a git repository; each question checks its agent's CLI, and /pipeline
- * those of every role and the repository.
+ * (help and settings need none), and without Git; each question checks its agent's CLI, and /pipeline those of every
+ * role and where its snapshots can go.
  */
 async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
   const env = await prepare(io, opts);
@@ -348,7 +355,7 @@ async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
       },
       readView: async (kind) => {
         const run = chat?.focused();
-        return run ? readView(kind, run.store, run.state, env.git) : null;
+        return run ? readView(kind, run.store, run.state, env.workspace, io.env) : null;
       },
       stdout: io.stdout as NodeJS.WriteStream, stdin: io.stdin as NodeJS.ReadStream,
     });
@@ -371,7 +378,6 @@ async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
 async function resumeCommand(io: CliIO, runId: string | undefined, opts: ResumeOptions): Promise<number> {
   if (opts.note && !opts.decision) throw new CliExit(EXIT.ERROR, "--note is only accepted together with --decision");
   const env = await prepare(io, opts);
-  if (!env.isRepo) requireRunnable(env, env.cfg, "", io);
   const store = openStore(env.runsDir, runId);
   const state = store.loadState();
   // A shared runs_dir can hold runs of other workspaces; running their agents here would edit the wrong tree.
@@ -383,7 +389,8 @@ async function resumeCommand(io: CliIO, runId: string | undefined, opts: ResumeO
     // A run keeps the config it started with, unless asked to pick up the current one.
     const useSaved = !opts.reloadConfig && store.exists("config.json");
     const cfg = withAcceptEdits(useSaved ? configFromSaved(store.readJson("config.json")) : env.cfg, opts);
-    requireRunnable(env, cfg, useSaved ? store.path("config.json") : env.sources.join(", "), io, { saved: useSaved });
+    // The run's snapshots are where it recorded them, which the workflow checks before a step or a decision.
+    requireRunnable(env, cfg, useSaved ? store.path("config.json") : env.sources.join(", "), io, { saved: useSaved, repo: false });
     if (!useSaved || opts.acceptEdits) store.writeJson("config.json", cfg);
     state.workspace ??= env.workspace;
     return await execute(io, env, cfg, store, state, opts, opts.decision ? { decision: opts.decision, note: opts.note } : undefined);
@@ -440,18 +447,22 @@ async function doctorCommand(io: CliIO, opts: CommonOptions): Promise<number> {
 
 async function initCommand(io: CliIO, opts: CommonOptions): Promise<number> {
   const env = await prepare(io, opts);
-  if (!env.isRepo) {
+  // A pipeline needs no repository (agentduo snapshots a folder without one in a repository of its own); one is offered.
+  if (env.snapshots.mode === "internal") {
+    const without = "agentduo snapshots it in a Git repository of its own, outside the folder";
     if (io.ask && io.stdin.isTTY) {
-      const answer = (await io.ask("This folder is not a git repository. Run 'git init' here? [y/N] ")).trim().toLowerCase();
+      const answer = (await io.ask(`This folder is not a git repository; a pipeline run does not need one (${without}). Run 'git init' here anyway? [y/N] `)).trim().toLowerCase();
       if (answer === "y" || answer === "yes") {
         await env.git.run(["init", "-q"]);
         io.stdout.write(`initialized a git repository in ${env.workspace}\n`);
       } else {
-        io.stdout.write("skipped; run 'git init' here before 'duo run'\n");
+        io.stdout.write(`skipped; 'duo run' works here without it (${without})\n`);
       }
     } else {
-      io.stdout.write("note: this folder is not a git repository; run 'git init' here before 'duo run'\n");
+      io.stdout.write(`note: this folder is not a git repository; 'duo run' works here without one (${without})\n`);
     }
+  } else if (env.snapshots.mode === null) {
+    io.stdout.write(`note: ${env.snapshots.problem.message}\n`);
   }
   const r = initRepo(env.workspace);
   if (r.created) {

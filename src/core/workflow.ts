@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isAbsolute, relative, resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import { AgentRunner, type AgentResult } from "../agents/runner.js";
 import type { SchemaName } from "../agents/schema.js";
 import type { PermissionDenial } from "../agents/types.js";
@@ -8,10 +8,12 @@ import { attachmentFile } from "./attachments.js";
 import type { Decider, DuoEvent, EventBus, HistoryEntry, Message, Party, PermissionDecider, Phase, Role } from "../events.js";
 import type { AgentRole, Backend, ConfigData } from "./config.js";
 import { GatesInterrupted, requiredPassed, runGates, type GateResult } from "./gates.js";
-import { Git, type Change } from "./git.js";
+import type { Change, Git } from "./git.js";
 import type { Approval, Critique, Finding, Implementation, Issue, Plan, Review } from "./outputs.js";
 import * as prompts from "./prompts.js";
 import * as render from "./render.js";
+import { internalNotice, openRunGit, prepareRunGit } from "./run-git.js";
+import { leavesBase } from "../paths.js";
 import { nowIso, type RunState, type RunStore } from "./state.js";
 
 export const EXIT = { DONE: 0, ERROR: 1, HUMAN_REVIEW: 2, ABORTED: 3, INTERRUPTED: 130 } as const;
@@ -68,11 +70,13 @@ export interface WorkflowOptions {
   /** Answers Claude's permission prompts; absent when nobody can (CI, background), so the CLI denies them. */
   permissions?: PermissionDecider;
   runner?: AgentRunner;
+  /** Where agentduo's data root is read from (and HOME): default, this process's environment. */
+  env?: NodeJS.ProcessEnv;
 }
 
 function relativeInside(path: string, root: string): string | null {
   const rel = relative(resolve(root), resolve(path));
-  return rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel.split("\\").join("/") : null;
+  return rel && !leavesBase(rel) ? rel.split("\\").join("/") : null;
 }
 
 function stableStringify(value: unknown): string {
@@ -104,7 +108,8 @@ function lastLine(text: string): string {
 }
 
 export class Workflow {
-  private readonly git: Git;
+  /** Where the run's snapshots are, once prepare() found or set it up. */
+  private snapshots: Git | null = null;
   private readonly runner: AgentRunner;
   private readonly snapshotExclude: string[];
   private readonly abort = new AbortController();
@@ -113,7 +118,6 @@ export class Workflow {
   private inSubdir: boolean | null = null;
 
   constructor(private readonly o: WorkflowOptions) {
-    this.git = new Git(o.repo);
     this.runner = o.runner ?? new AgentRunner(o.cfg, o.repo, o.store.path("logs"), o.bus, { permissions: o.permissions, runsDir: o.store.runsDir });
     const runsRel = relativeInside(o.store.runsDir, o.repo);
     this.snapshotExclude = runsRel ? [runsRel] : [];
@@ -121,6 +125,34 @@ export class Workflow {
 
   get state(): RunState {
     return this.o.state;
+  }
+
+  private get git(): Git {
+    if (!this.snapshots) throw new Error("the run's snapshots are not prepared");
+    return this.snapshots;
+  }
+
+  /** The run keeps its snapshots in agentduo's own repository: its Codex calls start outside any git repository. */
+  private get internal(): boolean {
+    return this.state.git?.mode === "internal";
+  }
+
+  /**
+   * Finds where the run keeps its snapshots, setting it up on the first call (an internal repository for a folder with
+   * no git repository), and records that before any agent runs. Called before every agent step and before a decision
+   * other than abort; idempotent. Throws RunGitError and changes nothing then: the run waits, resumable, for the cause
+   * to be fixed.
+   */
+  async prepare(): Promise<void> {
+    if (this.snapshots) return;
+    const st = this.state;
+    const { git, meta } = await prepareRunGit(st, this.o.repo, this.o.env ?? process.env);
+    this.snapshots = git;
+    if (!st.git) {
+      st.git = meta;
+      this.save();
+    }
+    if (meta.mode === "internal") this.emit({ type: "warning", text: internalNotice(meta) });
   }
 
   /** Stop cleanly after the step that is running now; the run stays resumable. */
@@ -164,6 +196,8 @@ export class Workflow {
         continue;
       }
       if (this.stopRequested) return this.finish("INTERRUPTED", EXIT.INTERRUPTED);
+      // Outside the step's error handling: a run whose snapshots cannot be set up stays where it is, with no escalation.
+      await this.prepare();
       st.inProgress = { phase, startedAt: nowIso() };
       this.save();
       this.phaseStartedAt = Date.now();
@@ -240,6 +274,7 @@ export class Workflow {
     return {
       repo: this.o.repo, taskId: st.taskId, task: st.task, agents: this.o.cfg.agents, gates: this.o.cfg.gates, notes: st.humanNotes, earlier: st.earlier,
       conversation: st.conversationContext, attachments: st.attachments, locate: (a) => attachmentFile(this.o.store.runsDir, a),
+      internalSnapshots: this.internal,
     };
   }
 
@@ -357,7 +392,10 @@ export class Workflow {
     round: number, check?: (data: T) => string[]): Promise<AgentResult | null> {
     const beforeTree = await this.tree();
     const beforeOutside = await this.outsideTree();
-    const r = await this.runner.call({ role, agentRole, prompt, schemaName, logPrefix: this.logPrefix(label, round), check, signal: this.abort.signal, attachments: this.files() });
+    const r = await this.runner.call({
+      role, agentRole, prompt, schemaName, logPrefix: this.logPrefix(label, round), check, signal: this.abort.signal, attachments: this.files(),
+      skipGitRepoCheck: this.internal,
+    });
     this.addUsage(r);
     if (r.interrupted) throw new Interrupted();
     const afterTree = await this.tree();
@@ -534,7 +572,7 @@ export class Workflow {
       rep.status === "blocked" && !(rep.blocking_reason ?? "").trim() ? ["status is 'blocked' but blocking_reason is empty"] : [];
     const res = await this.runner.call({
       role: "implementer", agentRole: "implementer", prompt, schemaName: "implementation", logPrefix: this.logPrefix("implement", k),
-      check, signal: this.abort.signal, attachments: this.files(),
+      check, signal: this.abort.signal, attachments: this.files(), skipGitRepoCheck: this.internal,
     });
     this.addUsage(res);
     const post = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}`), `agentduo ${st.taskId}: implementation round ${k}`);
@@ -631,10 +669,12 @@ export class Workflow {
     const base = st.base!.commit;
     const snap = st.lastSnapshot!.commit;
     const diff = await this.git.diff(base, snap);
+    // The whole diff, for a review that gets it cut short (and for the report): readable without any repository.
+    const fullDiff = store.writeText(`diff.r${k}.patch`, diff);
     const maxChars = cfg.limits.max_diff_chars;
     const implReport = store.readJson<{ output: Implementation }>(`implementation.r${k}.json`).output;
     const prompt = prompts.codeReviewer(this.ctx(), k, store.readText("plan.final.md"), base, snap, st.lastGates ?? [],
-      await this.git.diffStat(base, snap), diff.slice(0, maxChars), diff.length > maxChars, st.openFindings, implReport);
+      await this.git.diffStat(base, snap), diff.slice(0, maxChars), diff.length > maxChars, st.openFindings, implReport, fullDiff);
     const check = (rv: Review) => {
       const errors = consistentStatus(rv);
       if (rv.reviewed_commit !== snap) errors.push(`reviewed_commit is '${rv.reviewed_commit}', expected '${snap}'`);
@@ -679,6 +719,8 @@ export class Workflow {
   async applyDecision(decision: "resume" | "revise" | "abort", note?: string): Promise<void> {
     const st = this.state;
     if (st.phase !== "HUMAN_REVIEW" || !st.humanReview) throw new DecisionError(`run ${st.taskId} is not waiting for a decision (phase ${st.phase})`);
+    // Before anything changes: a run whose snapshots are unusable keeps waiting for its decision. Abort needs none.
+    if (decision !== "abort") await this.prepare();
     const hr = st.humanReview;
     if (note) st.humanNotes.push({ at: nowIso(), phase: hr.fromPhase, note });
     if (decision === "abort") {
@@ -718,7 +760,9 @@ export class Workflow {
     let diffStat = "";
     if (st.base && st.lastSnapshot) {
       try {
-        diffStat = await this.git.diffStat(st.base.commit, st.lastSnapshot.commit);
+        // An aborted or finished run may never have prepared its snapshots, or they may be gone: the report goes without.
+        const git = this.snapshots ?? openRunGit(st, this.o.repo, this.o.env ?? process.env);
+        diffStat = await git.diffStat(st.base.commit, st.lastSnapshot.commit);
       } catch {
         diffStat = "";
       }

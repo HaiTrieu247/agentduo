@@ -264,6 +264,11 @@ body.platform-darwin .settings-drag { height: 44px; }
 .page-title { margin: 0 0 6px; font-size: 1.55em; font-weight: 700; }
 .settings-page > p.muted:first-of-type { margin-top: 0; }
 .settings-body h3 { margin: 22px 0 8px; font-size: 1em; }
+.about-head { display: flex; align-items: center; gap: 14px; margin: 10px 0 12px; }
+.about-head p { margin: 0; }
+.about-icon { width: 64px; height: 64px; }
+.about-name { font-size: 1.25em; font-weight: 700; }
+.about-facts { margin: 8px 0; }
 .inline { display: inline-flex; align-items: center; gap: 8px; }
 select, input[type="text"], input[type="number"], textarea { background: var(--bg-input); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; }
 textarea { font-family: var(--font-mono); min-width: 260px; resize: vertical; }

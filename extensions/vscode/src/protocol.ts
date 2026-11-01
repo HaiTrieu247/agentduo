@@ -67,7 +67,7 @@ export interface PipelineStep {
 }
 
 export interface Problem {
-  kind: "environment" | "config" | "not_repo" | "missing_cli" | "locked" | "node" | "worker";
+  kind: "environment" | "config" | "not_repo" | "git" | "missing_cli" | "locked" | "node" | "worker";
   message: string;
 }
 

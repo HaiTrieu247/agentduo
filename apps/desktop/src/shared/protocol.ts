@@ -91,6 +91,7 @@ export interface AppSnapshot {
   projects: ProjectSummary[];
   active: { projectId: string | null; conversationId: string | null };
   platform: NodeJS.Platform;
+  arch: string;
   versions: { app: string; electron: string; chrome: string; node: string };
   userData: string;
   /** What "system" resolves to now. */
@@ -158,6 +159,9 @@ export interface Diagnostics {
 export const LINKS = {
   "claude-install": "https://code.claude.com/docs/en/setup",
   "codex-install": "https://developers.openai.com/codex/cli",
+  "agentduo-website": "https://agentduo.netlify.app/",
+  "agentduo-github": "https://github.com/HaiTrieu247/agentduo",
+  "agentduo-issues": "https://github.com/HaiTrieu247/agentduo/issues",
   "agentduo-readme": "https://github.com/HaiTrieu247/agentduo#readme",
   "agentduo-desktop": "https://github.com/HaiTrieu247/agentduo/tree/main/apps/desktop#readme",
   /** The latest release's page, where a build that cannot update itself gets the new version. */
@@ -258,7 +262,7 @@ export type DesktopEvent =
   | { type: "menu"; command: MenuCommand }
   | { type: "update"; state: UpdateState };
 
-export const MENU_COMMANDS = ["newConversation", "openProject", "settings", "toggleInspector", "stop", "diagnostics", "checkUpdates"] as const;
+export const MENU_COMMANDS = ["newConversation", "openProject", "settings", "toggleInspector", "stop", "diagnostics", "checkUpdates", "about"] as const;
 export type MenuCommand = (typeof MENU_COMMANDS)[number];
 
 // ------------------------------------------------------------------ validation

@@ -11,6 +11,12 @@ export type ConfigOverrides = {
  */
 export const userConfigEnv = (dir: string): NodeJS.ProcessEnv => ({ XDG_CONFIG_HOME: dir, APPDATA: dir });
 
+/**
+ * agentduo's data root (where the snapshot repositories of folders with no git repository go) in `dir`, on every OS:
+ * XDG_DATA_HOME on Linux and macOS, LOCALAPPDATA on Windows, so no test writes the real one.
+ */
+export const userDataEnv = (dir: string): NodeJS.ProcessEnv => ({ XDG_DATA_HOME: dir, LOCALAPPDATA: dir });
+
 export const CHECK_GATE: GateConfig = { name: "check", command: `"${process.execPath}" check.mjs`, required: true };
 
 /** Defaults pointed at the fake CLIs, with the check.mjs gate and short timeouts. */
