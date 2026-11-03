@@ -7,6 +7,7 @@ import { killAllActive } from "./agents/process.js";
 import { Chat, newRun } from "./chat.js";
 import { settings } from "./core/settings.js";
 import { configFromSaved, ConfigError, type ConfigData } from "./core/config.js";
+import { decisionCommand } from "./core/decisions.js";
 import { diagnose, EnvironmentError, prepareEnvironment, runnableProblem, type RunnableNeeds, type WorkspaceEnv } from "./core/environment.js";
 import { initRepo } from "./core/init.js";
 import type { Review } from "./core/outputs.js";
@@ -416,7 +417,7 @@ async function statusCommand(io: CliIO, runId: string | undefined, opts: CommonO
   if (st.warnings?.length) out(`  warnings: ${st.warnings.length} (see report.md)`);
   if (st.phase === "HUMAN_REVIEW" && st.humanReview) {
     out(`  waiting for a decision (${st.humanReview.reason}): ${st.humanReview.message}`);
-    out(`  continue: duo resume ${st.taskId} --decision resume|revise|abort [--note "..."]`);
+    out(`  continue: ${decisionCommand("duo", st.taskId, st.humanReview.reason)}`);
   }
   out(`  files: ${store.dir}`);
   return EXIT.DONE;

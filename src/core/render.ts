@@ -1,4 +1,5 @@
 import { BUDGET_CONFIG, BUDGET_KEYS, describeLimit, usageOf } from "./budget.js";
+import { decisionCommand } from "./decisions.js";
 import { describeGates } from "./gates.js";
 import type { Approval, Critique, Finding, Issue, Plan, Review } from "./outputs.js";
 import type { RunState } from "./state.js";
@@ -115,7 +116,7 @@ export function reportMarkdown(st: RunState, diffStat: string, lastReview: Revie
   lines.push("\n## Unresolved issues\n" + bullets(unresolved));
   if (st.warnings?.length) lines.push("\n## Warnings\n" + bullets(st.warnings));
   if (st.phase === "HUMAN_REVIEW" && hr) {
-    lines.push("\n## Next step\n" + hr.message + "\n\n```bash\nduo resume " + st.taskId + " --decision resume|revise|abort [--note \"...\"]\n```");
+    lines.push("\n## Next step\n" + hr.message + "\n\n```bash\n" + decisionCommand("duo", st.taskId, hr.reason) + "\n```");
   }
   return lines.join("\n") + "\n";
 }

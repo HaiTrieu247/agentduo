@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { AgentUsage } from "../src/core/usage.js";
 import {
   activityText, budgetText, discussionAuthor, discussionDoing, discussionOutcome, discussionStepText, formatClock, formatCost, formatDuration, formatTokens, messageHeadline, partyLabel, roleLabel,
-  resumeHint, usageBar, usageReportText, usageRows, usageText, verdictText,
+  resumeHint, resumeLabel, usageBar, usageReportText, usageRows, usageText, verdictText,
 } from "../src/ui/format.js";
+import { decisionCommand, needsInput } from "../src/core/decisions.js";
 
 describe("format", () => {
   it("formats durations, money and tokens", () => {
@@ -21,6 +22,16 @@ describe("format", () => {
     expect(budgetText({ lines: [{ key: "cost", used: 1.2, limit: 5 }], unpricedCalls: 3 })).toBe("budget $1.20+/$5.00 (3 calls unpriced)");
     expect(budgetText({ lines: [{ key: "cost", used: 1.2, limit: 5 }], unpricedCalls: 0 })).toBe("budget $1.20/$5.00");
     expect(resumeHint("budget_exhausted")).toBe("allow one more allowance of the budget reached and go on");
+  });
+
+  it("says that a blocker takes something from you before it runs again, and a failure does not", () => {
+    expect(["implementer_blocked", "no_progress", "agent_error", "max_review_rounds", undefined].map(needsInput)).toEqual([true, true, false, false, false]);
+    expect([resumeLabel("implementer_blocked"), resumeLabel("no_progress"), resumeLabel("agent_error")]).toEqual(["Unblock and retry", "Unblock and retry", "Resume"]);
+    expect(resumeHint("no_progress")).toBe("re-run this round with your note or the files you changed; with nothing new it does not run");
+    expect(resumeHint("agent_error")).toBe("re-run the step that stopped");
+    expect(decisionCommand("duo", "r1", "implementer_blocked"))
+      .toBe('duo resume r1 --decision resume --note "<what the implementer needs>" (or after changing the files), or --decision revise|abort');
+    expect(decisionCommand("duo", "r1", "agent_error")).toBe('duo resume r1 --decision resume|revise|abort [--note "..."]');
   });
 
   it("labels parties, roles, activities and messages", () => {

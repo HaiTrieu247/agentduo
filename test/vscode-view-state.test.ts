@@ -184,6 +184,7 @@ describe("view state", () => {
     expect(permissionChoices(request("p", ["Bash(npm test:*)"])).map((c) => c.label)).toEqual(["Allow once", "Always allow Bash(npm test:*)", "Deny"]);
     expect(decisionChoices(review).map((c) => c.key)).toEqual(["resume", "revise", "abort", "defer"]);
     expect(decisionChoices(review)[0]!.hint).toBe("start implementation");
+    expect(decisionChoices({ ...review, reason: "implementer_blocked" }).map((c) => c.label)).toEqual(["Unblock and retry", "Revise", "Abort", "Decide later"]);
   });
 
   it("says what a message does in each state", () => {

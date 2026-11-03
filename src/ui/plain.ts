@@ -1,3 +1,4 @@
+import { decisionCommand } from "../core/decisions.js";
 import type { Activity, Decider, DuoEvent, EventBus, PermissionAnswer, PermissionDecider } from "../events.js";
 import {
   activityText, DISCUSSION_LINES, discussionAuthor, discussionOutcome, discussionStepText, firstLines, formatDuration, messageHeadline, modelText, permissionAnswerText, PROVIDERS, roleLabel,
@@ -168,7 +169,7 @@ export function attachPlainRenderer(bus: EventBus, out: TextSink, o: PlainOption
         const r = e.review;
         out.write(`${paint("yellow", `⚠ HUMAN_REVIEW needed (${r.reason}): `)}${r.message}\n`);
         for (const d of r.details) out.write(`    - ${d}\n`);
-        out.write(`  Continue: ${cmd} resume ${e.runId} --decision resume|revise|abort [--note "..."]\n`);
+        out.write(`  Continue: ${decisionCommand(cmd, e.runId, r.reason)}\n`);
         break;
       }
       case "run.finished":

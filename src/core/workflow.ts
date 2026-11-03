@@ -5,7 +5,7 @@ import type { SchemaName } from "../agents/schema.js";
 import type { PermissionDenial } from "../agents/types.js";
 import type { Attachment } from "./attachment-types.js";
 import { attachmentFile } from "./attachments.js";
-import type { Decider, DuoEvent, EventBus, HistoryEntry, Message, Party, PermissionDecider, Phase, Role } from "../events.js";
+import type { Decider, DuoEvent, EventBus, HistoryEntry, HumanReview, Message, Party, PermissionDecider, Phase, Role } from "../events.js";
 import { budgetView, costLeft, ensureBudget, exhaustedMessage, newWarnings, raiseReached, reachedLimits, usageOf } from "./budget.js";
 import type { AgentRole, Backend, ConfigData } from "./config.js";
 import { acceptRepoNotes, addRepoNotes, planTurn, rememberSession, type Turn } from "./context.js";
@@ -14,9 +14,10 @@ import type { Change, Git } from "./git.js";
 import type { Approval, Critique, Finding, Implementation, Issue, Plan, RepoNoteOutput, Review } from "./outputs.js";
 import * as prompts from "./prompts.js";
 import * as render from "./render.js";
+import { blockedReview, changedParts, findingsDigest, heldReview, implementerSettings, nextBlocker } from "./progress.js";
 import { internalNotice, openRunGit, prepareRunGit } from "./run-git.js";
 import { leavesBase } from "../paths.js";
-import { nowIso, type RunState, type RunStore } from "./state.js";
+import { nowIso, type ProgressMark, type RunState, type RunStore } from "./state.js";
 
 export const EXIT = { DONE: 0, ERROR: 1, HUMAN_REVIEW: 2, ABORTED: 3, INTERRUPTED: 130 } as const;
 
@@ -393,9 +394,8 @@ export class Workflow {
     this.emit({ type: "message", message: m });
   }
 
-  private escalate(reason: string, message: string, resumePhase: Phase, details: string[] = []): void {
+  private escalate(reason: string, message: string, resumePhase: Phase, details: string[] = [], fromPhase: Phase = this.state.phase): void {
     const st = this.state;
-    const fromPhase = st.phase;
     st.humanReview = { reason, message, fromPhase, resumePhase, details, at: nowIso() };
     st.phase = "HUMAN_REVIEW";
     this.record("HUMAN_REVIEW", IMPL_PHASES.includes(fromPhase) ? st.implRound : st.planningRound, "orchestrator", reason, message, "warn");
@@ -422,6 +422,18 @@ export class Workflow {
   /** Minutes of the step under way, which the run's minutes do not include until it ends. */
   private stepMinutes(): number {
     return (Date.now() - this.phaseStartedAt) / 60_000;
+  }
+
+  /**
+   * What the implementer is given now, for the circuit breaker (src/core/progress.ts); `tree` and `notes` name what an
+   * attempt that already ran was given instead.
+   */
+  private async progressMark(tree?: string, notes?: number): Promise<ProgressMark> {
+    const st = this.state;
+    return {
+      tree: tree ?? await this.tree(), notes: notes ?? st.humanNotes.length, plan: st.finalPlanHash, findings: findingsDigest(st.openFindings),
+      settings: implementerSettings(this.o.cfg, this.o.repo, this.o.env ?? process.env),
+    };
   }
 
   /** The run's budget as an agent call consults it before each attempt; absent when the run has none. */
@@ -704,6 +716,8 @@ export class Workflow {
       build: (ctx) => prompts.implementer(ctx, k, planMd, st.openFindings, review, failed, st.lastImplementation),
       plan: { about: st.finalPlanHash, after: () => st.finalPlanHash, file: store.path("plan.final.md") },
     };
+    // The notes this attempt is given: one added while it runs reaches only the next.
+    const notesGiven = st.humanNotes.length;
     const { res, turn } = await this.callAgent(turnSpec, now);
     this.addUsage(res);
     const post = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}`), `agentduo ${st.taskId}: implementation round ${k}`);
@@ -740,9 +754,14 @@ export class Workflow {
       report.status === "completed" ? "ok" : "warn", `implementation.r${k}.json`, res);
     if (missing.length) this.warn(`implementer did not respond to finding(s): ${missing.join(", ")}`);
     if (report.status === "blocked") {
-      this.escalate("implementer_blocked", report.blocking_reason ?? "implementer reported blocked", "IMPLEMENT");
+      // A blocker needs something from you: until something the implementer is given changes, resume does not run it.
+      const mark = await this.progressMark(post.tree, notesGiven);
+      st.blocker = nextBlocker(st.blocker, report.blocking_reason ?? "implementer reported blocked", k, mark, post.tree !== now);
+      const { message, details } = blockedReview(st.blocker);
+      this.escalate("implementer_blocked", message, "IMPLEMENT", details);
       return;
     }
+    st.blocker = null;
     st.phase = cfg.gates.length ? "VERIFY" : "CODE_REVIEW";
   }
 
@@ -878,10 +897,13 @@ export class Workflow {
     if (note) st.humanNotes.push({ at: nowIso(), phase: hr.fromPhase, note });
     // Going on after the budget stopped the run is your authorization: one more allowance of each limit it reached.
     const raised = hr.reason === "budget_exhausted" && decision !== "abort" ? raiseReached(st, this.o.cfg) : [];
+    // A blocked implementer runs again only on something new; a resume with nothing new keeps the run waiting.
+    const held = decision === "resume" && await this.blockerHolds(hr);
     if (decision === "abort") {
       st.phase = "ABORTED";
     } else if (decision === "revise") {
       if (IMPL_PHASES.includes(hr.fromPhase)) st.planFeedback = null; // planning-era critique is stale; the note drives the revision
+      st.blocker = null;
       st.finalPlanVersion = null;
       st.finalPlanHash = null;
       st.lastGates = null;
@@ -889,7 +911,7 @@ export class Workflow {
       st.planningRound += 1;
       st.limits.planningRounds = Math.max(st.limits.planningRounds, st.planningRound + this.o.cfg.limits.max_planning_rounds - 1);
       st.phase = "PLAN";
-    } else {
+    } else if (!held) {
       const target = hr.resumePhase;
       if (target === "IMPLEMENT" && st.finalPlanVersion === null) {
         if (!st.planVersion) throw new DecisionError("there is no plan yet; use --decision revise");
@@ -904,7 +926,23 @@ export class Workflow {
     st.humanReview = null;
     this.message({ from: "human", to: "orchestrator", kind: "decision", headline: `${decision}${note ? ` · "${note}"` : ""}`, items: raised });
     this.record("HUMAN_REVIEW", st.implRound || st.planningRound, "human", decision, note || `after ${hr.reason}`);
+    if (held) {
+      // Nothing ran and nothing changed: the run waits again, now saying why.
+      const { message, details } = heldReview(st.blocker!);
+      this.escalate("no_progress", message, hr.resumePhase, details, hr.fromPhase);
+    }
     this.save();
+  }
+
+  /**
+   * The implementer's blocker holds for a resume into its round: nothing it is given changed since it reported it
+   * (src/core/progress.ts), so running it would repeat the same call.
+   */
+  private async blockerHolds(hr: HumanReview): Promise<boolean> {
+    const st = this.state;
+    const b = st.blocker;
+    if (!b || hr.resumePhase !== "IMPLEMENT" || b.round !== st.implRound || NEW_ROUND_FROM.includes(hr.fromPhase)) return false;
+    return changedParts(b.mark, await this.progressMark()).length === 0;
   }
 
   // ---------------------------------------------------------------- report

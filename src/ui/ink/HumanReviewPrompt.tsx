@@ -1,7 +1,8 @@
 import { Box, Text, useInput } from "ink";
 import { useState } from "react";
 import type { Decision, HumanReview } from "../../events.js";
-import { resumeHint } from "../format.js";
+import { needsInput } from "../../core/decisions.js";
+import { resumeHint, resumeLabel } from "../format.js";
 
 export type ViewKind = "plan" | "review" | "feedback" | "diffstat";
 
@@ -22,7 +23,7 @@ export function HumanReviewPrompt({ review, views, onDecision, onView }: {
   review: HumanReview; views: ViewKind[]; onDecision(d: Decision | "defer"): void; onView(kind: ViewKind): void;
 }) {
   const options: Option[] = [
-    { key: "resume", label: "Resume", hint: resumeHint(review.reason) },
+    { key: "resume", label: resumeLabel(review.reason), hint: resumeHint(review.reason) },
     { key: "revise", label: "Revise", hint: "re-plan with your note" },
     ...views.map((kind) => ({ key: `view:${kind}`, label: VIEWS[kind].label, hint: "" })),
     { key: "abort", label: "Abort", hint: "end the run" },
@@ -77,7 +78,8 @@ export function HumanReviewPrompt({ review, views, onDecision, onView }: {
           ))
         ) : (
           <Box flexDirection="column">
-            <Text>{`${pending === "resume" ? "Resume" : "Revise"}: note for the agents (Enter to continue, Esc to go back)`}</Text>
+            <Text>{`${pending === "resume" ? resumeLabel(review.reason) : "Revise"}: ${pending === "resume" && needsInput(review.reason)
+              ? "what the implementer needs" : "note for the agents"} (Enter to continue, Esc to go back)`}</Text>
             <Text>
               <Text color="cyan">{"› "}</Text>
               {note}

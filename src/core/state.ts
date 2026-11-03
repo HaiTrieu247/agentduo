@@ -76,6 +76,38 @@ export interface RunBudget {
   warned: BudgetKey[];
 }
 
+/**
+ * What the implementer is given, as far as a blocker depends on it: when none of it changed, running the implementer
+ * again would be the same call. Each value is compared, never read: a tree id, a count, or a digest.
+ */
+export interface ProgressMark {
+  /** The workspace's files (the snapshot tree). */
+  tree: string;
+  /** How many of the run's human notes it was given. */
+  notes: number;
+  /** The final plan's hash. */
+  plan: string | null;
+  /** The open review findings, as a digest. */
+  findings: string;
+  /** The implementer's settings, agentduo's and its CLI's own files (those snapshots leave out), as a digest. */
+  settings: string;
+}
+
+/**
+ * The implementer's last blocker, while it holds: a `resume` with nothing new in `mark` does not run the implementer
+ * again (src/core/progress.ts). Cleared when an implementation completes or the run re-plans.
+ */
+export interface Blocker {
+  /** The reason as the implementer gave it, and its identity (case, punctuation and spacing left out). */
+  reason: string;
+  key: string;
+  round: number;
+  /** Attempts in a row that reported this blocker, each changing no file. */
+  repeats: number;
+  /** What the implementer had been given when it reported it. */
+  mark: ProgressMark;
+}
+
 /** One question of the chat and the answer it got. */
 export interface Exchange {
   backend: "codex" | "claude";
@@ -120,6 +152,8 @@ export interface RunState {
   consecutiveGateFailures: number;
   openFindings: Finding[];
   lastImplementation: { round: number; summary: string | null; status: string | null; permissionDenials: PermissionDenial[] } | null;
+  /** The implementer's blocker while it holds; absent in older runs and while there is none. */
+  blocker?: Blocker | null;
   humanReview: HumanReview | null;
   humanNotes: HumanNote[];
   /** Notable things the run saw but did not act on (files changed outside the workspace, permission denials…). */

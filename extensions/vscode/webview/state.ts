@@ -10,7 +10,7 @@ import type {
   Activity, Agent, BudgetView, DiscussionPlace, DiscussionStatus, DuoEvent, HistoryEntry, HumanReview, Message, ModelIdentity, ModelMap, Party, PermissionAnswer, PermissionRequest,
   Phase, Role, RoundInfo, TurnStatus, Verdict,
 } from "../../../src/events.js";
-import { answerActivities, resumeHint, withObserved } from "../../../src/ui/format.js";
+import { answerActivities, resumeHint, resumeLabel, withObserved } from "../../../src/ui/format.js";
 import type { ArtifactName, DecisionChoice, PipelineStep, Problem, UiUpdate } from "../src/protocol.js";
 
 /** Kept in the view; older items stay in the run's files (events.jsonl, report.md, logs/). */
@@ -571,7 +571,7 @@ export interface Choice<K extends string> {
 
 export function decisionChoices(review: HumanReview): Array<Choice<DecisionChoice>> {
   return [
-    { key: "resume", label: "Resume", hint: resumeHint(review.reason) },
+    { key: "resume", label: resumeLabel(review.reason), hint: resumeHint(review.reason) },
     { key: "revise", label: "Revise", hint: "re-plan with your note" },
     { key: "abort", label: "Abort", hint: "end the run" },
     { key: "defer", label: "Decide later", hint: "/resume asks again" },

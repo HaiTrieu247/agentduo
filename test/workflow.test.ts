@@ -217,7 +217,7 @@ describe("Workflow", () => {
   it("escalates when the implementer is blocked", async () => {
     expect(await start({ ...happy(), implementer: [{ output: impl("blocked", [], "API key needed") }] })).toBe(2);
     const hr = stateOf(h).humanReview!;
-    expect([hr.reason, hr.message]).toEqual(["implementer_blocked", "API key needed"]);
+    expect([hr.reason, hr.message]).toEqual(["implementer_blocked", expect.stringMatching(/^the implementer is blocked: API key needed\. /)]);
   });
 
   it("escalates when required gates keep failing, without spending reviews", async () => {
@@ -927,6 +927,102 @@ describe("Workflow: context shared between the agents", () => {
     expect(stateOf(h).repoNotes!.map((n) => `${n.role}:${n.note}`)).toEqual([
       "planner:CHECK-NOTE", "planner:README-NOTE", "plan_reviewer:CRITIC-NOTE", "implementer:IMPL-NOTE", "code_reviewer:REVIEW-NOTE",
     ]);
+  });
+});
+
+describe("Workflow: a blocked implementer runs again only on something new", () => {
+  const blocked = (reason = "API key needed") => ({ output: impl("blocked", [], reason) });
+  const fixed = () => ({ write: { "app.txt": "fixed\n" }, output: impl() });
+  const notJson = () => ({ raw: "not json" });
+  const holds = () => stateOf(h).history.filter((e) => e.agent === "orchestrator" && e.status === "no_progress");
+
+  it("holds a resume with nothing new, calling no agent, and says what the implementer needs", async () => {
+    expect(await start({ ...happy(), implementer: [blocked(), fixed()] })).toBe(2);
+    let st = stateOf(h);
+    expect(st.humanReview).toMatchObject({ reason: "implementer_blocked", resumePhase: "IMPLEMENT", details: [] });
+    expect(st.humanReview!.message).toContain("the implementer is blocked: API key needed. It needs something from you: 'resume' with a --note");
+    expect(st.blocker).toMatchObject({ reason: "API key needed", key: "api key needed", round: 1, repeats: 1 });
+    const { agentCalls, tokens, sessions } = st;
+    for (let i = 0; i < 2; i++) {
+      expect(await resume(h, { decision: "resume" })).toBe(2);
+      st = stateOf(h);
+      expect(st.humanReview).toMatchObject({ reason: "no_progress", fromPhase: "IMPLEMENT", resumePhase: "IMPLEMENT" });
+      expect(st.humanReview!.message).toContain("so it was not run again (that would repeat the same call): API key needed. Give it what it needs");
+      expect(st.humanReview!.details).toEqual(["blocked in round 1",
+        "unchanged since: the workspace's files, your notes, the final plan, the open review findings, the implementer's settings (agentduo's and its CLI's)"]);
+    }
+    // Nothing ran and nothing moved: the round, its blocker, its usage and its sessions are as they were.
+    expect(fake.calls("implementer")).toHaveLength(1);
+    expect([st.agentCalls, st.tokens, st.sessions, st.implRound, st.blocker?.repeats]).toEqual([agentCalls, tokens, sessions, 1, 1]);
+    expect(holds()).toHaveLength(2);
+    expect(readRun("report.md")).toContain(`duo resume ${st.taskId} --decision resume --note "<what the implementer needs>"`);
+    // A note is something new: the implementer gets it, and the run goes on.
+    expect(await resume(h, { decision: "resume", note: "the key is in .env.example" })).toBe(0);
+    expect(fake.calls("implementer")).toHaveLength(2);
+    expect(fake.calls("implementer")[1]!.prompt).toContain("the key is in .env.example");
+    st = stateOf(h);
+    expect([st.phase, st.blocker]).toEqual(["DONE", null]);
+  });
+
+  it("asks again in-process, without running the implementer, until it gets something new", async () => {
+    const decider = new ScriptedDecider([{ decision: "resume" }, { decision: "resume" }, { decision: "resume", note: "use the staging key" }]);
+    expect(await start({ ...happy(), implementer: [blocked(), fixed()] }, undefined, { decider })).toBe(0);
+    expect(decider.seen).toEqual(["implementer_blocked", "no_progress", "no_progress"]);
+    expect(fake.calls("implementer")).toHaveLength(2);
+    expect(h.events.filter((e) => e.type === "human.required").map((e) => e.type === "human.required" && e.review.reason))
+      .toEqual(["implementer_blocked", "no_progress", "no_progress"]);
+  });
+
+  it("runs it again, with no note, once the workspace's files or the implementer's settings changed", async () => {
+    const reason = "config.json is missing";
+    expect(await start({ ...happy(), implementer: [blocked(reason), blocked(reason), blocked(reason), fixed()] })).toBe(2);
+    writeFileSync(join(h.repo, "config.json"), "{}\n");
+    expect(await resume(h, { decision: "resume" })).toBe(2);
+    expect(fake.calls("implementer")).toHaveLength(2);
+    // The same blocker again, and the attempt changed no file: what it got since did not unblock it.
+    let st = stateOf(h);
+    expect([st.humanReview?.reason, st.blocker?.repeats]).toEqual(["implementer_blocked", 2]);
+    expect(st.humanReview!.details).toEqual([expect.stringContaining("the same blocker 2 times in a row, the last attempt changing no file")]);
+    // agentduo's settings for the implementer (here its permission mode, which /claude permission-mode changes).
+    h.cfg = testConfig(fake, { claude: { role_args: { implementer: ["--permission-mode", "acceptEdits"] } } });
+    expect(await resume(h, { decision: "resume" })).toBe(2);
+    expect(fake.calls("implementer")).toHaveLength(3);
+    expect(stateOf(h).blocker?.repeats).toBe(3);
+    expect(await resume(h, { decision: "resume" })).toBe(2);
+    expect(stateOf(h).humanReview!.details[0]).toBe("blocked in round 1, 3 times in a row");
+    // Claude's own settings: a rule saved to .claude/settings.local.json, which snapshots leave out.
+    mkdirSync(join(h.repo, ".claude"), { recursive: true });
+    writeFileSync(join(h.repo, ".claude", "settings.local.json"), JSON.stringify({ permissions: { allow: ["Bash(npm test:*)"] } }));
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    expect(fake.calls("implementer")).toHaveLength(4);
+    st = stateOf(h);
+    expect([st.phase, st.blocker]).toEqual(["DONE", null]);
+  });
+
+  it("retries a failed implementer call on a resume with nothing new: a failure is not a blocker", async () => {
+    // Blocked; the note's attempt fails (continued session, then two fresh ones); a plain resume retries it.
+    expect(await start({ ...happy(), implementer: [blocked(), notJson(), notJson(), notJson(), fixed()] })).toBe(2);
+    expect(await resume(h, { decision: "resume", note: "the key is in .env.example" })).toBe(2);
+    let st = stateOf(h);
+    expect(st.humanReview!.reason).toBe("agent_error");
+    expect(st.blocker).toMatchObject({ reason: "API key needed", repeats: 1 });
+    const before = fake.calls("implementer").length;
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    expect(fake.calls("implementer").length).toBe(before + 1);
+    st = stateOf(h);
+    expect([st.phase, st.blocker]).toEqual(["DONE", null]);
+  });
+
+  it("forgets the blocker when you re-plan, and aborts a held run as any other", async () => {
+    expect(await start({ ...happy(), implementer: [blocked(), fixed()] })).toBe(2);
+    expect(await resume(h, { decision: "revise", note: "do it without the API" })).toBe(0);
+    let st = stateOf(h);
+    expect([st.phase, st.blocker, st.implRound]).toEqual(["DONE", null, 2]);
+    expect(await start({ ...happy(), implementer: [blocked()] })).toBe(2);
+    expect(await resume(h, { decision: "resume" })).toBe(2);
+    expect(await resume(h, { decision: "abort" })).toBe(3);
+    st = stateOf(h);
+    expect([st.phase, fake.calls("implementer").length]).toEqual(["ABORTED", 3]);
   });
 });
 

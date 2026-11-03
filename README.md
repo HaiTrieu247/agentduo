@@ -317,11 +317,22 @@ In a terminal, agentduo shows the reason and a menu: Resume, Revise (with a note
 | `max_planning_rounds` | Implements the latest plan, recorded as accepted by you |
 | `plan_ready` (with `safety.pause_before_implement`) | Starts implementing |
 | `max_review_rounds`, `critical_finding`, `gates_failing` | Starts another fix round |
-| `implementer_blocked` | Re-runs the implementation round |
+| `implementer_blocked`, `no_progress` | Re-runs the implementation round, but only with something new (see below) |
 | `agent_error`, `orchestrator_error` | Re-runs the failed step |
 | `budget_exhausted` | Raises each limit the run reached by one more allowance, then runs the step it stopped before |
 
 `revise` goes back to planning with your note (after `budget_exhausted` it raises the limits reached too). `abort` ends the run.
+
+**A blocked implementer needs something from you.** When the implementer reports that it is blocked (a missing
+credential, a file or service it needs, a question only you can answer), running it again with what it already had
+would repeat the same call at the same cost. So `resume` (shown as *Unblock and retry*) runs it again only when
+something it is given has changed since: a note (with the decision, or sent while the run waits), the workspace's
+files, or the implementer's settings (agentduo's, or its CLI's own settings files, such as a rule in
+`.claude/settings.local.json`). With nothing new, nothing runs: the run keeps waiting with the reason `no_progress`
+and says what it needs. If you fixed something agentduo cannot see (a credential, a service, a tool), say so in a
+note. A note always lets it try again. When it reports the same blocker several times in a row, the decision says so,
+and `revise` or `abort` may serve you better. A failed call (`agent_error`: a timeout, a crash, output it could not
+use) is not a blocker: `resume` retries it as before.
 
 ## Configuration
 

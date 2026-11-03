@@ -148,10 +148,15 @@ describe("Ink components", () => {
       [{ type: "run.finished", runId: "r1", phase: "INTERRUPTED", reportPath: "/x", exitCode: 130 }, ["Stopped", "duo resume r1"]],
       [{ type: "run.finished", runId: "r1", phase: "HUMAN_REVIEW", reportPath: "/x", exitCode: 2 }, ["duo resume r1 --decision resume|revise|abort"]],
       [{ type: "run.finished", runId: "r1", phase: "ABORTED", reportPath: "/x", exitCode: 3 }, ["Aborted"]],
+      // A run waiting on the implementer's blocker: a resume needs a note (or changed files).
+      [{ type: "run.finished", runId: "r1", phase: "HUMAN_REVIEW", reportPath: "/x", exitCode: 2 }, ['duo resume r1 --decision resume --note "<what the']],
     ];
-    for (const [event, texts] of cases) {
+    for (const [i, [event, texts]] of cases.entries()) {
       const bus = new EventBus();
       const app = render(<App bus={bus} version="0.1.0" verbose={false} interactive={false} onStop={noop} onInterrupt={noop} onDecision={noop} views={() => []} readView={async () => null} />);
+      if (i === cases.length - 1) {
+        bus.emit({ type: "human.required", runId: "r1", review: { reason: "implementer_blocked", message: "the implementer is blocked: API key needed", fromPhase: "IMPLEMENT", resumePhase: "IMPLEMENT", details: [], at: "x" } });
+      }
       bus.emit(event);
       await wait();
       const output = app.frames.join("\n");

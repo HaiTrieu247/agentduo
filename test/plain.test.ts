@@ -52,6 +52,14 @@ describe("plain renderer", () => {
     expect(text).not.toContain("\u001b[");
   });
 
+  it("says that a blocked implementer needs a note or changed files to run again", () => {
+    const bus = new EventBus();
+    let text = "";
+    attachPlainRenderer(bus, { write: (s: string) => { text += s; } }, { color: false, verbose: false, version: "0.1.0", now });
+    bus.emit({ type: "human.required", runId: "run-1", review: { ...review, reason: "no_progress", message: "nothing changed", details: [] } });
+    expect(text).toContain('Continue: duo resume run-1 --decision resume --note "<what the implementer needs>" (or after changing the files), or --decision revise|abort');
+  });
+
   it("shows thoughts in verbose mode and colors when asked", () => {
     expect(render(true)).toContain("thinking");
     expect(render(false, true)).toContain("\u001b[");

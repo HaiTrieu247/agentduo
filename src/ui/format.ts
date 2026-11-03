@@ -1,3 +1,4 @@
+import { needsInput } from "../core/decisions.js";
 import type { UsageReport, UsageState } from "../core/usage.js";
 import type { Activity, Agent, BudgetView, DiscussionStatus, DiscussionStep, Message, ModelIdentity, Party, PermissionAnswer, Phase, Role, Verdict } from "../events.js";
 
@@ -24,7 +25,8 @@ const RESUME_HINTS: Record<string, string> = {
   max_review_rounds: "start another fix round",
   critical_finding: "start another fix round",
   gates_failing: "start another fix round",
-  implementer_blocked: "re-run this implementation round",
+  implementer_blocked: "re-run this round with your note or the files you changed; with nothing new it does not run",
+  no_progress: "re-run this round with your note or the files you changed; with nothing new it does not run",
   budget_exhausted: "allow one more allowance of the budget reached and go on",
   // Reasons only agentduo 0.1 runs can be waiting on; kept so those runs can still be resumed from the prompt.
   dirty_worktree: "re-run this implementation round",
@@ -33,6 +35,9 @@ const RESUME_HINTS: Record<string, string> = {
 
 /** What "resume" does for a run waiting with this reason. */
 export const resumeHint = (reason: string): string => RESUME_HINTS[reason] ?? "re-run the step that stopped";
+
+/** The resume choice's label: a blocker's says that it takes something from you. */
+export const resumeLabel = (reason: string): string => (needsInput(reason) ? "Unblock and retry" : "Resume");
 
 export const partyLabel = (p?: Party | string): string => (p ? PARTY_LABELS[p as Party] ?? p : "");
 export const roleLabel = (r?: Role): string => (r ? ROLE_LABELS[r] : "");

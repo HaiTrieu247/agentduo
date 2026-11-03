@@ -62,7 +62,8 @@ type StaticContent =
   | { kind: "step"; step: StepView }
   | { kind: "note"; text: string }
   | { kind: "artifact"; title: string; body: string }
-  | { kind: "finish"; phase: string; runId: string; reportPath: string; summary?: string; chat?: boolean }
+  /** reason: what a run that waits for a decision waits on, which says how to answer it. */
+  | { kind: "finish"; phase: string; runId: string; reportPath: string; summary?: string; chat?: boolean; reason?: string }
   | { kind: "review"; review: HumanReview }
   | { kind: "answer"; turn: TurnView }
   | { kind: "discussion"; discussion: DiscussionView }
@@ -229,7 +230,10 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
       // A deferred decision (non-interactive, or "Decide later") keeps the reason in scrollback.
       const withReview = e.phase === "HUMAN_REVIEW" && s.humanReview ? push(s, { kind: "review", review: s.humanReview }) : s;
       return {
-        ...push(withReview, { kind: "finish", phase: e.phase, runId: e.runId, reportPath: e.reportPath, summary: e.summary, chat: s.chat }),
+        ...push(withReview, {
+          kind: "finish", phase: e.phase, runId: e.runId, reportPath: e.reportPath, summary: e.summary, chat: s.chat,
+          ...(e.phase === "HUMAN_REVIEW" && s.humanReview ? { reason: s.humanReview.reason } : {}),
+        }),
         finished: { phase: e.phase, reportPath: e.reportPath, exitCode: e.exitCode }, current: null, humanReview: null, permissions: [],
       };
     }

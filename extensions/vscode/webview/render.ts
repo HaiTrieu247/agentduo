@@ -5,6 +5,7 @@ import {
   type SettingCommand,
 } from "../../../src/core/commands.js";
 import { ATTACHMENT_LIMITS, attachmentDetail, formatBytes, type Attachment } from "../../../src/core/attachment-types.js";
+import { needsInput } from "../../../src/core/decisions.js";
 import type { UsageReport } from "../../../src/core/usage.js";
 import type { Activity, Agent, Message, ModelIdentity, Party, PermissionAnswer } from "../../../src/events.js";
 import {
@@ -416,7 +417,10 @@ const URI_TYPES = ["text/uri-list", "application/vnd.code.uri-list", "codefiles"
 
 // ------------------------------------------------------------------ questions for you
 function decisionCard(d: PendingDecision, generation: number, actions: Actions, files: number): HTMLElement {
-  const note = h("textarea", { class: "input note-input", attrs: { rows: "2", placeholder: "Note for the agents (optional; with Resume or Revise)", "aria-label": "Note for the agents" } });
+  const placeholder = needsInput(d.review.reason)
+    ? "What the implementer needs (with Unblock and retry), or your note for Revise"
+    : "Note for the agents (optional; with Resume or Revise)";
+  const note = h("textarea", { class: "input note-input", attrs: { rows: "2", placeholder, "aria-label": "Note for the agents" } });
   const VIEW: Record<string, { command: WebviewCommand; label: string; icon: string }> = {
     plan: { command: "openPlan", label: "Plan", icon: "go-to-file" }, review: { command: "openReview", label: "Review", icon: "go-to-file" },
     feedback: { command: "openFeedback", label: "Feedback", icon: "go-to-file" }, report: { command: "openReport", label: "Report", icon: "output" },

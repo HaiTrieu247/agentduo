@@ -1,5 +1,6 @@
 import { Box, Static, Text, useInput, useStdout } from "ink";
 import { useEffect, useReducer, useState } from "react";
+import { decisionCommand } from "../../core/decisions.js";
 import type { Decision, EventBus, PermissionAnswer } from "../../events.js";
 import { permissionAnswerText, whoLabel } from "../format.js";
 import { HumanReviewPrompt, VIEWS, type ViewKind } from "./HumanReviewPrompt.js";
@@ -65,7 +66,7 @@ export function StaticItemView({ item }: { item: StaticItem }) {
         </Box>
       );
     case "finish":
-      return <FinishLine phase={item.phase} runId={item.runId} reportPath={item.reportPath} summary={item.summary} chat={item.chat} />;
+      return <FinishLine phase={item.phase} runId={item.runId} reportPath={item.reportPath} summary={item.summary} chat={item.chat} reason={item.reason} />;
     case "permission":
       return (
         <Text dimColor wrap="truncate-end">
@@ -86,7 +87,9 @@ export function StaticItemView({ item }: { item: StaticItem }) {
   }
 }
 
-function FinishLine({ phase, runId, reportPath, summary, chat }: { phase: string; runId: string; reportPath: string; summary?: string; chat?: boolean }) {
+function FinishLine({ phase, runId, reportPath, summary, chat, reason }: {
+  phase: string; runId: string; reportPath: string; summary?: string; chat?: boolean; reason?: string;
+}) {
   if (phase === "DONE") return <Text><Text color="green" bold>✔ DONE</Text>{` ${summary ?? "finished"}. Report: ${reportPath}`}</Text>;
   if (phase === "ABORTED") return <Text><Text color="yellow" bold>Aborted.</Text>{` Report: ${reportPath}`}</Text>;
   // In a chat the next steps are typed, not shell commands; the chat says which.
@@ -95,7 +98,7 @@ function FinishLine({ phase, runId, reportPath, summary, chat }: { phase: string
   return (
     <Text>
       <Text color="yellow" bold>Waiting for your decision.</Text>
-      {` Continue with: duo resume ${runId} --decision resume|revise|abort [--note "..."]  Report: ${reportPath}`}
+      {` Continue with: ${decisionCommand("duo", runId, reason)}  Report: ${reportPath}`}
     </Text>
   );
 }

@@ -233,6 +233,19 @@ export function claudeLocalSignature(o: SettingsOptions): string {
   return digest([claudeEnv(o.env), files]);
 }
 
+/**
+ * Everything Claude Code's settings files say (permission rules and modes included), as a digest: it changes when any
+ * of them does, a rule saved to .claude/settings.local.json too, which snapshots leave out.
+ */
+export function claudeSettingsSignature(o: SettingsOptions): string {
+  const sources = claudeSettingsSources(o);
+  const files = "reason" in sources ? sources.reason : sources.candidates.map((c) => {
+    const r = c.read();
+    return [c.where, "error" in r ? { error: r.error } : "json" in r ? r.json : null];
+  });
+  return digest(files);
+}
+
 /** Claude's model as far as agentduo can tell before a call; `observed` is what Claude's stream named. */
 export function claudeIdentity(cfg: ConfigData["claude"], workspace: string, env: NodeJS.ProcessEnv, observed?: string, managed?: string[]): ModelIdentity {
   const base = blank("claude");
