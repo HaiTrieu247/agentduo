@@ -32,9 +32,16 @@ describe("format", () => {
     // A contradiction or pre-existing failures: resume is a choice of its own, which the label names.
     expect([resumeLabel("requirements_conflict"), resumeLabel("preexisting_failures")]).toEqual(["Implement as planned", "Accept as pre-existing"]);
     expect([resumeLabel("scope_expansion"), resumeLabel("out_of_scope_critical")]).toEqual(["Approve wider scope", "Keep the scope"]);
+    // A stalled review loop, like a blocker, needs something new before another round.
+    expect(resumeLabel("review_stalled")).toBe("Unblock and retry");
+    expect(resumeHint("review_stalled")).toBe("start another fix round with your note or the files you changed; with nothing new it does not run");
     expect(resumeHint("out_of_scope_critical")).toBe("leave them unfixed in this run, and go on");
     expect(resumeHint("scope_expansion")).toBe("go on with the wider plan, approving what it adds to the task");
     expect(resumeHint("preexisting_failures")).toBe("accept them as pre-existing for this run, and finish");
+    // Evidence that kept going out of date: resume verifies again, it waives nothing.
+    expect([resumeLabel("planning_stalled"), resumeHint("planning_stalled")]).toEqual(["Implement latest plan", "implement the latest plan as it is, recorded as accepted by you"]);
+    expect([resumeLabel("verification_stale"), resumeHint("verification_stale")]).toEqual(["Verify again",
+      "verify the files as they are now: the gates again, and a review if the code changed"]);
     expect(decisionCommand("duo", "r1", "implementer_blocked"))
       .toBe('duo resume r1 --decision resume --note "<what the implementer needs>" (or after changing the files), or --decision revise|abort');
     expect(decisionCommand("duo", "r1", "agent_error")).toBe('duo resume r1 --decision resume|revise|abort [--note "..."]');

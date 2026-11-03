@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  acceptedIds, acceptedText, acceptPending, attributionErrors, baselineFailures, conflictReview, gateVerdicts, missingBaselineEntries, outOfScopeGates,
-  preexistingFailures, preexistingReview, requirementConflicts, splitFindings,
+  acceptedIds, acceptedText, acceptPending, attributionErrors, baselineFailures, conflictReview, gateVerdicts, gatesToAttribute, missingBaselineEntries,
+  outOfScopeGates, preexistingFailures, preexistingReview, requirementConflicts, splitFindings,
 } from "../src/core/acceptance.js";
 import type { GateResult } from "../src/core/gates.js";
 import { newState } from "../src/core/state.js";
@@ -66,8 +66,22 @@ describe("acceptance: what fails after the change", () => {
     // A gate whose command changed since the baseline has none.
     expect(gateVerdicts({ results: [gate("layout", false, { command: "other" })], baseline, outOfScope: new Set(["layout"]), attributions: null, accepted: new Set() })[0]!.kind)
       .toBe("regression");
-    // What you accepted is not asked about again.
+    // What you accepted no longer holds the run back, while nothing says it got worse.
     expect(verdicts(null, new Set(["layout", "tests"])).map((v) => v[0])).toEqual(["lint", "new"]);
+    expect(verdicts([{ gate: "layout", origin: "pre_existing", evidence: "same" }], new Set(["layout"])).map((v) => v[0])).toEqual(["tests", "lint", "new"]);
+  });
+
+  it("never lets an acceptance cover a new failure: one the review finds worse, a changed command, or a gate that passed before", () => {
+    const accepted = new Set(["layout", "lint"]);
+    const worse = [{ gate: "layout", origin: "regression" as const, evidence: "a third defect" }];
+    expect(verdicts(worse, accepted)).toContainEqual(["layout", "regression", "a third defect"]);
+    expect(verdicts([{ gate: "layout", origin: "unclear" as const, evidence: "" }], accepted)).toContainEqual(["layout", "regression", null]);
+    // lint passed before the task: no acceptance covers it.
+    expect(verdicts(null, accepted)).toContainEqual(["lint", "regression", null]);
+    expect(gateVerdicts({ results: [gate("layout", false, { command: "other" })], baseline, outOfScope: new Set(["layout"]), attributions: null, accepted })
+      .map((v) => v.kind)).toEqual(["regression"]);
+    // So the reviewer is asked about accepted gates too.
+    expect(gatesToAttribute({ results: now, baseline, outOfScope: outOfScopeGates(layoutOut, baseline) })).toEqual(["layout"]);
   });
 
   it("asks evidence for every blocking finding and an attribution for every gate in question", () => {

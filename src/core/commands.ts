@@ -3,6 +3,10 @@
 
 export type Backend = "claude" | "codex";
 
+/** The pipeline profiles (src/core/profiles.ts), here so the webviews' command parsing knows them too. */
+export const PIPELINE_PROFILES = ["lightweight", "standard", "thorough"] as const;
+export type PipelineProfile = (typeof PIPELINE_PROFILES)[number];
+
 /** Claude Code's permission modes the chat offers, in the order its Shift+Tab goes through them (without plan). */
 export const PERMISSION_MODES = ["manual", "acceptEdits", "auto"] as const;
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
@@ -83,7 +87,8 @@ export type ParsedInput =
   /** `hint`: the words looked like a setting but did not fit one, so they went as a question; says how to set it. */
   | { kind: "ask"; backend: Backend; text: string; hint: string | null }
   | { kind: "recipient"; backend: Backend }
-  | { kind: "pipeline"; task: string }
+  /** `profile`: --profile given before the task; absent: the config's. */
+  | { kind: "pipeline"; task: string; profile?: PipelineProfile }
   /** /discuss: the current recipient answers, the other agent reviews, until they agree. */
   | { kind: "discuss"; question: string }
   /** `save`: --save, into the workspace's config file; `global`: --global, into the user config file. */
@@ -108,7 +113,7 @@ export interface CommandInfo {
 export const COMMANDS: CommandInfo[] = [
   { name: "/claude", usage: "/claude <question>", description: "ask Claude Code; /claude alone sends your next messages to Claude", args: true },
   { name: "/codex", usage: "/codex <question>", description: "ask Codex; /codex alone sends your next messages to Codex", args: true },
-  { name: "/pipeline", usage: "/pipeline <task>", description: "run the full workflow: plan → critique → finalize → implement → verify → review", args: true },
+  { name: "/pipeline", usage: "/pipeline [--profile lightweight|standard|thorough] <task>", description: "run the full workflow: plan → critique → finalize → implement → verify → review", args: true },
   { name: "/discuss", usage: "/discuss <question>", description: "the recipient answers, the other agent reviews, they revise until they agree, then Codex sums it up", args: true },
   { name: "/plan", usage: "/plan", description: "show the final plan of the current run", args: false },
   { name: "/diff", usage: "/diff", description: "show what the current run changed", args: false },
@@ -299,6 +304,17 @@ export function parsePathArg(input: string, platform?: NodeJS.Platform): { path:
 
 const ATTACH_USAGE = 'usage: /attach <path>, e.g. /attach screenshots/bug.png or /attach "~/Desktop/My notes.pdf" (one file at a time)';
 
+const PIPELINE_USAGE = `usage: /pipeline [--profile ${PIPELINE_PROFILES.join("|")}] <task>, e.g. /pipeline --profile lightweight Fix the typo in README`;
+
+/** /pipeline [--profile <name>] <task>: the profile only as the first words, so a task may mention one. */
+function pipelineCommand(rest: string): ParsedInput {
+  const m = /^--profile(?:=|\s+)(\S+)\s*([\s\S]*)$/.exec(rest);
+  if (!m) return rest ? { kind: "pipeline", task: rest } : usage(PIPELINE_USAGE);
+  const profile = PIPELINE_PROFILES.find((p) => p === m[1]);
+  if (!profile) return usage(`unknown profile '${m[1]}': ${PIPELINE_USAGE}`);
+  return m[2] ? { kind: "pipeline", task: m[2], profile } : usage(PIPELINE_USAGE);
+}
+
 /** What a line typed in the chat asks for. `platform`: how /attach reads a backslash (see parsePathArg). */
 export function parseInput(raw: string, platform?: NodeJS.Platform): ParsedInput {
   const text = raw.trim();
@@ -312,7 +328,7 @@ export function parseInput(raw: string, platform?: NodeJS.Platform): ParsedInput
     case "codex":
       return agentCommand(name, rest);
     case "pipeline":
-      return rest ? { kind: "pipeline", task: rest } : usage("usage: /pipeline <task>, e.g. /pipeline Add JWT auth");
+      return pipelineCommand(rest);
     case "discuss":
       return rest ? { kind: "discuss", question: rest } : usage("usage: /discuss <question>, e.g. /discuss Redis or Postgres for the job queue?");
     case "settings":

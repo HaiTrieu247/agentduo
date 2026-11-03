@@ -1151,7 +1151,8 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
       attrs: p.status === "active" ? { "aria-current": "step" } : {},
     }, icon(STAGE_ICON[p.status], "stage-icon"), h("span", { class: "sr-only" }, `${STAGE_WORD[p.status]}: `), stageName(p.label))));
     const usage = usageText(s.totals.costUsd + s.live.costUsd || undefined, s.totals.tokens + s.live.tokens || undefined);
-    progressMeta.textContent = [`plan ${s.planning.round}/${s.planning.limit || "–"}`, `impl ${s.impl.round}/${s.impl.limit || "–"}`, usage, budgetText(s.budget)]
+    progressMeta.textContent = [`plan ${s.planning.round}/${s.planning.limit || "–"}`, `impl ${s.impl.round}/${s.impl.limit || "–"}`, usage, budgetText(s.budget),
+      s.profile && s.profile !== "standard" ? s.profile : ""]
       .filter(Boolean).join(" · ");
   }
 

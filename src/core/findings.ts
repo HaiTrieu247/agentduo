@@ -1,7 +1,7 @@
 import { touched, workspacePath } from "./context.js";
 import type { Change } from "./git.js";
-import type { Finding, Implementation } from "./outputs.js";
-import type { FindingResponse, FindingsSource, RunState } from "./state.js";
+import type { Finding, Implementation, Review } from "./outputs.js";
+import type { FindingResponse, FindingsSource, RunState, TrackedFinding } from "./state.js";
 
 /**
  * The open review findings as they stand now. A finding holds for the revision its review was of (`findingsSource`),
@@ -77,4 +77,163 @@ export function setFindings(state: RunState, findings: Finding[], source: Findin
   state.openFindings = findings;
   state.findingsSource = findings.length ? source : null;
   state.findingResponses = [];
+}
+
+// ------------------------------------------------------------------ identity across reviews
+/**
+ * A review finding's identity across the run's reviews. A reviewer may word, order or number the same issue
+ * differently from one review to the next, so a finding is matched to the ones raised before: by its id when that id
+ * names an issue about the same file (or in close words), else by its words about the same file and criteria. A match
+ * must be unambiguous: when two findings could be the same earlier one, or one could be two earlier ones, they stay
+ * apart. Only a review resolves a finding (by leaving it out); the implementer's answers never do.
+ * See docs/superpowers/specs/2026-11-03-agentduo-convergence-design.md.
+ */
+
+/** How a finding of one review stands against the ones before: new, still open, or raised again after a review resolved it. */
+export type FindingStatus = "new" | "open" | "reopened";
+
+/** One review against the findings before it: each of its findings (by its id) with its identity and status, and what it resolved. */
+export interface ReviewTracking {
+  findings: Record<string, { key: string; status: FindingStatus }>;
+  resolved: string[];
+}
+
+/** How close two wordings must be to be one issue: about a file, and about none (a general finding). */
+const SAME_WORDS = 0.5;
+const SAME_GENERAL_WORDS = 0.6;
+/** An id reused for another file names the same issue only in words this close. */
+const SAME_ID_WORDS = 0.5;
+const MAX_SEEN = 20;
+const STOPWORDS = new Set(["the", "and", "for", "with", "that", "this", "not", "are", "was", "but", "from", "when", "into", "its", "has", "have",
+  "does", "can", "should", "will", "than", "then", "also", "any", "all", "only", "there", "which", "what", "where", "still", "yet", "now", "been"]);
+
+const normalFile = (file: string) => file.trim().replace(/\\/g, "/").replace(/^(\.\/)+/, "").replace(/\/{2,}/g, "/").replace(/\/$/, "");
+
+function stem(word: string): string {
+  if (word.length > 5 && word.endsWith("ing")) return word.slice(0, -3);
+  if (word.length > 4 && word.endsWith("ed")) return word.slice(0, -2);
+  if (word.length > 3 && word.endsWith("s") && !word.endsWith("ss")) return word.slice(0, -1);
+  return word;
+}
+
+const words = (text: string) => new Set(text.normalize("NFKC").toLowerCase().split(/[^\p{L}\p{N}]+/u)
+  .filter((w) => w.length > 2 && !STOPWORDS.has(w)).map(stem));
+
+/** How alike two wordings are (Dice's coefficient of their words): 0 to 1. */
+export function wordsAlike(a: string, b: string): number {
+  const x = words(a);
+  const y = words(b);
+  if (!x.size || !y.size) return 0;
+  let shared = 0;
+  for (const w of x) if (y.has(w)) shared += 1;
+  return (2 * shared) / (x.size + y.size);
+}
+
+const criteriaMeet = (a: string[] | undefined, b: string[] | undefined) => !a?.length || !b?.length || a.some((c) => b.includes(c));
+
+/**
+ * The earlier finding each finding of a review is, or null when it is new: by id first, then by words, and only where
+ * the match is unambiguous (one candidate each way).
+ */
+export function matchFindings(ledger: TrackedFinding[], findings: Finding[]): Array<TrackedFinding | null> {
+  const out: Array<TrackedFinding | null> = findings.map(() => null);
+  const taken = new Set<string>();
+  findings.forEach((f, i) => {
+    const e = ledger.find((x) => x.ids.includes(f.id) && !taken.has(x.key));
+    if (!e) return;
+    const sameFile = normalFile(e.file) === normalFile(f.file);
+    if (!sameFile && wordsAlike(e.issue, f.issue) < SAME_ID_WORDS) return;
+    out[i] = e;
+    taken.add(e.key);
+  });
+  const candidates = findings.map((f, i) => (out[i] ? [] : ledger.filter((e) => {
+    if (taken.has(e.key) || normalFile(e.file) !== normalFile(f.file) || !criteriaMeet(e.criteria, f.criteria)) return false;
+    const alike = Math.max(wordsAlike(e.issue, f.issue), e.firstIssue ? wordsAlike(e.firstIssue, f.issue) : 0);
+    return alike >= (normalFile(f.file) ? SAME_WORDS : SAME_GENERAL_WORDS);
+  })));
+  candidates.forEach((list, i) => {
+    if (list.length !== 1) return;
+    const e = list[0]!;
+    if (candidates.filter((other) => other.includes(e)).length !== 1) return;
+    out[i] = e;
+  });
+  return out;
+}
+
+/** The run's tracked findings; an older run's start from its open findings, as the review they came from raised them. */
+export function ledgerOf(state: RunState): TrackedFinding[] {
+  if (state.trackedFindings) return state.trackedFindings;
+  const at = { round: state.findingsSource?.round ?? 0, revision: state.findingsSource?.revision ?? "" };
+  return state.openFindings.map((f) => ({
+    key: f.id, ids: [f.id], file: f.file, issue: f.issue, severity: f.severity, origin: f.origin, criteria: f.criteria ?? [], status: "open",
+    seen: [at], resolvedRound: null, reopened: 0,
+  }));
+}
+
+/**
+ * The tracked findings after a review of `at.revision`: each of its findings matched to an earlier one (still open, or
+ * reopened) or added (new), and every earlier open one it left out resolved by it.
+ */
+export function trackReview(ledger: TrackedFinding[], findings: Finding[], at: { round: number; revision: string }): { ledger: TrackedFinding[]; tracking: ReviewTracking } {
+  const matches = matchFindings(ledger, findings);
+  const next = ledger.map((e) => ({ ...e, ids: [...e.ids], seen: [...e.seen] }));
+  const byKey = new Map(next.map((e) => [e.key, e]));
+  const tracking: ReviewTracking = { findings: {}, resolved: [] };
+  const raised = new Set<string>();
+  findings.forEach((f, i) => {
+    const m = matches[i];
+    const fields = { file: f.file, issue: f.issue, severity: f.severity, origin: f.origin, criteria: f.criteria ?? [] };
+    if (m) {
+      const e = byKey.get(m.key)!;
+      const status: FindingStatus = e.status === "resolved" ? "reopened" : "open";
+      if (status === "reopened") e.reopened += 1;
+      if (e.issue !== f.issue && !e.firstIssue) e.firstIssue = e.issue;
+      Object.assign(e, fields, { status: "open" });
+      if (!e.ids.includes(f.id)) e.ids.push(f.id);
+      e.seen = [...e.seen, at].slice(-MAX_SEEN);
+      tracking.findings[f.id] = { key: e.key, status };
+      raised.add(e.key);
+      return;
+    }
+    let key = byKey.has(f.id) ? `${f.id}@r${at.round}` : f.id;
+    for (let n = 2; byKey.has(key); n++) key = `${f.id}@r${at.round}-${n}`;
+    const e: TrackedFinding = { key, ids: [f.id], ...fields, status: "open", seen: [at], resolvedRound: null, reopened: 0 };
+    next.push(e);
+    byKey.set(key, e);
+    tracking.findings[f.id] = { key, status: "new" };
+    raised.add(key);
+  });
+  for (const e of next) {
+    if (e.status !== "open" || raised.has(e.key)) continue;
+    e.status = "resolved";
+    e.resolvedRound = at.round;
+    tracking.resolved.push(e.key);
+  }
+  return { ledger: next, tracking };
+}
+
+/**
+ * The review's check against churn: a blocking finding raised for the first time after an earlier review, about code
+ * that did not change since that review (`since.changed`; null when git cannot tell, and nothing is asked then), must
+ * say why it was not reported then, or be given the id of the finding it rewords. A new finding is never refused for
+ * coming late: only for coming late without a reason.
+ */
+export function lateFindingErrors(o: {
+  review: Review; ledger: TrackedFinding[]; since: { round: number; changed: Change[] | null } | null; blockingSeverities: string[]; workspace: string;
+}): string[] {
+  const since = o.since;
+  if (!since || !o.ledger.length || !since.changed) return [];
+  const changed = since.changed;
+  const matches = matchFindings(o.ledger, o.review.findings);
+  const known = o.ledger.map((e) => e.ids.at(-1)!).slice(0, 20).join(", ");
+  return o.review.findings.flatMap((f, i) => {
+    if (matches[i] || !o.blockingSeverities.includes(f.severity) || (f.late_reason ?? "").trim()) return [];
+    if (f.origin === "out_of_scope" && f.severity !== "critical") return [];
+    if (f.file && !workspacePath(f.file, o.workspace)) return []; // outside the workspace: agentduo cannot tell whether it changed
+    const unchanged = f.file ? fileChange(f.file, changed, o.workspace) === null : changed.length === 0;
+    if (!unchanged) return [];
+    return [`finding '${f.id}' is ${f.severity} and new since your review of round ${since.round}, but ${f.file ? `'${f.file}'` : "no file"} did not ` +
+      `change since then: if you reported it before in other words, give it that finding's id (${known}); if it is new, say in 'late_reason' why ` +
+      "it was not reported then"];
+  });
 }

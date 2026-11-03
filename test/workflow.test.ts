@@ -6,6 +6,7 @@ import { AttachmentStore } from "../src/core/attachments.js";
 import { settings } from "../src/core/settings.js";
 import { EventBus, type Message } from "../src/events.js";
 import { approval, critique, finding, impl, issue, plan, review } from "./helpers/builders.js";
+import { runMetrics, type RunMetrics } from "../src/core/render.js";
 import { GIT_MISSING, MARKER, RunGitError } from "../src/core/run-git.js";
 import type { RunGit } from "../src/core/state.js";
 import { CHECK_GATE, testConfig, userDataEnv, type ConfigOverrides } from "./helpers/config.js";
@@ -52,10 +53,10 @@ const readRunOf = (x: Harness, name: string) => readFileSync(join(runDirOf(x), n
 describe("Workflow", () => {
   it("says on DONE which checks passed", async () => {
     expect(await start(happy())).toBe(0);
-    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "quality gates passed and the review approved" });
+    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "quality gates passed on the final code and the review approved" });
     h.events.length = 0;
     expect(await start({ ...happy(), code_reviewer: [{ output: review(false) }] }, { quality_gates: { require_codex_approval: false } })).toBe(0);
-    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "quality gates passed and the review did not approve (require_codex_approval is off)" });
+    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "quality gates passed on the final code and the review did not approve (require_codex_approval is off)" });
   });
 
   it("debates the plan, fixes gate failures and review findings, then reaches DONE", async () => {
@@ -140,7 +141,9 @@ describe("Workflow", () => {
   });
 
   it("escalates after max planning rounds; resume implements the latest plan", async () => {
-    expect(await start({ ...happy(), plan_reviewer: [{ output: critique(false, [issue("C1")]) }] }, { limits: { max_planning_rounds: 2 } })).toBe(2);
+    // The planner revises its plan each round (an unchanged plan would stop the loop as stalled, a round earlier).
+    const scenario = { ...happy(), planner: [{ output: plan("v1") }, { output: plan("v2") }], plan_reviewer: [{ output: critique(false, [issue("C1")]) }] };
+    expect(await start(scenario, { limits: { max_planning_rounds: 2 } })).toBe(2);
     let st = stateOf(h);
     expect([st.phase, st.humanReview?.reason, st.planVersion]).toEqual(["HUMAN_REVIEW", "max_planning_rounds", 2]);
     expect(existsSync(join(runDirOf(h), "report.md"))).toBe(true);
@@ -190,7 +193,7 @@ describe("Workflow", () => {
     expect(stateOf(h).phase).toBe("DONE");
     for (const name of ["critique.r1.json", "approval.r1.json", "review.r1.json"]) expect(JSON.parse(readRun(name)).attempts, name).toBe(2);
     const retry = fake.calls("code_reviewer")[1]!.prompt;
-    expect(retry).toContain("Previous attempt was rejected");
+    expect(retry).toContain("## Your previous answer was rejected");
     expect(retry).toContain("reviewed_commit");
     expect(h.events.filter((e) => e.type === "agent.retry")).toHaveLength(3);
   });
@@ -228,7 +231,11 @@ describe("Workflow", () => {
   });
 
   it("escalates after max review rounds; abort ends the run", async () => {
-    const scenario = { ...happy(), implementer: [{ write: { "app.txt": "fixed\n" }, output: impl("completed", ["F1"]) }], code_reviewer: [{ output: review(false, [finding("F1")]) }] };
+    // Each round changes the finding's file: progress, though the reviewer is not satisfied.
+    const scenario = {
+      ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }],
+      implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed\nagain\n" }, output: impl("completed", ["F1"]) }],
+    };
     expect(await start(scenario, { limits: { max_review_rounds: 2 } })).toBe(2);
     const st = stateOf(h);
     expect([st.humanReview?.reason, st.implRound]).toEqual(["max_review_rounds", 2]);
@@ -333,6 +340,9 @@ describe("Workflow", () => {
     expect(messages().some((m) => m.kind === "gates")).toBe(false);
     expect(fake.calls("implementer")[0]!.prompt).toContain("Run the project's checks yourself");
     expect(h.events.at(-1)).toMatchObject({ type: "run.finished", phase: "DONE", summary: "the review approved; no quality gates configured" });
+    // Not configured is not passed: nothing was verified automatically, and the record and the report say so.
+    expect(st.verification).toMatchObject({ status: "no_gates", gates: [], config: null, gatesAt: null, exceptions: [] });
+    expect(readRun("report.md")).toContain("## Verification\n- no quality gates configured: nothing was verified automatically; the review of round 1 approved it");
   });
 
   it("clears stale gate results when re-planning", async () => {
@@ -549,7 +559,10 @@ describe("Workflow in a folder with no git repository", () => {
   });
 
   it("resumes in a new workflow with the same repository, base and refs, also after `git init`", async () => {
-    const scenario = { ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }, { output: review(false, [finding("F1")]) }, { output: review(true, [], ["F1"]) }] };
+    const scenario = {
+      ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }, { output: review(false, [finding("F1")]) }, { output: review(true, [], ["F1"]) }],
+      implementer: [1, 2, 3].map((n) => ({ write: { "app.txt": `fixed\nround ${n}\n` }, output: impl() })),
+    };
     expect(await run(scenario, { limits: { max_review_rounds: 1 } })).toBe(2);
     const first = stateOf(p);
     expect(await resume(p, { decision: "resume" })).toBe(2);
@@ -1001,8 +1014,9 @@ describe("Workflow: a blocked implementer runs again only on something new", () 
   });
 
   it("retries a failed implementer call on a resume with nothing new: a failure is not a blocker", async () => {
-    // Blocked; the note's attempt fails (continued session, then two fresh ones); a plain resume retries it.
-    expect(await start({ ...happy(), implementer: [blocked(), notJson(), notJson(), notJson(), fixed()] })).toBe(2);
+    // Blocked; the note's attempt fails (continued session, then a fresh one with the same invalid answer, which ends the
+    // call); a plain resume retries it.
+    expect(await start({ ...happy(), implementer: [blocked(), notJson(), notJson(), fixed()] })).toBe(2);
     expect(await resume(h, { decision: "resume", note: "the key is in .env.example" })).toBe(2);
     let st = stateOf(h);
     expect(st.humanReview!.reason).toBe("agent_error");
@@ -1131,22 +1145,179 @@ describe("Workflow: review findings kept in step with the code", () => {
     expect(fake.calls("code_reviewer")).toHaveLength(1);
     expect(fake.calls("implementer")[1]!.prompt).toContain("check failed: app.txt is not fixed");
     expect(record("review.r2.json").snapshot).toBe(record("gates.r2.json").snapshot);
-    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "quality gates passed and the review approved" });
+    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "quality gates passed on the final code and the review approved" });
   });
 
-  it("re-runs the gates once a round at most, when the files keep changing", async () => {
-    fake.setScenario(happy());
+  it("re-runs the gates once a round before a review, and never ends on gates of an earlier revision when the files keep changing", async () => {
+    fake.setScenario({ ...happy(), code_reviewer: [{ output: review(true) }, { output: review(true) }] });
     const { wf, bus } = newWorkflow(h, "Make app.txt fixed");
     let n = 0;
-    // Something writes a file each time the gates finish: the review must still come.
+    // Something writes a file each time a VERIFY step ends: the review still comes, but DONE never rests on stale gates.
     bus.on((e) => {
       if (e.type === "step.completed" && e.entry.phase === "VERIFY") writeFileSync(join(h.repo, "log.txt"), `${++n}\n`);
     });
+    expect(await wf.run()).toBe(2);
+    let st = stateOf(h);
+    expect(st.humanReview).toMatchObject({ reason: "verification_stale", resumePhase: "VERIFY" });
+    expect(st.humanReview!.message).toContain("the final code could not be verified: 3 time(s) in a row");
+    expect(st.humanReview!.details).toEqual(expect.arrayContaining([expect.stringContaining("the quality gates ran on an earlier revision; changed since: M log.txt"),
+      expect.stringContaining("the code changed after the review of round 1 approved it: M log.txt")]));
+    expect(warnings()).toContain("the quality gates' results are out of date again (the quality gates ran on an earlier revision): the review gets them as they " +
+      "are, and the run ends only once the gates ran on the code it ends with");
+    // Bounded: two reviews and five gate steps, then a stop for your decision; never DONE, nothing waived.
+    expect([fake.calls("code_reviewer").length, n, st.verification]).toEqual([2, 5, undefined]);
+    expect(h.events.some((e) => e.type === "run.finished" && e.phase === "DONE")).toBe(false);
+
+    // Once nothing changes them any more, resume verifies the files as they are: the gates run on the code the last
+    // review approved, which needs no review again.
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    st = stateOf(h);
+    expect([st.phase, fake.calls("code_reviewer").length, st.verification!.status, st.verification!.tree]).toEqual(["DONE", 2, "verified", st.gatesTree]);
+    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "quality gates passed on the final code and the review approved" });
+  });
+});
+
+describe("Workflow: DONE rests on the final code", () => {
+  const record = (name: string) => JSON.parse(readRun(name));
+  const statuses = () => stateOf(h).history.map((e) => `${e.phase} ${e.agent} ${e.status}`).filter((s) => !s.startsWith("PLAN"));
+  const notVerified = () => stateOf(h).history.filter((e) => e.status === "not verified").map((e) => e.summary);
+  const gateRuns = () => h.events.filter((e) => e.type === "gate.started").length;
+  /** Runs `act` once, when the reviewer's verdict comes in: after its review, before the run could end. */
+  const afterReview = (bus: EventBus, act: () => void) => {
+    let done = false;
+    bus.on((e) => {
+      if (!done && e.type === "message" && e.message.kind === "review") {
+        done = true;
+        act();
+      }
+    });
+  };
+  // A review that approves but finds a blocking problem there before the task: the run waits for you after the approval.
+  const preexisting = finding("F2", "high", "layout.css", "pre_existing");
+  const approvedThenPaused = (): Scenario => ({ ...happy(), code_reviewer: [{ output: review(true, [preexisting]) }, { output: review(true, [preexisting]) }] });
+
+  it("ends on the gates and the review of the code as it is, running nothing again when nothing changed", async () => {
+    expect(await start(happy())).toBe(0);
+    const st = stateOf(h);
+    const v = st.verification!;
+    expect(v).toMatchObject({
+      status: "verified", commit: st.lastSnapshot!.commit, tree: st.lastSnapshot!.tree, exceptions: [], gatesAt: st.gatesAt,
+      gates: [{ name: "check", required: true, outcome: "passed", exitCode: 0 }], review: { round: 1, revision: st.lastSnapshot!.commit, approved: true },
+    });
+    expect(JSON.parse(readRun("verification.json"))).toEqual(v);
+    expect([record("gates.r1.json").snapshot, record("review.r1.json").snapshot]).toEqual([v.commit, v.commit]);
+    // The baseline and one VERIFY: the evidence was current, so nothing ran again.
+    expect([gateRuns(), fake.calls("code_reviewer").length, notVerified()]).toEqual([2, 1, []]);
+    expect(readRun("report.md")).toContain(`## Verification\n- verified: every required quality gate passed on the final code (\`${v.commit.slice(0, 12)}\`), ` +
+      "and the review of round 1 approved it\n- gates: check passed (ran ");
+  });
+
+  it("does not end on an approval of code that changed after it: new and deleted files get the gates and a review first", async () => {
+    fake.setScenario({ ...happy(), code_reviewer: [{ output: review(true) }, { output: review(true) }] });
+    const { wf, bus } = newWorkflow(h, "Make app.txt fixed");
+    afterReview(bus, () => {
+      writeFileSync(join(h.repo, "notes.txt"), "added after the approval\n");
+      rmSync(join(h.repo, "README.md"));
+    });
     expect(await wf.run()).toBe(0);
-    expect(n).toBe(2);
-    expect(warnings()).toContain("the workspace changed again after the quality gates ran: the review gets the results of an earlier revision");
-    expect(fake.calls("code_reviewer")).toHaveLength(1);
-    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "quality gates passed on an earlier revision and the review approved" });
+    expect(statuses()).toEqual([
+      "IMPLEMENT Claude completed", "VERIFY gates passed", "CODE_REVIEW Codex approved", "CODE_REVIEW orchestrator not verified",
+      "VERIFY gates passed", "CODE_REVIEW Codex approved",
+    ]);
+    expect(notVerified()).toEqual(["the code changed after the review of round 1 approved it: D README.md, A notes.txt; the quality gates ran on an earlier " +
+      "revision; changed since: D README.md, A notes.txt; running the quality gates, then the review, again"]);
+    // The second review is of the files as they are, and DONE rests on that revision: gated, reviewed, the one delivered.
+    expect(fake.calls("code_reviewer")).toHaveLength(2);
+    expect(fake.calls("code_reviewer")[1]!.prompt).toContain("notes.txt");
+    const v = stateOf(h).verification!;
+    expect([record("gates.r1.json").snapshot, record("review.r1.json").snapshot, v.status]).toEqual([v.commit, v.commit, "verified"]);
+    const files = git(h.repo, "ls-tree", "-r", "--name-only", v.commit).split("\n");
+    expect([files.includes("notes.txt"), files.includes("README.md")]).toEqual([true, false]);
+  });
+
+  it("rejects gate results that a change before the end made stale: a broken file goes back to the implementer, never to DONE", async () => {
+    fake.setScenario({
+      ...happy(), implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed again\n" }, output: impl() }],
+      code_reviewer: [{ output: review(true) }, { output: review(true) }],
+    });
+    const { wf, bus } = newWorkflow(h, "Make app.txt fixed");
+    afterReview(bus, () => writeFileSync(join(h.repo, "app.txt"), "oops\n"));
+    expect(await wf.run()).toBe(0);
+    expect(statuses()).toEqual([
+      "IMPLEMENT Claude completed", "VERIFY gates passed", "CODE_REVIEW Codex approved", "CODE_REVIEW orchestrator not verified",
+      "VERIFY gates failed", "IMPLEMENT Claude completed", "VERIFY gates passed", "CODE_REVIEW Codex approved",
+    ]);
+    expect(fake.calls("implementer")[1]!.prompt).toContain("check failed: app.txt is not fixed");
+    expect(stateOf(h).verification).toMatchObject({ status: "verified", review: { round: 2 } });
+    expect(readFileSync(join(h.repo, "app.txt"), "utf8")).toBe("fixed again\n");
+  });
+
+  it("does not let a review certify code the reviewer changed during its own turn", async () => {
+    expect(await start({ ...happy(), code_reviewer: [{ write: { "app.txt": "fixed\nreviewer's tweak\n" }, output: review(true) }, { output: review(true) }] })).toBe(0);
+    expect(stateOf(h).warnings).toContain("Codex (code reviewer) changed files: M app.txt");
+    expect(notVerified()[0]).toMatch(/^the code changed after the review of round 1 approved it: M app\.txt;/);
+    expect(fake.calls("code_reviewer")).toHaveLength(2);
+    expect(fake.calls("code_reviewer")[1]!.prompt).toContain("reviewer's tweak");
+    expect(git(h.repo, "show", `${stateOf(h).verification!.commit}:app.txt`)).toBe("fixed\nreviewer's tweak");
+  });
+
+  it("verifies the files as they are when you resume after editing them while the run waited", async () => {
+    expect(await start(approvedThenPaused())).toBe(2);
+    expect(stateOf(h).humanReview).toMatchObject({ reason: "preexisting_failures", resumePhase: "DONE" });
+    writeFileSync(join(h.repo, "README.md"), "edited while the run waited\n");
+    h.events.length = 0;
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    expect(notVerified()[0]).toMatch(/^the code changed after the review of round 1 approved it: M README\.md;/);
+    expect(statuses().slice(-4)).toEqual(["HUMAN_REVIEW human resume", "CODE_REVIEW orchestrator not verified", "VERIFY gates passed", "CODE_REVIEW Codex approved"]);
+    expect([gateRuns(), fake.calls("code_reviewer").length]).toEqual([1, 2]);
+    const v = stateOf(h).verification!;
+    expect(v).toMatchObject({ status: "exceptions", exceptions: ["finding F2"] });
+    expect(git(h.repo, "show", `${v.commit}:README.md`)).toBe("edited while the run waited");
+    expect(h.events.at(-1)).toMatchObject({ summary: "with accepted exceptions: quality gates passed on the final code and the review approved; " +
+      "you accepted 1 pre-existing failure(s) outside the task's scope (finding F2)" });
+  });
+
+  it("ends straight away on a resume when nothing changed while the run waited: no gate and no review again", async () => {
+    expect(await start(approvedThenPaused())).toBe(2);
+    h.events.length = 0;
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    expect([gateRuns(), fake.calls("code_reviewer").length, notVerified(), stateOf(h).verification!.status]).toEqual([0, 1, [], "exceptions"]);
+  });
+
+  it("runs the gates again when their configuration changed though the code did not, keeping the review's approval", async () => {
+    expect(await start(approvedThenPaused())).toBe(2);
+    const before = record("gates.r1.json").config as string;
+    // As `duo resume --reload-config` after the config file changed.
+    h.cfg = testConfig(fake, { gates: [{ ...CHECK_GATE, timeout_sec: 30 }] });
+    h.events.length = 0;
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    expect(notVerified()).toEqual(["the gate configuration changed since they ran: gate 'check': timeout 60s → 30s; running the quality gates again"]);
+    expect([gateRuns(), fake.calls("code_reviewer").length]).toEqual([1, 1]);
+    const v = stateOf(h).verification!;
+    expect([v.config === before, v.config === record("gates.r1.json").config, v.status]).toEqual([false, true, "exceptions"]);
+  });
+
+  it("checks an older run's final code too, running the gates it cannot vouch for, and keeps a DONE it ended with before", async () => {
+    expect(await start(approvedThenPaused())).toBe(2);
+    // As an older agentduo left the run: no gate configuration, approval or final check recorded.
+    const path = join(runDirOf(h), "state.json");
+    const older = JSON.parse(readFileSync(path, "utf8"));
+    for (const key of ["gatesConfig", "gatesAt", "reviewApproval", "finalCheck"]) delete older[key];
+    writeFileSync(path, JSON.stringify(older));
+    h.events.length = 0;
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    expect(notVerified()).toEqual(["it is not known which gate configuration they ran with (a run of an older agentduo); running the quality gates again"]);
+    // The approval review.json records still covers the code: the gates run again, the review does not.
+    expect([gateRuns(), fake.calls("code_reviewer").length, stateOf(h).verification!.status]).toEqual([1, 1, "exceptions"]);
+    // A run that ended DONE before agentduo checked its final code stays DONE, said as it was then.
+    const done = JSON.parse(readFileSync(path, "utf8"));
+    delete done.verification;
+    writeFileSync(path, JSON.stringify(done));
+    h.events.length = 0;
+    expect(await resume(h)).toBe(0);
+    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", phase: "DONE",
+      summary: "quality gates passed and the review approved; you accepted 1 pre-existing failure(s) outside the task's scope (finding F2)" });
+    expect(gateRuns()).toBe(0);
   });
 });
 
@@ -1199,8 +1370,11 @@ process.exit(ok ? 0 : 1);
     expect(await resume(h, { decision: "resume" })).toBe(0);
     st = stateOf(h);
     expect(st.phase).toBe("DONE");
-    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "quality gates passed, except 'layout', failing as before the task and the review " +
-      "approved; you accepted 1 pre-existing failure(s) outside the task's scope (gate 'layout')" });
+    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "with accepted exceptions: quality gates passed on the final code, except 'layout', " +
+      "failing as before the task, and the review approved; you accepted 1 pre-existing failure(s) outside the task's scope (gate 'layout')" });
+    // Accepted, never passed: the record keeps the gate's failure apart from the gates that passed.
+    expect(st.verification).toMatchObject({ status: "exceptions", exceptions: ["gate 'layout'"], gates: [
+      { name: "check", outcome: "passed" }, { name: "layout", outcome: "accepted", exitCode: 1 }] });
     expect([st.accepted!.conflicts.length, st.accepted!.failures.map((f) => f.id)]).toEqual([1, ["layout"]]);
     const report = readRun("report.md");
     expect(report).toContain("## Accepted by you\nThe run would have stopped on these; your decision let it go on.\n- [conflict, implemented as planned] the required gate 'layout'");
@@ -1278,6 +1452,38 @@ process.exit(ok ? 0 : 1);
     st = stateOf(h);
     expect(st.phase).toBe("DONE");
     expect(h.events.at(-1)).toMatchObject({ summary: expect.stringContaining("; you accepted 1 pre-existing failure(s) outside the task's scope (finding F2)") });
+  });
+
+  it("never lets your acceptance of a gate's old failure cover a failure the change made worse", async () => {
+    const worse = { gate: "layout", origin: "regression" as const, evidence: "a third defect (sidebar), which the diff causes" };
+    const scenario = {
+      ...happy(),
+      planner: [{ output: outOfScopePlan() }],
+      implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed\nsidebar restored\n" }, output: impl() }],
+      code_reviewer: [
+        // Not approved yet: once you accept the layout gate's old failure, it reviews again.
+        { output: { ...review(false), gate_failures: [preexistingGate] } },
+        // It approves the change, but finds the accepted gate worse: that alone keeps the run from DONE.
+        { output: { ...review(true), gate_failures: [worse] } },
+        { output: { ...review(true), gate_failures: [preexistingGate] } },
+      ],
+    };
+    expect(await start(scenario, withLayout())).toBe(2);
+    expect(await resume(h, { decision: "resume" })).toBe(2);
+    expect(stateOf(h).humanReview).toMatchObject({ reason: "preexisting_failures", resumePhase: "CODE_REVIEW" });
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    // Accepted, the gate is still the reviewer's to attribute; found worse, it is the implementer's to fix, accepted or not.
+    const second = fake.calls("code_reviewer")[1]!.prompt;
+    expect(second).toContain("## Required gates that failed before the task too\n- `layout`");
+    expect(second).toContain("A gate the user accepted as failing before the task is listed too");
+    expect(fake.calls("implementer")).toHaveLength(2);
+    expect(fake.calls("implementer")[1]!.prompt).toContain("layout: 2 defects (header, footer)");
+    const st = stateOf(h);
+    expect(st.history.map((e) => `${e.phase} ${e.status}`).filter((x) => x.startsWith("CODE_REVIEW") || x.startsWith("IMPLEMENT"))).toEqual([
+      "IMPLEMENT completed", "CODE_REVIEW changes requested", "CODE_REVIEW changes requested", "IMPLEMENT completed", "CODE_REVIEW approved",
+    ]);
+    // DONE only once the reviewer of the final code finds it failing as before: an exception, never a pass.
+    expect(st.verification).toMatchObject({ status: "exceptions", exceptions: ["gate 'layout'"], gates: [{ name: "check", outcome: "passed" }, { name: "layout", outcome: "accepted" }] });
   });
 
   it("asks the reviewer for evidence of every blocking finding", async () => {
@@ -1434,6 +1640,385 @@ describe("Workflow: the task's scope", () => {
     const scenario = { ...happy(), planner: [{ output: plan() }, { output: kept }], plan_reviewer: [{ output: critique(false, [issue("C1"), landscape]) }, { output: critique(true) }] };
     expect(await start(scenario)).toBe(0);
     expect(stateOf(h).history.some((e) => e.status === "scope_expansion")).toBe(false);
+  });
+});
+
+describe("Workflow: review loops that do not converge", () => {
+  /** The finding each review raises about app.txt, in its own words. */
+  const nullCheck = (id: string, issue = "parse() accepts a null input and then crashes") => ({ ...finding(id, "high", "app.txt"), issue });
+
+  it("stops a fix loop in which the implementer reports completed but nothing moves, and resumes only on something new", async () => {
+    const scenario = {
+      ...happy(),
+      implementer: [
+        { write: { "app.txt": "fixed\n" }, output: impl() },
+        // Claims the fix, changes nothing.
+        { output: impl("completed", ["F1"]) },
+        { write: { "app.txt": "fixed\nnull checked\n" }, output: impl("completed", ["F1"]) },
+      ],
+      code_reviewer: [
+        { output: review(false, [nullCheck("F1")]) },
+        // The same finding, renumbered and reworded.
+        { output: review(false, [nullCheck("F4", "a null input still crashes parse()")]) },
+        { output: review(true, [], ["F1"]) },
+      ],
+    };
+    expect(await start(scenario)).toBe(2);
+    let st = stateOf(h);
+    expect(st.humanReview).toMatchObject({ reason: "review_stalled", fromPhase: "CODE_REVIEW", resumePhase: "IMPLEMENT" });
+    const [stuck, attempt, count] = st.humanReview!.details;
+    expect(stuck).toContain("F1 (F4 in this review) [high] app.txt: a null input still crashes parse() — open since round 1, raised in rounds 1, 2 on `");
+    expect(stuck).toContain("; the implementer answered: fixed (round 2)");
+    expect([attempt, count]).toEqual(["round 2: the implementer reported completed and changed no file", "1 review round(s) in a row without progress (since round 2)"]);
+    expect([fake.calls("implementer").length, fake.calls("code_reviewer").length]).toEqual([2, 2]);
+    expect(st.trackedFindings!.map((e) => [e.key, e.ids, e.status])).toEqual([["F1", ["F1", "F4"], "open"]]);
+
+    // Resume with nothing new: no round, and the run says why.
+    expect(await resume(h, { decision: "resume" })).toBe(2);
+    st = stateOf(h);
+    expect(st.humanReview).toMatchObject({ reason: "review_stalled" });
+    expect(st.humanReview!.message).toContain("nothing changed since the review loop stalled, so no fix round was started");
+    expect(fake.calls("implementer")).toHaveLength(2);
+
+    // A note is new: another round, and only the next review resolves the finding.
+    expect(await resume(h, { decision: "resume", note: "parse() must return null for a null input" })).toBe(0);
+    expect(fake.calls("implementer")[2]!.prompt).toContain("parse() must return null for a null input");
+    st = stateOf(h);
+    expect([st.phase, st.stall ?? null]).toEqual(["DONE", null]);
+    expect(st.trackedFindings!.find((e) => e.key === "F1")).toMatchObject({ status: "resolved", resolvedRound: 3 });
+    const report = readRun("report.md");
+    expect(report).toContain("## Findings across reviews\n- `F1` (also F4) [high] app.txt — parse() accepts a null input and then crashes → " +
+      "a null input still crashes parse(): raised in rounds 1, 2; resolved by the review of round 3");
+    expect(report).toContain("## Review rounds\n- round 1: 1 new, 0 still open, 0 reopened, 0 resolved\n" +
+      "- round 2: 0 new, 1 still open, 0 reopened, 0 resolved — no progress\n" +
+      "- round 3: 0 new, 0 still open, 0 reopened, 1 resolved — progress: the review resolved F1; app.txt changed (the file of F1)");
+  });
+
+  it("does not take a productive fix round for a stalled one", async () => {
+    const scenario = {
+      ...happy(),
+      implementer: [
+        { write: { "app.txt": "fixed\n" }, output: impl() },
+        { write: { "app.txt": "fixed\nhalf of it\n" }, output: impl("completed", ["F1", "F2"]) },
+        { write: { "app.txt": "fixed\nall of it\n" }, output: impl("completed", ["F1"]) },
+      ],
+      code_reviewer: [
+        { output: review(false, [nullCheck("F1"), { ...finding("F2", "high", "app.txt"), issue: "the error message names the wrong file" }]) },
+        // F2 resolved; F1 still open, its file changed.
+        { output: review(false, [nullCheck("F1")], ["F2"]) },
+        { output: review(true, [], ["F1"]) },
+      ],
+    };
+    expect(await start(scenario)).toBe(0);
+    const st = stateOf(h);
+    expect(st.history.some((e) => e.status === "review_stalled")).toBe(false);
+    expect(st.cycles!.map((c) => c.progress)).toEqual([null, ["the review resolved F2", "app.txt changed (the file of F1, F2)"],
+      ["the review resolved F1", "app.txt changed (the file of F1)"]]);
+  });
+
+  it("allows one cycle without progress when files changed, stops at the second, and keeps everything when you abort", async () => {
+    const scenario = {
+      ...happy(),
+      implementer: [
+        { write: { "app.txt": "fixed\n" }, output: impl() },
+        { write: { "notes.md": "tried once\n" }, output: impl("completed", ["F1"]) },
+        { write: { "notes.md": "tried twice\n" }, output: impl("completed", ["F1"]) },
+      ],
+      code_reviewer: [{ output: review(false, [nullCheck("F1")]) }],
+    };
+    expect(await start(scenario)).toBe(2);
+    let st = stateOf(h);
+    expect([st.humanReview?.reason, fake.calls("implementer").length, fake.calls("code_reviewer").length]).toEqual(["review_stalled", 3, 3]);
+    expect(st.humanReview!.details.slice(1)).toEqual(["round 3: the implementer reported completed and changed only notes.md (none of these findings' files)",
+      "2 review round(s) in a row without progress (since round 2)"]);
+    expect(await resume(h, { decision: "abort" })).toBe(3);
+    st = stateOf(h);
+    expect([st.phase, st.trackedFindings!.length, st.cycles!.length, st.stall!.count]).toEqual(["ABORTED", 1, 3, 2]);
+    expect(st.openFindings.map((f) => f.id)).toEqual(["F1"]);
+  });
+
+  it("asks why a blocking finding is new on code that did not change, tells the retry exactly that, and stops when it keeps giving no reason", async () => {
+    const late = { ...finding("F2", "high", "other.txt"), issue: "other.txt has no license header" };
+    const lateError = "finding 'F2' is high and new since your review of round 1, but 'other.txt' did not change since then: if you reported it " +
+      "before in other words, give it that finding's id (F1); if it is new, say in 'late_reason' why it was not reported then";
+    const scenario = {
+      ...happy(),
+      implementer: [
+        { write: { "app.txt": "fixed\n" }, output: impl() },
+        { write: { "app.txt": "fixed\nnull checked\n" }, output: impl("completed", ["F1"]) },
+        { write: { "other.txt": "// license\n" }, output: impl("completed", ["F2"]) },
+      ],
+      code_reviewer: [
+        { output: review(false, [nullCheck("F1")]) },
+        // Round 2: F1 resolved, and a blocking finding new on a file nobody touched, with no reason, twice.
+        { output: review(false, [late], ["F1"]) },
+        { output: review(false, [late], ["F1"]) },
+        // After your resume: explained, so it is the task's to fix.
+        { output: review(false, [{ ...late, late_reason: "round 1 read only app.txt; AC1 covers every file the change ships" }], ["F1"]) },
+        { output: review(true, [], ["F2"]) },
+      ],
+    };
+    expect(await start(scenario)).toBe(2);
+    let st = stateOf(h);
+    expect(st.humanReview).toMatchObject({ reason: "agent_error", fromPhase: "CODE_REVIEW", details: [lateError] });
+    expect(st.humanReview!.message).toContain("the same invalid answer came back after it was told what to correct");
+    // Round 2's first answer continued the reviewer's session; the retry was a fresh one, told exactly what to correct.
+    const [, continued, fresh] = fake.calls("code_reviewer");
+    expect([!!continued!.resumed, fresh!.resumed]).toEqual([true, undefined]);
+    expect(fresh!.prompt).toContain("## Your previous answer was rejected\nagentduo checked your previous answer to this request, given in a session you " +
+      `cannot see, and rejected it:\n- ${lateError}\n`);
+    // The same answer again: no third attempt, and no fix round for the unsupported finding.
+    expect([fake.calls("code_reviewer").length, fake.calls("implementer").length]).toEqual([3, 2]);
+    expect(readRun("report.md")).toContain("## Rejected answers\n- code reviewer, round 2: 2 answer(s) rejected (" + lateError + "); the call failed");
+
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    st = stateOf(h);
+    expect(st.phase).toBe("DONE");
+    expect(st.trackedFindings!.map((e) => [e.key, e.status])).toEqual([["F1", "resolved"], ["F2", "resolved"]]);
+    expect(fake.calls("code_reviewer")[3]!.prompt).toContain("`late_reason`");
+  });
+
+  it("re-plans from a stalled loop with your note, keeping the implementation in the files", async () => {
+    const scenario = {
+      ...happy(),
+      planner: [{ output: plan() }, { output: plan("v2") }],
+      plan_reviewer: [{ output: critique(true) }, { output: critique(true) }],
+      plan_finalizer: [{ output: approval(true) }, { output: approval(true) }],
+      implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }, { output: impl("completed", ["F1"]) }, { write: { "README.md": "null input: unsupported\n" }, output: impl() }],
+      code_reviewer: [{ output: review(false, [nullCheck("F1")]) }, { output: review(false, [nullCheck("F1")]) }, { output: review(true) }],
+    };
+    expect(await start(scenario)).toBe(2);
+    expect(stateOf(h).humanReview?.reason).toBe("review_stalled");
+    expect(await resume(h, { decision: "revise", note: "a null input is out of the task: document it instead" })).toBe(0);
+    const st = stateOf(h);
+    expect([st.phase, st.finalPlanVersion, st.stall ?? null]).toEqual(["DONE", 2, null]);
+    expect(readFileSync(join(h.repo, "app.txt"), "utf8")).toBe("fixed\n");
+    expect(st.trackedFindings!.find((e) => e.key === "F1")).toMatchObject({ status: "resolved", resolvedRound: 3 });
+  });
+});
+
+describe("Workflow: pipeline profiles", () => {
+  const withProfile = (profile: "lightweight" | "standard" | "thorough", overrides: ConfigOverrides = {}) => {
+    h.cfg = testConfig(fake, { ...overrides, pipeline: { profile } });
+  };
+  const timeline = () => stateOf(h).history.map((e) => `${e.phase} ${e.agent} ${e.status}`).filter((x) => !x.startsWith("PLAN gates"));
+  const escalations = () => stateOf(h).profile!.changes.map((c) => `${c.from}>${c.to} ${c.signal}`);
+  /** One run of `scenario` under `profile`, from the same files each time: its metrics. */
+  const measure = async (profile: "lightweight" | "standard", scenario: Scenario): Promise<RunMetrics> => {
+    rmSync(join(h.repo, "app.txt"), { force: true });
+    withProfile(profile);
+    fake.setScenario(scenario);
+    expect(await newWorkflow(h, "Make app.txt fixed").wf.run()).toBe(0);
+    return runMetrics(stateOf(h));
+  };
+
+  it("benchmark: does the same small task with fewer handoffs in lightweight, and every required check still", async () => {
+    const standard = await measure("standard", happy());
+    const light = await measure("lightweight", happy());
+    // Same task, same files, same answers: the sign-off is the one handoff lightweight leaves out.
+    expect([standard.agentCalls, light.agentCalls]).toEqual([5, 4]);
+    expect([standard.steps.signOffs, light.steps.signOffs]).toEqual([1, 0]);
+    for (const m of [standard, light]) {
+      // A plan, an independent critique, the implementation, an independent review, the baseline and the gates, the final check.
+      expect(m).toMatchObject({ outcome: "DONE", verification: "verified", requiredGates: "passed", review: "approved", planningRounds: 1, implementationRounds: 1,
+        steps: { plans: 1, critiques: 1, implementations: 1, reviews: 1, gateRuns: 2 }, decisions: 0 });
+    }
+    expect(light.byRole).toEqual({ planner: expect.objectContaining({ calls: 1 }), plan_reviewer: expect.objectContaining({ calls: 1 }),
+      implementer: expect.objectContaining({ calls: 1 }), code_reviewer: expect.objectContaining({ calls: 1 }) });
+    expect(standard.byRole.plan_finalizer).toMatchObject({ calls: 1, tokens: 1234, unpricedCalls: 1 });
+    // The counts add up to the run's totals: no separate accounting.
+    for (const m of [standard, light]) {
+      expect(Object.values(m.byRole).reduce((n, u) => n + u.calls, 0)).toBe(m.agentCalls);
+      expect(Object.values(m.byRole).reduce((n, u) => n + u.tokens, 0)).toBe(m.tokens);
+      expect(Math.round(Object.values(m.byRole).reduce((n, u) => n + u.costUsd, 0) * 100) / 100).toBe(m.costUsd);
+    }
+    expect(light.profile).toEqual({ initial: "lightweight", final: "lightweight", escalations: [] });
+    expect(JSON.parse(readRun("metrics.json"))).toEqual(runMetrics(stateOf(h)));
+    expect(readRun("report.md")).toContain("## Profile and metrics\n- profile: lightweight\n- agent calls: 4 (planner 1 · 1,234 tokens (1 unpriced); plan critic 1 · 0 tokens · $0.01;");
+
+    // A planner that second-guesses a plan the critic approved costs standard a whole planning round more; lightweight none.
+    // The fake counts each role's calls across this test's runs: the first standard run took the sign-off's first answer.
+    const churn = { ...happy(), plan_finalizer: [{ output: approval(true) }, { output: approval(false, [issue("S1", "high", "name the helper after the module")]) },
+      { output: approval(true) }] };
+    const standardChurn = await measure("standard", churn);
+    const lightChurn = await measure("lightweight", churn);
+    expect([standardChurn.agentCalls, lightChurn.agentCalls, standardChurn.planningRounds, lightChurn.planningRounds]).toEqual([8, 4, 2, 1]);
+    expect(lightChurn).toMatchObject({ verification: "verified", review: "approved", steps: { critiques: 1, reviews: 1 } });
+  });
+
+  it("tells the planner and critic what lightweight asks, and goes straight from the critic's approval to implementation", async () => {
+    withProfile("lightweight");
+    expect(await start(happy())).toBe(0);
+    expect(fake.calls("planner")[0]!.prompt).toContain("## Pipeline profile: lightweight\nThe task is expected to be small and clearly specified. Keep the plan short");
+    expect(fake.calls("plan_reviewer")[0]!.prompt).toContain("A plan you approve goes straight to implementation: there is no sign-off round after you.");
+    // No profile text where it asks nothing: the implementer and reviewer get the same prompts as in standard.
+    expect(fake.calls("implementer")[0]!.prompt).not.toContain("Pipeline profile");
+    expect(fake.calls("code_reviewer")[0]!.prompt).not.toContain("Pipeline profile");
+    expect(timeline()).toEqual(["PLAN Codex plan created", "PLAN_REVIEW Claude approved", "IMPLEMENT Claude completed", "VERIFY gates passed", "CODE_REVIEW Codex approved"]);
+    expect(readRun("plan.final.md")).toContain("final plan v1");
+    expect(h.events.find((e) => e.type === "run.started")).toMatchObject({ profile: "lightweight" });
+    expect(h.events.filter((e) => e.type === "phase.started").every((e) => e.type === "phase.started" && e.profile === "lightweight")).toBe(true);
+  });
+
+  it("moves to standard on a blocking plan issue, keeping the plan, the critique and the sessions, and signs the revision off", async () => {
+    withProfile("lightweight");
+    const scenario = {
+      ...happy(),
+      planner: [{ output: plan("v1") }, { output: plan("v2", { feedback_resolution: [{ issue_id: "C1", decision: "accepted", rationale: "handled" }] }) }],
+      plan_reviewer: [{ output: critique(false, [issue("C1", "high", "the plan never handles an empty app.txt")]) }, { output: critique(true) }],
+    };
+    expect(await start(scenario)).toBe(0);
+    expect(timeline()).toEqual(["PLAN Codex plan created", "PLAN_REVIEW Claude changes requested",
+      "PLAN_REVIEW orchestrator profile escalated", "PLAN Codex plan revised", "PLAN_REVIEW Claude approved", "PLAN_FINALIZE Codex plan finalized",
+      "IMPLEMENT Claude completed", "VERIFY gates passed", "CODE_REVIEW Codex approved"]);
+    expect(escalations()).toEqual(["lightweight>standard plan_blocking"]);
+    expect(stateOf(h).profile!.changes[0]).toMatchObject({ phase: "PLAN_REVIEW", round: 1, reason: "the plan critic raised 1 blocking issue(s) (C1)" });
+    // The planner goes on in its own session with the critique, told the run is now standard; nothing ran twice.
+    const second = fake.calls("planner")[1]!;
+    expect(second.resumed).toBe(fake.calls("planner")[0]!.session);
+    expect(second.prompt).toContain("## Pipeline profile: standard (escalated from lightweight)");
+    expect(second.prompt).toContain("the plan never handles an empty app.txt");
+    expect([fake.calls("implementer").length, fake.calls("code_reviewer").length]).toEqual([1, 1]);
+    expect(readRun("report.md")).toContain("- profile: standard (from lightweight)\n- escalated: lightweight → standard at PLAN_REVIEW round 1 (plan_blocking): " +
+      "the plan critic raised 1 blocking issue(s) (C1)");
+    expect(stateOf(h).verification!.status).toBe("verified");
+  });
+
+  it("never lets lightweight skip a fix round for a blocking review finding, and moves to standard when one round is not enough", async () => {
+    withProfile("lightweight");
+    const scenario = {
+      ...happy(),
+      implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed\nv2\n" }, output: impl("completed", ["F1"]) },
+        { write: { "app.txt": "fixed\nv3\n" }, output: impl("completed", ["F1"]) }],
+      code_reviewer: [{ output: review(false, [finding("F1")]) }, { output: review(false, [finding("F1")]) }, { output: review(true, [], ["F1"]) }],
+    };
+    expect(await start(scenario)).toBe(0);
+    const reviews = timeline().filter((x) => x.startsWith("CODE_REVIEW"));
+    expect(reviews).toEqual(["CODE_REVIEW Codex changes requested", "CODE_REVIEW Codex changes requested", "CODE_REVIEW orchestrator profile escalated",
+      "CODE_REVIEW Codex approved"]);
+    expect(escalations()).toEqual(["lightweight>standard review_rounds"]);
+    expect([fake.calls("implementer").length, fake.calls("code_reviewer").length, stateOf(h).verification!.status]).toEqual([3, 3, "verified"]);
+  });
+
+  it("escalates on a plan larger than a lightweight task, and on files the plan never named", async () => {
+    withProfile("lightweight");
+    const steps = Array.from({ length: 7 }, (_, i) => ({ id: `S${i + 1}`, description: `step ${i + 1}`, files: ["app.txt"] }));
+    expect(await start({ ...happy(), planner: [{ output: plan("big", { steps }) }] })).toBe(0);
+    expect(escalations()).toEqual(["lightweight>standard plan_size"]);
+    expect(timeline()).toContain("PLAN_FINALIZE Codex plan finalized");
+    expect(stateOf(h).profile!.changes[0]!.reason).toBe("the plan has 7 steps (a lightweight task has at most 6)");
+
+    rmSync(join(h.repo, "app.txt"));
+    const sprawl = { "app.txt": "fixed\n", "src/a.ts": "a\n", "src/b.ts": "b\n", "docs/c.md": "c\n" };
+    expect(await start({ ...happy(), implementer: [{ write: sprawl, output: impl() }] })).toBe(0);
+    expect(escalations()).toEqual(["lightweight>standard unplanned_files"]);
+    expect(stateOf(h).profile!.changes[0]!.reason).toBe("round 1 changed 3 file(s) no step of the plan names (docs/c.md, src/a.ts, src/b.ts)");
+  });
+
+  it("pauses for your decision on a requirements conflict and on a scope expansion in every profile", async () => {
+    const conflict = { id: "K1", description: "AC1 needs the old format, the task drops it", between: ["AC1", "task"] };
+    const landscape = issue("C2", "medium", "also verify the layout in landscape", "out_of_scope");
+    const widened = plan("v2", { feedback_resolution: [{ issue_id: "C1", decision: "accepted", rationale: "done" }, { issue_id: "C2", decision: "accepted", rationale: "cheap" }] });
+    for (const profile of ["lightweight", "standard", "thorough"] as const) {
+      withProfile(profile);
+      expect(await start({ ...happy(), plan_reviewer: [{ output: { ...critique(true), conflicts: [conflict] } }] })).toBe(2);
+      expect(stateOf(h).humanReview?.reason, profile).toBe("requirements_conflict");
+      expect(await start({ ...happy(), planner: [{ output: plan() }, { output: widened }],
+        plan_reviewer: [{ output: critique(false, [issue("C1"), landscape]) }] })).toBe(2);
+      expect(stateOf(h).humanReview?.reason, profile).toBe("scope_expansion");
+      fake.setScenario({});
+    }
+    expect(fake.calls("implementer")).toHaveLength(0);
+  });
+
+  it("goes deeper in thorough: a sign-off even when not required, a review even when gates fail, and prompts that ask for depth", async () => {
+    withProfile("thorough", { quality_gates: { require_plan_approval: false } });
+    const scenario = {
+      ...happy(),
+      implementer: [{ write: { "app.txt": "broken\n" }, output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl("completed", ["F1"]) }],
+      code_reviewer: [{ output: review(false, [finding("F1")]) }, { output: review(true, [], ["F1"]) }],
+    };
+    expect(await start(scenario)).toBe(0);
+    expect(timeline()).toEqual(["PLAN Codex plan created", "PLAN_REVIEW Claude approved", "PLAN_FINALIZE Codex plan finalized", "IMPLEMENT Claude completed",
+      "VERIFY gates failed", "CODE_REVIEW Codex changes requested", "IMPLEMENT Claude completed", "VERIFY gates passed", "CODE_REVIEW Codex approved"]);
+    expect(fake.calls("code_reviewer")[0]!.prompt).toContain("## Pipeline profile: thorough\nThe task is expected to be complex or risky: review in depth");
+    expect(fake.calls("planner")[0]!.prompt).toContain("Cover the architecture and the alternatives you rejected");
+    expect(escalations()).toEqual([]);
+    expect(stateOf(h).verification!.status).toBe("verified");
+  });
+
+  it("detects a planning loop that does not converge, even with renumbered issues, and stops before spending every round", async () => {
+    const stuck = (id: string) => critique(false, [issue(id, "high", "the plan never handles an empty app.txt")]);
+    const answer = (v: string) => plan(v, { feedback_resolution: [{ issue_id: "C1", decision: "disputed", rationale: "empty input cannot happen" }] });
+    const scenario = {
+      ...happy(),
+      planner: [{ output: plan("v1") }, { output: answer("v2") }, { output: answer("v3") }, { output: answer("v4") }],
+      // The same issue each time, renumbered once: one issue, never resolved.
+      plan_reviewer: [{ output: stuck("C1") }, { output: stuck("C4") }, { output: stuck("C1") }, { output: critique(true) }],
+    };
+    expect(await start(scenario)).toBe(2);
+    let st = stateOf(h);
+    expect(st.humanReview).toMatchObject({ reason: "planning_stalled", fromPhase: "PLAN_REVIEW", resumePhase: "IMPLEMENT" });
+    expect([st.planningRound, st.limits.planningRounds, fake.calls("plan_reviewer").length]).toEqual([3, 4, 3]);
+    expect(st.humanReview!.details).toEqual([
+      "C1 [high] the plan never handles an empty app.txt — raised in rounds 1, 2, 3; the plan answered: disputed (empty input cannot happen)",
+      "2 critique(s) in a row without progress (since round 2)",
+    ]);
+    expect(st.planCycles!.map((c) => c.progress)).toEqual([null, [], []]);
+    expect(readRun("report.md")).toContain("## Planning rounds\n- round 1: blocking C1\n- round 2: blocking C1 — no progress\n- round 3: blocking C1 — no progress");
+    // Your decision: implement the latest plan as it is, recorded as accepted by you.
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    st = stateOf(h);
+    expect([st.phase, st.finalPlanVersion, st.planStall]).toEqual(["DONE", 3, null]);
+    expect(readRun("plan.final.md")).toContain("accepted by the human operator");
+  });
+
+  it("keeps a resumed run's profile whatever the config says now, and runs an older run with none as standard", async () => {
+    withProfile("lightweight");
+    fake.setScenario(happy());
+    const { wf, bus } = newWorkflow(h, "Make app.txt fixed");
+    bus.on((e) => {
+      if (e.type === "step.completed" && e.entry.phase === "PLAN" && e.entry.agent === "Codex") wf.requestStop();
+    });
+    expect(await wf.run()).toBe(130);
+    withProfile("thorough");
+    h.events.length = 0;
+    expect(await resume(h)).toBe(0);
+    expect(h.events).toContainEqual({ type: "warning", text: "this run keeps its pipeline profile, lightweight; pipeline.profile 'thorough' applies to new runs" });
+    expect(stateOf(h).profile).toEqual({ initial: "lightweight", name: "lightweight", changes: [] });
+    expect(timeline()).not.toContain("PLAN_FINALIZE Codex plan finalized");
+
+    // An older run, stopped before profiles existed: it goes on as standard (with its sign-off), whatever the config says.
+    withProfile("lightweight");
+    fake.setScenario(happy());
+    const older = newWorkflow(h, "Make app.txt fixed");
+    older.bus.on((e) => {
+      if (e.type === "step.completed" && e.entry.phase === "PLAN" && e.entry.agent === "Codex") older.wf.requestStop();
+    });
+    expect(await older.wf.run()).toBe(130);
+    const path = join(runDirOf(h), "state.json");
+    const st = JSON.parse(readFileSync(path, "utf8"));
+    delete st.profile;
+    writeFileSync(path, JSON.stringify(st));
+    expect(await resume(h)).toBe(0);
+    expect(stateOf(h).profile).toEqual({ initial: "standard", name: "standard", changes: [] });
+    expect(timeline()).toContain("PLAN_FINALIZE Codex plan finalized");
+  });
+
+  it("keeps the budget and the circuit breakers in lightweight", async () => {
+    withProfile("lightweight", { limits: { max_run_agent_calls: 2 } });
+    expect(await start(happy())).toBe(2);
+    expect(stateOf(h).humanReview).toMatchObject({ reason: "budget_exhausted", resumePhase: "IMPLEMENT" });
+    expect(fake.calls("implementer")).toHaveLength(0);
+
+    withProfile("lightweight");
+    expect(await start({ ...happy(), implementer: [{ output: impl("blocked", [], "API key needed") }] })).toBe(2);
+    expect(stateOf(h).humanReview!.reason).toBe("implementer_blocked");
+    expect(escalations()).toEqual(["lightweight>standard implementer_blocked"]);
+    // Nothing new: the implementer does not run again, whichever profile the run is in.
+    expect(await resume(h, { decision: "resume" })).toBe(2);
+    expect(stateOf(h).humanReview!.reason).toBe("no_progress");
+    expect(fake.calls("implementer")).toHaveLength(1);
   });
 });
 

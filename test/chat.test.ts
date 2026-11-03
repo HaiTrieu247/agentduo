@@ -868,7 +868,7 @@ describe("Chat: the pipeline", () => {
     await chat.submit("/plan");
     expect(ui.lines.at(-1)).toContain("no plan yet");
     await chat.submit("/pipeline");
-    expect(ui.lines.at(-1)).toContain("usage: /pipeline <task>");
+    expect(ui.lines.at(-1)).toContain("usage: /pipeline [--profile lightweight|standard|thorough] <task>");
     fake.setScenario(happy());
     await chat.submit("/pipeline Make app.txt fixed");
     await chat.idle();

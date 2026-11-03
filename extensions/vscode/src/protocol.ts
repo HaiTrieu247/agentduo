@@ -167,6 +167,11 @@ export interface FocusedRun {
   phase: Phase;
   artifacts: ArtifactName[];
   hasSnapshots: boolean;
+  /**
+   * What the run's gates and DONE are evidence about, one line each (src/core/verification.ts): passed on the current
+   * revision, failing, on an earlier revision, not run, accepted by the user, or none configured.
+   */
+  verification: string[];
 }
 
 export interface ArtifactContent {

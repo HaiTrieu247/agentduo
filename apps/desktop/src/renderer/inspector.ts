@@ -143,7 +143,9 @@ export class Inspector {
         el("dt", { text: "Task" }), el("dd", { text: run.task }),
         el("dt", { text: "Phase" }), el("dd", { text: run.phase }),
         el("dt", { text: "Artifacts" }), el("dd", { text: run.artifacts.join(", ") || "none yet" }),
-        el("dt", { text: "Snapshots" }), el("dd", { text: run.hasSnapshots ? "yes" : "not yet" })));
+        el("dt", { text: "Snapshots" }), el("dd", { text: run.hasSnapshots ? "yes" : "not yet" }),
+        // What the gates and DONE are evidence about: never "passed" for results about other code.
+        el("dt", { text: "Verification" }), el("dd", { text: run.verification?.join("; ") || "nothing yet" })));
     }
     const gates = gateActivities(this.ctx().state);
     out.push(el("h3", { class: "pad", text: "Gates" }));

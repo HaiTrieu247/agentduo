@@ -1,7 +1,8 @@
 # agentduo: review findings kept in step with the code
 
 Status: implemented. Builds on `2026-11-03-agentduo-context-sharing-design.md` and
-`2026-11-03-agentduo-no-progress-design.md`.
+`2026-11-03-agentduo-no-progress-design.md`. Amended by `2026-11-03-agentduo-final-verification-design.md`: `DONE` no
+longer rests on gates of an earlier revision.
 
 ## Problem
 
@@ -63,7 +64,8 @@ until the next review, whatever happened in between. This caused five problems:
 - **Reviews of gated code.** `state.gatesTree` records the tree the gates ran on. If CODE_REVIEW finds it differs from
   the tree to review, it records "gates out of date" and goes back to VERIFY, once a round (`reverifiedRound`), so a
   file that keeps changing cannot hold the run in a loop. If the files changed again, the review goes ahead with a
-  warning, and `DONE` says "quality gates passed on an earlier revision".
+  warning. (`DONE` used to say "quality gates passed on an earlier revision" then; now the final check sends the run
+  back to the gates, at most twice in a row, and then stops with `verification_stale`.)
 
 ## Design
 

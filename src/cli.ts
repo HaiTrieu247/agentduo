@@ -6,15 +6,16 @@ import { Command, CommanderError, Option } from "commander";
 import { killAllActive } from "./agents/process.js";
 import { Chat, newRun } from "./chat.js";
 import { settings } from "./core/settings.js";
-import { configFromSaved, ConfigError, type ConfigData } from "./core/config.js";
+import { configFromSaved, ConfigError, PROFILES, type ConfigData, type ProfileName } from "./core/config.js";
 import { decisionCommand } from "./core/decisions.js";
 import { diagnose, EnvironmentError, prepareEnvironment, runnableProblem, type RunnableNeeds, type WorkspaceEnv } from "./core/environment.js";
 import { initRepo } from "./core/init.js";
 import type { Review } from "./core/outputs.js";
-import { budgetLines, findingsMarkdown, usageSummary } from "./core/render.js";
+import { budgetLines, cycleLines, findingsMarkdown, metricsLines, usageSummary } from "./core/render.js";
 import { openRunGit, RunGitError } from "./core/run-git.js";
 import { acquireWorkspaceLock, LockError, RunStore, type RunState } from "./core/state.js";
-import { DecisionError, EXIT, Workflow } from "./core/workflow.js";
+import { gateSpecs, verificationLines } from "./core/verification.js";
+import { DecisionError, EXIT, Workflow, workspaceTree } from "./core/workflow.js";
 import { EventBus, type Decider, type Decision, type PermissionDecider } from "./events.js";
 import { packageVersion } from "./paths.js";
 import type { ViewKind } from "./ui/ink/HumanReviewPrompt.js";
@@ -106,7 +107,13 @@ export function processIO(): CliIO {
 }
 
 interface CommonOptions { dir?: string; config?: string; plain?: boolean; verbose?: boolean; color?: boolean }
-interface RunOptions extends CommonOptions { taskFile?: string; acceptEdits?: boolean }
+interface RunOptions extends CommonOptions { taskFile?: string; acceptEdits?: boolean; profile?: ProfileName }
+
+/** --profile: the pipeline profile of the runs started now, over pipeline.profile (a run keeps its own once started). */
+function withProfile<T extends ConfigData>(cfg: T, opts: { profile?: ProfileName }): T {
+  if (opts.profile) cfg.pipeline = { ...cfg.pipeline, profile: opts.profile };
+  return cfg;
+}
 interface ResumeOptions extends CommonOptions { decision?: Decision["decision"]; note?: string; reloadConfig?: boolean; acceptEdits?: boolean }
 
 /** --accept-edits: the implementer edits files without asking, like /mode acceptEdits in the chat. */
@@ -264,7 +271,7 @@ async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, st
 }
 
 const COMMANDS = ["run", "resume", "status", "list", "doctor", "init"];
-const COMMON_KEYS = ["dir", "config", "plain", "verbose", "color", "acceptEdits"] as const;
+const COMMON_KEYS = ["dir", "config", "plain", "verbose", "color", "acceptEdits", "profile"] as const;
 
 /** With positional options, `duo --dir X list` parses --dir as the root's option; give it to the subcommand unless it set its own. */
 function withGlobals<T extends CommonOptions>(cmd: Command): T {
@@ -319,7 +326,7 @@ async function runCommand(io: CliIO, words: string[], opts: RunOptions, explicit
   }
   const env = await prepare(io, opts);
   requireRunnable(env, env.cfg, env.sources.join(", "), io);
-  withAcceptEdits(env.cfg, opts);
+  withProfile(withAcceptEdits(env.cfg, opts), opts);
   // Lock first: a start refused because another run is active must not leave a run behind or move LATEST.
   const release = lockWorkspace(env.runsDir);
   try {
@@ -338,7 +345,7 @@ async function runCommand(io: CliIO, words: string[], opts: RunOptions, explicit
 async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
   const env = await prepare(io, opts);
   requireRunnable(env, env.cfg, env.sources.join(", "), io, { backends: [], repo: false });
-  withAcceptEdits(env.cfg, opts);
+  withProfile(withAcceptEdits(env.cfg, opts), opts);
   const release = lockWorkspace(env.runsDir);
   try {
     applyColorPreference(opts, io.env);
@@ -408,6 +415,17 @@ async function statusCommand(io: CliIO, runId: string | undefined, opts: CommonO
   out(`  task: ${st.task.split("\n")[0]!.slice(0, 100)}`);
   out(`  planning round ${st.planningRound}/${st.limits.planningRounds}, plan v${st.planVersion}, final ${st.finalPlanVersion ? `v${st.finalPlanVersion}` : "—"}`);
   out(`  implementation round ${st.implRound}/${st.limits.reviewRounds}, open findings ${st.openFindings.length}`);
+  const tracked = st.trackedFindings ?? [];
+  if (tracked.length) {
+    const reopened = tracked.reduce((n, e) => n + e.reopened, 0);
+    const last = st.cycles?.at(-1);
+    out(`  findings across reviews: ${tracked.filter((e) => e.status === "open").length} open, ${tracked.filter((e) => e.status === "resolved").length} resolved` +
+      (reopened ? `, ${reopened} reopened` : "") + (last ? `; last review: ${cycleLines([last])[0]}` : "") +
+      (st.stall?.count ? `; ${st.stall.count} review round(s) in a row without progress` : ""));
+  }
+  if (st.rejected?.length) out(`  rejected answers: ${st.rejected.reduce((n, r) => n + r.count, 0)} in ${st.rejected.length} call(s) (see report.md)`);
+  for (const line of await statusVerification(st, store, env, io.env)) out(`  verification: ${line}`);
+  for (const line of metricsLines(st)) out(`  ${line}`);
   out(`  usage: ${usageSummary(st)}`);
   for (const line of budgetLines(st)) out(`  budget: ${line}`);
   if (st.inProgress) out(`  interrupted during ${st.inProgress.phase} (resume to re-run it)`);
@@ -421,6 +439,30 @@ async function statusCommand(io: CliIO, runId: string | undefined, opts: CommonO
   }
   out(`  files: ${store.dir}`);
   return EXIT.DONE;
+}
+
+/**
+ * What the run's gates and DONE are evidence about, against the workspace as it is now: the run's own gates (its saved
+ * config), and the files compared with what the gates ran on. When the files cannot be looked at, the run's last
+ * snapshot stands for them.
+ */
+async function statusVerification(st: RunState, store: RunStore, env: WorkspaceEnv, vars: NodeJS.ProcessEnv): Promise<string[]> {
+  let configured = null;
+  try {
+    const cfg = store.exists("config.json") ? configFromSaved(store.readJson("config.json")) : null;
+    configured = cfg ? gateSpecs(cfg.gates, cfg.limits.gate_timeout_sec) : null;
+  } catch {
+    // an unreadable saved config: the gates that last ran stand for it
+  }
+  let tree: string | null = null;
+  if (st.lastSnapshot) {
+    try {
+      tree = await workspaceTree(st, env.workspace, env.runsDir, vars);
+    } catch {
+      // the run's snapshots cannot be opened here
+    }
+  }
+  return verificationLines(st, { configured, workspaceTree: tree });
 }
 
 async function listCommand(io: CliIO, opts: CommonOptions): Promise<number> {
@@ -495,13 +537,14 @@ export async function main(argv: string[], io: CliIO = processIO()): Promise<num
     .option("--no-color", "disable colors");
 
   const acceptEdits = "the implementer edits files without asking (Claude's acceptEdits mode)";
+  const profile = () => new Option("--profile <profile>", "pipeline profile of new runs: lightweight (small, clear tasks), standard, thorough").choices([...PROFILES]);
   common(program.argument("[task...]", "task description for a new run, or none for the chat (use -- before a task that starts with '-')")
-    .option("--task-file <file>", "read the task description from a file").option("--accept-edits", acceptEdits))
+    .option("--task-file <file>", "read the task description from a file").option("--accept-edits", acceptEdits).addOption(profile()))
     .action(async (words: string[], opts: RunOptions) => {
       exitCode = await runCommand(io, words, opts);
     });
   common(program.command("run").description("start a new run").argument("<task...>").option("--task-file <file>", "read the task description from a file")
-    .option("--accept-edits", acceptEdits))
+    .option("--accept-edits", acceptEdits).addOption(profile()))
     .action(async (words: string[], _opts: RunOptions, cmd: Command) => {
       exitCode = await runCommand(io, words, withGlobals<RunOptions>(cmd), true);
     });

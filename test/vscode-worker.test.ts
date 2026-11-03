@@ -257,7 +257,7 @@ describe("vscode worker", () => {
     await h.client.request({ type: "submit", conversation: C, text: "Make app.txt fixed", route: "pipeline" });
     expect(readFileSync(lockFile(), "utf8").trim()).toBe(String(h.client.pid));
     const done = await h.waitFor(finished());
-    expect(done.event).toMatchObject({ phase: "DONE", summary: "quality gates passed and the review approved" });
+    expect(done.event).toMatchObject({ phase: "DONE", summary: "quality gates passed on the final code and the review approved" });
     const events = h.events();
     expect(events.some((e) => e.type === "gate.completed" && e.passed)).toBe(true);
     expect(events.filter((e) => e.type === "step.completed").every((e) => e.type === "step.completed")).toBe(true);

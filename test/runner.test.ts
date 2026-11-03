@@ -81,7 +81,7 @@ describe("AgentRunner", () => {
     const r = await runner().call({ role: "plan_reviewer", agentRole: "plan_reviewer", prompt: prompt("plan_reviewer"), schemaName: "plan_critique", logPrefix: "002" });
     expect(r).toMatchObject({ ok: true, attempts: 2, costUsd: 0.02 });
     expect(events.find((e) => e.type === "agent.retry")).toMatchObject({ attempt: 2, max: 2, role: "plan_reviewer" });
-    expect(fake.calls("plan_reviewer")[1]!.prompt).toContain("Previous attempt was rejected");
+    expect(fake.calls("plan_reviewer")[1]!.prompt).toContain("## Your previous answer was rejected\n");
   });
 
   it("applies the semantic check and gives up after max_retries", async () => {
@@ -90,6 +90,33 @@ describe("AgentRunner", () => {
       schemaName: "plan_critique", logPrefix: "003", check: () => ["nope"] });
     expect(r).toMatchObject({ ok: false, attempts: 2 });
     expect(r.error).toContain("nope");
+  });
+
+  it("tells each retry exactly what to correct, with the answer it rejected, and keeps every rejection", async () => {
+    fake.setScenario({ plan_reviewer: [{ output: critique(false) }, { output: critique(true) }, { output: critique(true) }] });
+    let k = 0;
+    const r = await runner({ limits: { max_retries: 2 } }).call({ role: "plan_reviewer", agentRole: "plan_reviewer", prompt: prompt("plan_reviewer"),
+      schemaName: "plan_critique", logPrefix: "004", check: () => (++k < 3 ? [`issue 'C${k}' needs a scope`] : []) });
+    expect(r).toMatchObject({ ok: true, attempts: 3, calls: 3 });
+    expect(r.rejections).toEqual([{ attempt: 1, errors: ["issue 'C1' needs a scope"] }, { attempt: 2, errors: ["issue 'C2' needs a scope"] }]);
+    const second = fake.calls("plan_reviewer")[1]!.prompt;
+    expect(second).toContain("## Your previous answer was rejected\nagentduo checked your previous answer to this request and rejected it:\n- issue 'C1' needs a scope\n");
+    expect(second).toContain("Correct exactly these points");
+    expect(second).toContain('"status": "changes_requested"');
+    // Only the latest rejection: the agent corrects the answer it is shown.
+    expect(fake.calls("plan_reviewer")[2]!.prompt).toContain("- issue 'C2' needs a scope\n");
+    expect(fake.calls("plan_reviewer")[2]!.prompt).not.toContain("'C1'");
+  });
+
+  it("stops retrying when the same invalid answer comes back, and says why", async () => {
+    fake.setScenario({ plan_reviewer: [{ output: critique(true) }] });
+    const r = await runner({ limits: { max_retries: 3 } }).call({ role: "plan_reviewer", agentRole: "plan_reviewer", prompt: prompt("plan_reviewer"),
+      schemaName: "plan_critique", logPrefix: "005", check: () => ["finding 'F1' cites 'AC9', which is not an acceptance criterion of the final plan (AC1)"] });
+    expect(r).toMatchObject({ ok: false, attempts: 2, calls: 2 });
+    expect(r.error).toBe("the same invalid answer came back after it was told what to correct, so no further attempt was made:\n" +
+      "- finding 'F1' cites 'AC9', which is not an acceptance criterion of the final plan (AC1)");
+    expect(r.rejections).toHaveLength(2);
+    expect(fake.calls("plan_reviewer")).toHaveLength(2);
   });
 
   it("reports a missing binary without retrying", async () => {
@@ -284,6 +311,26 @@ describe("AgentRunner sessions", () => {
     expect(retries).toHaveLength(2);
     expect(retries[0]).toMatchObject({ attempt: 2, max: 2, reason: expect.stringContaining("the earlier session could not be continued (codex exited with code 1") });
     expect(retries[1]).toMatchObject({ reason: expect.stringContaining("No conversation found with session ID: gone-plan_reviewer") });
+  });
+
+  it("tells the fresh session after a rejected continued answer why it was rejected, with that answer", async () => {
+    fake.setScenario({ planner: [{ output: plan("v1") }, { output: plan("v2") }, { output: plan("v3") }] });
+    const r = runner();
+    const first = await call(r, "planner", "001-plan-r1", { session: { keep: true } });
+    const res = await r.call({
+      role: "planner", agentRole: "planner", prompt: `${prompt("planner")}\nWHOLE`, schemaName: "plan", logPrefix: "002-plan-r2",
+      check: (p: { title: string }) => (p.title === "v2" ? ["acceptance criterion 'AC1' is listed twice: give each criterion its own id"] : []),
+      session: { keep: true, resume: { id: first.sessionId!, prompt: `${prompt("planner")}\nNEW ONLY` } },
+    });
+    expect(res).toMatchObject({ ok: true, resumed: false, attempts: 2, rejections: [{ attempt: 1, errors: ["acceptance criterion 'AC1' is listed twice: give each criterion its own id"] }] });
+    const fresh = fake.calls("planner")[2]!;
+    expect(fresh.resumed).toBeUndefined();
+    // The whole prompt, the reasons, and the answer it rejected: the new session corrects it rather than starting over.
+    expect(fresh.prompt).toContain(`${prompt("planner")}\nWHOLE\n\n## Your previous answer was rejected\nagentduo checked your previous answer to this request, given in ` +
+      "a session you cannot see, and rejected it:\n- acceptance criterion 'AC1' is listed twice");
+    expect(fresh.prompt).toContain('"title": "v2"');
+    const retry = events.find((e) => e.type === "agent.retry");
+    expect(retry).toMatchObject({ attempt: 2, reason: expect.stringContaining("the continued session's answer was rejected (output failed validation:\n- acceptance criterion 'AC1'") });
   });
 
   it("keeps each conversation turn's session off disk", async () => {

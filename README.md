@@ -28,13 +28,51 @@ Website: [agentduo.netlify.app](https://agentduo.netlify.app/) · Tiếng Việt
 1. **Plan and debate.** Codex writes a plan with goals, scope, steps, acceptance criteria and risks. Claude checks that it is feasible, Codex revises it, and Codex finally signs it off.
 2. **Implement and review.** Claude implements the plan. Optional quality gates run, and their results go to the reviewer. Codex reviews the diff, and Claude fixes the findings, round after round, until the run reaches `DONE`.
 
-A run reaches `DONE` when all of these hold:
-- Codex approves;
+A run reaches `DONE` when all of these hold for the code in your workspace at the end, not for an earlier revision of
+it:
+- Codex approves that code;
 - no blocking finding is left;
-- if you configured gates, every required gate passes.
+- if you configured gates, every required gate passes on that code, with the gate configuration as it is then.
 
-The only way past one of these is your own decision to accept a pre-existing failure, and `DONE` then names what you
-accepted.
+The only way past one of these is your own decision to accept a pre-existing failure. `DONE` then says *with accepted
+exceptions* and names them; an accepted failure is never reported as a pass. With no gates configured, `DONE` says
+that nothing was verified automatically.
+
+**DONE is checked against the final code.** Just before `DONE`, agentduo compares the workspace with what the gates
+and the review were about: the files (dirty, untracked and deleted ones included) and the gate configuration. It
+checks again on a resume, since you may have edited files while the run waited. When nothing changed, nothing runs
+again. When only the gate configuration changed, the gates run again and the review's approval stands. When the code
+changed after the approval (your edits, a tool, the reviewer's own edits, a gate that writes files), the gates run
+again and the code is reviewed again. If the files keep changing, the run stops after two such refreshes in a row
+with `verification_stale` instead of ending on evidence about other code. The record of what `DONE` rests on is
+`verification.json` in the run directory, and `duo status` and the report show it. The design is in
+[docs/superpowers/specs/2026-11-03-agentduo-final-verification-design.md](docs/superpowers/specs/2026-11-03-agentduo-final-verification-design.md).
+
+**Pipeline profiles.** A profile sets how much planning and review a run spends, never what it checks. You choose it
+with `pipeline.profile` in the config, `duo --profile <name> "<task>"`, or `/pipeline --profile <name> <task>` in the
+chat:
+
+- `lightweight`: for small, clearly specified tasks. A plan the critic approves goes straight to implementation,
+  without the planner's sign-off, and the planner is asked for a short plan. If the task turns out bigger, the run moves
+  to `standard`, keeping everything it did. The signals: a plan of more than 6 steps or 8 files, a critique that sends
+  the plan back, a contradiction or scope change, a blocker, 3 or more files changed that the plan never names,
+  required gates failing twice in a row, a second review that still blocks, a stalled review loop, or a critical
+  finding.
+- `standard`: the pipeline as before, and the default.
+- `thorough`: for complex or risky tasks. The planner always signs off, a review runs even when gates fail, and the
+  planner, critic and reviewer are asked to go in depth.
+
+Every profile keeps the critique, the independent review, the required gates, the final verification, the scope and
+consistency checks, the loop breakers, the budget and your decisions. A run keeps its profile on resume; only an
+escalation changes it, and only upward. On the same small task, lightweight makes 4 agent calls where standard makes 5,
+or 8 when standard's sign-off sends an approved plan back. `metrics.json`, the report and `duo status` show where the
+calls, tokens and rounds went, and why a run escalated.
+
+**Planning that does not converge stops.** agentduo tracks the critic's issues across critiques, also when they are
+renumbered or reworded. When two critiques in a row block on the same issues (or the planner returns the same plan),
+the run stops with `planning_stalled` instead of using up its planning rounds. *Implement latest plan* (`resume`)
+implements it as it is, recorded as accepted by you; `revise` with a note re-plans. The design is in
+[docs/superpowers/specs/2026-11-03-agentduo-profiles-design.md](docs/superpowers/specs/2026-11-03-agentduo-profiles-design.md).
 
 When a limit is reached, an agent fails or blocks, or a critical finding appears, the run asks you what to do.
 
@@ -46,7 +84,9 @@ leaves failing, stops the run before any implementation (`requirements_conflict`
 reviewer gives, for every blocking problem, where it comes from and the evidence for it: the change caused it, or it
 was there before and lies outside the plan's scope. If all that still fails is pre-existing and outside the scope,
 another fix round could not settle it, so the run asks you (`preexisting_failures`) instead of looping. The task's
-requirements are never changed for you, and no failure is waived without your decision. The design is in
+requirements are never changed for you, and no failure is waived without your decision. What you accept is the failure
+as it was before the task: every later review still attributes that gate, and a failure the change made worse, or a
+gate whose command changed, is the task's to fix again. The design is in
 [docs/superpowers/specs/2026-11-03-agentduo-acceptance-design.md](docs/superpowers/specs/2026-11-03-agentduo-acceptance-design.md).
 
 **The task's scope does not grow on its own.** The plan's acceptance criteria have ids (`AC1`, `AC2`, …). With the
@@ -90,8 +130,9 @@ review checks the answer. That holds even when the attempt that answered it ende
 failed. A finding whose file changed since its revision is marked as possibly out of date. When an attempt is re-run,
 it is told what the earlier attempt left in your files, so it goes on from there instead of starting over. Before the
 gates run, and before a review, agentduo takes the workspace as it is now, including edits you made while the run
-waited. If the gates passed on an earlier revision, they run once more first, so a review and `DONE` rest on gated code. If
-the files keep changing even after that, the run warns that the review gets an earlier revision's gate results.
+waited. If the gates passed on an earlier revision or with another configuration, they run once more first, so a review
+rests on gated code. If the files keep changing even after that, the review gets the earlier results with a warning,
+and `DONE` waits until the gates have run on the code it ends with.
 The design is in
 [docs/superpowers/specs/2026-11-03-agentduo-review-state-design.md](docs/superpowers/specs/2026-11-03-agentduo-review-state-design.md).
 
@@ -146,6 +187,7 @@ agentduo 0.5.0 · chat
   the chat says so).
 - **`/pipeline <task>`** runs the full workflow (plan → critique → finalize → implement → verify → review). Every role
   is told what was said in the conversation before the task, and what earlier pipeline tasks of the chat did.
+  `/pipeline --profile lightweight <task>` runs it with another [profile](#how-it-works) than the config's.
 - **`/discuss <question>`** has both agents work out one answer. The agent named under the input answers, the other
   reviews it and ends with `VERDICT: AGREE` or `VERDICT: REVISE`, and the first revises until the reviewer agrees, for
   at most `limits.max_discussion_rounds` reviews (3 by default; a review without a verdict counts as REVISE). Then
@@ -343,9 +385,9 @@ folder without a repository) and commit them yourself.
 | Command | What it does |
 |---|---|
 | `duo` | Open the [chat](#chat) (in a terminal) |
-| `duo "<task>"`, `duo run "<task>"` | Start a run (`--task-file F`; use `duo -- "-x …"` for a task that starts with `-`) |
+| `duo "<task>"`, `duo run "<task>"` | Start a run (`--task-file F`; `--profile lightweight\|standard\|thorough`; use `duo -- "-x …"` for a task that starts with `-`) |
 | `duo resume [id]` | Continue the latest (or given) run with the config it started with (`--reload-config` to use today's); `--decision resume\|revise\|abort [--note "..."]` answers a pending decision |
-| `duo status [id]`, `duo list` | Progress, history and where the files are |
+| `duo status [id]`, `duo list` | Progress, history, what the gates and `DONE` were verified on, and where the files are |
 | `duo doctor` | Check the CLIs and config without calling models |
 | `duo init` | Create `.agentduo/config.yaml` and `.agentduo/.gitignore`, and offer `git init` (a run does not need it) |
 
@@ -358,13 +400,16 @@ In a terminal, agentduo shows the reason and a menu: Resume, Revise (with a note
 | Reason | What `resume` does |
 |---|---|
 | `max_planning_rounds` | Implements the latest plan, recorded as accepted by you |
+| `planning_stalled` (shown as *Implement latest plan*) | Implements the latest plan, recorded as accepted by you; `revise` with a note that settles the critic's issues re-plans instead |
 | `plan_ready` (with `safety.pause_before_implement`) | Starts implementing |
 | `max_review_rounds`, `critical_finding`, `gates_failing` | Starts another fix round |
 | `implementer_blocked`, `no_progress` | Re-runs the implementation round, but only with something new (see below) |
+| `review_stalled` (shown as *Unblock and retry*) | Starts another fix round, but only with something new (see below) |
 | `agent_error`, `orchestrator_error` | Re-runs the failed step |
 | `budget_exhausted` | Raises each limit the run reached by one more allowance, then runs the step it stopped before |
 | `requirements_conflict` (shown as *Implement as planned*) | Implements the plan as it is, accepting the contradiction. `revise` with a note that settles it re-plans instead |
 | `preexisting_failures` (shown as *Accept as pre-existing*) | Accepts them for this run. The run ends `DONE`, naming them, or the reviewer reviews once more first if it had not approved |
+| `verification_stale` (shown as *Verify again*) | Verifies the files as they are then: the gates run again, and the code is reviewed again if it changed. Stop whatever keeps changing them first; a gate that writes files should write ignored ones |
 | `out_of_scope_critical` (shown as *Keep the scope*) | Leaves the critical problems outside the task's scope unfixed in this run, and goes on: the fix round for the task's own findings, `DONE` (naming them), or another review. `revise` with a note brings them into the scope instead |
 | `scope_expansion` (shown as *Approve wider scope*) | Approves the suggestions outside the task that the revised plan adopted, and the critic reviews that plan. `revise` with a note re-plans instead, for example to keep to the task |
 
@@ -381,6 +426,37 @@ note. A note always lets it try again. When it reports the same blocker several 
 and `revise` or `abort` may serve you better. A failed call (`agent_error`: a timeout, a crash, output it could not
 use) is not a blocker: `resume` retries it as before.
 
+**A review loop that does not converge stops.** agentduo tracks each review finding across reviews, even when a
+reviewer renumbers or rewords it. Matching is conservative: when unsure, it keeps two findings apart. A finding counts
+as resolved only when a later review leaves it out; the implementer saying "fixed" does not resolve it. A fix round
+makes progress when one of these happens:
+
+- the review resolves a blocking finding;
+- a finding stops blocking;
+- a required gate starts passing;
+- a file of a blocking finding changes.
+
+Repeated reports and reworded findings do not count. After two rounds in a row without progress, or one in which no
+file changed at all, the run stops with `review_stalled` instead of reviewing the same findings again. The stop lists
+each finding that keeps blocking, where it was raised, and what the implementer did. As with a blocker, `resume` runs
+another round only with something new. `revise` re-plans and keeps your files. Nothing is waived: the findings stay
+open.
+
+A reviewer that raises a new critical or high finding on code that has not changed since its last review must say
+why it did not raise it then (`late_reason`), or reuse the old finding's id.
+
+When agentduo rejects an agent's answer, the next attempt is told exactly what to correct and shown the rejected
+answer, even when that attempt runs in a fresh session. If the same invalid answer comes back, the call stops.
+
+The report and `duo status` show:
+
+- findings that are new, still open, resolved or reopened;
+- each review round's progress;
+- the rejected answers.
+
+The design is in
+[docs/superpowers/specs/2026-11-03-agentduo-convergence-design.md](docs/superpowers/specs/2026-11-03-agentduo-convergence-design.md).
+
 ## Configuration
 
 Settings are merged in this order, later sources winning: built-in defaults, then `~/.config/agentduo/config.yaml` (or `$XDG_CONFIG_HOME/agentduo/` or `%APPDATA%\agentduo\` on Windows), then `<workspace>/.agentduo/config.yaml` or `--config`. A misspelled key produces a warning. A value of the wrong type produces an error that names the file.
@@ -390,6 +466,7 @@ Settings are merged in this order, later sources winning: built-in defaults, the
 
 ```yaml
 agents: { planner: codex, plan_reviewer: claude, implementer: claude, code_reviewer: codex }
+pipeline: { profile: standard }   # lightweight | standard | thorough: the profile new runs start with
 limits: { max_planning_rounds: 4, max_review_rounds: 5, max_discussion_rounds: 3, agent_timeout_sec: 1800, agent_idle_timeout_sec: 900 }
 gates:                       # optional
   - name: tests
@@ -436,7 +513,9 @@ Everything about a run lives in `.agentduo/runs/<run-id>/`:
 
 - `state.json`: makes the run resumable; it also keeps each role's session id, the agents' notes about the repository, and the run's budget and usage;
 - `config.json`: the config the run started with;
-- `report.md`: timeline, gates, diff stat, unresolved issues, warnings, usage (tokens, reported cost, unpriced calls, agent calls, minutes) and the budget;
+- `report.md`: timeline, gates, diff stat, unresolved issues, warnings, usage (tokens, reported cost, unpriced calls, agent calls, minutes), the budget, and the profile with its metrics;
+- `metrics.json`: the run's profile and escalations, agent calls, tokens and cost by role, rounds, steps, decisions, minutes and outcome, to compare profiles;
+- `verification.json`: what `DONE` rests on (the final code's snapshot, each gate's outcome, the approving review);
 - the plans, the critiques, and every agent's JSON (with task id, round, timestamp, git SHA and plan version);
 - `diff.r<round>.patch`: the whole diff each code review was given;
 - `logs/`: the prompt, the command line, the raw event stream and stderr of every CLI call.

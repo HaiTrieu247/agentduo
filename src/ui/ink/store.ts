@@ -2,6 +2,7 @@ import type {
   Activity, Agent, BudgetView, DiscussionPlace, DiscussionStatus, DuoEvent, HistoryEntry, HumanReview, Message, ModelIdentity, Party, PermissionAnswer, Phase, Role, RoundInfo, TurnStatus,
   Verdict,
 } from "../../events.js";
+import type { PipelineProfile } from "../../core/commands.js";
 import { answerActivities, PROVIDERS, withObserved } from "../format.js";
 import type { PermissionAsk } from "./PermissionPrompt.js";
 
@@ -82,6 +83,8 @@ export interface ViewState {
   impl: RoundInfo;
   /** The run's budget when its current step started; null: it has none. */
   budget: BudgetView | null;
+  /** The run's pipeline profile as its current step started; absent: none said (standard). */
+  profile?: PipelineProfile;
   reached: Phase[];
   totals: { costUsd: number; tokens: number };
   live: { costUsd: number; tokens: number };
@@ -157,7 +160,7 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
     case "phase.started":
       return {
         ...s, current: newStep(s, e.phase, e.round, now, e.role, e.agent), planning: e.planning, impl: e.impl, budget: e.budget ?? null,
-        reached: s.reached.includes(e.phase) ? s.reached : [...s.reached, e.phase], live: { costUsd: 0, tokens: 0 },
+        reached: s.reached.includes(e.phase) ? s.reached : [...s.reached, e.phase], live: { costUsd: 0, tokens: 0 }, profile: e.profile,
       };
     case "agent.activity":
       return withActivity(s, e.activity);

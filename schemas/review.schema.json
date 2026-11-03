@@ -43,7 +43,8 @@
           "recommendation",
           "origin",
           "evidence",
-          "criteria"
+          "criteria",
+          "late_reason"
         ],
         "properties": {
           "id": {
@@ -91,6 +92,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "late_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       }

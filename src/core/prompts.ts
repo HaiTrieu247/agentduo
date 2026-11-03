@@ -7,7 +7,7 @@ import type { Change } from "./git.js";
 import type { FindingItem, ReviewFindings } from "./findings.js";
 import type { Approval, Critique, Implementation, Plan } from "./outputs.js";
 import { issuesMarkdown } from "./render.js";
-import type { ConversationContext, EarlierTask, Exchange, HumanNote, PreexistingFailure, RepoNote, ScopeItem } from "./state.js";
+import type { ConversationContext, EarlierTask, Exchange, HumanNote, PreexistingFailure, RepoNote, RunProfile, ScopeItem, TrackedFinding } from "./state.js";
 
 /** Where an attachment's copy is, as a prompt names it: its absolute path, or null when its reference is unusable. */
 export type Locate = (a: Attachment) => string | null;
@@ -39,6 +39,8 @@ export interface PromptContext {
   planFile?: string;
   /** The quality gates before any change (the baseline); null or absent when there is none. */
   baseline?: GateResult[] | null;
+  /** The run's pipeline profile (src/core/profiles.ts); absent: standard, as it always was. */
+  profile?: RunProfile;
 }
 
 /** What the code reviewer is asked about the acceptance contract (src/core/acceptance.ts). */
@@ -49,7 +51,13 @@ export interface ReviewContract {
   accepted: PreexistingFailure[];
   /** Critical findings outside the task's scope that the user decided to keep out of it. */
   kept: ScopeItem[];
+  /** Findings earlier reviews resolved: one raised again keeps its id (it is reopened, not new). Absent: none. */
+  resolved?: TrackedFinding[];
 }
+
+/** The most resolved findings a review prompt lists, and how much of each one's words. */
+const MAX_RESOLVED_LISTED = 20;
+const MAX_RESOLVED_CHARS = 120;
 
 export interface ContinuedTurn {
   /** Files of the workspace that changed after the session's last turn ended. */
@@ -153,13 +161,47 @@ function opening(role: string, title: string, ctx: PromptContext, position: stri
     return [
       continuedHeader(role, title, ctx),
       position,
+      // A continued session knows the profile it started with: it is told again only once the profile changed.
+      ctx.profile && ctx.profile.name !== ctx.profile.initial ? profileSection(ctx.profile, role) : "",
       changedSection(ctx.continued.changed),
       notes(ctx.notes, ctx.locate, true),
       repoNotesSection(ctx.repoNotes, true),
     ].filter(Boolean);
   }
-  return [header(role, title, ctx), position, taskSection(ctx), earlier(ctx), notes(ctx.notes, ctx.locate), repoNotesSection(ctx.repoNotes, false),
-    baselineSection(ctx.baseline)];
+  const profile = profileSection(ctx.profile, role);
+  return [header(role, title, ctx), position, ...(profile ? [profile] : []), taskSection(ctx), earlier(ctx), notes(ctx.notes, ctx.locate),
+    repoNotesSection(ctx.repoNotes, false), baselineSection(ctx.baseline)];
+}
+
+/**
+ * What the run's pipeline profile asks of a role, only where it asks something (src/core/profiles.ts). Standard asks
+ * nothing new, unless the run came to it from lightweight. No profile changes what a role checks or may approve.
+ */
+export function profileSection(profile: RunProfile | undefined, role: string): string {
+  if (!profile) return "";
+  const from = profile.changes.at(-1);
+  if (profile.name === "standard") {
+    if (!from) return "";
+    return `## Pipeline profile: standard (escalated from ${from.from})\nThe run started as a ${from.from} task and is now handled with the ` +
+      `standard depth, because ${from.reason}. Plan, critique and review as for any task of this size.\n`;
+  }
+  const text: Partial<Record<string, string>> = profile.name === "lightweight" ? {
+    planner: "The task is expected to be small and clearly specified. Keep the plan short: the fewest steps that do the task, each naming its " +
+      "files, and acceptance criteria a check can verify; no speculative work. A plan the critic approves goes straight to implementation, " +
+      "with no sign-off round. A plan that needs more (many steps or files, a blocking critique) moves the run to the standard profile.",
+    plan_reviewer: "A plan you approve goes straight to implementation: there is no sign-off round after you. Your severities decide as " +
+      "always; a blocking issue sends the plan back and moves the run to the standard profile.",
+  } : {
+    planner: "The task is expected to be complex or risky. Cover the architecture and the alternatives you rejected, the risks with their " +
+      "mitigations, edge cases and failure modes, and a test strategy that exercises them. The plan goes through the critic and your sign-off.",
+    plan_reviewer: "The task is expected to be complex or risky: check the architecture, the risks, edge cases and the test strategy in depth " +
+      "against the code the plan changes.",
+    plan_finalizer: "The task is expected to be complex or risky: sign the plan off only if it covers what its critique raised.",
+    code_reviewer: "The task is expected to be complex or risky: review in depth (edge cases, error handling, concurrency, security, and the " +
+      "tests the change adds), and review even when quality gates fail, with their results.",
+  };
+  const t = text[role];
+  return t ? `## Pipeline profile: ${profile.name}\n${t}\n` : "";
 }
 
 /** The quality gates as they were before any change: what fails there is not the task's doing (fresh prompts only; it never changes). */
@@ -675,6 +717,9 @@ export function codeReviewer(ctx: PromptContext, round: number, planMd: string, 
     "outside its scope)" : "") + ".\n" +
     "- Out-of-scope findings never hold back your approval: if they are all you would report, approve. A review that does not approve must " +
     "say in its findings what blocks it.\n" +
+    "- Keep a finding's id when you raise it again, even in other words: a new id says the issue is new. A critical or high finding you raise " +
+    "for the first time after an earlier review of this run, about code that did not change since that review, must say in `late_reason` why it " +
+    "was not reported then (agentduo checks this against the files changed since); otherwise `late_reason` is null.\n" +
     "- `reviewed_commit` must be exactly `" + snapshot + "`.\n" +
     "- New finding ids continue the sequence `F1`, `F2`, ...; `file` is workspace-relative (empty string if " +
     "general) and `line` may be null.\n",
@@ -700,11 +745,17 @@ export function codeReviewer(ctx: PromptContext, round: number, planMd: string, 
       ? "## Required gates that failed before the task too\n" + contract.attribute.map((g) => "- `" + g + "`").join("\n") + "\n" +
         "Each failed before any change (see the baseline), and the plan leaves fixing it out of scope. In `gate_failures`, give one entry for " +
         "each, with its `origin` and `evidence`: `pre_existing` only when its output now shows the same failures as before the change and " +
-        "nothing the change caused; otherwise `regression` (the change adds or worsens a failure) or `unclear`. Leave other gates out.\n"
+        "nothing the change caused; otherwise `regression` (the change adds or worsens a failure) or `unclear`. Leave other gates out." +
+        (contract.accepted.some((f) => f.kind === "gate" && contract.attribute.includes(f.id))
+          ? " A gate the user accepted as failing before the task is listed too: the acceptance holds only while it fails as it did before.\n" : "\n")
       : "`gate_failures` is an empty list.\n",
     contract.accepted.length
       ? "## Pre-existing failures the user accepted for this run\n" + contract.accepted.map((f) => `- ${f.kind === "gate" ? `gate \`${f.id}\`` : `finding \`${f.id}\``}: ${f.text}`).join("\n") +
         "\nThey no longer weigh against your approval. Re-raise one only if it got worse, under the same id.\n"
+      : "",
+    contract.resolved?.length
+      ? "## Findings earlier reviews resolved\nRaise one again only if it is back, under its id:\n" + contract.resolved.slice(-MAX_RESOLVED_LISTED).map((e) =>
+        `- \`${e.ids.at(-1)}\` (resolved in round ${e.resolvedRound}) ${e.file ? `${e.file}: ` : ""}${e.issue.length > MAX_RESOLVED_CHARS ? `${e.issue.slice(0, MAX_RESOLVED_CHARS - 1)}…` : e.issue}`).join("\n") + "\n"
       : "",
     contract.kept.length
       ? "## Findings the user kept outside the task's scope\n" + contract.kept.map((f) => `- finding \`${f.id}\`: ${f.text}`).join("\n") +

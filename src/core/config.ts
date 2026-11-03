@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import YAML from "yaml";
+import { PIPELINE_PROFILES, type PipelineProfile } from "./commands.js";
 
 export type Backend = "codex" | "claude";
 export type AgentRole = "planner" | "plan_reviewer" | "implementer" | "code_reviewer";
@@ -9,6 +10,9 @@ export type RoleArgs = Partial<Record<AgentRole, string[]>>;
 
 export const AGENT_ROLES: AgentRole[] = ["planner", "plan_reviewer", "implementer", "code_reviewer"];
 export const SEVERITIES = ["critical", "high", "medium", "low"] as const;
+/** How much planning and review a pipeline run spends (src/core/profiles.ts); standard is the pipeline as it always was. */
+export const PROFILES = PIPELINE_PROFILES;
+export type ProfileName = PipelineProfile;
 
 export interface GateConfig {
   name: string;
@@ -55,6 +59,8 @@ export interface ConfigData {
     review_on_gate_failure: boolean;
   };
   gates: GateConfig[];
+  /** profile: the pipeline profile new runs start with; a run keeps its own (state.profile). */
+  pipeline: { profile: ProfileName };
   safety: { pause_before_implement: boolean };
   codex: { bin: string; model: string | null; args: string[]; role_args: RoleArgs };
   /** permission_prompts: "ask" relays Claude's permission prompts to the user when someone can answer; "deny" never asks. */
@@ -89,6 +95,7 @@ const DEFAULTS: ConfigData = {
     review_on_gate_failure: false,
   },
   gates: [],
+  pipeline: { profile: "standard" },
   safety: { pause_before_implement: false },
   // No session flag here: agentduo keeps a pipeline role's sessions to continue them, and passes --ephemeral /
   // --no-session-persistence to every other call. Listing one in args turns the continuation off.
@@ -281,6 +288,7 @@ export function configErrors(cfg: ConfigData): string[] {
     if (value !== null && typeof value !== "string") errors.push(`${name} must be a string or null`);
   }
   if (!["ask", "deny"].includes(cfg.claude.permission_prompts as string)) errors.push("claude.permission_prompts must be 'ask' or 'deny'");
+  if (!(PROFILES as readonly string[]).includes(cfg.pipeline?.profile as string)) errors.push(`pipeline.profile must be one of ${PROFILES.join(", ")}`);
   const budget = cfg.claude.max_budget_usd;
   if (budget !== null && !(typeof budget === "number" && budget > 0)) errors.push("claude.max_budget_usd must be a positive number or null");
   for (const backend of ["codex", "claude"] as const) {

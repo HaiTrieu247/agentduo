@@ -7,7 +7,7 @@ import { AttachmentError, AttachmentStore } from "./core/attachments.js";
 import {
   AGENT_NAMES, helpText, isPermissionMode, MODE_INFO, modeLabel, nextMode, parseInput, type Backend, type ChatCommand, type SettingCommand,
 } from "./core/commands.js";
-import { configFromSaved, type ConfigData } from "./core/config.js";
+import { configFromSaved, type ConfigData, type ProfileName } from "./core/config.js";
 import { Conversation, type Turn } from "./core/conversation.js";
 import { parseVerdict } from "./core/discussion.js";
 import { missingCli } from "./core/environment.js";
@@ -313,7 +313,7 @@ export class Chat {
         return;
       case "pipeline":
         if (await this.cannotSnapshot()) return;
-        return this.withFiles(o, (files) => this.startPipeline(input.task, files));
+        return this.withFiles(o, (files) => this.startPipeline(input.task, files, input.profile));
       case "discuss":
         return this.withFiles(o, (files) => this.discuss(input.question, files));
       case "attach":
@@ -757,7 +757,7 @@ export class Chat {
     return true;
   }
 
-  private startPipeline(task: string, files: Attachment[] = []): void {
+  private startPipeline(task: string, files: Attachment[] = [], profile?: ProfileName): void {
     if (this.active) return this.busy();
     if (this.elsewhere()) return;
     const problem = missingCli(this.cfg, Object.values(this.cfg.agents), this.env);
@@ -767,6 +767,8 @@ export class Chat {
     }
     const left = this.paused;
     const cfg = structuredClone(this.cfg);
+    // --profile is this run's: the run records it and keeps it; the chat's own config stays as it is.
+    if (profile) cfg.pipeline = { ...cfg.pipeline, profile };
     const context = this.conversation.context();
     let run: { store: RunStore; state: RunState };
     try {

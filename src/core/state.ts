@@ -1,12 +1,12 @@
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { PermissionDenial } from "../agents/types.js";
-import type { BudgetKey, HistoryEntry, HumanReview, Phase } from "../events.js";
+import type { BudgetKey, HistoryEntry, HumanReview, Phase, Role } from "../events.js";
 import type { Attachment } from "./attachment-types.js";
-import type { AgentRole, Backend } from "./config.js";
+import type { AgentRole, Backend, ProfileName } from "./config.js";
 import type { GateResult } from "./gates.js";
 import type { Snapshot } from "./git.js";
-import type { Approval, Critique, Finding } from "./outputs.js";
+import type { Approval, Critique, Finding, Origin, Severity } from "./outputs.js";
 
 export const STATE_VERSION = 1;
 
@@ -129,6 +129,74 @@ export interface FindingResponse {
 }
 
 /**
+ * One underlying review finding across the run's reviews (src/core/findings.ts): reviews may word, order or number it
+ * differently, and `key` stays its identity. Only a review resolves it (by leaving it out); the implementer's answers
+ * are claims. See docs/superpowers/specs/2026-11-03-agentduo-convergence-design.md.
+ */
+export interface TrackedFinding {
+  /** Its identity: the id it was first raised with (`F2@r3` when that id was taken by another finding already). */
+  key: string;
+  /** The ids reviews gave it, oldest first. */
+  ids: string[];
+  /** As the latest review that raised it gave them. */
+  file: string;
+  issue: string;
+  severity: Severity;
+  origin: Origin;
+  criteria: string[];
+  /** The issue as first raised, when a later review worded it differently. */
+  firstIssue?: string;
+  status: "open" | "resolved";
+  /** The reviews that raised it: their round and the revision they were of. */
+  seen: Array<{ round: number; revision: string }>;
+  /** The review round that last resolved it; null while none did. */
+  resolvedRound: number | null;
+  /** Times a review raised it again after one resolved it. */
+  reopened: number;
+}
+
+/**
+ * One implementation and review cycle as its review left it (src/core/progress.ts): what still blocked, and what moved
+ * since the review before it. Kept for the stall check and the report.
+ */
+export interface ReviewCycle {
+  round: number;
+  /** The revision reviewed, and its tree. */
+  revision: string;
+  tree: string;
+  /** The final plan's hash: a cycle is only compared with one of the same plan. */
+  plan: string | null;
+  /** The findings the task must still fix after this review (tracked keys), with their files ("" for a general one). */
+  blocking: Array<{ key: string; file: string }>;
+  /** The required gates the task must still fix. */
+  failingGates: string[];
+  /** What moved since the review before it; [] nothing (no progress); null when there was nothing to compare with. */
+  progress: string[] | null;
+  /** The review's findings: new, still open, reopened, and the open ones it resolved. */
+  counts: { new: number; open: number; reopened: number; resolved: number };
+}
+
+/** Review cycles in a row without progress, while they last; `mark` is what the implementer was given when the run stopped on them. */
+export interface Stall {
+  count: number;
+  /** The round of the first of them, and of the latest. */
+  since: number;
+  round: number;
+  /** The tracked findings that kept blocking. */
+  keys: string[];
+  mark: ProgressMark | null;
+}
+
+/** An agent call whose answers agentduo rejected (src/agents/runner.ts), for the report: the latest reasons, and how it ended. */
+export interface RejectedAnswers {
+  role: Role;
+  round: number;
+  count: number;
+  errors: string[];
+  outcome: "corrected" | "failed";
+}
+
+/**
  * A failure that was there before the task and that the plan's scope leaves out, as the review gave its evidence: a
  * required gate (`id` its name) or a blocking finding (`id` its id). The run asks you about these instead of looping.
  */
@@ -161,6 +229,102 @@ export interface Accepted {
   failures: PreexistingFailure[];
   /** Absent in older runs: none. */
   scope?: ScopeItem[];
+}
+
+/** A quality gate as far as its outcome can depend on agentduo's configuration (src/core/verification.ts). */
+export interface GateSpec {
+  name: string;
+  command: string;
+  required: boolean;
+  timeoutSec: number;
+}
+
+/**
+ * The latest review's approval, while that review leaves nothing for the task to fix (what it leaves is yours to decide
+ * on): the code it covers. DONE needs it to cover the code as it is then (src/core/verification.ts).
+ */
+export interface ReviewApproval {
+  round: number;
+  /** The snapshot it reviewed (its `reviewed_commit`), and that snapshot's tree. */
+  revision: string;
+  tree: string;
+  /** The final plan's hash it reviewed against. */
+  plan: string | null;
+  /** False when the reviewer did not approve and require_codex_approval is off. */
+  approved: boolean;
+}
+
+/** The final verification checkpoint's refreshes in a row: each time it found DONE's evidence out of date, and why. */
+export interface FinalCheck {
+  refreshes: number;
+  reasons: string[];
+}
+
+/** A gate's outcome on the code DONE rests on: `accepted` is a failure you accepted as pre-existing, never a pass. */
+export type GateOutcome = "passed" | "failed" | "timed_out" | "error" | "accepted";
+
+/**
+ * What DONE rests on, as the final verification checkpoint found it (src/core/verification.ts); also verification.json.
+ * verified: every required gate passed on that code; exceptions: it rests on failures you accepted (pre-existing gates
+ * or findings, critical findings kept outside the scope); not_enforced: a required gate fails and require_tests_pass is
+ * off; no_gates: none configured, so nothing was verified automatically.
+ */
+export interface Verification {
+  status: "verified" | "exceptions" | "not_enforced" | "no_gates";
+  /** The snapshot of the workspace DONE checked (dirty and untracked files included), and its tree. */
+  commit: string;
+  tree: string;
+  /** Each configured gate's outcome on that tree. */
+  gates: Array<{ name: string; required: boolean; outcome: GateOutcome; exitCode: number | null }>;
+  /** The gate configuration they ran with (a digest), and when they finished; null with no gates. */
+  config: string | null;
+  gatesAt: string | null;
+  /** The review whose approval covers that tree. */
+  review: { round: number; revision: string; approved: boolean };
+  /** The accepted failures DONE rests on, as "gate 'x'" or "finding F2". */
+  exceptions: string[];
+  at: string;
+}
+
+/** Why a run's profile went up (src/core/profiles.ts): a signal agentduo can name, where it came, and when. */
+export interface ProfileChange {
+  from: ProfileName;
+  to: ProfileName;
+  /** The deterministic signal (plan_size, plan_blocking, gates_failing…) and its explanation. */
+  signal: string;
+  reason: string;
+  phase: Phase;
+  round: number;
+  at: string;
+}
+
+/** The run's pipeline profile: the one it started with, the one in effect, and every change, oldest first. */
+export interface RunProfile {
+  initial: ProfileName;
+  name: ProfileName;
+  changes: ProfileChange[];
+}
+
+/** One role's agent calls in a run, as the CLIs reported them (retries and resumed sessions included). */
+export interface RoleUsage {
+  calls: number;
+  tokens: number;
+  costUsd: number;
+  /** Calls that reported no cost (Codex never does). */
+  unpricedCalls: number;
+}
+
+/**
+ * One plan critique that sent the plan back (src/core/progress.ts): what still blocked, by tracked identity, and what
+ * moved since the critique before it. Kept for the planning stall check and the report.
+ */
+export interface PlanCycle {
+  round: number;
+  /** The hash of the plan critiqued. */
+  plan: string | null;
+  blocking: string[];
+  /** What moved since the critique before; [] nothing; null when there was nothing to compare with. */
+  progress: string[] | null;
 }
 
 /** One question of the chat and the answer it got. */
@@ -210,6 +374,24 @@ export interface RunState {
   findingsSource?: FindingsSource | null;
   /** The implementer's answers to `openFindings` since that review; absent: none. */
   findingResponses?: FindingResponse[];
+  /** Every finding the run's reviews raised, by identity; absent in older runs (started from `openFindings`). */
+  trackedFindings?: TrackedFinding[];
+  /** Each review's cycle, oldest first (at most MAX_CYCLES); absent in older runs. */
+  cycles?: ReviewCycle[];
+  /** Review cycles in a row without progress; absent or null: none. */
+  stall?: Stall | null;
+  /** The run's pipeline profile; absent in older runs (standard). */
+  profile?: RunProfile;
+  /** Agent calls, tokens and cost by role; absent in older runs (only the totals). */
+  usageByRole?: Partial<Record<Role, RoleUsage>>;
+  /** The plan critiques' issues, by identity across critiques; absent in older runs and before the first critique. */
+  planIssues?: TrackedFinding[];
+  /** Each critique that sent the plan back, oldest first (at most MAX_CYCLES); absent: none. */
+  planCycles?: PlanCycle[];
+  /** Critiques in a row that sent the plan back without progress; absent or null: none. */
+  planStall?: Stall | null;
+  /** The agent calls whose answers were rejected, oldest first (at most MAX_REJECTED); absent: none. */
+  rejected?: RejectedAnswers[];
   /**
    * The quality gates as they were before any change (run before the first plan, with the tree they ran on): what failed
    * then is not the task's doing. Absent in older runs; null when no gate is configured.
@@ -223,8 +405,17 @@ export interface RunState {
   scopePending?: ScopeItem[] | null;
   /** What you accepted; re-planning starts over. Absent: nothing. */
   accepted?: Accepted;
-  /** The tree the last quality gates ran on; absent in older runs, null while none ran. */
+  /** The tree the last quality gates ran on (before any change they made); absent in older runs, null while none ran. */
   gatesTree?: string | null;
+  /** The gate configuration they ran with, and when they finished; absent in older runs (unknown), null while none ran. */
+  gatesConfig?: GateSpec[] | null;
+  gatesAt?: string | null;
+  /** The latest review's approval, while it leaves nothing for the task to fix; absent in older runs, null: none. */
+  reviewApproval?: ReviewApproval | null;
+  /** The final verification checkpoint's refreshes in a row; absent or null: none. */
+  finalCheck?: FinalCheck | null;
+  /** What DONE rests on; absent before DONE, and in runs that ended before agentduo checked it. */
+  verification?: Verification;
   /** The round whose review sent the run back to its gates once, because they ran on an earlier revision. */
   reverifiedRound?: number;
   /** The last implementation attempt; `blockingReason` absent in older runs. */

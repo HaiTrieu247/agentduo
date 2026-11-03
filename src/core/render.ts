@@ -3,7 +3,11 @@ import { decisionCommand } from "./decisions.js";
 import { describeGates } from "./gates.js";
 import type { Approval, Critique, Finding, Issue, Plan, Review } from "./outputs.js";
 import { criteria } from "./scope.js";
-import type { RunState } from "./state.js";
+import type { Phase, Role } from "../events.js";
+import type { ProfileName } from "./config.js";
+import { profileChangeLines, profileText } from "./profiles.js";
+import type { PlanCycle, ProfileChange, RejectedAnswers, ReviewCycle, RoleUsage, RunState, TrackedFinding, Verification } from "./state.js";
+import { verificationLines } from "./verification.js";
 
 const bullets = (items: string[], empty = "_(none)_") => (items.length ? items.map((x) => `- ${x}`).join("\n") : empty);
 
@@ -65,6 +69,30 @@ export function findingsMarkdown(findings: Finding[]): string {
   }).join("\n");
 }
 
+const ROLE_NAMES: Record<RejectedAnswers["role"], string> = {
+  planner: "planner", plan_reviewer: "plan critic", plan_finalizer: "plan sign-off", implementer: "implementer", code_reviewer: "code reviewer",
+};
+
+/** Each finding the reviews raised, by identity: its ids, words, the rounds that raised it, and where it stands. */
+export function trackedLines(ledger: TrackedFinding[]): string[] {
+  return ledger.map((e) => {
+    const also = e.ids.filter((id) => id !== e.key);
+    const words = e.firstIssue && e.firstIssue !== e.issue ? `${e.firstIssue} → ${e.issue}` : e.issue;
+    const where = e.status === "resolved" ? `resolved by the review of round ${e.resolvedRound}` : "still open";
+    return "`" + e.key + "`" + (also.length ? ` (also ${also.join(", ")})` : "") + ` [${e.severity}] ${e.file ? `${e.file} — ` : ""}${words}: ` +
+      `raised in rounds ${e.seen.map((x) => x.round).join(", ")}; ${where}${e.reopened ? `; reopened ${e.reopened}×` : ""}`;
+  });
+}
+
+/** Each review round: its findings against the ones before, and whether the cycle it closed made progress. */
+export function cycleLines(cycles: ReviewCycle[]): string[] {
+  return cycles.map((c) => {
+    const n = c.counts;
+    const progress = c.progress === null ? "" : c.progress.length ? ` — progress: ${c.progress.join("; ")}` : " — no progress";
+    return `round ${c.round}: ${n.new} new, ${n.open} still open, ${n.reopened} reopened, ${n.resolved} resolved${progress}`;
+  });
+}
+
 /**
  * Tokens, the cost the CLIs reported (and how many calls reported none, which it leaves out), agent calls and minutes
  * of work: the measures of the run's budget.
@@ -83,6 +111,101 @@ export function budgetLines(st: RunState): string[] {
     const limit = st.budget!.limits[k]!;
     const share = Math.floor((used[k] / limit) * 100);
     return `${describeLimit(k, used[k], limit)} (${share}%, limits.${BUDGET_CONFIG[k]})${used[k] >= limit ? ": reached" : ""}`;
+  });
+}
+
+const ROLE_ORDER: Role[] = ["planner", "plan_reviewer", "plan_finalizer", "implementer", "code_reviewer"];
+
+/**
+ * What a run spent and how it went, for comparing profiles on the same task (metrics.json, the report, `duo status`).
+ * Built from what the run already keeps: its usage and budget counters, its timeline and its verification record.
+ */
+export interface RunMetrics {
+  profile: { initial: ProfileName; final: ProfileName; escalations: ProfileChange[] };
+  outcome: Phase;
+  /** The final verification's status; null before DONE (or for a run that ended before it existed). */
+  verification: Verification["status"] | null;
+  /** passed (on the final code), exceptions (failures you accepted), failing, not_run, not_configured. */
+  requiredGates: "passed" | "exceptions" | "failing" | "not_run" | "not_configured";
+  /** The last review's verdict, or none yet. */
+  review: "approved" | "changes requested" | "none";
+  agentCalls: number;
+  byRole: Partial<Record<Role, RoleUsage>>;
+  tokens: number;
+  costUsd: number;
+  unpricedCalls: number;
+  planningRounds: number;
+  implementationRounds: number;
+  /** The steps the timeline recorded: agent turns by kind, and gate runs (the baseline included). */
+  steps: { plans: number; critiques: number; signOffs: number; implementations: number; reviews: number; gateRuns: number };
+  /** Times the run stopped for your decision. */
+  decisions: number;
+  workMinutes: number;
+  wallMinutes: number;
+}
+
+const AGENTS = new Set(["Codex", "Claude"]);
+
+export function runMetrics(st: RunState): RunMetrics {
+  const used = usageOf(st);
+  const turns = (phase: Phase) => st.history.filter((h) => h.phase === phase && AGENTS.has(h.agent)).length;
+  const lastReview = [...st.history].reverse().find((h) => h.phase === "CODE_REVIEW" && AGENTS.has(h.agent));
+  const v = st.verification;
+  let gates: RunMetrics["requiredGates"];
+  if (v) {
+    const accepted = v.gates.some((g) => g.outcome === "accepted");
+    gates = !v.gates.length ? "not_configured" : v.status === "not_enforced" ? "failing" : accepted ? "exceptions" : "passed";
+  } else if (!st.lastGates) {
+    // A null baseline: no gate was configured when the run started.
+    gates = st.baseline === null || st.gatesConfig?.length === 0 ? "not_configured" : "not_run";
+  } else {
+    gates = st.lastGates.every((g) => g.passed || !g.required) ? "passed" : "failing";
+  }
+  const wall = (Date.parse(st.updatedAt) - Date.parse(st.createdAt)) / 60_000;
+  return {
+    profile: { initial: st.profile?.initial ?? "standard", final: st.profile?.name ?? "standard", escalations: st.profile?.changes ?? [] },
+    outcome: st.phase, verification: v?.status ?? null, requiredGates: gates,
+    review: !lastReview ? "none" : lastReview.status === "approved" ? "approved" : "changes requested",
+    agentCalls: used.calls, byRole: st.usageByRole ?? {}, tokens: used.tokens, costUsd: used.cost, unpricedCalls: st.unpricedCalls ?? 0,
+    planningRounds: st.planningRound, implementationRounds: st.implRound,
+    steps: {
+      plans: turns("PLAN"), critiques: turns("PLAN_REVIEW"), signOffs: turns("PLAN_FINALIZE"), implementations: turns("IMPLEMENT"),
+      reviews: turns("CODE_REVIEW"), gateRuns: st.history.filter((h) => h.agent === "gates").length,
+    },
+    decisions: st.history.filter((h) => h.phase === "HUMAN_REVIEW" && h.agent === "orchestrator").length,
+    workMinutes: Math.round(used.minutes * 10) / 10, wallMinutes: Number.isFinite(wall) ? Math.round(wall * 10) / 10 : 0,
+  };
+}
+
+const ROLE_WORDS: Record<Role, string> = {
+  planner: "planner", plan_reviewer: "plan critic", plan_finalizer: "plan sign-off", implementer: "implementer", code_reviewer: "code reviewer",
+};
+
+/** The run's profile and metrics, one line each (the report and `duo status`). */
+export function metricsLines(st: RunState): string[] {
+  const m = runMetrics(st);
+  const roles = ROLE_ORDER.filter((r) => m.byRole[r]?.calls).map((r) => {
+    const u = m.byRole[r]!;
+    const cost = u.costUsd ? ` · $${u.costUsd.toFixed(2)}` : "";
+    return `${ROLE_WORDS[r]} ${u.calls} · ${Math.round(u.tokens).toLocaleString("en-US")} tokens${cost}${u.unpricedCalls ? ` (${u.unpricedCalls} unpriced)` : ""}`;
+  });
+  const s = m.steps;
+  return [
+    `profile: ${profileText(st.profile)}`,
+    ...profileChangeLines(st.profile).map((l) => `escalated: ${l}`),
+    `agent calls: ${m.agentCalls}${roles.length ? ` (${roles.join("; ")})` : ""}`,
+    `steps: ${s.plans} plan(s), ${s.critiques} critique(s), ${s.signOffs} sign-off(s), ${s.implementations} implementation(s), ${s.reviews} review(s), ` +
+      `${s.gateRuns} gate run(s); planning rounds ${m.planningRounds}, implementation rounds ${m.implementationRounds}; ${m.decisions} decision(s) asked of you`,
+    `outcome: ${m.outcome}${m.verification ? ` (${m.verification})` : ""}; required gates: ${m.requiredGates.split("_").join(" ")}; review: ${m.review}; ` +
+      `${m.workMinutes} min of work, ${m.wallMinutes} min wall clock`,
+  ];
+}
+
+/** Each critique that sent the plan back: what still blocked, and whether the revision before it made progress. */
+export function planCycleLines(cycles: PlanCycle[]): string[] {
+  return cycles.filter((c) => c.blocking.length).map((c) => {
+    const progress = c.progress === null ? "" : c.progress.length ? ` — progress: ${c.progress.join("; ")}` : " — no progress";
+    return `round ${c.round}: blocking ${c.blocking.join(", ")}${progress}`;
   });
 }
 
@@ -110,8 +233,13 @@ export function reportMarkdown(st: RunState, diffStat: string, lastReview: Revie
   }
   const budget = budgetLines(st);
   if (budget.length) lines.push("\n## Budget\n" + bullets(budget));
+  lines.push("\n## Profile and metrics\n" + bullets(metricsLines(st)));
+  const planning = planCycleLines(st.planCycles ?? []);
+  if (planning.length) lines.push("\n## Planning rounds\n" + bullets(planning));
   lines.push("\n## Timeline");
   for (const h of st.history) lines.push(`${h.step}. \`${h.phase}\` r${h.round} **${h.agent}** — ${h.status}: ${h.summary}`);
+  // What DONE rests on, or how current the gates' results are: never "passed" for results about other code.
+  lines.push("\n## Verification\n" + bullets(verificationLines(st)));
   lines.push("\n## Quality gates (last run)");
   lines.push(st.lastGates?.length ? describeGates(st.lastGates, false) : "_(not run)_");
   if (st.baseline?.results.length) lines.push("\n## Quality gates before any change (baseline)\n" + describeGates(st.baseline.results, false));
@@ -121,6 +249,13 @@ export function reportMarkdown(st: RunState, diffStat: string, lastReview: Revie
       ? `[kept outside the task's scope] \`${i.id}\` ${i.text}${i.evidence ? ` — justification: ${i.evidence}` : ""}`
       : `[scope widened] \`${i.id}\` ${i.text}${i.evidence ? ` — the plan's answer: ${i.evidence}` : ""}`))];
   if (accepted.length) lines.push("\n## Accepted by you\nThe run would have stopped on these; your decision let it go on.\n" + bullets(accepted));
+  // Older runs have none of these.
+  if (st.trackedFindings?.length) lines.push("\n## Findings across reviews\n" + bullets(trackedLines(st.trackedFindings)));
+  if (st.cycles?.length) lines.push("\n## Review rounds\n" + bullets(cycleLines(st.cycles)));
+  if (st.rejected?.length) {
+    lines.push("\n## Rejected answers\n" + bullets(st.rejected.map((r) => `${ROLE_NAMES[r.role] ?? r.role}, round ${r.round}: ${r.count} answer(s) rejected ` +
+      `(${r.errors.join("; ")}); ${r.outcome === "failed" ? "the call failed" : "a later answer was accepted"}`)));
+  }
   if (diffStat.trim()) lines.push("\n## Diff stat\n```\n" + diffStat.trimEnd() + "\n```");
   const unresolved: string[] = [];
   if (lastReview) {
@@ -138,7 +273,10 @@ export function reportMarkdown(st: RunState, diffStat: string, lastReview: Revie
   } else if (lastCritique && st.phase !== "DONE") {
     for (const i of lastCritique.issues) unresolved.push(`[plan ${i.severity}] \`${i.id}\` ${i.description}`);
   }
-  for (const g of st.lastGates ?? []) if (!g.passed) unresolved.push(`[gate] ${g.name} failed (${g.required ? "required" : "optional"})`);
+  const acceptedGates = new Set((st.accepted?.failures ?? []).filter((f) => f.kind === "gate").map((f) => f.id));
+  for (const g of st.lastGates ?? []) {
+    if (!g.passed) unresolved.push(`[gate] ${g.name} failed (${g.required ? "required" : "optional"}${g.required && acceptedGates.has(g.name) ? "; failing as before the task, accepted by you" : ""})`);
+  }
   for (const d of st.lastImplementation?.permissionDenials ?? []) {
     unresolved.push(`[permission denied] ${d.tool_name}: ${JSON.stringify(d.tool_input ?? "").slice(0, 160)}`);
   }

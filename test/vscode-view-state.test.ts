@@ -17,6 +17,7 @@ const phase = (p: "PLAN" | "IMPLEMENT" | "VERIFY" | "CODE_REVIEW", step = 1): Du
   type: "phase.started", step, phase: p, round: 1, role: p === "PLAN" ? "planner" : "implementer", agent: p === "VERIFY" ? "gates" : "claude",
   planning: { round: 1, limit: 4 }, impl: { round: 1, limit: 5 },
 });
+type PhaseStarted = Extract<DuoEvent, { type: "phase.started" }>;
 const act = (id: string, status: Activity["status"] = "running"): DuoEvent => ({ type: "agent.activity", role: "implementer", agent: "claude", activity: { id, kind: "read", label: `Read  ${id}`, status } });
 const entry = (p: HistoryEntry["phase"], step: number): HistoryEntry => ({ step, phase: p, round: 1, agent: "Claude", status: "completed", summary: "s", kind: "ok", at: "t", artifact: null });
 const review: HumanReview = { reason: "plan_ready", message: "ready", fromPhase: "PLAN_FINALIZE", resumePhase: "IMPLEMENT", details: [], at: "t" };
@@ -167,6 +168,19 @@ describe("view state", () => {
     const reached = run(s, ev(phase("PLAN")), ev({ type: "step.completed", entry: entry("PLAN", 1), durationSec: 1 }), ev(phase("IMPLEMENT", 2)),
       ev({ type: "step.completed", entry: entry("IMPLEMENT", 2), durationSec: 1 }), ev(phase("VERIFY", 3)));
     expect(pipelineView(reached).map((p) => `${p.label}:${p.status}`)).toEqual(["PLAN:done", "IMPLEMENT:done", "VERIFY:active", "REVIEW:pending"]);
+  });
+
+  it("puts a sign-off a lightweight run escalated to before implementation, and shows the profile", () => {
+    // A lightweight run's flow: no sign-off.
+    const light: PipelineStep[] = [PIPELINE[0]!, { phase: "PLAN_REVIEW", label: "CRITIQUE", role: "plan_reviewer", agent: "claude" }, ...PIPELINE.slice(1)];
+    const s = { ...initialState("active"), pipeline: light };
+    const started = run(s, ev({ ...(phase("PLAN") as PhaseStarted), profile: "lightweight" }));
+    expect(started.profile).toBe("lightweight");
+    // Escalated to standard, it signs the revised plan off: that step shows where it happens.
+    const signOff: DuoEvent = { ...(phase("PLAN", 3) as PhaseStarted), phase: "PLAN_FINALIZE", role: "plan_finalizer", profile: "standard" };
+    const reached = run(started, ev(signOff));
+    expect(pipelineView(reached).map((p) => `${p.label}:${p.status}`)).toEqual(["PLAN:done", "CRITIQUE:pending", "FINALIZE:active", "IMPLEMENT:pending", "REVIEW:pending"]);
+    expect(reached.profile).toBe("standard");
   });
 
   it("marks the phase a run was stopped in as stopped, not done, until a step starts again", () => {

@@ -186,6 +186,17 @@ describe("prompts", () => {
     expect(prompts.implementer(ctx, 2, "# Plan", traced, [], null)).toContain("Fails acceptance criteria: AC1, AC2");
   });
 
+  it("asks the reviewer to keep a finding's id, to say why a late one comes late, and lists what earlier reviews resolved", () => {
+    const sha = "b".repeat(40);
+    const resolved = [{ key: "F2", ids: ["F2", "F5"], file: "db.ts", issue: "x".repeat(130), severity: "high" as const, origin: "regression" as const, criteria: [],
+      status: "resolved" as const, seen: [{ round: 1, revision: "a" }], resolvedRound: 2, reopened: 0 }];
+    const p = prompts.codeReviewer(ctx, 3, "# Plan", "a".repeat(40), sha, [], "", "", false, null, impl(), undefined, { attribute: [], accepted: [], kept: [], resolved });
+    expect(p).toContain("Keep a finding's id when you raise it again, even in other words: a new id says the issue is new.");
+    expect(p).toContain("must say in `late_reason` why it was not reported then");
+    expect(p).toContain(`## Findings earlier reviews resolved\nRaise one again only if it is back, under its id:\n- \`F5\` (resolved in round 2) db.ts: ${"x".repeat(119)}…\n`);
+    expect(prompts.codeReviewer(ctx, 1, "# Plan", "a".repeat(40), sha, [], "", "", false, null, impl())).not.toContain("## Findings earlier reviews resolved");
+  });
+
   it("code reviewer sees the revision, gates, diff and previous findings, fenced safely", () => {
     const sha = "b".repeat(40);
     const diff = "+```js\n+code\n+```";

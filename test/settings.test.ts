@@ -185,6 +185,11 @@ describe("settings", () => {
     settings.value("agents.implementer", "codex").apply(cfg);
     settings.value("limits.max_retries", 0).apply(cfg);
     settings.value("claude.max_budget_usd", 2.5).apply(cfg);
+    settings.value("pipeline.profile", "lightweight").apply(cfg);
+    expect(cfg.pipeline.profile).toBe("lightweight");
+    // Like the roles and limits: a run keeps the profile it started with.
+    expect(settings.value("pipeline.profile", "thorough").live).toBe("next-run");
+    expect(() => settings.value("pipeline.profile", "quick")).toThrow("pipeline.profile must be one of lightweight, standard, thorough");
     // The backends hold cfg.claude and its role_args: they keep their identity.
     expect(cfg.claude).toBe(claude);
     expect(cfg.claude.role_args).toBe(roles);

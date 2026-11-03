@@ -54,6 +54,16 @@ describe("loadConfig", () => {
     expect(text).toContain("unknown config key 'claude.read_only_tools' (ignored)");
   });
 
+  it("defaults to the standard profile, keeps an older saved config standard, and rejects an unknown profile", () => {
+    expect(defaultConfig().pipeline.profile).toBe("standard");
+    // A run saved before profiles: merged over today's defaults, it is standard.
+    expect(configFromSaved({ agents: defaultConfig().agents }).pipeline).toEqual({ profile: "standard" });
+    const light = setup("pipeline:\n  profile: lightweight\n");
+    expect(loadConfig({ dir: light.dir, env: light.env }).data.pipeline.profile).toBe("lightweight");
+    const bad = setup("pipeline:\n  profile: quick\n");
+    expect(() => loadConfig({ dir: bad.dir, env: bad.env })).toThrow("pipeline.profile must be one of lightweight, standard, thorough");
+  });
+
   it("accepts role_args per role and rejects unknown roles or non-string args", () => {
     const ok = setup("claude:\n  role_args:\n    implementer: [--permission-mode, acceptEdits]\n");
     expect(loadConfig({ dir: ok.dir, env: ok.env }).data.claude.role_args).toEqual({ implementer: ["--permission-mode", "acceptEdits"] });

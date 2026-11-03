@@ -119,7 +119,8 @@ export function attachPlainRenderer(bus: EventBus, out: TextSink, o: PlainOption
         break;
       }
       case "run.started":
-        out.write(`${paint("bold", `agentduo ${o.version} · run ${e.runId}`)}\n  workspace: ${e.repo}\n  run dir: ${e.runDir}\n`);
+        out.write(`${paint("bold", `agentduo ${o.version} · run ${e.runId}`)}\n  workspace: ${e.repo}\n  run dir: ${e.runDir}\n` +
+          (e.profile && e.profile !== "standard" ? `  profile: ${e.profile}\n` : ""));
         break;
       case "phase.started":
         ctx = { agent: e.agent ?? "", where: `${e.phase} r${e.round}` };

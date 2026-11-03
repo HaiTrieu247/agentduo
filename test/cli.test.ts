@@ -76,7 +76,27 @@ describe("cli", () => {
     expect(r.code, r.err).toBe(0);
     for (const s of [`agentduo ${packageVersion()} · run`, "▶ planner", "Codex → Claude  Plan v1", "Claude → Codex  approved", "✓ gate check", "[DONE]"]) expect(r.out).toContain(s);
     expect((await cli(["list"])).out).toContain("DONE");
-    expect((await cli(["status"])).out).toMatch(/Run \S+ — DONE/);
+    const status = (await cli(["status"])).out;
+    expect(status).toMatch(/Run \S+ — DONE/);
+    expect(status).toMatch(/verification: verified: every required quality gate passed on the final code \(`[0-9a-f]{12}`\), and the review of round 1 approved it/);
+    expect(status).toContain("verification: gates: check passed (ran ");
+    expect(status).toContain("  profile: standard\n  agent calls: 5 (planner 1");
+    // Files changed after DONE: status says they are not what was verified.
+    writeFileSync(join(repo, "app.txt"), "changed after the run\n");
+    expect((await cli(["status"])).out).toContain("verification: the workspace has changed since DONE verified it: the files there now are not verified");
+  });
+
+  it("starts a run with the profile --profile names, which it keeps, and refuses one it does not know", async () => {
+    writeConfig(repo);
+    fake.setScenario(happy());
+    const r = await cli(["run", "Make app.txt fixed", "--profile", "lightweight"]);
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toContain("  profile: lightweight\n");
+    const st = RunStore.open(join(repo, ".agentduo", "runs")).loadState();
+    expect([st.profile, st.history.some((e) => e.phase === "PLAN_FINALIZE")]).toEqual([{ initial: "lightweight", name: "lightweight", changes: [] }, false]);
+    expect((await cli(["status"])).out).toContain("  profile: lightweight\n  agent calls: 4 (");
+    const bad = await cli(["Make app.txt fixed", "--profile", "quick"]);
+    expect([bad.code, bad.err]).toEqual([1, expect.stringContaining("Allowed choices are lightweight, standard, thorough")]);
   });
 
   it("treats a subdirectory (or --dir) as the workspace", async () => {

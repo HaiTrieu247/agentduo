@@ -59,6 +59,12 @@ describe("commands: reading a line", () => {
 
   it("asks for a task after /pipeline, and knows the chat's own commands", () => {
     expect(parseInput("/pipeline Add JWT auth")).toEqual({ kind: "pipeline", task: "Add JWT auth" });
+    // A profile only as the first words, so a task may still mention one.
+    expect(parseInput("/pipeline --profile lightweight Fix the typo")).toEqual({ kind: "pipeline", task: "Fix the typo", profile: "lightweight" });
+    expect(parseInput("/pipeline --profile=thorough Rework auth")).toEqual({ kind: "pipeline", task: "Rework auth", profile: "thorough" });
+    expect(parseInput("/pipeline Use the --profile flag in docs")).toEqual({ kind: "pipeline", task: "Use the --profile flag in docs" });
+    expect(parseInput("/pipeline --profile quick Fix it")).toMatchObject({ kind: "usage", text: expect.stringContaining("unknown profile 'quick'") });
+    expect(parseInput("/pipeline --profile lightweight")).toMatchObject({ kind: "usage" });
     expect(parseInput("/pipeline")).toMatchObject({ kind: "usage" });
     expect(parseInput("/discuss Redis or Postgres for the queue?")).toEqual({ kind: "discuss", question: "Redis or Postgres for the queue?" });
     expect(parseInput("/discuss")).toMatchObject({ kind: "usage" });

@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import type { ProfileName } from "./core/config.js";
 
 export type Phase =
   | "PLAN" | "PLAN_REVIEW" | "PLAN_FINALIZE" | "IMPLEMENT" | "VERIFY" | "CODE_REVIEW"
@@ -140,8 +141,12 @@ export type DiscussionStatus = "agreed" | "disputed" | "interrupted" | "error";
 export type CallContext = { role: Role; turnId?: undefined } | { role?: undefined; turnId: string };
 
 export type DuoEvent =
-  | { type: "run.started"; runId: string; task: string; repo: string; runDir: string }
-  | { type: "phase.started"; step: number; phase: Phase; round: number; role?: Role; agent?: Party; planning: RoundInfo; impl: RoundInfo; budget?: BudgetView }
+  /** `profile`: the pipeline profile in effect (src/core/profiles.ts); absent from older emitters (standard). */
+  | { type: "run.started"; runId: string; task: string; repo: string; runDir: string; profile?: ProfileName }
+  | {
+    type: "phase.started"; step: number; phase: Phase; round: number; role?: Role; agent?: Party; planning: RoundInfo; impl: RoundInfo; budget?: BudgetView;
+    profile?: ProfileName;
+  }
   | { type: "agent.activity"; role: Role; agent: Party; activity: Activity }
   | { type: "agent.retry"; role: Role; agent: Party; attempt: number; max: number; reason: string }
   | ({ type: "permission.requested"; agent: Party; request: PermissionRequest } & CallContext)
@@ -177,7 +182,10 @@ export type DuoEvent =
   | { type: "step.completed"; entry: HistoryEntry; durationSec: number; costUsd?: number; tokens?: number }
   | { type: "warning"; text: string }
   | { type: "human.required"; runId: string; review: HumanReview }
-  /** `summary` says, on DONE, what the run actually checked ("quality gates passed and the review approved"). */
+  /**
+   * `summary` says, on DONE, what the run actually checked on the final code ("quality gates passed on the final code and
+   * the review approved", "with accepted exceptions: …", "…; no quality gates configured").
+   */
   | { type: "run.finished"; runId: string; phase: "DONE" | "ABORTED" | "HUMAN_REVIEW" | "INTERRUPTED"; reportPath: string; exitCode: number; summary?: string };
 
 export interface Decision {

@@ -27,9 +27,11 @@ export function TurnFooter({ view, now, frame }: { view: ViewState; now: number;
 
 function Pipeline({ view }: { view: ViewState }) {
   const current = view.current?.phase;
+  // A lightweight run has no sign-off step, unless it escalated to one.
+  const phases = PIPELINE.filter((p) => !(p.phase === "PLAN_FINALIZE" && view.profile === "lightweight" && !view.reached.includes(p.phase)));
   return (
     <Text wrap="truncate-end">
-      {PIPELINE.map((p, i) => {
+      {phases.map((p, i) => {
         const active = p.phase === current;
         const done = !active && view.reached.includes(p.phase);
         const round = active && IMPL_PHASES.includes(p.phase) ? ` r${view.current!.round}` : "";
@@ -42,7 +44,8 @@ function Pipeline({ view }: { view: ViewState }) {
           </Text>
         );
       })}
-      <Text dimColor>{`    plan ${view.planning.round}/${view.planning.limit} · impl ${view.impl.round}/${view.impl.limit}${view.budget ? ` · ${budgetText(view.budget)}` : ""}`}</Text>
+      <Text dimColor>{`    plan ${view.planning.round}/${view.planning.limit} · impl ${view.impl.round}/${view.impl.limit}${view.budget ? ` · ${budgetText(view.budget)}` : ""}` +
+        (view.profile && view.profile !== "standard" ? ` · ${view.profile}` : "")}</Text>
     </Text>
   );
 }

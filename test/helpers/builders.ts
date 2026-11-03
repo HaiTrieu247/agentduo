@@ -32,7 +32,7 @@ export const impl = (status: Implementation["status"] = "completed", addressed: 
 });
 
 export const finding = (id: string, severity: Severity = "high", file = "app.txt", origin: Origin = "regression", criteria: string[] = []): Finding => ({
-  id, severity, file, line: 1, issue: "bad", recommendation: "fix", origin, criteria,
+  id, severity, file, line: 1, issue: "bad", recommendation: "fix", origin, criteria, late_reason: null,
   evidence: origin === "pre_existing" ? "the same at the base revision" : origin === "out_of_scope" ? "" : "the change causes it",
 });
 

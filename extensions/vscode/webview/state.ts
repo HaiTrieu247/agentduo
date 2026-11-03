@@ -2,7 +2,7 @@
 // snapshot) and the webview another, both driven by the same actions through `reduce`. No DOM here.
 import type { ChatStatus } from "../../../src/chat.js";
 import type { Attachment } from "../../../src/core/attachment-types.js";
-import { AGENT_NAMES, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS, type Backend } from "../../../src/core/commands.js";
+import { AGENT_NAMES, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS, type Backend, type PipelineProfile } from "../../../src/core/commands.js";
 import type { CodexCatalog } from "../../../src/core/models.js";
 import type { SettingsView } from "../../../src/core/settings.js";
 import type { UsageReport } from "../../../src/core/usage.js";
@@ -158,6 +158,8 @@ export interface ViewState {
   impl: RoundInfo;
   /** The run's budget when its current step started; absent or null: it has none (or a view saved before budgets). */
   budget?: BudgetView | null;
+  /** The run's pipeline profile as its current step started; absent: none said (standard, or a view saved before profiles). */
+  profile?: PipelineProfile;
   totals: { costUsd: number; tokens: number };
   live: { costUsd: number; tokens: number };
   decision: PendingDecision | null;
@@ -350,7 +352,7 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
     case "phase.started":
       return {
         ...s, current: newStep(e.phase, e.round, now, e.role, e.agent), stopped: null, planning: e.planning, impl: e.impl, budget: e.budget ?? null,
-        reached: s.reached.includes(e.phase) ? s.reached : [...s.reached, e.phase], live: { costUsd: 0, tokens: 0 },
+        reached: s.reached.includes(e.phase) ? s.reached : [...s.reached, e.phase], live: { costUsd: 0, tokens: 0 }, profile: e.profile,
       };
     case "agent.activity":
       return withActivity(s, e.activity);
@@ -596,8 +598,11 @@ export function pipelineView(s: ViewState): Array<PipelineStep & { status: Stage
   const steps = [...s.pipeline];
   for (const phase of s.reached) {
     if (steps.some((p) => p.phase === phase) || phase === "HUMAN_REVIEW" || phase === "DONE" || phase === "ABORTED") continue;
-    const at = phase === "VERIFY" ? steps.findIndex((p) => p.phase === "CODE_REVIEW") : -1;
-    const step: PipelineStep = { phase, label: phase === "VERIFY" ? "VERIFY" : phase, role: null, agent: phase === "VERIFY" ? "gates" : null };
+    // Where it goes in the flow: gates before the review, a sign-off (a lightweight run that escalated) before implementing.
+    const before = phase === "VERIFY" ? "CODE_REVIEW" : phase === "PLAN_FINALIZE" ? "IMPLEMENT" : null;
+    const at = before ? steps.findIndex((p) => p.phase === before) : -1;
+    const label = phase === "VERIFY" ? "VERIFY" : phase === "PLAN_FINALIZE" ? "FINALIZE" : phase;
+    const step: PipelineStep = { phase, label, role: phase === "PLAN_FINALIZE" ? "plan_finalizer" : null, agent: phase === "VERIFY" ? "gates" : null };
     if (at >= 0) steps.splice(at, 0, step);
     else steps.push(step);
   }

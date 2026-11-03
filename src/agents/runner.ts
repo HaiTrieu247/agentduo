@@ -92,7 +92,37 @@ export interface AgentResult {
   unpricedCalls: number;
   /** The run's budget stopped the call before an attempt: why. */
   budgetStop: string | null;
+  /** Every answer agentduo rejected (not JSON, or failing the schema or the role's check), by attempt; empty for a text call. */
+  rejections: Rejection[];
 }
+
+/** An answer agentduo rejected, and why: the next attempt is told, also when it runs in a fresh session. */
+export interface Rejection {
+  attempt: number;
+  errors: string[];
+}
+
+/** The longest rejected answer a retry is shown again, to correct it rather than redo it. */
+const MAX_REJECTED_CHARS = 20_000;
+
+/**
+ * What a retry is told about the answer agentduo rejected: exactly what to correct, and the answer itself (when it was
+ * JSON and not too long), so that it corrects that answer instead of redoing the work. Only the role's own answer and
+ * agentduo's reasons: nothing of another agent's. `unseen`: the retry runs in a session that never saw that answer.
+ */
+export function rejectionNote(errors: string[], answer: unknown, unseen: boolean): string {
+  const json = answer == null ? null : JSON.stringify(answer, null, 2);
+  const shown = json == null ? ""
+    : json.length > MAX_REJECTED_CHARS
+      ? `\nYour rejected answer is ${json.length} characters long, too long to repeat here: give it again with these corrections.\n`
+      : `\nYour rejected answer:\n\`\`\`\`json\n${json}\n\`\`\`\`\n`;
+  return `\n\n## Your previous answer was rejected\nagentduo checked your previous answer to this request${unseen ? ", given in a session you cannot see," : ""} ` +
+    `and rejected it:\n${errors.map((e) => `- ${e}`).join("\n")}\n` +
+    "Correct exactly these points. Keep the rest of the answer as it was, unless a correction needs a change elsewhere: there is no need to redo " +
+    "the work. Return the whole corrected answer as a single JSON object that matches the required schema.\n" + shown;
+}
+
+const sameErrors = (a: string[], b: string[]) => a.length === b.length && [...a].sort().every((e, i) => e === [...b].sort()[i]);
 
 export interface RunnerOptions {
   backends?: Record<"codex" | "claude", AgentBackend>;
@@ -220,13 +250,16 @@ export class AgentRunner {
     let meta: AgentMeta = { permissionDenials: [] };
     let model: string | null = null;
     let lastError: string | null = null;
+    // The last answer agentduo rejected, which the next attempt is told about (also a fresh session after a continued one).
+    let rejected: { errors: string[]; answer: unknown } | null = null;
+    const rejections: Rejection[] = [];
     let resuming: CallSession["resume"];
     let calls = 0;
     let priced = 0;
     const finish = (ok: boolean, attempts: number, data: unknown, error: string | null, interrupted = false, budgetStop: string | null = null): AgentResult => ({
       ok, data, error, attempts, durationSec: (Date.now() - started) / 1000,
       costUsd: costSeen ? cost : null, tokens: tokensSeen ? tokens : null, meta, backend: backend.name, interrupted, model,
-      sessionId: meta.sessionId ?? null, resumed: ok && !!resuming, calls, unpricedCalls: calls - priced, budgetStop,
+      sessionId: meta.sessionId ?? null, resumed: ok && !!resuming, calls, unpricedCalls: calls - priced, budgetStop, rejections,
     });
     const budget = o.mode === "text" ? undefined : o.budget;
 
@@ -236,16 +269,23 @@ export class AgentRunner {
       const stop = budget?.stop({ tokens, costUsd: cost, calls }) ?? null;
       if (stop) return finish(false, attempt - 1, null, stop, false, stop);
       resuming = attempt === 1 ? resume : undefined;
-      // The fresh session after a resumed attempt never saw that attempt, so it gets no rejection note.
+      // The fresh session after a resumed attempt never saw that attempt: a lost session needs no note, but an answer
+      // agentduo rejected does, or the new session would repeat it.
       const fellBack = attempt === 2 && !!resume;
-      if (fellBack) lastError = `the earlier session could not be continued (${lastError ?? "no answer"}); starting a new one`;
+      if (fellBack) {
+        lastError = rejected
+          ? `the continued session's answer was rejected (${lastError}); starting a new one, told why`
+          : `the earlier session could not be continued (${lastError ?? "no answer"}); starting a new one`;
+      }
       if (attempt > 1 && o.mode !== "text") this.bus.emit({ type: "agent.retry", role: o.role, agent, attempt, max: attemptsAllowed, reason: lastError ?? "" });
       const stem = join(this.logDir, `${prefix}.a${attempt}`);
       const prompt = resuming
         ? resuming.prompt
-        : lastError && !fellBack
-          ? `${o.prompt}\n\n## Previous attempt was rejected by the orchestrator\n${lastError}\nReturn ONLY a JSON object that matches the required schema exactly.\n`
-          : o.prompt;
+        : rejected
+          ? o.prompt + rejectionNote(rejected.errors, rejected.answer, fellBack)
+          : lastError && !fellBack
+            ? `${o.prompt}\n\n## Previous attempt was rejected by the orchestrator\n${lastError}\nReturn ONLY a JSON object that matches the required schema exactly.\n`
+            : o.prompt;
       // A resumed session already has the files of its earlier turns: it gets only the ones it was not given.
       const attachments = resuming ? resuming.attachments ?? [] : o.attachments ?? [];
       const lastMessageFile = `${stem}.last.${text ? "md" : "json"}`;
@@ -362,8 +402,18 @@ export class AgentRunner {
         tokens += meta.tokens;
         tokensSeen = true;
       }
+      // Each attempt starts over: only the answer it gives can be rejected.
+      const before = rejected;
+      rejected = null;
       if (parseError) {
         lastError = run.code === 0 ? parseError : `${backend.name} exited with code ${run.code}: ${(run.stderr || run.stdout).trim().slice(-800)}`;
+        if (run.code === 0 && o.mode !== "text") {
+          rejections.push({ attempt, errors: [parseError] });
+          if (before && sameErrors(before.errors, [parseError])) {
+            return finish(false, attempt, null, `the same invalid answer came back after it was told what to correct, so no further attempt was made:\n- ${parseError}`);
+          }
+          rejected = { errors: [parseError], answer: null };
+        }
         continue;
       }
       if (run.code !== 0) {
@@ -377,7 +427,14 @@ export class AgentRunner {
       let errors = validateOutput(o.schemaName, data);
       if (!errors.length && o.check) errors = o.check(data);
       if (errors.length) {
-        lastError = `output failed validation:\n- ${errors.slice(0, 20).join("\n- ")}`;
+        const shown = errors.slice(0, 20);
+        lastError = `output failed validation:\n- ${shown.join("\n- ")}`;
+        rejections.push({ attempt, errors: shown });
+        // Told what to correct, it gave the same invalid answer: another attempt would most likely repeat it again.
+        if (before && sameErrors(before.errors, shown)) {
+          return finish(false, attempt, null, `the same invalid answer came back after it was told what to correct, so no further attempt was made:\n- ${shown.join("\n- ")}`);
+        }
+        rejected = { errors: shown, answer: data };
         continue;
       }
       writeFileSync(`${stem}.output.json`, JSON.stringify(data, null, 2));

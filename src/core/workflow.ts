@@ -15,18 +15,28 @@ import type { Approval, Critique, Finding, Implementation, Issue, Plan, RepoNote
 import * as prompts from "./prompts.js";
 import * as render from "./render.js";
 import {
-  acceptedIds, acceptedText, acceptPending, attributionErrors, baselineFailures, conflictReview, gateVerdicts, missingBaselineEntries, outOfScopeGates,
-  preexistingFailures, preexistingReview, requirementConflicts, splitFindings,
+  acceptedIds, acceptedText, acceptPending, attributionErrors, baselineFailures, conflictReview, gateVerdicts, gatesToAttribute, missingBaselineEntries,
+  outOfScopeGates, preexistingFailures, preexistingReview, requirementConflicts, splitFindings,
 } from "./acceptance.js";
-import { recordResponses, reviewFindings, setFindings, unanswered, type ReviewFindings } from "./findings.js";
+import { lateFindingErrors, ledgerOf, recordResponses, reviewFindings, setFindings, trackReview, unanswered, type ReviewFindings } from "./findings.js";
 import {
   addedCriteria, adoptedSuggestions, criteriaErrors, criterionIds, expansionReview, issueRefusalErrors, keptIds, outOfScopeBlockers, reviewScopeErrors,
   scopeReview, taskIssues,
 } from "./scope.js";
-import { blockedReview, changedParts, findingsDigest, heldReview, implementerSettings, nextBlocker } from "./progress.js";
+import {
+  blockedReview, changedParts, cycleProgress, findingsDigest, heldReview, implementerSettings, nextBlocker, nextStall, planAnswer, planProgress,
+  planStallReview, stallHeldReview, stallReview, trackCritique,
+} from "./progress.js";
+import {
+  escalate, LIGHTWEIGHT, newProfile, planTooLarge, profileOf, profileText, reviewsOnGateFailure, signsOff, unplannedFiles, type EscalationSignal,
+} from "./profiles.js";
 import { internalNotice, openRunGit, prepareRunGit } from "./run-git.js";
 import { leavesBase } from "../paths.js";
-import { nowIso, type FindingsSource, type ProgressMark, type RunState, type RunStore } from "./state.js";
+import {
+  nowIso, type FindingResponse, type FindingsSource, type GateSpec, type PlanCycle, type ProgressMark, type ReviewApproval, type ReviewCycle, type RunState,
+  type RunStore,
+} from "./state.js";
+import { configDigest, doneText, FINAL_REFRESHES, finalProblems, finalVerification, gateSpecs, gatesStale, nextFinalCheck, staleReview } from "./verification.js";
 
 export const EXIT = { DONE: 0, ERROR: 1, HUMAN_REVIEW: 2, ABORTED: 3, INTERRUPTED: 130 } as const;
 
@@ -46,6 +56,9 @@ const ROLE_NAMES: Record<Role, string> = {
 };
 const SEVERITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 const MAX_WARNINGS = 50;
+/** The review cycles and the rejected answers a run keeps, for the report. */
+const MAX_CYCLES = 50;
+const MAX_REJECTED = 30;
 
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 
@@ -125,6 +138,15 @@ export interface WorkflowOptions {
 function relativeInside(path: string, root: string): string | null {
   const rel = relative(resolve(root), resolve(path));
   return rel && !leavesBase(rel) ? rel.split("\\").join("/") : null;
+}
+
+/**
+ * The workspace's tree as the run's snapshots take it (its runs folder left out), for `duo status` to compare with the
+ * tree the run's evidence is about. Throws when the run's snapshots cannot be opened.
+ */
+export async function workspaceTree(state: RunState, repo: string, runsDir: string, env: NodeJS.ProcessEnv): Promise<string> {
+  const runsRel = relativeInside(runsDir, repo);
+  return openRunGit(state, repo, env).worktreeTree(runsRel ? [runsRel] : []);
 }
 
 function stableStringify(value: unknown): string {
@@ -227,7 +249,17 @@ export class Workflow {
   // ------------------------------------------------------------------ loop
   async run(): Promise<number> {
     const st = this.state;
-    this.emit({ type: "run.started", runId: st.taskId, task: st.task, repo: this.o.repo, runDir: this.o.store.dir });
+    const configured = this.o.cfg.pipeline?.profile ?? "standard";
+    if (!st.profile) {
+      // A new run takes the config's profile; an older run, which had none, goes on as it always did (standard).
+      st.profile = newProfile(st.step === 0 ? configured : "standard");
+      this.save();
+    }
+    this.emit({ type: "run.started", runId: st.taskId, task: st.task, repo: this.o.repo, runDir: this.o.store.dir, profile: st.profile.name });
+    if (configured !== st.profile.initial) {
+      // Never changed on resume: the run keeps the review policy it started with (escalations aside).
+      this.emit({ type: "warning", text: `this run keeps its pipeline profile, ${profileText(st.profile)}; pipeline.profile '${configured}' applies to new runs` });
+    }
     if (st.inProgress) this.warn(`previous run was interrupted during ${st.inProgress.phase}; re-running it`);
     const budget = ensureBudget(st, this.o.cfg);
     if (budget?.limits.cost != null && Object.values(this.o.cfg.agents).includes("codex")) {
@@ -304,14 +336,18 @@ export class Workflow {
     return exitCode;
   }
 
-  /** What DONE rests on: with no gates or with approval not required, "quality gates passed and the review approved" would overclaim. */
+  /**
+   * What DONE rests on, from the final check's record (src/core/verification.ts): with no gates, with failures you
+   * accepted, or with approval not required, "quality gates passed and the review approved" would overclaim.
+   */
   private doneSummary(): string {
+    const st = this.state;
+    if (st.verification) return doneText(st.verification, acceptedText(st.accepted));
+    // A run that ended DONE before agentduo checked its final code: said as it was then.
     const { cfg, store } = this.o;
     const approved = store.exists("review.json") && store.readJson<{ output: Review }>("review.json").output.approved;
     const review = approved ? "the review approved" : "the review did not approve (require_codex_approval is off)";
     if (!cfg.gates.length) return `${review}; no quality gates configured`;
-    const st = this.state;
-    // Gates of an earlier revision: the files kept changing after they ran (CODE_REVIEW re-runs them once a round).
     const earlier = st.gatesTree != null && st.lastSnapshot != null && st.gatesTree !== st.lastSnapshot.tree ? " on an earlier revision" : "";
     const failing = (st.lastGates ?? []).filter((g) => g.required && !g.passed);
     const accepted = acceptedIds(st.accepted, "gate");
@@ -352,7 +388,7 @@ export class Workflow {
     return {
       repo: this.o.repo, taskId: st.taskId, task: st.task, agents: this.o.cfg.agents, gates: this.o.cfg.gates, notes: st.humanNotes, earlier: st.earlier,
       conversation: st.conversationContext, attachments: st.attachments, locate: (a) => attachmentFile(this.o.store.runsDir, a),
-      internalSnapshots: this.internal, baseline: st.baseline?.results ?? null,
+      internalSnapshots: this.internal, baseline: st.baseline?.results ?? null, profile: st.profile,
     };
   }
 
@@ -411,7 +447,7 @@ export class Workflow {
       role: info?.role, agent: gates ? "gates" : info ? this.party(info.agentRole) : undefined,
       planning: { round: st.planningRound, limit: st.limits.planningRounds },
       impl: { round: st.implRound, limit: st.limits.reviewRounds },
-      ...(budgetView(st) ? { budget: budgetView(st)! } : {}),
+      ...(budgetView(st) ? { budget: budgetView(st)! } : {}), profile: profileOf(st),
     });
   }
 
@@ -432,6 +468,48 @@ export class Workflow {
     this.emit({ type: "message", message: m });
   }
 
+  /**
+   * A deterministic signal that the task needs more than the run's profile gives (src/core/profiles.ts): a lightweight
+   * run moves to standard, recorded in the timeline and the report, keeping everything it did; nothing is run again,
+   * approved or waived for it. Other profiles stay as they are.
+   */
+  private escalateProfile(signal: EscalationSignal, reason: string, phase: Phase = this.state.phase): void {
+    const st = this.state;
+    if (!st.profile) return;
+    const round = IMPL_PHASES.includes(phase) ? st.implRound : st.planningRound;
+    const change = escalate(st.profile, { signal, reason, phase, round, at: nowIso() });
+    if (change) this.record(phase, round, "orchestrator", "profile escalated", `${change.from} → ${change.to}: ${reason}`, "warn");
+  }
+
+  /**
+   * The planning loop's circuit breaker (src/core/progress.ts), after a critique of `round` that sent `plan` back:
+   * records the cycle and, when the critiques stopped making progress, stops for your decision. Returns whether it did.
+   */
+  private planningStalled(round: number, plan: Plan, tracked: { keys: Record<string, string>; resolved: string[] }, blocking: string[]): boolean {
+    const resolved = tracked.resolved;
+    const st = this.state;
+    const prev = st.planCycles?.at(-2);
+    const cycle = st.planCycles!.at(-1)!;
+    const progress = planProgress(prev, blocking, resolved);
+    cycle.progress = progress;
+    const stuck = (prev?.blocking ?? []).filter((k) => blocking.includes(k));
+    const { stall, stop } = nextStall(st.planStall, { round, progress, keys: stuck }, !!prev && prev.plan === cycle.plan);
+    st.planStall = stall;
+    if (!stop) return false;
+    const ledger = st.planIssues ?? [];
+    const items = stall!.keys.map((key) => {
+      const e = ledger.find((x) => x.key === key);
+      if (!e) return key;
+      // The id this critique gave it, which may not be the one it was first raised with.
+      const id = Object.entries(tracked.keys).find(([, k]) => k === key)?.[0] ?? e.ids.at(-1)!;
+      return `${key}${id !== key ? ` (${id} in this critique)` : ""} [${e.severity}] ${e.issue} — raised in rounds ${e.seen.map((x) => x.round).join(", ")}; ` +
+        `the plan answered: ${planAnswer(plan, e.ids)}`;
+    });
+    const { message, details } = planStallReview(stall!, items);
+    this.escalate("planning_stalled", message, "IMPLEMENT", details);
+    return true;
+  }
+
   private escalate(reason: string, message: string, resumePhase: Phase, details: string[] = [], fromPhase: Phase = this.state.phase): void {
     const st = this.state;
     st.humanReview = { reason, message, fromPhase, resumePhase, details, at: nowIso() };
@@ -448,13 +526,27 @@ export class Workflow {
     };
   }
 
-  private addUsage(r: AgentResult): void {
+  private addUsage(r: AgentResult, role: Role): void {
     const st = this.state;
+    // By role too: what each profile spends where (the report's metrics).
+    const by = st.usageByRole?.[role] ?? { calls: 0, tokens: 0, costUsd: 0, unpricedCalls: 0 };
+    st.usageByRole = {
+      ...st.usageByRole,
+      [role]: { calls: by.calls + r.calls, tokens: by.tokens + (r.tokens ?? 0), costUsd: Math.round((by.costUsd + (r.costUsd ?? 0)) * 10000) / 10000, unpricedCalls: by.unpricedCalls + r.unpricedCalls },
+    };
     if (r.costUsd) st.costUsd = Math.round((st.costUsd + r.costUsd) * 10000) / 10000;
     if (r.tokens) st.tokens += r.tokens;
     st.agentCalls = (st.agentCalls ?? 0) + r.calls;
     st.unpricedCalls = (st.unpricedCalls ?? 0) + r.unpricedCalls;
     for (const text of newWarnings(st)) this.warn(text);
+  }
+
+  /** Keeps what agentduo rejected of a call's answers, for the report (each retry was told why). */
+  private noteRejections(role: Role, round: number, r: AgentResult): void {
+    if (!r.rejections?.length) return;
+    const st = this.state;
+    const entry = { role, round, count: r.rejections.length, errors: r.rejections.at(-1)!.errors, outcome: r.ok ? "corrected" as const : "failed" as const };
+    st.rejected = [...st.rejected ?? [], entry].slice(-MAX_REJECTED);
   }
 
   /** Minutes of the step under way, which the run's minutes do not include until it ends. */
@@ -555,7 +647,8 @@ export class Workflow {
     const beforeTree = await this.tree();
     const beforeOutside = await this.outsideTree();
     const { res: r, turn } = await this.callAgent(o, beforeTree);
-    this.addUsage(r);
+    this.addUsage(r, o.role);
+    this.noteRejections(o.role, o.round, r);
     if (r.interrupted) throw new Interrupted();
     const afterTree = await this.tree();
     if (afterTree !== beforeTree) {
@@ -566,7 +659,9 @@ export class Workflow {
     if (!r.ok) {
       // Stopped by the budget, or failed once it was reached (a Claude call cut at the cost left): the budget's decision.
       if (!this.budgetExhausted(this.state.phase)) {
-        this.escalate("agent_error", `${o.role} (${r.backend}) failed after ${r.attempts} attempt(s): ${r.error}`, this.state.phase);
+        // The reasons its last answer was rejected, if it was: what you can act on.
+        this.escalate("agent_error", `${o.role} (${r.backend}) failed after ${r.attempts} attempt(s): ${r.error}`, this.state.phase,
+          r.rejections?.at(-1)?.errors ?? []);
       }
       return null;
     }
@@ -670,10 +765,14 @@ export class Workflow {
     const adopted = adoptedSuggestions(plan, feedback, st.accepted);
     if (adopted.length) {
       st.scopePending = adopted;
+      this.escalateProfile("scope", `the revised plan adopts ${adopted.length} suggestion(s) outside the task's scope`);
       const { message, details } = expansionReview(adopted, addedCriteria(previous, plan), v);
       this.escalate("scope_expansion", message, "PLAN_REVIEW", details);
       return;
     }
+    // More than a small task: the critic's approval no longer ends planning on its own (a sign-off follows).
+    const large = profileOf(st) === "lightweight" ? planTooLarge(plan) : null;
+    if (large) this.escalateProfile("plan_size", large);
     st.phase = "PLAN_REVIEW";
   }
 
@@ -697,6 +796,12 @@ export class Workflow {
     // Suggestions outside the task's scope never hold the plan back.
     const blocking = this.blocking(taskIssues(critique.issues));
     const approved = critique.approved && blocking.length === 0;
+    // The critic's issues by identity across critiques (renumbered or reworded, one issue stays one): the planning cycle.
+    const tracked = trackCritique(st.planIssues ?? [], critique.issues, { round: r, plan: st.planHash });
+    st.planIssues = tracked.ledger;
+    const blockingKeys = approved ? [] : blocking.map((i) => tracked.keys[i.id] ?? i.id);
+    const cycle: PlanCycle = { round: r, plan: st.planHash, blocking: blockingKeys, progress: null };
+    st.planCycles = [...st.planCycles ?? [], cycle].slice(-MAX_CYCLES);
     if (critique.approved && blocking.length) this.warn("the critic approved but raised blocking issues; treating as changes requested");
     this.message({
       from: this.party("plan_reviewer"), to: this.party("planner"), kind: "critique",
@@ -712,18 +817,24 @@ export class Workflow {
     if (conflicts.length) {
       st.planFeedback = { critique };
       st.conflicts = conflicts;
+      this.escalateProfile("requirements_conflict", `${conflicts.length} contradiction(s) in the requirements, which you settle`);
       const { message, details } = conflictReview(conflicts);
       this.escalate("requirements_conflict", message, "IMPLEMENT", details);
       return;
     }
     if (!approved) {
       st.planFeedback = { critique };
+      this.escalateProfile("plan_blocking", blocking.length
+        ? `the plan critic raised ${blocking.length} blocking issue(s) (${blocking.map((i) => i.id).join(", ")})` : "the plan critic requested changes");
+      // Critiques that keep blocking on the same issues stop the loop before it spends every planning round.
+      if (this.planningStalled(r, plan, tracked, blockingKeys)) return;
       this.nextPlanningRound();
-    } else if (cfg.quality_gates.require_plan_approval) {
-      st.phase = "PLAN_FINALIZE";
-    } else {
-      this.freezePlan(v);
+      return;
     }
+    st.planStall = null;
+    // The profile decides whether the planner signs off what the critic approved (lightweight: no; thorough: always).
+    if (signsOff(profileOf(st), cfg)) st.phase = "PLAN_FINALIZE";
+    else this.freezePlan(v);
   }
 
   private async stepPlanFinalize(): Promise<void> {
@@ -783,9 +894,7 @@ export class Workflow {
       // Re-planned after implementation started: continue in a new round, with no stale review or gate results.
       st.implRound += 1;
       setFindings(st, [], null);
-      st.lastGates = null;
-      st.gatesTree = null;
-      st.consecutiveGateFailures = 0;
+      this.clearEvidence();
       this.ensureReviewBudget();
     }
     if (cfg.safety.pause_before_implement && !byHuman) {
@@ -835,6 +944,117 @@ export class Workflow {
     const snap = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}`), `agentduo ${st.taskId}: round ${k} before ${phase}`);
     st.lastSnapshot = { commit: snap.commit, tree: snap.tree };
     if (changed.length) this.warn(`${changed.length} file(s) changed after the last snapshot, not by the run's last step: ${listChanges(changed)}; ${phase} takes the workspace as it is now`);
+  }
+
+  /** Re-planning: no gate result, approval or final check of the old plan's code is evidence for the new one. */
+  private clearEvidence(): void {
+    const st = this.state;
+    st.lastGates = null;
+    st.gatesTree = null;
+    st.gatesConfig = null;
+    st.gatesAt = null;
+    st.reviewApproval = null;
+    st.finalCheck = null;
+    st.consecutiveGateFailures = 0;
+  }
+
+  /** The gates as the run's config sets them now, as far as their outcome can depend on it. */
+  private gateSpecs(): GateSpec[] {
+    return gateSpecs(this.o.cfg.gates, this.o.cfg.limits.gate_timeout_sec);
+  }
+
+  /** The latest review's approval covers `tree` under the final plan: gates that pass on it need no review again. */
+  private approvalCovers(tree: string): boolean {
+    const a = this.state.reviewApproval;
+    return !!a && a.tree === tree && a.plan === this.state.finalPlanHash;
+  }
+
+  /**
+   * The approval DONE would rest on: the latest review's; in an older run (which kept none), review.json's when it
+   * approved the run's last snapshot.
+   */
+  private approvalRecord(): ReviewApproval | null {
+    const st = this.state;
+    if (st.reviewApproval !== undefined) return st.reviewApproval;
+    if (!st.lastSnapshot || !this.o.store.exists("review.json")) return null;
+    const r = this.o.store.readJson<{ round: number; output: Review }>("review.json");
+    const approved = r.output.approved || !this.o.cfg.quality_gates.require_codex_approval;
+    return approved && r.output.reviewed_commit === st.lastSnapshot.commit
+      ? { round: r.round, revision: r.output.reviewed_commit, tree: st.lastSnapshot.tree, plan: st.finalPlanHash, approved: r.output.approved }
+      : null;
+  }
+
+  /**
+   * The final verification checkpoint, wherever the run would end DONE (src/core/verification.ts): DONE only when the
+   * evidence holds for the workspace as it is now (dirty, untracked and deleted files included) and the gates as they
+   * are configured now: the latest review approved this very code under the final plan, the gates ran on it with this
+   * configuration, every required gate passed or failed only where you accepted it, and nothing waits for your
+   * decision. It runs no gate and no agent: out of date, the run goes back to the gates (keeping the approval when the
+   * code is the same) or to a review, at most FINAL_REFRESHES times in a row, then stops (`verification_stale`).
+   * `phase`: the step (or decision) it ends.
+   */
+  private async finalCheck(phase: Phase): Promise<void> {
+    const st = this.state;
+    const { cfg, store } = this.o;
+    const k = st.implRound;
+    const approval = this.approvalRecord();
+    // An older run's approval, once found: the gates it may need again then need no review again.
+    if (st.reviewApproval === undefined) st.reviewApproval = approval;
+    // The workspace as it is now, whoever changed it since the last snapshot (the reviewer, you, another tool).
+    const tree = await this.tree();
+    if (tree !== st.lastSnapshot!.tree) {
+      const snap = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}`), `agentduo ${st.taskId}: round ${k} at the final check`);
+      st.lastSnapshot = { commit: snap.commit, tree: snap.tree };
+    }
+    const changesTo = async (from: string | null | undefined): Promise<Change[] | null> => {
+      if (!from || from === tree) return null;
+      try {
+        return await this.git.nameStatus(from, tree);
+      } catch {
+        return null; // that tree is gone: what changed cannot be told, but that it changed can
+      }
+    };
+    const specs = this.gateSpecs();
+    const review = store.exists("review.json") ? store.readJson<{ output: Review }>("review.json").output : null;
+    // The approving review's attributions: an accepted gate holds only while that review finds it failing as before.
+    const approving = review && approval && review.reviewed_commit === approval.revision ? review : null;
+    const acceptedGates = acceptedIds(st.accepted, "gate");
+    const verdicts = specs.length
+      ? gateVerdicts({ results: st.lastGates ?? [], baseline: st.baseline?.results, outOfScope: this.outOfScope(), attributions: approving?.gate_failures ?? null, accepted: acceptedGates })
+      : [];
+    const problems = finalProblems({
+      tree, plan: st.finalPlanHash, approval, changedSinceApproval: await changesTo(approval?.tree), gates: specs,
+      ran: { tree: st.gatesTree, config: st.gatesConfig, results: st.lastGates }, changedSinceGates: await changesTo(st.gatesTree),
+      blockingGates: specs.length && cfg.quality_gates.require_tests_pass ? verdicts.map((v) => v.gate.name) : [],
+      pending: (st.conflicts?.length ?? 0) + (st.preexisting?.length ?? 0) + (st.scopePending?.length ?? 0),
+    });
+    if (!problems.length) {
+      const failing = new Set(verdicts.map((v) => v.gate.name));
+      const decided = new Set([...acceptedIds(st.accepted, "finding"), ...keptIds(st.accepted)]);
+      st.verification = finalVerification({
+        snapshot: st.lastSnapshot!, gates: specs, results: st.lastGates ?? [], acceptedGates: new Set([...acceptedGates].filter((g) => !failing.has(g))),
+        gatesAt: st.gatesAt ?? null, approval: approval!, findings: (approving?.findings ?? []).filter((f) => decided.has(f.id)).map((f) => `finding ${f.id}`), at: nowIso(),
+      });
+      store.writeJson("verification.json", st.verification);
+      st.finalCheck = null;
+      st.phase = "DONE";
+      return;
+    }
+    // Never DONE on evidence about other code. Same code with gates out of date: the gates again, and the approval
+    // stands. Code the approval does not cover: the gates and a review. Anything else: a review, which decides afresh.
+    const blocked = problems.some((p) => p.kind === "blocked");
+    const next: Phase = !blocked && problems.some((p) => p.kind === "gates") ? "VERIFY" : "CODE_REVIEW";
+    st.finalCheck = nextFinalCheck(st.finalCheck, problems.map((p) => `round ${k}: ${p.text}`));
+    if (blocked) st.reviewApproval = null;
+    if (st.finalCheck.refreshes > FINAL_REFRESHES) {
+      const { message, details } = staleReview(st.finalCheck, specs.length > 0);
+      this.escalate("verification_stale", message, next, details, phase);
+      return;
+    }
+    const again = next === "VERIFY" ? (problems.every((p) => p.kind === "gates") ? "running the quality gates again" : "running the quality gates, then the review, again")
+      : "reviewing again";
+    this.record(phase, k, "orchestrator", "not verified", `${problems.map((p) => p.text).join("; ")}; ${again}`, "warn");
+    st.phase = next;
   }
 
   private ensureReviewBudget(): void {
@@ -889,7 +1109,8 @@ export class Workflow {
     // The notes this attempt is given: one added while it runs reaches only the next.
     const notesGiven = st.humanNotes.length;
     const { res, turn } = await this.callAgent(turnSpec, now);
-    this.addUsage(res);
+    this.addUsage(res, "implementer");
+    this.noteRejections("implementer", k, res);
     const post = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}`), `agentduo ${st.taskId}: implementation round ${k}`);
     st.lastSnapshot = { commit: post.commit, tree: post.tree };
     if (res.interrupted) throw new Interrupted();
@@ -914,7 +1135,8 @@ export class Workflow {
     if (denials.length) this.warn(denialHint(cfg.agents.implementer, denials));
     if (!res.ok || !report) {
       if (!this.budgetExhausted("IMPLEMENT")) {
-        this.escalate("agent_error", `implementer (${res.backend}) failed after ${res.attempts} attempt(s): ${res.error}`, "IMPLEMENT");
+        this.escalate("agent_error", `implementer (${res.backend}) failed after ${res.attempts} attempt(s): ${res.error}`, "IMPLEMENT",
+          res.rejections?.at(-1)?.errors ?? []);
       }
       return;
     }
@@ -932,7 +1154,14 @@ export class Workflow {
       report.status === "completed" ? "ok" : "warn", `implementation.r${k}.json`, res);
     // A blocked attempt stops before some findings by its nature; the round's next attempt answers them.
     if (missing.length && report.status !== "blocked") this.warn(`implementer did not respond to finding(s): ${missing.join(", ")}`);
+    const plan = profileOf(st) === "lightweight" ? this.finalPlan() : null;
+    const unplanned = plan ? unplannedFiles(plan, changes, this.o.repo) : [];
+    if (unplanned.length >= LIGHTWEIGHT.unplannedFiles) {
+      this.escalateProfile("unplanned_files", `round ${k} changed ${unplanned.length} file(s) no step of the plan names ` +
+        `(${unplanned.slice(0, 5).join(", ")}${unplanned.length > 5 ? ", …" : ""})`, "IMPLEMENT");
+    }
     if (report.status === "blocked") {
+      this.escalateProfile("implementer_blocked", `the implementer is blocked: ${report.blocking_reason ?? "no reason given"}`, "IMPLEMENT");
       // A blocker needs something from you: until something the implementer is given changes, resume does not run it.
       const mark = await this.progressMark(post.tree, notesGiven);
       st.blocker = nextBlocker(st.blocker, report.blocking_reason ?? "implementer reported blocked", k, mark, post.tree !== now);
@@ -941,6 +1170,8 @@ export class Workflow {
       return;
     }
     st.blocker = null;
+    // New code: the final check's count starts anew once it is reviewed.
+    st.finalCheck = null;
     st.phase = cfg.gates.length ? "VERIFY" : "CODE_REVIEW";
   }
 
@@ -950,6 +1181,10 @@ export class Workflow {
     const k = st.implRound;
     // Gates judge the code that is there; what changed since the implementation is not theirs.
     await this.catchUp("VERIFY");
+    // Their results are evidence about the files they start on, under this configuration: a change while they run (their
+    // own or anyone's) is not verified by them.
+    const ranOn = st.lastSnapshot!;
+    const specs = this.gateSpecs();
     const beforeOutside = await this.outsideTree();
     let results: GateResult[];
     try {
@@ -962,16 +1197,25 @@ export class Workflow {
       throw e;
     }
     const tree = await this.tree();
-    if (tree !== st.lastSnapshot!.tree) {
-      const changed = await this.git.nameStatus(st.lastSnapshot!.tree, tree);
-      if (changed.length) this.warn(`quality gates modified the working tree: ${listChanges(changed)} (re-snapshotting)`);
+    let changed: Change[] = [];
+    if (tree !== ranOn.tree) {
+      changed = await this.git.nameStatus(ranOn.tree, tree);
+      if (changed.length) {
+        this.warn(`quality gates modified the working tree: ${listChanges(changed)} (re-snapshotting; their results hold for the files before these changes)`);
+      }
       const snap = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}`), `agentduo ${st.taskId}: round ${k} after gates`);
       st.lastSnapshot = { commit: snap.commit, tree: snap.tree };
     }
     await this.warnOutside(beforeOutside, "VERIFY");
-    store.writeJson(`gates.r${k}.json`, { round: k, snapshot: st.lastSnapshot!.commit, timestamp: nowIso(), results });
+    const at = nowIso();
+    store.writeJson(`gates.r${k}.json`, {
+      round: k, snapshot: ranOn.commit, tree: ranOn.tree, config: configDigest(specs), timestamp: at, results,
+      changed_while_running: changed.map(([status, path]) => ({ status, path })),
+    });
     st.lastGates = results;
-    st.gatesTree = st.lastSnapshot!.tree;
+    st.gatesTree = ranOn.tree;
+    st.gatesConfig = specs;
+    st.gatesAt = at;
     // A required gate that failed before any change, and that the plan leaves out of scope, is not the implementer's to
     // fix: it goes to the reviewer, who says whether the change made it worse. The task's own failures go back as before.
     const verdicts = gateVerdicts({
@@ -981,7 +1225,9 @@ export class Workflow {
     const passed = verdicts.length === 0;
     st.consecutiveGateFailures = fixable.length ? st.consecutiveGateFailures + 1 : 0;
     const enforce = cfg.quality_gates.require_tests_pass;
-    const toReviewer = !fixable.length || !enforce || cfg.quality_gates.review_on_gate_failure;
+    // The profile may spend a review on failing gates too (thorough), so the findings come with each round.
+    const reviewAnyway = reviewsOnGateFailure(profileOf(st), cfg);
+    const toReviewer = !fixable.length || !enforce || reviewAnyway;
     this.message({
       from: "gates", to: toReviewer ? this.party("code_reviewer") : this.party("implementer"), kind: "gates",
       headline: results.map((g) => (g.passed ? `${g.name} ✓` : `${g.name} ✗ (${g.timedOut ? "timeout" : `exit ${g.exitCode}`})`)).join(" · ") || "no gates",
@@ -989,16 +1235,24 @@ export class Workflow {
     });
     this.record("VERIFY", k, "gates", passed ? "passed" : fixable.length ? "failed" : "failing as before the task",
       results.map((g) => `${g.name} ${g.passed ? "PASS" : "FAIL"}`).join(", ") || "no gates", passed ? "ok" : "warn", `gates.r${k}.json`);
+    if (fixable.length && st.consecutiveGateFailures >= LIGHTWEIGHT.gateFailures) {
+      this.escalateProfile("gates_failing", `required quality gates failed ${st.consecutiveGateFailures} rounds in a row`, "VERIFY");
+    }
     if (fixable.length && enforce) {
       const limit = cfg.limits.max_consecutive_gate_failures;
       if (st.consecutiveGateFailures >= limit) {
         this.escalate("gates_failing", `required quality gates failed ${limit} round(s) in a row. Check the logs under gates/, then resume (optionally with a --note) or abort.`, "IMPLEMENT");
         return;
       }
-      if (!cfg.quality_gates.review_on_gate_failure) {
+      if (!reviewAnyway) {
         this.nextImplRound(); // back to the implementer without spending a review
         return;
       }
+    }
+    // The gates passed on code the latest review approved (they ran again for the final check): no review again.
+    if (passed && this.approvalCovers(ranOn.tree)) {
+      await this.finalCheck("VERIFY");
+      return;
     }
     st.phase = "CODE_REVIEW";
   }
@@ -1008,17 +1262,20 @@ export class Workflow {
     const { store, cfg } = this.o;
     const k = st.implRound;
     const base = st.base!.commit;
-    // Review the code that is there now; gates that ran on an earlier revision run once more first.
+    // Review the code that is there now; gates that ran on an earlier revision, or with another configuration, run once more first.
     const gatedBefore = st.gatesTree === undefined ? st.lastSnapshot!.tree : st.gatesTree;
     await this.catchUp("CODE_REVIEW");
-    if (cfg.gates.length && gatedBefore !== st.lastSnapshot!.tree) {
+    const outdated = gatesStale({ tree: gatedBefore, config: st.gatesConfig, results: st.lastGates }, st.lastSnapshot!.tree, this.gateSpecs());
+    if (outdated.length) {
       if (st.reverifiedRound !== k) {
         st.reverifiedRound = k; // once a round: files that never stop changing must not keep the run from its review
-        this.record("CODE_REVIEW", k, "orchestrator", "gates out of date", "the quality gates ran on an earlier revision; running them on this one before the review", "warn");
+        this.record("CODE_REVIEW", k, "orchestrator", "gates out of date", `${outdated.join("; ")}: running them on this revision before the review`, "warn");
         st.phase = "VERIFY";
         return;
       }
-      this.warn("the workspace changed again after the quality gates ran: the review gets the results of an earlier revision");
+      // The review goes on; DONE does not, until gates ran on the code it ends with (finalCheck).
+      this.warn(`the quality gates' results are out of date again (${outdated.join("; ")}): the review gets them as they are, and the run ` +
+        "ends only once the gates ran on the code it ends with");
     }
     const snap = st.lastSnapshot!.commit;
     const diff = await this.git.diff(base, snap);
@@ -1035,10 +1292,8 @@ export class Workflow {
     const enforceGates = cfg.gates.length > 0 && cfg.quality_gates.require_tests_pass;
     const outOfScope = this.outOfScope();
     const acceptedGates = acceptedIds(st.accepted, "gate");
-    const attribute = enforceGates
-      ? gateVerdicts({ results: gates, baseline: st.baseline?.results, outOfScope, attributions: null, accepted: acceptedGates })
-        .filter((v) => v.kind === "pre_existing").map((v) => v.gate.name)
-      : [];
+    // Those you accepted too: an acceptance holds only while the review of the code finds them failing as before.
+    const attribute = enforceGates ? gatesToAttribute({ results: gates, baseline: st.baseline?.results, outOfScope }) : [];
     const kept = keptIds(st.accepted);
     const contract: prompts.ReviewContract = {
       attribute, accepted: st.accepted?.failures ?? [], kept: (st.accepted?.scope ?? []).filter((i) => i.kind === "finding"),
@@ -1048,6 +1303,19 @@ export class Workflow {
     // The findings you already decided on (accepted as pre-existing, or kept out of the scope) no longer hold anything back.
     const decided = new Set([...acceptedIds(st.accepted, "finding"), ...kept]);
     const gatesFailing = enforceGates && gates.some((g) => g.required && !g.passed && !acceptedGates.has(g.name));
+    // The findings raised so far, by identity, and the review before this one under the same plan: what changed since
+    // tells a finding new on untouched code (which must say why it comes late) and whether the cycle made progress. After
+    // a re-plan, or in an older run with no cycle recorded, there is none to compare with.
+    const ledger = ledgerOf(st);
+    const prevCycle = st.cycles?.at(-1);
+    const samePlan = prevCycle && prevCycle.plan === st.finalPlanHash ? prevCycle : undefined;
+    let changedSincePrev: Change[] | null = null;
+    try {
+      changedSincePrev = samePlan ? await this.git.nameStatus(samePlan.revision, snap) : null;
+    } catch {
+      // that revision is gone: what changed cannot be told
+    }
+    const since = samePlan ? { round: samePlan.round, changed: changedSincePrev } : null;
     // What the reviewer's session last reviewed: a continued review gets the changes since then instead of the whole diff.
     const reviewed = st.sessions?.code_reviewer?.reviewed ?? null;
     const build = async (ctx: prompts.PromptContext): Promise<string> => {
@@ -1060,7 +1328,8 @@ export class Workflow {
           // that revision is gone: the whole diff, as a fresh review gets it
         }
       }
-      return prompts.codeReviewer(ctx, k, planMd, base, snap, gates, diffStat, diff.slice(0, maxChars), diff.length > maxChars, findings, implReport, fullDiff, contract);
+      return prompts.codeReviewer(ctx, k, planMd, base, snap, gates, diffStat, diff.slice(0, maxChars), diff.length > maxChars, findings, implReport, fullDiff,
+        { ...contract, resolved: ledger.filter((e) => e.status === "resolved") });
     };
     const check = (rv: Review) => {
       const errors = consistentStatus(rv);
@@ -1071,6 +1340,7 @@ export class Workflow {
           review: rv, criteria, blockingSeverities: cfg.quality_gates.blocking_severities, requireApproval: cfg.quality_gates.require_codex_approval,
           gatesFailing, decided,
         }),
+        ...lateFindingErrors({ review: rv, ledger, since, blockingSeverities: cfg.quality_gates.blocking_severities, workspace: this.o.repo }),
       ];
     };
     const res = await this.callReviewer<Review>({
@@ -1079,9 +1349,14 @@ export class Workflow {
     });
     if (!res) return;
     const review = res.data as Review;
-    const envelope = await this.envelope("code_reviewer", k, res, { base, snapshot: snap });
+    // Each finding's identity across the reviews: new, still open or reopened; the open ones it left out, resolved by it.
+    const { ledger: tracked, tracking } = trackReview(ledger, review.findings, { round: k, revision: snap });
+    st.trackedFindings = tracked;
+    const envelope = await this.envelope("code_reviewer", k, res, { base, snapshot: snap, tracking });
     store.writeJson(`review.r${k}.json`, envelope);
     store.writeJson("review.json", envelope);
+    // The implementer's answers since the last review, which the stall's details name; this review replaces them.
+    const answers = st.findingResponses ?? [];
     // Fresh evidence: the findings of this revision replace the open ones and every answer to them.
     setFindings(st, review.findings, { round: k, revision: snap });
     // What still blocks: the task's to fix (its regressions, what its scope includes, what the reviewer cannot place), and
@@ -1099,7 +1374,26 @@ export class Workflow {
     const critical = fixable.filter((f) => f.severity === "critical");
     const approved = review.approved || !cfg.quality_gates.require_codex_approval;
     const done = approved && !fixable.length && !pre.length && !scope.length && gatesOk;
+    // The code this review approved, while it leaves nothing for the task to fix: what DONE may rest on (finalCheck).
+    st.reviewApproval = approved && !fixable.length && !fixableGates.length
+      ? { round: k, revision: snap, tree: st.lastSnapshot!.tree, plan: st.finalPlanHash, approved: review.approved }
+      : null;
     if (review.approved && fixable.length) this.warn("the reviewer approved but reported blocking findings; continuing with a fix round");
+    // The cycle this review closes: what still blocks, and what moved since the review before it (same plan).
+    const keyOf = (f: Finding) => tracking.findings[f.id]?.key ?? f.id;
+    const now = { plan: st.finalPlanHash, tree: st.lastSnapshot!.tree, blocking: fixable.map((f) => ({ key: keyOf(f), file: f.file })), failingGates: fixableGates.map((v) => v.gate.name) };
+    const progress = cycleProgress(samePlan, now, { resolved: tracking.resolved, changed: changedSincePrev, workspace: this.o.repo });
+    const statuses = Object.values(tracking.findings).map((t) => t.status);
+    const cycle: ReviewCycle = {
+      round: k, revision: snap, ...now, progress,
+      counts: { new: statuses.filter((x) => x === "new").length, open: statuses.filter((x) => x === "open").length, reopened: statuses.filter((x) => x === "reopened").length, resolved: tracking.resolved.length },
+    };
+    st.cycles = [...st.cycles ?? [], cycle].slice(-MAX_CYCLES);
+    // What kept blocking through the cycle: the findings and required gates of the review before that are still there.
+    const stuck = [...(samePlan?.blocking ?? []).map((b) => b.key).filter((key) => now.blocking.some((b) => b.key === key)),
+      ...(samePlan?.failingGates ?? []).filter((g) => now.failingGates.includes(g)).map((g) => `gate '${g}'`)];
+    const stalled = nextStall(st.stall, { round: k, progress, keys: stuck }, samePlan?.tree === cycle.tree);
+    st.stall = done ? null : stalled.stall;
     const held = [pre.length ? `${pre.length} pre-existing` : "", scope.length ? `${scope.length} outside the task's scope` : ""].filter(Boolean);
     const counts = `${fixable.length + preexisting.length + scope.length} blocking${held.length ? ` (${held.join(", ")})` : ""}`;
     this.message({
@@ -1112,9 +1406,16 @@ export class Workflow {
     this.record("CODE_REVIEW", k, this.agentName("code_reviewer"), done ? "approved" : "changes requested",
       `${review.findings.length} finding(s), ${counts}${gatesOk ? "" : ", required gates failing"}`, done ? "ok" : "warn", `review.r${k}.json`, res);
     if (done) {
-      st.phase = "DONE";
+      await this.finalCheck("CODE_REVIEW");
       return;
     }
+    // More than a lightweight task: the first signal that says so, before whatever this review leads to.
+    const signal: [EscalationSignal, string] | null = scope.length ? ["scope", `the reviewer raised ${scope.length} critical problem(s) outside the task's scope`]
+      : stalled.stop ? ["review_stalled", `round ${k}'s review blocks on the same finding(s) as the review before it`]
+        : critical.length && cfg.quality_gates.stop_on_critical_issue ? ["critical_finding", `the reviewer reported ${critical.length} critical finding(s)`]
+          : fixable.length && k >= LIGHTWEIGHT.reviewRound ? ["review_rounds", `round ${k}'s review still blocks on ${fixable.length} finding(s) after ${k - 1} fix round(s)`]
+            : null;
+    if (signal) this.escalateProfile(signal[0], signal[1], "CODE_REVIEW");
     if (!fixable.length && !fixableGates.length && (pre.length || scope.length)) {
       // Nothing left the task can fix: another round would loop on an impossible contract, or widen the task. You decide.
       st.preexisting = pre.length ? pre : null;
@@ -1136,6 +1437,13 @@ export class Workflow {
       this.escalate("out_of_scope_critical", message, "IMPLEMENT", details);
       return;
     }
+    if (stalled.stop) {
+      // Fix rounds that move nothing: another one would repeat the same work. You decide; nothing is waived.
+      st.stall!.mark = await this.progressMark();
+      const { message, details } = stallReview(st.stall!, this.stallItems(cycle, samePlan!, answers, implReport, changedSincePrev));
+      this.escalate("review_stalled", message, "IMPLEMENT", details);
+      return;
+    }
     if (critical.length && cfg.quality_gates.stop_on_critical_issue) {
       this.escalate("critical_finding",
         `the reviewer reported critical finding(s): ${critical.map((f) => `${f.id} ${f.issue}`).join("; ")}. Inspect them, then resume to let the ` +
@@ -1143,6 +1451,28 @@ export class Workflow {
       return;
     }
     this.nextImplRound();
+  }
+
+  /**
+   * What holds a stalled review loop, line by line: each finding that keeps blocking (its identity, the id this review
+   * gave it, where it was raised, and the implementer's answer to it), then what the implementer did in the cycle.
+   */
+  private stallItems(cycle: ReviewCycle, prev: ReviewCycle, answers: FindingResponse[], report: Implementation, changed: Change[] | null): string[] {
+    const ledger = this.state.trackedFindings ?? [];
+    const items = this.state.stall!.keys.map((key) => {
+      const e = ledger.find((x) => x.key === key);
+      if (!e) return `required ${key} still fails`;
+      const id = e.ids.at(-1)!;
+      const answer = answers.find((a) => e.ids.includes(a.id));
+      const revisions = [...new Set(e.seen.map((x) => x.revision).filter(Boolean))].map((r) => "`" + r.slice(0, 12) + "`").join(", ");
+      return `${key}${id !== key ? ` (${id} in this review)` : ""} [${e.severity}] ${e.file ? `${e.file}: ` : ""}${e.issue} — open since round ` +
+        `${e.seen[0]!.round}, raised in rounds ${e.seen.map((x) => x.round).join(", ")}${revisions ? ` on ${revisions}` : ""}; the implementer answered: ` +
+        (answer ? `${answer.resolution}${answer.notes ? ` (${answer.notes})` : ""} (round ${answer.round})` : "nothing");
+    });
+    const files = prev.tree === cycle.tree ? "changed no file"
+      : changed?.length ? `changed only ${changed.slice(0, 10).map(([, p]) => p).join(", ")}${changed.length > 10 ? ", …" : ""} (none of these findings' files)`
+        : "changed files outside these findings";
+    return [...items, `round ${cycle.round}: the implementer reported ${report.status} and ${files}`];
   }
 
   // ---------------------------------------------------------- human review
@@ -1155,8 +1485,8 @@ export class Workflow {
     if (note) st.humanNotes.push({ at: nowIso(), phase: hr.fromPhase, note });
     // Going on after the budget stopped the run is your authorization: one more allowance of each limit it reached.
     const raised = hr.reason === "budget_exhausted" && decision !== "abort" ? raiseReached(st, this.o.cfg) : [];
-    // A blocked implementer runs again only on something new; a resume with nothing new keeps the run waiting.
-    const held = decision === "resume" && await this.blockerHolds(hr);
+    // A blocked implementer, or a stalled review loop, runs again only on something new; a resume with nothing new keeps the run waiting.
+    const held = decision === "resume" && (await this.blockerHolds(hr) || await this.stallHolds(hr));
     // Going on after a contradiction or pre-existing failures is your acceptance of them, which the run records and says.
     const accepted = decision === "resume" ? acceptPending(st) : [];
     if (decision === "abort") {
@@ -1164,6 +1494,8 @@ export class Workflow {
     } else if (decision === "revise") {
       if (IMPL_PHASES.includes(hr.fromPhase)) st.planFeedback = null; // planning-era critique is stale; the note drives the revision
       st.blocker = null;
+      st.stall = null;
+      st.planStall = null;
       // Re-planning settles the contract anew: nothing accepted so far, and nothing pending, carries over.
       st.conflicts = null;
       st.preexisting = null;
@@ -1171,13 +1503,14 @@ export class Workflow {
       delete st.accepted;
       st.finalPlanVersion = null;
       st.finalPlanHash = null;
-      st.lastGates = null;
-      st.gatesTree = null;
-      st.consecutiveGateFailures = 0;
+      this.clearEvidence();
       st.planningRound += 1;
       st.limits.planningRounds = Math.max(st.limits.planningRounds, st.planningRound + this.o.cfg.limits.max_planning_rounds - 1);
       st.phase = "PLAN";
     } else if (!held) {
+      // Your decision lets the final check try again as often as before, and the planning loop's count start anew.
+      st.finalCheck = null;
+      st.planStall = null;
       const target = hr.resumePhase;
       if (target === "IMPLEMENT" && st.finalPlanVersion === null) {
         if (!st.planVersion) throw new DecisionError("there is no plan yet; use --decision revise");
@@ -1187,15 +1520,26 @@ export class Workflow {
         this.ensureReviewBudget();
       }
       st.consecutiveGateFailures = 0;
-      st.phase = target;
+      // Never DONE straight from a decision: the files may have changed while the run waited.
+      if (target !== "DONE") st.phase = target;
     }
     st.humanReview = null;
     this.message({ from: "human", to: "orchestrator", kind: "decision", headline: `${decision}${note ? ` · "${note}"` : ""}`, items: [...raised, ...accepted] });
     this.record("HUMAN_REVIEW", st.implRound || st.planningRound, "human", decision, note || `after ${hr.reason}`);
+    if (decision === "resume" && !held && hr.resumePhase === "DONE") {
+      try {
+        await this.finalCheck(hr.fromPhase);
+      } catch (e) {
+        // The check could not look at the files: the review step checks them again, with the step's error handling.
+        this.warn(`could not check the final code (${(e as Error).message}): reviewing it again`);
+        st.phase = "CODE_REVIEW";
+      }
+    }
     if (held) {
       // Nothing ran and nothing changed: the run waits again, now saying why.
-      const { message, details } = heldReview(st.blocker!);
-      this.escalate("no_progress", message, hr.resumePhase, details, hr.fromPhase);
+      const stalled = hr.reason === "review_stalled";
+      const { message, details } = stalled ? stallHeldReview(st.stall!) : heldReview(st.blocker!);
+      this.escalate(stalled ? "review_stalled" : "no_progress", message, hr.resumePhase, details, hr.fromPhase);
     }
     this.save();
   }
@@ -1209,6 +1553,16 @@ export class Workflow {
     const b = st.blocker;
     if (!b || hr.resumePhase !== "IMPLEMENT" || b.round !== st.implRound || NEW_ROUND_FROM.includes(hr.fromPhase)) return false;
     return changedParts(b.mark, await this.progressMark()).length === 0;
+  }
+
+  /**
+   * The review loop stalled and nothing the implementer is given changed since (src/core/progress.ts): another fix round
+   * would repeat the same work. A note always counts as new: your explicit override, recorded with your decision.
+   */
+  private async stallHolds(hr: HumanReview): Promise<boolean> {
+    const s = this.state.stall;
+    if (hr.reason !== "review_stalled" || !s?.mark) return false;
+    return changedParts(s.mark, await this.progressMark()).length === 0;
   }
 
   // ---------------------------------------------------------------- report
@@ -1226,6 +1580,8 @@ export class Workflow {
         diffStat = "";
       }
     }
+    // What the run spent and where, for comparing profiles (also in the report).
+    store.writeJson("metrics.json", render.runMetrics(st));
     return store.writeText("report.md", render.reportMarkdown(st, diffStat, lastReview, this.lastCritique(st.planningRound + 1), store.dir));
   }
 }

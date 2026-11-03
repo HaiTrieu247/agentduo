@@ -145,7 +145,9 @@ export function formatValue(v: unknown): string {
 export type EditorKind = "number" | "list" | "text" | "choice";
 
 /** The values a choice setting takes, as config validation allows them. */
-export const CHOICES: Partial<Record<ConfigEntry["kind"], readonly string[]>> = { prompts: ["ask", "deny"], backend: ["codex", "claude"] };
+export const CHOICES: Partial<Record<ConfigEntry["kind"], readonly string[]>> = {
+  prompts: ["ask", "deny"], backend: ["codex", "claude"], profile: ["lightweight", "standard", "thorough"],
+};
 
 /** What an entry's editor holds, as the value to save, by the editor its kind has; empty is null where null is allowed. */
 export function parseEditorValue(kind: EditorKind, raw: string, nullable: boolean): unknown {
@@ -171,6 +173,7 @@ export function editorKind(e: Pick<ConfigEntry, "kind">): EditorKind {
       return "number";
     case "prompts":
     case "backend":
+    case "profile":
       return "choice";
     case "bin":
     case "model":
@@ -180,6 +183,8 @@ export function editorKind(e: Pick<ConfigEntry, "kind">): EditorKind {
 
 export function groupOf(key: string): string {
   const head = key.split(".")[0]!;
+  // The pipeline's profile sits with who plays each step: both shape the workflow of new runs.
+  if (head === "pipeline") return "agents";
   return ["claude", "codex", "agents", "limits"].includes(head) ? head : "other";
 }
 
@@ -189,7 +194,7 @@ export function settingLabel(key: string): string {
   if (parts[1] === "role_args") return `${words(parts[2]!)} options`;
   if (parts[0] === "agents") return words(parts[1]!);
   const labels: Record<string, string> = {
-    bin: "CLI executable", model: "Model", args: "Options", max_budget_usd: "Budget per call", permission_prompts: "Permission requests",
+    bin: "CLI executable", model: "Model", args: "Options", max_budget_usd: "Budget per call", permission_prompts: "Permission requests", profile: "Pipeline profile",
     max_planning_rounds: "Planning rounds", max_review_rounds: "Review rounds", max_discussion_rounds: "Discussion rounds",
     max_retries: "Retries", max_consecutive_gate_failures: "Failed checks in a row", agent_timeout_sec: "Agent timeout",
     agent_idle_timeout_sec: "Idle timeout", gate_timeout_sec: "Check timeout", max_diff_chars: "Diff size", max_gate_output_chars: "Check output size",
@@ -208,6 +213,8 @@ export function settingHelp(key: string): string {
     "codex.model": "Default leaves it to Codex's own setting (~/.codex/config.toml).",
     "claude.permission_prompts": "When Claude needs approval for a tool: ask you in the chat, or deny it.",
     "claude.max_budget_usd": "The most one Claude call may spend. Empty: no limit.",
+    "pipeline.profile": "How much planning and review a new run spends. Lightweight: small, clear tasks (no sign-off; it moves to standard when " +
+      "the task turns out bigger). Thorough: complex or risky tasks. Every profile keeps the critique, the review, the checks and your decisions.",
     "agents.planner": "Writes the plan.",
     "agents.plan_reviewer": "Critiques the plan.",
     "agents.implementer": "Makes the changes.",
@@ -279,7 +286,10 @@ const GROUPS: Array<{ id: string; title: string; description: string; cards: Arr
     id: "codex", title: "Codex", description: "How AgentDuo runs Codex. A change reaches its next call, also in a pipeline that is running.",
     cards: [{ title: null, keys: ["codex.model"] }, { title: null, keys: ["codex.args"] }],
   },
-  { id: "agents", title: "Workflow roles", description: "Who handles each step of a pipeline. A change applies to new runs and discussions.", cards: [{ title: null, keys: [] }] },
+  {
+    id: "agents", title: "Workflow roles", description: "How deep a pipeline goes, and who handles each step. A change applies to new runs and discussions.",
+    cards: [{ title: null, keys: ["pipeline.profile"] }, { title: null, keys: [] }],
+  },
   {
     id: "limits", title: "Rounds & limits", description: "How many rounds the agents take and how long they may work. A change applies to new work.",
     cards: [

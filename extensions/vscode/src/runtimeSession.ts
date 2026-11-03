@@ -20,6 +20,7 @@ import {
 } from "../../../src/core/settings.js";
 import { acquireWorkspaceLock, LockError, RunStore, workspaceBusy, workspaceLockHolder, type RunState } from "../../../src/core/state.js";
 import { readClaudeUsage, readCodexUsage } from "../../../src/core/usage.js";
+import { verificationLines } from "../../../src/core/verification.js";
 import { EventBus, type DuoEvent, type HumanReview, type ModelMap, type PermissionAnswer } from "../../../src/events.js";
 import { packageVersion } from "../../../src/paths.js";
 import { PIPELINE } from "../../../src/ui/format.js";
@@ -68,7 +69,9 @@ export function pipelineOf(cfg: ConfigData): PipelineStep[] {
   const agents = cfg.agents ?? {};
   add("PLAN", "planner", agents.planner ?? null);
   add("PLAN_REVIEW", "plan_reviewer", agents.plan_reviewer ?? null);
-  if (cfg.quality_gates?.require_plan_approval !== false) add("PLAN_FINALIZE", "plan_finalizer", agents.planner ?? null);
+  // The profile decides whether a sign-off follows the critic's approval (lightweight: no; thorough: always).
+  const profile = cfg.pipeline?.profile ?? "standard";
+  if (profile === "thorough" || (profile === "standard" && cfg.quality_gates?.require_plan_approval !== false)) add("PLAN_FINALIZE", "plan_finalizer", agents.planner ?? null);
   add("IMPLEMENT", "implementer", agents.implementer ?? null);
   if (Array.isArray(cfg.gates) && cfg.gates.length) add("VERIFY", null, "gates");
   add("CODE_REVIEW", "code_reviewer", agents.code_reviewer ?? null);
@@ -668,7 +671,10 @@ export class RuntimeSession {
     const run = this.focus(conversation);
     if (!run) return null;
     const st = run.state;
-    return { runId: st.taskId, task: st.task, phase: st.phase, artifacts: this.artifactsOf(run), hasSnapshots: !!(st.base && st.lastSnapshot) };
+    return {
+      runId: st.taskId, task: st.task, phase: st.phase, artifacts: this.artifactsOf(run), hasSnapshots: !!(st.base && st.lastSnapshot),
+      verification: verificationLines(st),
+    };
   }
 
   readArtifact(artifact: ArtifactName, conversation: string | null): ArtifactContent {

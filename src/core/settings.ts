@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import YAML from "yaml";
 import { CLAUDE_EFFORTS, CODEX_EFFORTS, type CodexPermission, type PermissionMode, type SettingCommand } from "./commands.js";
-import { AGENT_ROLES, ConfigError, configFromFiles, type ConfigData } from "./config.js";
+import { AGENT_ROLES, ConfigError, configFromFiles, PROFILES, type ConfigData } from "./config.js";
 import { atomicWrite } from "./state.js";
 
 export { CLAUDE_EFFORTS, CODEX_EFFORTS, type CodexPermission, type PermissionMode };
@@ -224,7 +224,7 @@ export function withChange(changes: SettingChange[], change: SettingChange): Set
 }
 
 // ------------------------------------------------------------------ the keys the desktop's Settings change
-export type SettingKind = "bin" | "model" | "args" | "budget" | "prompts" | "backend" | "positive" | "count" | "limit";
+export type SettingKind = "bin" | "model" | "args" | "budget" | "prompts" | "backend" | "profile" | "positive" | "count" | "limit";
 
 /** A config key a Settings field sets: where it is, what it takes, and when work already going gets it. */
 export interface SettingKey {
@@ -258,6 +258,8 @@ export const SETTING_KEYS: SettingKey[] = [
   ]),
   { key: "claude.max_budget_usd", path: ["claude", "max_budget_usd"], kind: "budget", live: "next-call", removable: false },
   { key: "claude.permission_prompts", path: ["claude", "permission_prompts"], kind: "prompts", live: "next-call", removable: false },
+  // A run keeps the profile it started with: a change applies to the runs started after it.
+  { key: "pipeline.profile", path: ["pipeline", "profile"], kind: "profile", live: "next-run", removable: false },
   ...AGENT_ROLES.map((role): SettingKey => ({ key: `agents.${role}`, path: ["agents", role], kind: "backend", live: "next-run", removable: false })),
   ...LIMIT_KEYS.map(([name, kind]): SettingKey => ({ key: `limits.${name}`, path: ["limits", name], kind, live: "next-run", removable: false })),
 ];
@@ -285,6 +287,8 @@ export function checkSettingValue(k: SettingKey, value: unknown): string | null 
       return value === "ask" || value === "deny" ? null : `${k.key} must be 'ask' or 'deny'`;
     case "backend":
       return value === "codex" || value === "claude" ? null : `${k.key} must be one of codex, claude`;
+    case "profile":
+      return (PROFILES as readonly unknown[]).includes(value) ? null : `${k.key} must be one of ${PROFILES.join(", ")}`;
     case "positive":
       return Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 1e9 ? null : `${k.key} must be a positive integer`;
     case "count":

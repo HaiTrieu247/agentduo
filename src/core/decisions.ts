@@ -3,10 +3,11 @@
  */
 
 /**
- * A run waiting on the implementer's blocker needs something from you (a note, or files you changed) before `resume`
- * runs it again; agentduo keeps it waiting otherwise (src/core/progress.ts).
+ * A run waiting on the implementer's blocker, or on a review loop that stalled, needs something from you (a note, or
+ * files you changed) before `resume` runs another round; agentduo keeps it waiting otherwise (src/core/progress.ts).
  */
-export const needsInput = (reason: string | null | undefined): boolean => reason === "implementer_blocked" || reason === "no_progress";
+export const needsInput = (reason: string | null | undefined): boolean =>
+  reason === "implementer_blocked" || reason === "no_progress" || reason === "review_stalled";
 
 /** How `duo resume` answers a run waiting with this reason (`cmd`: how agentduo was started). */
 export const decisionCommand = (cmd: string, runId: string, reason: string | null | undefined): string => (needsInput(reason)

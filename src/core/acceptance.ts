@@ -71,21 +71,31 @@ export interface GateVerdict {
 
 /**
  * The failing required gates you did not accept, each with its verdict. `attributions` is null before the review: a
- * gate the plan leaves failing counts as pre-existing until the reviewer has looked.
+ * gate the plan leaves failing counts as pre-existing until the reviewer has looked. Your acceptance covers a gate's
+ * failure as it was before the task, never a new one: not a gate that passed then or whose command changed since, and
+ * not one the review of the code finds the change made worse (so the reviewer attributes accepted gates too).
  */
 export function gateVerdicts(o: {
   results: GateResult[]; baseline: Baseline; outOfScope: Set<string>; attributions: Review["gate_failures"] | null; accepted: Set<string>;
 }): GateVerdict[] {
-  return o.results.filter((g) => g.required && !g.passed && !o.accepted.has(g.name)).map((gate): GateVerdict => {
+  return o.results.filter((g) => g.required && !g.passed).flatMap((gate): GateVerdict[] => {
     const before = o.baseline?.find((b) => b.name === gate.name && b.command === gate.command);
-    if (!before || before.passed) return { gate, kind: "regression", evidence: null };
-    if (!o.outOfScope.has(gate.name)) return { gate, kind: "in_scope", evidence: null };
-    if (!o.attributions) return { gate, kind: "pre_existing", evidence: null };
-    const a = o.attributions.find((x) => x.gate === gate.name);
+    if (!before || before.passed) return [{ gate, kind: "regression", evidence: null }];
+    const a = o.attributions?.find((x) => x.gate === gate.name);
+    if (o.accepted.has(gate.name)) {
+      if (!a || a.origin === "pre_existing") return [];
+      return [{ gate, kind: "regression", evidence: a.evidence.trim() || null }];
+    }
+    if (!o.outOfScope.has(gate.name)) return [{ gate, kind: "in_scope", evidence: null }];
+    if (!o.attributions) return [{ gate, kind: "pre_existing", evidence: null }];
     const evidence = a?.evidence.trim() || null;
-    return { gate, kind: a?.origin === "pre_existing" && evidence ? "pre_existing" : "regression", evidence };
+    return [{ gate, kind: a?.origin === "pre_existing" && evidence ? "pre_existing" : "regression", evidence }];
   });
 }
+
+/** The required gates the reviewer attributes: those failing as before the task, out of the plan's scope, accepted ones included. */
+export const gatesToAttribute = (o: { results: GateResult[]; baseline: Baseline; outOfScope: Set<string> }): string[] =>
+  gateVerdicts({ ...o, attributions: null, accepted: new Set() }).filter((v) => v.kind === "pre_existing").map((v) => v.gate.name);
 
 /**
  * The review's check: evidence for every blocking finding, and an attribution with evidence for every gate it is asked

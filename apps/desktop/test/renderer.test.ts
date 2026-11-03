@@ -37,6 +37,8 @@ describe("settings editors", () => {
       "codex.args": "list", "claude.role_args.implementer": "list", "claude.model": "text", "codex.bin": "text",
     });
     expect(CHOICES.prompts).toEqual(["ask", "deny"]);
+    // The pipeline profile: a choice of the values config validation allows, with the workflow's roles.
+    expect([CHOICES.profile, editorKind({ kind: "profile" }), groupOf("pipeline.profile")]).toEqual([["lightweight", "standard", "thorough"], "choice", "agents"]);
   });
   it("turns what was typed into the value saved", () => {
     expect(parseEditorValue("list", "--a\n\n --b \n", false)).toEqual(["--a", "--b"]);

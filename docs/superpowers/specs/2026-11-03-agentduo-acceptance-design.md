@@ -2,7 +2,9 @@
 
 Status: implemented. Amends `2026-10-27-agentduo-channel-design.md` (§5 escalation reasons, DONE). Builds on
 `2026-11-03-agentduo-review-state-design.md`. Amended by `2026-11-03-agentduo-scope-design.md`, which widens a
-finding's `in_scope` and adds `out_of_scope` for what the task does not ask.
+finding's `in_scope` and adds `out_of_scope` for what the task does not ask, and by
+`2026-11-03-agentduo-final-verification-design.md`: an accepted gate is still attributed by every later review, and a
+failure the change made worse (or a changed command) is never covered by the acceptance.
 
 ## Problem
 

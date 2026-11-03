@@ -104,6 +104,11 @@ export interface Finding {
   evidence: string;
   /** The ids of the final plan's acceptance criteria it is about (a blocking in_scope finding names those it fails); absent in older reviews. */
   criteria: string[];
+  /**
+   * A blocking finding raised for the first time after an earlier review, about code that did not change since: why it
+   * was not reported then. Null otherwise; absent in older reviews.
+   */
+  late_reason: string | null;
 }
 
 export interface Review {
