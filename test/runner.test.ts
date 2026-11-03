@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AgentRunner, type CallSession } from "../src/agents/runner.js";
+import { AgentRunner, type CallBudget, type CallSession } from "../src/agents/runner.js";
 import type { Attachment } from "../src/core/attachment-types.js";
 import { AttachmentStore, existingAttachmentFile } from "../src/core/attachments.js";
 import { png } from "./helpers/images.js";
@@ -294,5 +294,36 @@ describe("AgentRunner sessions", () => {
     const [codex, claude] = fake.calls();
     expect(codex!.args).toContain("--ephemeral");
     expect(claude!.args).toContain("--no-session-persistence");
+  });
+});
+
+describe("AgentRunner and the run's budget", () => {
+  const plannerCall = (r: AgentRunner, budget: CallBudget, logPrefix = "001-plan-r1") =>
+    r.call({ role: "planner", agentRole: "planner", prompt: prompt("planner"), schemaName: "plan", logPrefix, budget });
+
+  it("starts no attempt once the budget stops it, retries included, and says why", async () => {
+    fake.setScenario({ planner: [{ raw: "not json" }, { output: plan() }] });
+    const r = runner({ limits: { max_retries: 3 } });
+    const seen: Array<{ tokens: number; costUsd: number; calls: number }> = [];
+    const res = await plannerCall(r, { stop: (call) => (seen.push(call), call.calls >= 1 ? "the run reached its budget" : null), costCap: () => null });
+    expect(res).toMatchObject({ ok: false, budgetStop: "the run reached its budget", error: "the run reached its budget", attempts: 1, calls: 1, unpricedCalls: 1 });
+    expect(seen).toEqual([{ tokens: 0, costUsd: 0, calls: 0 }, { tokens: 1234, costUsd: 0, calls: 1 }]);
+    expect(fake.calls("planner")).toHaveLength(1);
+    const before = await plannerCall(r, { stop: () => "no budget left", costCap: () => null }, "002-plan-r1");
+    expect(before).toMatchObject({ ok: false, attempts: 0, calls: 0, budgetStop: "no budget left" });
+    expect(fake.calls("planner")).toHaveLength(1);
+  });
+
+  it("counts every CLI call, and those that reported no cost; caps Claude's at what is left", async () => {
+    fake.setScenario({ planner: [{ raw: "not json" }, { output: plan() }], plan_reviewer: [{ output: critique(true) }] });
+    const r = runner();
+    const caps: number[] = [];
+    const budget: CallBudget = { stop: () => null, costCap: (spent) => (caps.push(spent), 0.42) };
+    expect(await plannerCall(r, budget)).toMatchObject({ ok: true, calls: 2, unpricedCalls: 2, costUsd: null });
+    const critic = await r.call({ role: "plan_reviewer", agentRole: "plan_reviewer", prompt: prompt("plan_reviewer"), schemaName: "plan_critique", logPrefix: "003-review", budget });
+    expect(critic).toMatchObject({ ok: true, calls: 1, unpricedCalls: 0, costUsd: 0.01 });
+    const args = fake.calls("plan_reviewer")[0]!.args;
+    expect(args[args.indexOf("--max-budget-usd") + 1]).toBe("0.42");
+    expect(fake.calls("planner")[0]!.args).not.toContain("--max-budget-usd");
   });
 });

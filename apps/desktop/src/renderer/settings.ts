@@ -167,6 +167,7 @@ export function editorKind(e: Pick<ConfigEntry, "kind">): EditorKind {
     case "budget":
     case "positive":
     case "count":
+    case "limit":
       return "number";
     case "prompts":
     case "backend":
@@ -192,6 +193,7 @@ export function settingLabel(key: string): string {
     max_planning_rounds: "Planning rounds", max_review_rounds: "Review rounds", max_discussion_rounds: "Discussion rounds",
     max_retries: "Retries", max_consecutive_gate_failures: "Failed checks in a row", agent_timeout_sec: "Agent timeout",
     agent_idle_timeout_sec: "Idle timeout", gate_timeout_sec: "Check timeout", max_diff_chars: "Diff size", max_gate_output_chars: "Check output size",
+    max_run_tokens: "Tokens per run", max_run_cost_usd: "Cost per run", max_run_agent_calls: "Agent calls per run", max_run_minutes: "Work time per run",
   };
   return labels[parts[1]!] ?? words(parts.at(-1)!);
 }
@@ -220,6 +222,10 @@ export function settingHelp(key: string): string {
     "limits.gate_timeout_sec": "The longest one check may take.",
     "limits.max_diff_chars": "How much of the diff a reviewer is shown.",
     "limits.max_gate_output_chars": "How much of a check's output the agents are shown.",
+    "limits.max_run_tokens": "Tokens a pipeline may use in all before it asks you. A call that crosses it finishes. Empty: no limit.",
+    "limits.max_run_cost_usd": "Cost a pipeline may report in all before it asks you. Claude stops a call at what is left; Codex reports no cost, so its calls are not counted. Empty: no limit.",
+    "limits.max_run_agent_calls": "Agent calls a pipeline may make, retries included, before it asks you. Empty: no limit.",
+    "limits.max_run_minutes": "Time a pipeline may work, not counting waits for you, before it asks you. A call already running finishes. Empty: no limit.",
   };
   if (name === "bin") return `The command or path AgentDuo runs for ${cli}.`;
   if (name === "args") return `Added to every ${cli} call. Pick them from the list; AgentDuo writes the flags.`;
@@ -231,6 +237,9 @@ export function settingUnit(key: string): string {
   if (key.endsWith("_sec")) return "seconds";
   if (key.endsWith("_chars")) return "characters";
   if (key.endsWith("_usd")) return "USD";
+  if (key.endsWith("_tokens")) return "tokens";
+  if (key.endsWith("_calls")) return "calls";
+  if (key.endsWith("_minutes")) return "minutes";
   return "";
 }
 
@@ -277,6 +286,7 @@ const GROUPS: Array<{ id: string; title: string; description: string; cards: Arr
       { title: "Rounds", keys: ["limits.max_planning_rounds", "limits.max_review_rounds", "limits.max_discussion_rounds", "limits.max_retries", "limits.max_consecutive_gate_failures"] },
       { title: "Time", keys: ["limits.agent_timeout_sec", "limits.agent_idle_timeout_sec", "limits.gate_timeout_sec"] },
       { title: "Size", keys: ["limits.max_diff_chars", "limits.max_gate_output_chars"] },
+      { title: "Budget per pipeline run", keys: ["limits.max_run_tokens", "limits.max_run_cost_usd", "limits.max_run_agent_calls", "limits.max_run_minutes"] },
     ],
   },
 ];
@@ -595,8 +605,8 @@ export class SettingsPanel {
     }
     const input = el("input", {
       class: kind === "number" ? "num" : "text", attrs: {
-        id, type: kind === "number" ? "number" : "text", spellcheck: "false", placeholder: e.kind === "budget" ? "No limit" : nullable ? "(none)" : "",
-        ...(kind === "number" ? { step: e.kind === "budget" ? "any" : "1", min: e.kind === "positive" ? "1" : "0" } : {}),
+        id, type: kind === "number" ? "number" : "text", spellcheck: "false", placeholder: e.kind === "budget" || e.kind === "limit" ? "No limit" : nullable ? "(none)" : "",
+        ...(kind === "number" ? { step: e.kind === "budget" ? "any" : "1", min: e.kind === "positive" || e.kind === "limit" ? "1" : "0" } : {}),
       },
     });
     input.value = current === null || current === undefined ? "" : String(current);

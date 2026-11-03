@@ -69,6 +69,26 @@ export interface RoundInfo {
   limit: number;
 }
 
+/**
+ * What a pipeline run may use in all (limits.max_run_*): tokens, the cost the CLIs report, agent CLI calls, and minutes
+ * of work (steps that ran, not time spent waiting for a decision).
+ */
+export type BudgetKey = "tokens" | "cost" | "calls" | "minutes";
+
+/** One configured limit of a run's budget, and how much of it is used. */
+export interface BudgetLine {
+  key: BudgetKey;
+  used: number;
+  limit: number;
+}
+
+/** A run's budget as the screen shows it: only the limits that are set. */
+export interface BudgetView {
+  lines: BudgetLine[];
+  /** Agent calls whose CLI reported no cost (every Codex call): their cost is not in `cost`, which is a lower bound. */
+  unpricedCalls: number;
+}
+
 export type Agent = "codex" | "claude";
 
 /**
@@ -121,7 +141,7 @@ export type CallContext = { role: Role; turnId?: undefined } | { role?: undefine
 
 export type DuoEvent =
   | { type: "run.started"; runId: string; task: string; repo: string; runDir: string }
-  | { type: "phase.started"; step: number; phase: Phase; round: number; role?: Role; agent?: Party; planning: RoundInfo; impl: RoundInfo }
+  | { type: "phase.started"; step: number; phase: Phase; round: number; role?: Role; agent?: Party; planning: RoundInfo; impl: RoundInfo; budget?: BudgetView }
   | { type: "agent.activity"; role: Role; agent: Party; activity: Activity }
   | { type: "agent.retry"; role: Role; agent: Party; attempt: number; max: number; reason: string }
   | ({ type: "permission.requested"; agent: Party; request: PermissionRequest } & CallContext)

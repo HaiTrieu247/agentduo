@@ -319,8 +319,9 @@ In a terminal, agentduo shows the reason and a menu: Resume, Revise (with a note
 | `max_review_rounds`, `critical_finding`, `gates_failing` | Starts another fix round |
 | `implementer_blocked` | Re-runs the implementation round |
 | `agent_error`, `orchestrator_error` | Re-runs the failed step |
+| `budget_exhausted` | Raises each limit the run reached by one more allowance, then runs the step it stopped before |
 
-`revise` goes back to planning with your note. `abort` ends the run.
+`revise` goes back to planning with your note (after `budget_exhausted` it raises the limits reached too). `abort` ends the run.
 
 ## Configuration
 
@@ -342,13 +343,42 @@ claude: { model: null, max_budget_usd: null, permission_prompts: ask, args: [], 
 
 `agent_idle_timeout_sec` stops an agent that prints nothing for that long; set it to 0 to turn the check off.
 
+### Budget per run
+
+Round limits bound each loop; a budget bounds a whole pipeline run, across all its phases, rounds and retries. Each
+limit is off unless you set it:
+
+```yaml
+limits:
+  max_run_tokens: 2000000      # tokens of every agent call
+  max_run_cost_usd: 10         # the cost the CLIs report
+  max_run_agent_calls: 40      # agent CLI calls, retries included
+  max_run_minutes: 90          # time spent working, not waiting for you
+```
+
+- The screen shows the budget at each step (`budget 1.2M/2M tok · 31/40 calls`), as do `duo status` and the report.
+  A warning comes once a limit is 80% used.
+- When a limit is reached, the run starts no further step or agent call and waits for you, with the reason
+  `budget_exhausted`. Everything is kept: plans, reviews, your files, the report. `resume` allows one more allowance
+  of each limit reached (as much again as the config sets) and goes on where the run stopped. A run in CI exits with
+  code 2 until you run `duo resume --decision resume`.
+- **Hard and best-effort limits.** `max_run_agent_calls` is exact: no call starts past it. No step or call starts past
+  `max_run_minutes`, but a call already running finishes (up to `agent_timeout_sec`). Tokens are known only when a
+  call ends, so the call that crosses `max_run_tokens` finishes past it.
+- **Cost.** Only Claude reports a cost. Codex reports none, and its cost is never counted as zero: the run counts its
+  calls as unpriced, and shows the cost as a lower bound (`$1.20+/$10.00 (3 calls unpriced)`). Bound Codex with
+  tokens or calls. Each Claude call is capped by Claude itself at what the run has left (`--max-budget-usd`, or
+  `claude.max_budget_usd` if that is lower), so Claude's part of the cost stops close to the limit.
+- A run keeps the limits it started with, like its round limits. A run started without a budget takes one from the
+  config it next runs with (`duo resume --reload-config`).
+
 ## Run files
 
 Everything about a run lives in `.agentduo/runs/<run-id>/`:
 
-- `state.json`: makes the run resumable; it also keeps each role's session id and the agents' notes about the repository;
+- `state.json`: makes the run resumable; it also keeps each role's session id, the agents' notes about the repository, and the run's budget and usage;
 - `config.json`: the config the run started with;
-- `report.md`: timeline, gates, diff stat, unresolved issues, warnings, cost and tokens;
+- `report.md`: timeline, gates, diff stat, unresolved issues, warnings, usage (tokens, reported cost, unpriced calls, agent calls, minutes) and the budget;
 - the plans, the critiques, and every agent's JSON (with task id, round, timestamp, git SHA and plan version);
 - `diff.r<round>.patch`: the whole diff each code review was given;
 - `logs/`: the prompt, the command line, the raw event stream and stderr of every CLI call.

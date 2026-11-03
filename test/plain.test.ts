@@ -7,6 +7,10 @@ const review = { reason: "max_review_rounds", message: "not approved", fromPhase
 const EVENTS: DuoEvent[] = [
   { type: "run.started", runId: "run-1", task: "t", repo: "/repo", runDir: "/repo/.agentduo/runs/run-1" },
   { type: "phase.started", step: 1, phase: "PLAN", round: 1, role: "planner", agent: "codex", planning: { round: 1, limit: 4 }, impl: { round: 0, limit: 5 } },
+  {
+    type: "phase.started", step: 2, phase: "PLAN_REVIEW", round: 1, role: "plan_reviewer", agent: "claude", planning: { round: 1, limit: 4 }, impl: { round: 0, limit: 5 },
+    budget: { lines: [{ key: "tokens", used: 1234, limit: 10_000 }, { key: "calls", used: 1, limit: 40 }], unpricedCalls: 1 },
+  },
   { type: "agent.activity", role: "planner", agent: "codex", activity: { id: "1", kind: "command", label: "exec  cat README.md", status: "running" } },
   { type: "agent.activity", role: "planner", agent: "codex", activity: { id: "1", kind: "command", label: "exec  cat README.md", status: "ok", exitCode: 0 } },
   { type: "agent.activity", role: "planner", agent: "codex", activity: { id: "2", kind: "think", label: "thinking", status: "ok" } },
@@ -34,6 +38,7 @@ describe("plain renderer", () => {
   it("prints one line per event with time, agent and phase columns", () => {
     const text = render(false);
     expect(text.split("\n")).toContain("12:00:00  codex        PLAN r1          ▶ planner");
+    expect(text.split("\n")).toContain("12:00:00  claude       PLAN_REVIEW r1   ▶ plan critic (budget 1k/10k tok · 1/40 calls)");
     expect(text.split("\n")).toContain(`${" ".repeat(40)}- [high] C1 problem`);
     for (const s of ["agentduo 0.1.0 · run run-1", "✓ exec  cat README.md", "↻ retry 2/2: output is not valid JSON", "Codex → Claude  Plan v1",
       "- [high] C1 problem", "● plan created: v1 (32s · 1k tok)", "✗ gate tests (exit 1)", "warning: something odd",

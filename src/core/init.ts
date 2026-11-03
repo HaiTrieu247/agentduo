@@ -81,6 +81,10 @@ export function renderConfigYaml(gates: DetectedGate[]): string {
     "#   max_planning_rounds: 4",
     "#   max_review_rounds: 5",
     "#   agent_idle_timeout_sec: 900",
+    "#   max_run_tokens: 2000000    # a pipeline run's budget, over all its rounds and retries (each off unless set);",
+    "#   max_run_cost_usd: 10       # reaching one pauses the run for your decision",
+    "#   max_run_agent_calls: 40",
+    "#   max_run_minutes: 90",
     "",
   );
   return lines.join("\n");

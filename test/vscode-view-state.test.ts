@@ -67,6 +67,14 @@ describe("view state", () => {
     expect(s.timeline.at(-1)).toMatchObject({ kind: "step", step: { phase: "PLAN", tokens: 1234 } });
   });
 
+  it("keeps the run's budget from each step's start, and none for a run without one", () => {
+    const budget = { lines: [{ key: "tokens" as const, used: 1234, limit: 10_000 }], unpricedCalls: 1 };
+    let s = run(initialState("active"), ev({ ...phase("PLAN"), budget } as DuoEvent));
+    expect(s.budget).toEqual(budget);
+    s = reduce(s, ev(phase("IMPLEMENT", 2)));
+    expect(s.budget).toBeNull();
+  });
+
   it("tracks gates, retries, permission prompts and their answers", () => {
     let s = run(initialState("active"), ev(phase("VERIFY")), ev({ type: "gate.started", name: "test", command: "npm test" }),
       ev({ type: "gate.completed", name: "test", command: "npm test", passed: false, exitCode: 1 }),

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { AgentUsage } from "../src/core/usage.js";
 import {
-  activityText, discussionAuthor, discussionDoing, discussionOutcome, discussionStepText, formatClock, formatCost, formatDuration, formatTokens, messageHeadline, partyLabel, roleLabel,
-  usageBar, usageReportText, usageRows, usageText, verdictText,
+  activityText, budgetText, discussionAuthor, discussionDoing, discussionOutcome, discussionStepText, formatClock, formatCost, formatDuration, formatTokens, messageHeadline, partyLabel, roleLabel,
+  resumeHint, usageBar, usageReportText, usageRows, usageText, verdictText,
 } from "../src/ui/format.js";
 
 describe("format", () => {
@@ -12,6 +12,15 @@ describe("format", () => {
     expect([formatCost(0.171), formatCost(0), formatCost(null)]).toEqual(["$0.17", "", ""]);
     expect([formatTokens(67_400), formatTokens(512), formatTokens(0)]).toEqual(["67k tok", "512 tok", ""]);
     expect(usageText(0.5, 2000)).toBe("$0.50 · 2k tok");
+  });
+
+  it("shows a run's budget in one line, the limits that are set, and a cost that leaves calls out as a lower bound", () => {
+    expect(budgetText(null)).toBe("");
+    expect(budgetText({ lines: [{ key: "tokens", used: 120_400, limit: 2_000_000 }, { key: "calls", used: 7, limit: 40 }, { key: "minutes", used: 12.7, limit: 60 }], unpricedCalls: 0 }))
+      .toBe("budget 120k/2M tok · 7/40 calls · 12/60 min");
+    expect(budgetText({ lines: [{ key: "cost", used: 1.2, limit: 5 }], unpricedCalls: 3 })).toBe("budget $1.20+/$5.00 (3 calls unpriced)");
+    expect(budgetText({ lines: [{ key: "cost", used: 1.2, limit: 5 }], unpricedCalls: 0 })).toBe("budget $1.20/$5.00");
+    expect(resumeHint("budget_exhausted")).toBe("allow one more allowance of the budget reached and go on");
   });
 
   it("labels parties, roles, activities and messages", () => {

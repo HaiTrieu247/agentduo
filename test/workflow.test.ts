@@ -929,3 +929,103 @@ describe("Workflow: context shared between the agents", () => {
     ]);
   });
 });
+
+describe("Workflow: the run's budget", () => {
+  const budgetWarnings = () => stateOf(h).warnings.filter((w) => w.startsWith("budget:"));
+  const decisionItems = () => messages().filter((m) => m.kind === "decision").map((m) => m.items);
+
+  it("runs as before within its budget, shows it at every step, warns near a limit, and reports what it used", async () => {
+    expect(await start(happy(), { limits: { max_run_tokens: 100_000, max_run_cost_usd: 1, max_run_agent_calls: 6, max_run_minutes: 60 } })).toBe(0);
+    const st = stateOf(h);
+    // Three Codex calls (1,234 tokens each, no cost reported) and two Claude calls ($0.01 each).
+    expect([st.agentCalls, st.unpricedCalls, st.tokens, st.costUsd]).toEqual([5, 3, 3702, 0.02]);
+    expect(st.budget).toEqual({ limits: { tokens: 100_000, cost: 1, calls: 6, minutes: 60 }, warned: ["calls"] });
+    expect(budgetWarnings()).toEqual(["budget: 5 of 6 agent calls used (83%, limits.max_run_agent_calls); the run stops for your decision when it is reached"]);
+    const phases = h.events.flatMap((e) => (e.type === "phase.started" ? [e] : []));
+    expect(phases[0]!.budget!.lines.map((l) => [l.key, l.used, l.limit])).toEqual([["tokens", 0, 100_000], ["cost", 0, 1], ["calls", 0, 6], ["minutes", 0, 60]]);
+    expect(phases.at(-1)!.budget).toMatchObject({ unpricedCalls: 2, lines: expect.arrayContaining([{ key: "calls", used: 4, limit: 6 }]) });
+    // Codex's missing cost is said, never counted as zero; the notice is not one of the run's warnings.
+    expect(h.events).toContainEqual({ type: "warning", text: expect.stringContaining("Codex reports none, so the cost of its calls is not in it") });
+    expect(st.warnings.some((w) => w.includes("Codex reports none"))).toBe(false);
+    const report = readRun("report.md");
+    expect(report).toContain("- **Usage:** 3,702 tokens · reported cost $0.02 (3 call(s) reported no cost, as Codex never does: the real cost is higher) · 5 agent call(s)");
+    expect(report).toContain("## Budget\n- 3,702 of 100,000 tokens (3%, limits.max_run_tokens)\n- $0.02 of $1.00 reported cost (2%, limits.max_run_cost_usd)\n- 5 of 6 agent calls (83%, limits.max_run_agent_calls)");
+    // Claude is capped at what the run has left: all of it first, then less the critic's cost.
+    const cap = (role: string) => { const a = fake.calls(role)[0]!.args; return a[a.indexOf("--max-budget-usd") + 1]; };
+    expect([cap("plan_reviewer"), cap("implementer")]).toEqual(["1", "0.99"]);
+  });
+
+  it("stops before the next step once a limit is reached, keeps everything, and goes on only when you allow it", async () => {
+    expect(await start(happy(), { limits: { max_run_tokens: 1000 } })).toBe(2);
+    let st = stateOf(h);
+    expect(st.phase).toBe("HUMAN_REVIEW");
+    expect(st.humanReview).toMatchObject({ reason: "budget_exhausted", fromPhase: "PLAN_REVIEW", resumePhase: "PLAN_REVIEW" });
+    expect(st.humanReview!.message).toContain("the run reached its budget: 1,234 of 1,000 tokens (limits.max_run_tokens)");
+    expect(st.humanReview!.details[0]).toContain("reached (tokens are known when a call ends");
+    expect(fake.calls().map((c) => c.role)).toEqual(["planner"]);
+    expect(existsSync(join(runDirOf(h), "plan.v1.md"))).toBe(true);
+    expect(readRun("report.md")).toContain("1,234 of 1,000 tokens (123%, limits.max_run_tokens): reached");
+    // `duo resume --decision resume`: one more allowance (1,000 tokens from what it used), then it stops again.
+    expect(await resume(h, { decision: "resume" })).toBe(2);
+    st = stateOf(h);
+    expect(st.humanReview).toMatchObject({ reason: "budget_exhausted", resumePhase: "IMPLEMENT" });
+    expect(fake.calls().map((c) => c.role)).toEqual(["planner", "plan_reviewer", "plan_finalizer"]);
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    st = stateOf(h);
+    expect(st.phase).toBe("DONE");
+    // Every step ran once: a stop never re-ran work that was done.
+    expect(fake.calls().map((c) => c.role)).toEqual(["planner", "plan_reviewer", "plan_finalizer", "implementer", "code_reviewer"]);
+    expect(decisionItems()).toEqual([["tokens limit raised to 2234"], ["tokens limit raised to 3468"]]);
+    expect(st.budget!.limits.tokens).toBe(3468);
+  });
+
+  it("never starts an agent call past the call limit, a retry included, and stops for a decision rather than an error", async () => {
+    expect(await start({ ...happy(), planner: [{ raw: "not json" }, { output: plan() }] }, { limits: { max_run_agent_calls: 1, max_retries: 3 } })).toBe(2);
+    let st = stateOf(h);
+    expect(st.humanReview).toMatchObject({ reason: "budget_exhausted", resumePhase: "PLAN" });
+    expect(st.humanReview!.message).toContain("1 of 1 agent calls (limits.max_run_agent_calls)");
+    expect(fake.calls("planner")).toHaveLength(1);
+    expect(st.agentCalls).toBe(1);
+    // Allowed one more call: the planner's step runs again and succeeds, and the run stops before the critic.
+    expect(await resume(h, { decision: "resume" })).toBe(2);
+    st = stateOf(h);
+    expect([st.agentCalls, st.planVersion, st.humanReview?.resumePhase]).toEqual([2, 1, "PLAN_REVIEW"]);
+    expect(fake.calls("planner")).toHaveLength(2);
+    expect(await resume(h, { decision: "abort" })).toBe(3);
+    expect(stateOf(h).budget!.limits.calls).toBe(2);
+  });
+
+  it("starts no step past its minutes of work", async () => {
+    fake.setScenario(happy());
+    h.cfg = testConfig(fake, { limits: { max_run_minutes: 1 } });
+    const { wf } = newWorkflow(h, "Make app.txt fixed", undefined, (state) => {
+      state.activeSec = 61;
+    });
+    expect(await wf.run()).toBe(2);
+    expect(stateOf(h).humanReview).toMatchObject({ reason: "budget_exhausted", resumePhase: "PLAN" });
+    expect(stateOf(h).humanReview!.message).toContain("1 of 1 minutes of work (limits.max_run_minutes)");
+    expect(fake.calls()).toEqual([]);
+  });
+
+  it("saves the work time of a step that was stopped, which a resumed run counts on from", async () => {
+    fake.setScenario({ ...happy(), planner: [{ activities: [{ command: "ls" }], sleep: 5000, output: plan() }] });
+    const { wf, bus } = newWorkflow(h, "Make app.txt fixed");
+    bus.on((e) => {
+      if (e.type === "agent.activity") wf.interrupt();
+    });
+    expect(await wf.run()).toBe(130);
+    expect(stateOf(h).activeSec).toBeGreaterThan(0);
+  });
+
+  it("counts the cost the CLIs report, caps Claude at what is left, and says how much Codex left out", async () => {
+    expect(await start(happy(), { limits: { max_run_cost_usd: 0.015 } })).toBe(2);
+    const st = stateOf(h);
+    expect([st.costUsd, st.unpricedCalls]).toEqual([0.02, 2]);
+    expect(st.humanReview).toMatchObject({ reason: "budget_exhausted", resumePhase: "VERIFY" });
+    expect(st.humanReview!.details).toContain("2 agent call(s) reported no cost (Codex never does): the run's real cost is higher than the reported one");
+    const capOf = (role: string) => { const a = fake.calls(role)[0]!.args; return a[a.indexOf("--max-budget-usd") + 1]; };
+    // Never less than a cent: Claude stops a call that would spend more than is left.
+    expect([capOf("plan_reviewer"), capOf("implementer")]).toEqual(["0.01", "0.01"]);
+    expect(fake.calls("plan_finalizer")[0]!.args).not.toContain("--max-budget-usd");
+  });
+});

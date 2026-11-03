@@ -8,8 +8,8 @@ import { ATTACHMENT_LIMITS, attachmentDetail, formatBytes, type Attachment } fro
 import type { UsageReport } from "../../../src/core/usage.js";
 import type { Activity, Agent, Message, ModelIdentity, Party, PermissionAnswer } from "../../../src/events.js";
 import {
-  discussionAuthor, discussionDoing, discussionOutcome, discussionStepText, formatClock, formatDuration, modelText, partyLabel, permissionAnswerText, PROVIDERS, roleLabel, usageRows,
-  usageText, verdictText, whoLabel,
+  budgetText, discussionAuthor, discussionDoing, discussionOutcome, discussionStepText, formatClock, formatDuration, modelText, partyLabel, permissionAnswerText, PROVIDERS, roleLabel,
+  usageRows, usageText, verdictText, whoLabel,
 } from "../../../src/ui/format.js";
 import type { DecisionChoice, Route, SettingRequest, WebviewCommand } from "../src/protocol.js";
 import { h, icon, providerMark, type Child } from "./dom.js";
@@ -1147,7 +1147,8 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
       attrs: p.status === "active" ? { "aria-current": "step" } : {},
     }, icon(STAGE_ICON[p.status], "stage-icon"), h("span", { class: "sr-only" }, `${STAGE_WORD[p.status]}: `), stageName(p.label))));
     const usage = usageText(s.totals.costUsd + s.live.costUsd || undefined, s.totals.tokens + s.live.tokens || undefined);
-    progressMeta.textContent = [`plan ${s.planning.round}/${s.planning.limit || "–"}`, `impl ${s.impl.round}/${s.impl.limit || "–"}`, usage].filter(Boolean).join(" · ");
+    progressMeta.textContent = [`plan ${s.planning.round}/${s.planning.limit || "–"}`, `impl ${s.impl.round}/${s.impl.limit || "–"}`, usage, budgetText(s.budget)]
+      .filter(Boolean).join(" · ");
   }
 
   function renderProblem(s: ViewState): void {

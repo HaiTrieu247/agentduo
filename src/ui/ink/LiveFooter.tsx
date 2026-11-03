@@ -1,5 +1,5 @@
 import { Box, Text } from "ink";
-import { IMPL_PHASES, PIPELINE, SPINNER, discussionDoing, formatClock, partyLabel, roleLabel, usageText } from "../format.js";
+import { IMPL_PHASES, PIPELINE, SPINNER, budgetText, discussionDoing, formatClock, partyLabel, roleLabel, usageText } from "../format.js";
 import { ActivityLine, Speaker } from "./StepBlock.js";
 import type { ViewState } from "./store.js";
 
@@ -42,7 +42,7 @@ function Pipeline({ view }: { view: ViewState }) {
           </Text>
         );
       })}
-      <Text dimColor>{`    plan ${view.planning.round}/${view.planning.limit} · impl ${view.impl.round}/${view.impl.limit}`}</Text>
+      <Text dimColor>{`    plan ${view.planning.round}/${view.planning.limit} · impl ${view.impl.round}/${view.impl.limit}${view.budget ? ` · ${budgetText(view.budget)}` : ""}`}</Text>
     </Text>
   );
 }

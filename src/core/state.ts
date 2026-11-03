@@ -1,7 +1,7 @@
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { PermissionDenial } from "../agents/types.js";
-import type { HistoryEntry, HumanReview, Phase } from "../events.js";
+import type { BudgetKey, HistoryEntry, HumanReview, Phase } from "../events.js";
 import type { Attachment } from "./attachment-types.js";
 import type { AgentRole, Backend } from "./config.js";
 import type { GateResult } from "./gates.js";
@@ -67,6 +67,15 @@ export interface RepoNote {
   tree: string;
 }
 
+/**
+ * A run's budget: its limits (null: none), fixed when the run starts like its round limits, and raised only when you
+ * let a run that reached one go on; and the limits it has already warned about (at 80%) since they were last set.
+ */
+export interface RunBudget {
+  limits: Record<BudgetKey, number | null>;
+  warned: BudgetKey[];
+}
+
 /** One question of the chat and the answer it got. */
 export interface Exchange {
   backend: "codex" | "claude";
@@ -129,8 +138,17 @@ export interface RunState {
   sessions?: Partial<Record<AgentRole, RoleSession>>;
   /** What the agents recorded about the repository, oldest first, at most MAX_REPO_NOTES; absent: none yet. */
   repoNotes?: RepoNote[];
+  /** The cost the CLIs reported (Claude's); calls that reported none are counted in `unpricedCalls`. */
   costUsd: number;
   tokens: number;
+  /** Agent CLI processes started, retries and resumed sessions included; absent in older runs (0). */
+  agentCalls?: number;
+  /** Of those, the calls whose CLI reported no cost (Codex never does): `costUsd` leaves them out. */
+  unpricedCalls?: number;
+  /** Seconds the run spent in its steps (agents and gates), not waiting for a decision; absent in older runs (0). */
+  activeSec?: number;
+  /** Absent in runs created before budgets, and in runs with none set. */
+  budget?: RunBudget;
   step: number;
   inProgress: { phase: Phase; startedAt: string } | null;
   history: HistoryEntry[];

@@ -185,6 +185,12 @@ export class ClaudeBackend implements AgentBackend {
     return ![...this.cfg.args, ...(this.cfg.role_args[role] ?? [])].includes(CLAUDE_NO_PERSISTENCE);
   }
 
+  /** --max-budget-usd: the lower of the per-call budget and what the run's budget has left, when either is set. */
+  private budgetArgs(costCap: number | undefined): string[] {
+    const caps = [this.cfg.max_budget_usd, costCap].filter((x): x is number => typeof x === "number" && x > 0);
+    return caps.length ? ["--max-budget-usd", String(Math.min(...caps))] : [];
+  }
+
   /**
    * Protocol flags only; what Claude may do comes from the user's Claude Code settings plus args/role_args. A
    * conversation turn (text mode) has no schema and no role, but keeps the implementer's permission mode, which is
@@ -208,7 +214,7 @@ export class ClaudeBackend implements AgentBackend {
       // them automatically, since nobody could answer and the run would hang. Neither grants anything.
       ...(a.askPermissions ? ["--permission-prompts", "host", "--permission-prompt-tool", "stdio"] : ["--permission-prompts", "none"]),
       ...(this.cfg.model ? ["--model", this.cfg.model] : []),
-      ...(this.cfg.max_budget_usd ? ["--max-budget-usd", String(this.cfg.max_budget_usd)] : []),
+      ...this.budgetArgs(a.mode === "text" ? undefined : a.costCap),
       ...(session?.keep || own.includes(CLAUDE_NO_PERSISTENCE) ? [] : [CLAUDE_NO_PERSISTENCE]),
       ...(session?.resume ? ["--resume", session.resume] : []),
       ...own,

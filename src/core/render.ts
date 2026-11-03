@@ -1,3 +1,4 @@
+import { BUDGET_CONFIG, BUDGET_KEYS, describeLimit, usageOf } from "./budget.js";
 import { describeGates } from "./gates.js";
 import type { Approval, Critique, Finding, Issue, Plan, Review } from "./outputs.js";
 import type { RunState } from "./state.js";
@@ -51,6 +52,27 @@ export function findingsMarkdown(findings: Finding[]): string {
   }).join("\n");
 }
 
+/**
+ * Tokens, the cost the CLIs reported (and how many calls reported none, which it leaves out), agent calls and minutes
+ * of work: the measures of the run's budget.
+ */
+export function usageSummary(st: RunState): string {
+  const used = usageOf(st);
+  const unpriced = st.unpricedCalls ?? 0;
+  const cost = `reported cost $${used.cost.toFixed(2)}` + (unpriced ? ` (${unpriced} call(s) reported no cost, as Codex never does: the real cost is higher)` : "");
+  return [`${Math.round(used.tokens).toLocaleString("en-US")} tokens`, cost, `${used.calls} agent call(s)`, `${Math.round(used.minutes * 10) / 10} min of work`].join(" · ");
+}
+
+/** Each limit of the run's budget, one line each: how much of it is used, and whether it was reached. */
+export function budgetLines(st: RunState): string[] {
+  const used = usageOf(st);
+  return BUDGET_KEYS.filter((k) => st.budget?.limits[k] != null).map((k) => {
+    const limit = st.budget!.limits[k]!;
+    const share = Math.floor((used[k] / limit) * 100);
+    return `${describeLimit(k, used[k], limit)} (${share}%, limits.${BUDGET_CONFIG[k]})${used[k] >= limit ? ": reached" : ""}`;
+  });
+}
+
 export function reportMarkdown(st: RunState, diffStat: string, lastReview: Review | null, lastCritique: Critique | null, runDir: string): string {
   const hr = st.humanReview;
   const lines = [
@@ -60,7 +82,7 @@ export function reportMarkdown(st: RunState, diffStat: string, lastReview: Revie
     `- **Started:** ${st.createdAt} · **Updated:** ${st.updatedAt}`,
     `- **Planning rounds:** ${st.planningRound} · **Plan version:** ${st.planVersion} · **Final plan:** ${st.finalPlanVersion ? `v${st.finalPlanVersion}` : "—"}`,
     `- **Implementation rounds:** ${st.implRound}`,
-    `- **Claude cost (reported):** $${(st.costUsd ?? 0).toFixed(2)} · **Tokens:** ${st.tokens ?? 0}`,
+    `- **Usage:** ${usageSummary(st)}`,
     "- **Run directory:** `" + runDir + "`",
   ];
   if (st.git?.mode === "internal") {
@@ -73,6 +95,8 @@ export function reportMarkdown(st: RunState, diffStat: string, lastReview: Revie
   } else if (st.base && st.lastSnapshot) {
     lines.push("- **Diff:** `git diff " + st.base.commit.slice(0, 12) + " " + st.lastSnapshot.commit.slice(0, 12) + " -- .` (run it in the workspace; changes are left uncommitted in your working tree)");
   }
+  const budget = budgetLines(st);
+  if (budget.length) lines.push("\n## Budget\n" + bullets(budget));
   lines.push("\n## Timeline");
   for (const h of st.history) lines.push(`${h.step}. \`${h.phase}\` r${h.round} **${h.agent}** — ${h.status}: ${h.summary}`);
   lines.push("\n## Quality gates (last run)");

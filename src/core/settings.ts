@@ -224,7 +224,7 @@ export function withChange(changes: SettingChange[], change: SettingChange): Set
 }
 
 // ------------------------------------------------------------------ the keys the desktop's Settings change
-export type SettingKind = "bin" | "model" | "args" | "budget" | "prompts" | "backend" | "positive" | "count";
+export type SettingKind = "bin" | "model" | "args" | "budget" | "prompts" | "backend" | "positive" | "count" | "limit";
 
 /** A config key a Settings field sets: where it is, what it takes, and when work already going gets it. */
 export interface SettingKey {
@@ -236,10 +236,11 @@ export interface SettingKey {
   removable: boolean;
 }
 
-const LIMIT_KEYS: Array<[keyof ConfigData["limits"], "positive" | "count"]> = [
+const LIMIT_KEYS: Array<[keyof ConfigData["limits"], "positive" | "count" | "limit" | "budget"]> = [
   ["max_planning_rounds", "positive"], ["max_review_rounds", "positive"], ["max_discussion_rounds", "positive"], ["max_retries", "count"],
   ["max_consecutive_gate_failures", "positive"], ["agent_timeout_sec", "positive"], ["agent_idle_timeout_sec", "count"], ["gate_timeout_sec", "positive"],
   ["max_diff_chars", "positive"], ["max_gate_output_chars", "positive"],
+  ["max_run_tokens", "limit"], ["max_run_cost_usd", "budget"], ["max_run_agent_calls", "limit"], ["max_run_minutes", "limit"],
 ];
 
 /**
@@ -288,6 +289,8 @@ export function checkSettingValue(k: SettingKey, value: unknown): string | null 
       return Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 1e9 ? null : `${k.key} must be a positive integer`;
     case "count":
       return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 1e9 ? null : `${k.key} must be an integer >= 0`;
+    case "limit":
+      return value === null || (Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 1e12) ? null : `${k.key} must be a positive integer or null`;
   }
 }
 

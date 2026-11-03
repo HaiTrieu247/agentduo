@@ -10,13 +10,12 @@ import { configFromSaved, ConfigError, type ConfigData } from "./core/config.js"
 import { diagnose, EnvironmentError, prepareEnvironment, runnableProblem, type RunnableNeeds, type WorkspaceEnv } from "./core/environment.js";
 import { initRepo } from "./core/init.js";
 import type { Review } from "./core/outputs.js";
-import { findingsMarkdown } from "./core/render.js";
+import { budgetLines, findingsMarkdown, usageSummary } from "./core/render.js";
 import { openRunGit, RunGitError } from "./core/run-git.js";
 import { acquireWorkspaceLock, LockError, RunStore, type RunState } from "./core/state.js";
 import { DecisionError, EXIT, Workflow } from "./core/workflow.js";
 import { EventBus, type Decider, type Decision, type PermissionDecider } from "./events.js";
 import { packageVersion } from "./paths.js";
-import { formatCost, formatTokens } from "./ui/format.js";
 import type { ViewKind } from "./ui/ink/HumanReviewPrompt.js";
 import { attachPlainRenderer, deferDecider, plainPermissionDecider } from "./ui/plain.js";
 
@@ -408,7 +407,8 @@ async function statusCommand(io: CliIO, runId: string | undefined, opts: CommonO
   out(`  task: ${st.task.split("\n")[0]!.slice(0, 100)}`);
   out(`  planning round ${st.planningRound}/${st.limits.planningRounds}, plan v${st.planVersion}, final ${st.finalPlanVersion ? `v${st.finalPlanVersion}` : "—"}`);
   out(`  implementation round ${st.implRound}/${st.limits.reviewRounds}, open findings ${st.openFindings.length}`);
-  out(`  usage: ${[formatCost(st.costUsd), formatTokens(st.tokens)].filter(Boolean).join(" · ") || "none"}`);
+  out(`  usage: ${usageSummary(st)}`);
+  for (const line of budgetLines(st)) out(`  budget: ${line}`);
   if (st.inProgress) out(`  interrupted during ${st.inProgress.phase} (resume to re-run it)`);
   for (const h of st.history.slice(-12)) {
     out(`  [${String(h.step).padStart(2, "0")}] ${`${h.phase} r${h.round}`.padEnd(16)} ${h.agent.padEnd(12)} ${h.status}: ${h.summary}`);

@@ -78,6 +78,8 @@ export type BuildArgs =
     skipGitRepoCheck?: boolean;
     /** Absent: a session of its own that is not kept, as a conversation turn's. */
     session?: SessionArgs;
+    /** The most this call may cost, from the run's budget; a CLI that can cap a call itself (Claude) does. */
+    costCap?: number;
   } & CallArgs)
   | ({ mode: "text" } & CallArgs);
 

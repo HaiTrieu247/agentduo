@@ -51,6 +51,22 @@ describe("ClaudeBackend", () => {
     expect(backend.buildArgs({ mode: "text", lastMessageFile: "" }).filter((a) => a === "--no-session-persistence")).toHaveLength(1);
   });
 
+  it("caps a call's cost at the lower of the per-call budget and what the run's budget has left", () => {
+    const cfg = defaultConfig();
+    const backend = new ClaudeBackend(cfg.claude, "/ws");
+    const cap = (costCap?: number) => {
+      const args = backend.buildArgs({ schemaName: "plan_critique", lastMessageFile: "", role: "plan_reviewer", ...(costCap !== undefined ? { costCap } : {}) });
+      return args.includes("--max-budget-usd") ? args[args.indexOf("--max-budget-usd") + 1] : null;
+    };
+    expect(cap()).toBeNull();
+    expect(cap(0.75)).toBe("0.75");
+    cfg.claude.max_budget_usd = 2;
+    expect(cap()).toBe("2");
+    expect(cap(0.75)).toBe("0.75");
+    expect(cap(3)).toBe("2");
+    expect(backend.buildArgs({ mode: "text", lastMessageFile: "" }).filter((a) => a === "--max-budget-usd")).toHaveLength(1);
+  });
+
   it("reads stream-json input whenever it gets images, without changing who answers permission prompts", () => {
     const t = tempDir();
     try {

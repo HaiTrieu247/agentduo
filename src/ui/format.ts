@@ -1,5 +1,5 @@
 import type { UsageReport, UsageState } from "../core/usage.js";
-import type { Activity, Agent, DiscussionStatus, DiscussionStep, Message, ModelIdentity, Party, PermissionAnswer, Phase, Role, Verdict } from "../events.js";
+import type { Activity, Agent, BudgetView, DiscussionStatus, DiscussionStep, Message, ModelIdentity, Party, PermissionAnswer, Phase, Role, Verdict } from "../events.js";
 
 export const PIPELINE: Array<{ phase: Phase; label: string }> = [
   { phase: "PLAN", label: "PLAN" },
@@ -25,6 +25,7 @@ const RESUME_HINTS: Record<string, string> = {
   critical_finding: "start another fix round",
   gates_failing: "start another fix round",
   implementer_blocked: "re-run this implementation round",
+  budget_exhausted: "allow one more allowance of the budget reached and go on",
   // Reasons only agentduo 0.1 runs can be waiting on; kept so those runs can still be resumed from the prompt.
   dirty_worktree: "re-run this implementation round",
   guard_violation: "accept the changes and run the gates",
@@ -58,6 +59,29 @@ export function formatClock(sec: number): string {
 export const formatCost = (usd?: number | null): string => (usd ? `$${usd.toFixed(2)}` : "");
 export const formatTokens = (n?: number | null): string => (!n ? "" : n >= 1000 ? `${Math.round(n / 1000)}k tok` : `${n} tok`);
 export const usageText = (costUsd?: number | null, tokens?: number | null): string => [formatCost(costUsd), formatTokens(tokens)].filter(Boolean).join(" · ");
+
+const compact = (n: number): string => (n >= 1_000_000 ? `${Math.round(n / 100_000) / 10}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n)));
+
+/**
+ * A run's budget in one line, the limits that are set only: "budget 120k/500k tok · $1.20/$5.00 · 7/40 calls · 12/60
+ * min". A cost that leaves calls out (Codex reports none) says so: "$1.20+/$5.00 (3 calls unpriced)".
+ */
+export function budgetText(view?: BudgetView | null): string {
+  if (!view?.lines.length) return "";
+  const parts = view.lines.map(({ key, used, limit }) => {
+    switch (key) {
+      case "tokens":
+        return `${compact(used)}/${compact(limit)} tok`;
+      case "cost":
+        return `$${used.toFixed(2)}${view.unpricedCalls ? "+" : ""}/$${limit.toFixed(2)}${view.unpricedCalls ? ` (${view.unpricedCalls} calls unpriced)` : ""}`;
+      case "calls":
+        return `${used}/${limit} calls`;
+      case "minutes":
+        return `${Math.floor(used)}/${limit} min`;
+    }
+  });
+  return `budget ${parts.join(" · ")}`;
+}
 
 export function activityText(a: Activity): string {
   const diff = a.added !== undefined || a.removed !== undefined ? `  +${a.added ?? 0} −${a.removed ?? 0}` : "";

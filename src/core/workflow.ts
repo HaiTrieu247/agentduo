@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { relative, resolve } from "node:path";
-import { AgentRunner, type AgentResult } from "../agents/runner.js";
+import { AgentRunner, type AgentResult, type CallBudget } from "../agents/runner.js";
 import type { SchemaName } from "../agents/schema.js";
 import type { PermissionDenial } from "../agents/types.js";
 import type { Attachment } from "./attachment-types.js";
 import { attachmentFile } from "./attachments.js";
 import type { Decider, DuoEvent, EventBus, HistoryEntry, Message, Party, PermissionDecider, Phase, Role } from "../events.js";
+import { budgetView, costLeft, ensureBudget, exhaustedMessage, newWarnings, raiseReached, reachedLimits, usageOf } from "./budget.js";
 import type { AgentRole, Backend, ConfigData } from "./config.js";
 import { acceptRepoNotes, addRepoNotes, planTurn, rememberSession, type Turn } from "./context.js";
 import { GatesInterrupted, requiredPassed, runGates, type GateResult } from "./gates.js";
@@ -200,6 +201,12 @@ export class Workflow {
     const st = this.state;
     this.emit({ type: "run.started", runId: st.taskId, task: st.task, repo: this.o.repo, runDir: this.o.store.dir });
     if (st.inProgress) this.warn(`previous run was interrupted during ${st.inProgress.phase}; re-running it`);
+    const budget = ensureBudget(st, this.o.cfg);
+    if (budget?.limits.cost != null && Object.values(this.o.cfg.agents).includes("codex")) {
+      // Said every time the run starts, never stored: a fact about the setup, not about this run's work.
+      this.emit({ type: "warning", text: "limits.max_run_cost_usd counts the cost the CLIs report: Codex reports none, so the cost of its calls " +
+        "is not in it (limits.max_run_tokens and max_run_agent_calls bound them)" });
+    }
     for (;;) {
       const phase = st.phase;
       if (phase === "DONE") return this.finish("DONE", EXIT.DONE);
@@ -216,20 +223,34 @@ export class Workflow {
         continue;
       }
       if (this.stopRequested) return this.finish("INTERRUPTED", EXIT.INTERRUPTED);
+      // No step starts once the run's budget is reached: it waits, with everything it did kept, for your decision.
+      this.phaseStartedAt = Date.now();
+      if (this.budgetExhausted(phase)) {
+        this.save();
+        continue;
+      }
       // Outside the step's error handling: a run whose snapshots cannot be set up stays where it is, with no escalation.
       await this.prepare();
       st.inProgress = { phase, startedAt: nowIso() };
       this.save();
       this.phaseStartedAt = Date.now();
       this.emitPhaseStarted(phase);
+      let interrupted = false;
       try {
         await this.handler(phase)();
       } catch (err) {
-        if (err instanceof Interrupted || this.abort.signal.aborted) return this.finish("INTERRUPTED", EXIT.INTERRUPTED);
-        const e = err as Error;
-        this.o.store.writeText(`logs/error-step${String(st.step + 1).padStart(3, "0")}.txt`, e.stack ?? String(e));
-        this.escalate("orchestrator_error", `${e.name}: ${e.message}`, phase);
+        if (err instanceof Interrupted || this.abort.signal.aborted) {
+          interrupted = true;
+        } else {
+          const e = err as Error;
+          this.o.store.writeText(`logs/error-step${String(st.step + 1).padStart(3, "0")}.txt`, e.stack ?? String(e));
+          this.escalate("orchestrator_error", `${e.name}: ${e.message}`, phase);
+        }
       }
+      // Work time, the budget's minutes: the step's, interrupted or not (before finish saves); never a wait for a decision.
+      st.activeSec = (st.activeSec ?? 0) + (Date.now() - this.phaseStartedAt) / 1000;
+      for (const text of newWarnings(st)) this.warn(text);
+      if (interrupted) return this.finish("INTERRUPTED", EXIT.INTERRUPTED);
       st.inProgress = null;
       this.save();
     }
@@ -351,6 +372,7 @@ export class Workflow {
       role: info?.role, agent: phase === "VERIFY" ? "gates" : info ? this.party(info.agentRole) : undefined,
       planning: { round: st.planningRound, limit: st.limits.planningRounds },
       impl: { round: st.implRound, limit: st.limits.reviewRounds },
+      ...(budgetView(st) ? { budget: budgetView(st)! } : {}),
     });
   }
 
@@ -392,6 +414,42 @@ export class Workflow {
     const st = this.state;
     if (r.costUsd) st.costUsd = Math.round((st.costUsd + r.costUsd) * 10000) / 10000;
     if (r.tokens) st.tokens += r.tokens;
+    st.agentCalls = (st.agentCalls ?? 0) + r.calls;
+    st.unpricedCalls = (st.unpricedCalls ?? 0) + r.unpricedCalls;
+    for (const text of newWarnings(st)) this.warn(text);
+  }
+
+  /** Minutes of the step under way, which the run's minutes do not include until it ends. */
+  private stepMinutes(): number {
+    return (Date.now() - this.phaseStartedAt) / 60_000;
+  }
+
+  /** The run's budget as an agent call consults it before each attempt; absent when the run has none. */
+  private callBudget(): CallBudget | undefined {
+    const st = this.state;
+    if (!st.budget) return undefined;
+    return {
+      stop: (call) => {
+        const used = usageOf(st, { tokens: call.tokens, cost: call.costUsd, calls: call.calls, minutes: this.stepMinutes() });
+        const reached = reachedLimits(st.budget, used);
+        return reached.length ? exhaustedMessage(st, reached, used).message : null;
+      },
+      costCap: (callCost) => costLeft(st, callCost),
+    };
+  }
+
+  /**
+   * Waits for your decision when the budget is reached (before a step, with `phase` the step to run on resume; or
+   * after a call that stopped on it or failed once it was reached). Returns whether it did.
+   */
+  private budgetExhausted(phase: Phase): boolean {
+    const st = this.state;
+    const used = usageOf(st);
+    const reached = reachedLimits(st.budget, used);
+    if (!reached.length) return false;
+    const { message, details } = exhaustedMessage(st, reached, used);
+    this.escalate("budget_exhausted", message, phase, details);
+    return true;
   }
 
   private blocking<T extends { severity: string }>(issues: T[]): T[] {
@@ -430,6 +488,7 @@ export class Workflow {
     const res = await this.runner.call({
       role: o.role, agentRole: o.agentRole, prompt, schemaName: o.schemaName, logPrefix: this.logPrefix(o.label, o.round), check: o.check,
       signal: this.abort.signal, attachments: this.files(), skipGitRepoCheck: this.internal, session: { keep: turn.keep, ...(resume ? { resume } : {}) },
+      budget: this.callBudget(),
     });
     return { res, turn };
   }
@@ -455,7 +514,10 @@ export class Workflow {
     }
     await this.warnOutside(beforeOutside, this.state.phase);
     if (!r.ok) {
-      this.escalate("agent_error", `${o.role} (${r.backend}) failed after ${r.attempts} attempt(s): ${r.error}`, this.state.phase);
+      // Stopped by the budget, or failed once it was reached (a Claude call cut at the cost left): the budget's decision.
+      if (!this.budgetExhausted(this.state.phase)) {
+        this.escalate("agent_error", `${o.role} (${r.backend}) failed after ${r.attempts} attempt(s): ${r.error}`, this.state.phase);
+      }
       return null;
     }
     this.afterTurn(o, r, turn, afterTree);
@@ -659,7 +721,9 @@ export class Workflow {
     st.lastImplementation = { round: k, summary: report?.summary ?? null, status: report?.status ?? null, permissionDenials: denials };
     if (denials.length) this.warn(denialHint(cfg.agents.implementer, denials));
     if (!res.ok || !report) {
-      this.escalate("agent_error", `implementer (${res.backend}) failed after ${res.attempts} attempt(s): ${res.error}`, "IMPLEMENT");
+      if (!this.budgetExhausted("IMPLEMENT")) {
+        this.escalate("agent_error", `implementer (${res.backend}) failed after ${res.attempts} attempt(s): ${res.error}`, "IMPLEMENT");
+      }
       return;
     }
     this.afterTurn(turnSpec, res, turn, post.tree);
@@ -812,6 +876,8 @@ export class Workflow {
     if (decision !== "abort") await this.prepare();
     const hr = st.humanReview;
     if (note) st.humanNotes.push({ at: nowIso(), phase: hr.fromPhase, note });
+    // Going on after the budget stopped the run is your authorization: one more allowance of each limit it reached.
+    const raised = hr.reason === "budget_exhausted" && decision !== "abort" ? raiseReached(st, this.o.cfg) : [];
     if (decision === "abort") {
       st.phase = "ABORTED";
     } else if (decision === "revise") {
@@ -836,7 +902,7 @@ export class Workflow {
       st.phase = target;
     }
     st.humanReview = null;
-    this.message({ from: "human", to: "orchestrator", kind: "decision", headline: `${decision}${note ? ` · "${note}"` : ""}`, items: [] });
+    this.message({ from: "human", to: "orchestrator", kind: "decision", headline: `${decision}${note ? ` · "${note}"` : ""}`, items: raised });
     this.record("HUMAN_REVIEW", st.implRound || st.planningRound, "human", decision, note || `after ${hr.reason}`);
     this.save();
   }

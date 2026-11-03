@@ -7,7 +7,7 @@ import type { CodexCatalog } from "../../../src/core/models.js";
 import type { SettingsView } from "../../../src/core/settings.js";
 import type { UsageReport } from "../../../src/core/usage.js";
 import type {
-  Activity, Agent, DiscussionPlace, DiscussionStatus, DuoEvent, HistoryEntry, HumanReview, Message, ModelIdentity, ModelMap, Party, PermissionAnswer, PermissionRequest,
+  Activity, Agent, BudgetView, DiscussionPlace, DiscussionStatus, DuoEvent, HistoryEntry, HumanReview, Message, ModelIdentity, ModelMap, Party, PermissionAnswer, PermissionRequest,
   Phase, Role, RoundInfo, TurnStatus, Verdict,
 } from "../../../src/events.js";
 import { answerActivities, resumeHint, withObserved } from "../../../src/ui/format.js";
@@ -156,6 +156,8 @@ export interface ViewState {
   stopped: Phase | null;
   planning: RoundInfo;
   impl: RoundInfo;
+  /** The run's budget when its current step started; absent or null: it has none (or a view saved before budgets). */
+  budget?: BudgetView | null;
   totals: { costUsd: number; tokens: number };
   live: { costUsd: number; tokens: number };
   decision: PendingDecision | null;
@@ -347,7 +349,7 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
       return push({ ...s, run: { id: e.runId, task: e.task }, ended: null, reached: [], stopped: null, current: null }, { kind: "run", runId: e.runId, task: e.task });
     case "phase.started":
       return {
-        ...s, current: newStep(e.phase, e.round, now, e.role, e.agent), stopped: null, planning: e.planning, impl: e.impl,
+        ...s, current: newStep(e.phase, e.round, now, e.role, e.agent), stopped: null, planning: e.planning, impl: e.impl, budget: e.budget ?? null,
         reached: s.reached.includes(e.phase) ? s.reached : [...s.reached, e.phase], live: { costUsd: 0, tokens: 0 },
       };
     case "agent.activity":

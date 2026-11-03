@@ -101,6 +101,10 @@ describe("loadConfig", () => {
       ["limits:\n  agent_idle_timeout_sec: -1\n", "limits.agent_idle_timeout_sec must be an integer >= 0"],
       ["limits:\n  max_review_rounds: 0\n", "limits.max_review_rounds must be a positive integer"],
       ["limits:\n  max_discussion_rounds: 0\n", "limits.max_discussion_rounds must be a positive integer"],
+      ["limits:\n  max_run_tokens: 0\n", "limits.max_run_tokens must be a positive integer or null"],
+      ["limits:\n  max_run_agent_calls: 2.5\n", "limits.max_run_agent_calls must be a positive integer or null"],
+      ["limits:\n  max_run_minutes: soon\n", "limits.max_run_minutes must be a positive integer or null"],
+      ["limits:\n  max_run_cost_usd: -1\n", "limits.max_run_cost_usd must be a positive number or null"],
       ["agents:\n  implementer: gemini\n", "agents.implementer must be one of codex, claude"],
       ["gates: [npm test]\n", "gates[0] needs 'name' and 'command'"],
     ];
@@ -108,6 +112,10 @@ describe("loadConfig", () => {
       const { dir, env } = setup(yaml);
       expect(() => loadConfig({ dir, env }), yaml).toThrow(expected);
     }
+    // A run's budget is off unless set; any positive amount (cost in dollars and cents) is one.
+    expect(loadConfig(setup("")).data.limits).toMatchObject({ max_run_tokens: null, max_run_cost_usd: null, max_run_agent_calls: null, max_run_minutes: null });
+    const budget = setup("limits:\n  max_run_tokens: 2000000\n  max_run_cost_usd: 12.5\n  max_run_agent_calls: 40\n  max_run_minutes: 90\n");
+    expect(loadConfig(budget).data.limits).toMatchObject({ max_run_tokens: 2_000_000, max_run_cost_usd: 12.5, max_run_agent_calls: 40, max_run_minutes: 90 });
     const both = setup("", "limits:\n  max_retries: -1\n");
     expect(() => loadConfig({ dir: both.dir, env: both.env })).toThrow(join("xdg", "agentduo", "config.yaml"));
   });

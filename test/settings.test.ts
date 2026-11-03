@@ -204,6 +204,14 @@ describe("settings", () => {
     expect(() => settings.value("claude.bin", undefined)).toThrow("cannot be removed");
     expect(checkSettingValue(settingKey("limits.agent_idle_timeout_sec")!, 0)).toBeNull();
     expect(checkSettingValue(settingKey("claude.model")!, null)).toBeNull();
+    // A run's budget: a positive amount, or null for no limit; it reaches only runs started after the change.
+    for (const key of ["limits.max_run_tokens", "limits.max_run_agent_calls", "limits.max_run_minutes", "limits.max_run_cost_usd"]) {
+      expect(settingKey(key), key).toMatchObject({ live: "next-run" });
+      expect(checkSettingValue(settingKey(key)!, null), key).toBeNull();
+      expect(checkSettingValue(settingKey(key)!, 0), key).not.toBeNull();
+    }
+    expect(checkSettingValue(settingKey("limits.max_run_tokens")!, 1.5)).toBe("limits.max_run_tokens must be a positive integer or null");
+    expect(checkSettingValue(settingKey("limits.max_run_cost_usd")!, 1.5)).toBeNull();
   });
 
   it("drops an earlier change once a later one sets the same keys whole, so a replay never brings it back", () => {

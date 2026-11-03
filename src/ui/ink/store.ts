@@ -1,5 +1,5 @@
 import type {
-  Activity, Agent, DiscussionPlace, DiscussionStatus, DuoEvent, HistoryEntry, HumanReview, Message, ModelIdentity, Party, PermissionAnswer, Phase, Role, RoundInfo, TurnStatus,
+  Activity, Agent, BudgetView, DiscussionPlace, DiscussionStatus, DuoEvent, HistoryEntry, HumanReview, Message, ModelIdentity, Party, PermissionAnswer, Phase, Role, RoundInfo, TurnStatus,
   Verdict,
 } from "../../events.js";
 import { answerActivities, PROVIDERS, withObserved } from "../format.js";
@@ -79,6 +79,8 @@ export interface ViewState {
   discussion: { id: string; answerer: Agent; critic: Agent; maxRounds: number } | null;
   planning: RoundInfo;
   impl: RoundInfo;
+  /** The run's budget when its current step started; null: it has none. */
+  budget: BudgetView | null;
   reached: Phase[];
   totals: { costUsd: number; tokens: number };
   live: { costUsd: number; tokens: number };
@@ -102,7 +104,7 @@ export type ViewAction =
 
 export function initialView(version: string, verbose = false, chat?: { workspace: string }): ViewState {
   const s: ViewState = {
-    version, items: [], current: null, turn: null, discussion: null, planning: { round: 1, limit: 0 }, impl: { round: 0, limit: 0 }, reached: [],
+    version, items: [], current: null, turn: null, discussion: null, planning: { round: 1, limit: 0 }, impl: { round: 0, limit: 0 }, budget: null, reached: [],
     totals: { costUsd: 0, tokens: 0 }, live: { costUsd: 0, tokens: 0 }, humanReview: null, permissions: [], finished: null, verbose, stopping: false, seq: 0,
     chat: !!chat,
   };
@@ -153,7 +155,7 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
     }
     case "phase.started":
       return {
-        ...s, current: newStep(s, e.phase, e.round, now, e.role, e.agent), planning: e.planning, impl: e.impl,
+        ...s, current: newStep(s, e.phase, e.round, now, e.role, e.agent), planning: e.planning, impl: e.impl, budget: e.budget ?? null,
         reached: s.reached.includes(e.phase) ? s.reached : [...s.reached, e.phase], live: { costUsd: 0, tokens: 0 },
       };
     case "agent.activity":

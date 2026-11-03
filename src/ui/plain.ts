@@ -1,7 +1,7 @@
 import type { Activity, Decider, DuoEvent, EventBus, PermissionAnswer, PermissionDecider } from "../events.js";
 import {
   activityText, DISCUSSION_LINES, discussionAuthor, discussionOutcome, discussionStepText, firstLines, formatDuration, messageHeadline, modelText, permissionAnswerText, PROVIDERS, roleLabel,
-  statusIcon, usageText, verdictText,
+  statusIcon, usageText, verdictText, budgetText,
 } from "./format.js";
 
 export interface TextSink {
@@ -122,7 +122,7 @@ export function attachPlainRenderer(bus: EventBus, out: TextSink, o: PlainOption
         break;
       case "phase.started":
         ctx = { agent: e.agent ?? "", where: `${e.phase} r${e.round}` };
-        line(paint("cyan", `▶ ${e.role ? roleLabel(e.role) : e.phase.toLowerCase()}`));
+        line(paint("cyan", `▶ ${e.role ? roleLabel(e.role) : e.phase.toLowerCase()}`) + (e.budget ? paint("dim", ` (${budgetText(e.budget)})`) : ""));
         break;
       case "agent.activity":
         activity(e.activity, e.agent);

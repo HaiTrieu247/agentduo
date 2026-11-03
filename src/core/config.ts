@@ -35,6 +35,16 @@ export interface ConfigData {
     gate_timeout_sec: number;
     max_diff_chars: number;
     max_gate_output_chars: number;
+    /**
+     * A pipeline run's budget (null: no limit), across all its phases, rounds and retries. When one is reached the run
+     * stops before its next step or agent call and waits for your decision. Calls and minutes are checked before every
+     * agent call; tokens and cost are known only when a call ends, so the last call can go past them (Claude's calls
+     * are capped by Claude itself at the cost left). Cost counts what the CLIs report: Codex reports none.
+     */
+    max_run_tokens: number | null;
+    max_run_cost_usd: number | null;
+    max_run_agent_calls: number | null;
+    max_run_minutes: number | null;
   };
   quality_gates: {
     require_plan_approval: boolean;
@@ -65,6 +75,10 @@ const DEFAULTS: ConfigData = {
     gate_timeout_sec: 900,
     max_diff_chars: 120000,
     max_gate_output_chars: 6000,
+    max_run_tokens: null,
+    max_run_cost_usd: null,
+    max_run_agent_calls: null,
+    max_run_minutes: null,
   },
   quality_gates: {
     require_plan_approval: true,
@@ -224,6 +238,11 @@ export function configErrors(cfg: ConfigData): string[] {
   }
   if (!isNonNegInt(cfg.limits.max_retries)) errors.push("limits.max_retries must be an integer >= 0");
   if (!isNonNegInt(cfg.limits.agent_idle_timeout_sec)) errors.push("limits.agent_idle_timeout_sec must be an integer >= 0");
+  for (const key of ["max_run_tokens", "max_run_agent_calls", "max_run_minutes"] as const) {
+    if (cfg.limits[key] !== null && !isPosInt(cfg.limits[key])) errors.push(`limits.${key} must be a positive integer or null`);
+  }
+  const runCost = cfg.limits.max_run_cost_usd;
+  if (runCost !== null && !(typeof runCost === "number" && Number.isFinite(runCost) && runCost > 0)) errors.push("limits.max_run_cost_usd must be a positive number or null");
   if (!Array.isArray(cfg.quality_gates.blocking_severities)) {
     errors.push("quality_gates.blocking_severities must be a list");
   } else {

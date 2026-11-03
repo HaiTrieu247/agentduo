@@ -237,6 +237,36 @@ Nếu CLI đã mất session, lần gọi đó chạy một session mới với 
 vào `claude.args` hoặc `--ephemeral` vào `codex.args` (hoặc vào `role_args` cho một vai trò). Thiết kế chi tiết ở
 [2026-11-03-agentduo-context-sharing-design.md](superpowers/specs/2026-11-03-agentduo-context-sharing-design.md).
 
+## Ngân sách cho mỗi run
+
+Giới hạn vòng (`max_planning_rounds`, `max_review_rounds`) chặn từng vòng lặp. Ngân sách chặn cả một run pipeline,
+cộng dồn qua mọi pha, mọi vòng và mọi lần retry. Mỗi giới hạn chỉ có hiệu lực khi bạn đặt nó:
+
+```yaml
+limits:
+  max_run_tokens: 2000000      # token của mọi lần gọi agent
+  max_run_cost_usd: 10         # chi phí mà các CLI báo
+  max_run_agent_calls: 40      # số lần gọi CLI của agent, tính cả retry
+  max_run_minutes: 90          # thời gian làm việc, không tính lúc chờ bạn
+```
+
+- Màn hình hiện ngân sách ở mỗi bước (`budget 1.2M/2M tok · 31/40 calls`), `duo status` và report cũng vậy. Khi một
+  giới hạn dùng tới 80%, run cảnh báo một lần.
+- Khi chạm giới hạn, run không bắt đầu bước hay lần gọi agent nào nữa và chờ bạn quyết định, với lý do
+  `budget_exhausted`. Mọi thứ được giữ nguyên: plan, review, file của bạn, report. `resume` cấp thêm một lượt cho mỗi
+  giới hạn đã chạm (bằng đúng mức config đặt) rồi chạy tiếp từ bước đã dừng. Chạy trong CI thì run thoát với code 2
+  cho tới khi bạn gõ `duo resume --decision resume`.
+- **Giới hạn cứng và giới hạn tương đối.** `max_run_agent_calls` chính xác: không lần gọi nào bắt đầu khi đã chạm nó.
+  Với `max_run_minutes`, không bước hay lần gọi nào bắt đầu khi đã hết giờ, nhưng lần gọi đang chạy vẫn chạy xong (tối
+  đa `agent_timeout_sec`). Token chỉ biết được khi một lần gọi kết thúc, nên lần gọi vượt `max_run_tokens` vẫn chạy
+  xong.
+- **Chi phí.** Chỉ Claude báo chi phí. Codex không báo, và chi phí của Codex không bao giờ bị coi là 0: run đếm các lần
+  gọi đó là chưa có giá, và hiện chi phí như một cận dưới (`$1.20+/$10.00 (3 calls unpriced)`). Hãy giới hạn Codex bằng
+  token hoặc số lần gọi. Mỗi lần gọi Claude được chính Claude chặn ở số tiền run còn lại (`--max-budget-usd`, hoặc
+  `claude.max_budget_usd` nếu thấp hơn), nên phần chi phí của Claude dừng sát giới hạn.
+- Run giữ ngân sách lúc nó bắt đầu, giống giới hạn vòng. Run bắt đầu khi chưa có ngân sách sẽ lấy ngân sách từ config
+  của lần chạy kế tiếp (`duo resume --reload-config`).
+
 ## Exit code
 
 | Code | Ý nghĩa |

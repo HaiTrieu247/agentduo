@@ -32,6 +32,16 @@ export interface StructuredCall extends WithAttachments {
   skipGitRepoCheck?: boolean;
   /** The role's CLI session; absent: a session of its own that is not kept. */
   session?: CallSession;
+  /** The run's budget, consulted before every attempt; absent: none. */
+  budget?: CallBudget;
+}
+
+/** What a pipeline run may still spend, asked before each attempt of a call with what the call used so far. */
+export interface CallBudget {
+  /** Why no further attempt may start (a limit of the run reached); null when one may. */
+  stop(call: { tokens: number; costUsd: number; calls: number }): string | null;
+  /** The most the next attempt may cost, for a CLI that caps a call itself (Claude's --max-budget-usd); null: no cap. */
+  costCap(callCostUsd: number): number | null;
 }
 
 /**
@@ -76,6 +86,12 @@ export interface AgentResult {
   sessionId: string | null;
   /** The answer came from the session the call continued, not from a fresh one. */
   resumed: boolean;
+  /** CLI processes the call started (every attempt that ran, also one that failed). */
+  calls: number;
+  /** Of those, the ones whose CLI reported no cost (every Codex call): `costUsd` does not include them. */
+  unpricedCalls: number;
+  /** The run's budget stopped the call before an attempt: why. */
+  budgetStop: string | null;
 }
 
 export interface RunnerOptions {
@@ -205,14 +221,20 @@ export class AgentRunner {
     let model: string | null = null;
     let lastError: string | null = null;
     let resuming: CallSession["resume"];
-    const finish = (ok: boolean, attempts: number, data: unknown, error: string | null, interrupted = false): AgentResult => ({
+    let calls = 0;
+    let priced = 0;
+    const finish = (ok: boolean, attempts: number, data: unknown, error: string | null, interrupted = false, budgetStop: string | null = null): AgentResult => ({
       ok, data, error, attempts, durationSec: (Date.now() - started) / 1000,
       costUsd: costSeen ? cost : null, tokens: tokensSeen ? tokens : null, meta, backend: backend.name, interrupted, model,
-      sessionId: meta.sessionId ?? null, resumed: ok && !!resuming,
+      sessionId: meta.sessionId ?? null, resumed: ok && !!resuming, calls, unpricedCalls: calls - priced, budgetStop,
     });
+    const budget = o.mode === "text" ? undefined : o.budget;
 
     this.warnFallback(backend, o.attachments ?? []);
     for (let attempt = 1; attempt <= attemptsAllowed; attempt++) {
+      // The run's budget comes before every attempt: a retry or a fresh session after a lost one is a call too.
+      const stop = budget?.stop({ tokens, costUsd: cost, calls }) ?? null;
+      if (stop) return finish(false, attempt - 1, null, stop, false, stop);
       resuming = attempt === 1 ? resume : undefined;
       // The fresh session after a resumed attempt never saw that attempt, so it gets no rejection note.
       const fellBack = attempt === 2 && !!resume;
@@ -243,6 +265,7 @@ export class AgentRunner {
           : backend.buildArgs({
             schemaName: o.schemaName, lastMessageFile, role: o.agentRole, askPermissions: host, images, skipGitRepoCheck: o.skipGitRepoCheck,
             ...(o.session ? { session: { keep: o.session.keep, ...(resuming ? { resume: resuming.id } : {}) } } : {}),
+            ...(budget?.costCap(cost) != null ? { costCap: budget.costCap(cost)! } : {}),
           });
       } catch (e) {
         if (e instanceof BinaryNotFound) return finish(false, attempt, null, e.message);
@@ -272,6 +295,7 @@ export class AgentRunner {
           cwd: this.repo, input, holdStdin: host, timeoutMs, idleTimeoutMs, signal: o.signal,
           onSpawn: (child) => {
             io = child;
+            calls += 1;
           },
           onStdoutLine: (line) => {
             eventsLog.write(`${line}\n`);
@@ -332,6 +356,7 @@ export class AgentRunner {
       if (typeof meta.costUsd === "number") {
         cost += meta.costUsd;
         costSeen = true;
+        priced += 1;
       }
       if (typeof meta.tokens === "number") {
         tokens += meta.tokens;
