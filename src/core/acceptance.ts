@@ -1,5 +1,6 @@
 import type { GateResult } from "./gates.js";
 import type { Critique, Finding, Plan, Review } from "./outputs.js";
+import { scopeItemText } from "./scope.js";
 import type { Accepted, PreexistingFailure, RunState } from "./state.js";
 
 /**
@@ -86,9 +87,12 @@ export function gateVerdicts(o: {
   });
 }
 
-/** The review's check: evidence for every blocking finding, and an attribution with evidence for every gate it is asked about. */
+/**
+ * The review's check: evidence for every blocking finding, and an attribution with evidence for every gate it is asked
+ * about. A finding outside the task's scope blocks nothing, so it is left to the scope's check (src/core/scope.ts).
+ */
 export function attributionErrors(review: Review, blockingSeverities: string[], gates: string[]): string[] {
-  const errors = review.findings.filter((f) => blockingSeverities.includes(f.severity) && !f.evidence.trim())
+  const errors = review.findings.filter((f) => f.origin !== "out_of_scope" && blockingSeverities.includes(f.severity) && !f.evidence.trim())
     .map((f) => `finding '${f.id}' is ${f.severity}, so its 'evidence' must say where it comes from`);
   for (const name of gates) {
     const a = review.gate_failures.find((x) => x.gate === name);
@@ -98,10 +102,13 @@ export function attributionErrors(review: Review, blockingSeverities: string[], 
   return errors;
 }
 
-/** Blocking findings: what the task must still fix, and what was there before outside its scope (less what you accepted). */
+/**
+ * Blocking findings: what the task must still fix, and what was there before outside its scope (less what you
+ * accepted). A finding outside the task's scope is in neither: it is never the task's to fix (src/core/scope.ts).
+ */
 export function splitFindings(blocking: Finding[], accepted: Set<string>): { fixable: Finding[]; preexisting: Finding[] } {
   return {
-    fixable: blocking.filter((f) => f.origin !== "pre_existing"),
+    fixable: blocking.filter((f) => f.origin !== "pre_existing" && f.origin !== "out_of_scope"),
     preexisting: blocking.filter((f) => f.origin === "pre_existing" && !accepted.has(f.id)),
   };
 }
@@ -130,22 +137,38 @@ export function preexistingReview(items: PreexistingFailure[], approved: boolean
 export const acceptedIds = (accepted: Accepted | undefined, kind: PreexistingFailure["kind"]): Set<string> =>
   new Set((accepted?.failures ?? []).filter((f) => f.kind === kind).map((f) => f.id));
 
-/** Your decision to go on: what waited for it is accepted, for the rest of the run. Returns what it accepted, for its record. */
+/**
+ * Your decision to go on: what waited for it is accepted, for the rest of the run (a critical finding outside the
+ * scope stays out of it; a suggestion a plan adopted widens it). Returns what it accepted, for its record.
+ */
 export function acceptPending(state: RunState): string[] {
   const conflicts = state.conflicts ?? [];
   const failures = state.preexisting ?? [];
-  if (!conflicts.length && !failures.length) return [];
+  const scope = state.scopePending ?? [];
+  if (!conflicts.length && !failures.length && !scope.length) return [];
   const before = state.accepted ?? { conflicts: [], failures: [] };
-  state.accepted = { conflicts: [...before.conflicts, ...conflicts], failures: [...before.failures, ...failures] };
+  state.accepted = {
+    conflicts: [...before.conflicts, ...conflicts], failures: [...before.failures, ...failures],
+    ...(before.scope?.length || scope.length ? { scope: [...before.scope ?? [], ...scope] } : {}),
+  };
   state.conflicts = null;
   state.preexisting = null;
-  return [...conflicts.map((c) => `accepted conflict: ${c}`), ...failures.map((f) => `accepted as pre-existing: ${itemText(f)}`)];
+  state.scopePending = null;
+  return [
+    ...conflicts.map((c) => `accepted conflict: ${c}`), ...failures.map((f) => `accepted as pre-existing: ${itemText(f)}`),
+    ...scope.map((i) => `${i.kind === "finding" ? "kept outside the task's scope" : "scope widened"}: ${scopeItemText(i)}`),
+  ];
 }
 
 /** What you accepted, as DONE and the report say it; empty when nothing. */
 export function acceptedText(accepted: Accepted | undefined): string {
   const failures = accepted?.failures ?? [];
-  if (!failures.length) return "";
-  const names = failures.map((f) => (f.kind === "gate" ? `gate '${f.id}'` : `finding ${f.id}`)).join(", ");
-  return `you accepted ${failures.length} pre-existing failure(s) outside the task's scope (${names})`;
+  const kept = (accepted?.scope ?? []).filter((s) => s.kind === "finding");
+  const widened = (accepted?.scope ?? []).filter((s) => s.kind === "suggestion");
+  return [
+    failures.length ? `you accepted ${failures.length} pre-existing failure(s) outside the task's scope ` +
+      `(${failures.map((f) => (f.kind === "gate" ? `gate '${f.id}'` : `finding ${f.id}`)).join(", ")})` : "",
+    kept.length ? `you kept ${kept.length} critical finding(s) outside the task's scope unfixed (${kept.map((f) => `finding ${f.id}`).join(", ")})` : "",
+    widened.length ? `you approved widening the task's scope for ${widened.length} suggestion(s) (${widened.map((s) => s.id).join(", ")})` : "",
+  ].filter(Boolean).join("; ");
 }

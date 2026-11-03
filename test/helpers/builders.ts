@@ -1,19 +1,19 @@
-import type { Approval, Critique, Finding, Implementation, Issue, Origin, Plan, Review, Severity } from "../../src/core/outputs.js";
+import type { Approval, Critique, Finding, Implementation, Issue, IssueScope, Origin, Plan, Review, Severity } from "../../src/core/outputs.js";
 
 export function plan(title = "Demo plan", extra: Partial<Plan> = {}): Plan {
   return {
     title, summary: "Do the thing.", goals: ["make app.txt fixed"], scope_in: ["app.txt"],
     scope_out: ["everything else"], architecture: "single file",
     steps: [{ id: "S1", description: "write app.txt", files: ["app.txt"] }],
-    acceptance_criteria: ["check.mjs exits 0"], risks: [{ risk: "none", mitigation: "n/a" }],
+    acceptance_criteria: [{ id: "AC1", criterion: "check.mjs exits 0" }], risks: [{ risk: "none", mitigation: "n/a" }],
     test_strategy: "run check.mjs", open_questions: [], feedback_resolution: [],
     // The test repository's check gate fails before any change (no app.txt yet): fixing it is the task.
     baseline_failures: [{ gate: "check", in_scope: true, rationale: "the task makes app.txt pass the check" }], repo_notes: [], ...extra,
   };
 }
 
-export const issue = (id: string, severity: Severity = "high", description = "problem"): Issue =>
-  ({ id, severity, description, suggestion: "fix it" });
+export const issue = (id: string, severity: Severity = "high", description = "problem", scope: IssueScope = "task"): Issue =>
+  ({ id, severity, description, suggestion: "fix it", scope });
 
 export const critique = (approved: boolean, issues: Issue[] = []): Critique => ({
   status: approved ? "approved" : "changes_requested", approved, summary: "critique", issues,
@@ -31,8 +31,10 @@ export const impl = (status: Implementation["status"] = "completed", addressed: 
   blocking_reason: blockingReason, repo_notes: [],
 });
 
-export const finding = (id: string, severity: Severity = "high", file = "app.txt", origin: Origin = "regression"): Finding =>
-  ({ id, severity, file, line: 1, issue: "bad", recommendation: "fix", origin, evidence: origin === "pre_existing" ? "the same at the base revision" : "the change causes it" });
+export const finding = (id: string, severity: Severity = "high", file = "app.txt", origin: Origin = "regression", criteria: string[] = []): Finding => ({
+  id, severity, file, line: 1, issue: "bad", recommendation: "fix", origin, criteria,
+  evidence: origin === "pre_existing" ? "the same at the base revision" : origin === "out_of_scope" ? "" : "the change causes it",
+});
 
 export const review = (approved: boolean, findings: Finding[] = [], resolved: string[] = [],
   commit = "$SNAPSHOT"): Review => ({

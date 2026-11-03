@@ -192,7 +192,7 @@ describe("run artifacts and changes (worker)", () => {
   it("says a run has nothing to compare before the implementer ran", async () => {
     const repo = makeRepo(t.path);
     writeWorkspaceConfig(repo, fake, { gates: [], limits: { max_planning_rounds: 1 } });
-    fake.setScenario({ planner: [{ output: plan() }], plan_reviewer: [{ output: critique(false, [{ id: "C1", severity: "high", description: "no", suggestion: "x" }]) }] });
+    fake.setScenario({ planner: [{ output: plan() }], plan_reviewer: [{ output: critique(false, [{ id: "C1", severity: "high", description: "no", suggestion: "x", scope: "task" }]) }] });
     const h = await openWorker(repo);
     await h.client.request({ type: "submit", conversation: C, text: "Plan only", route: "pipeline" });
     const asked = await h.waitFor((m) => m.kind === "decision");

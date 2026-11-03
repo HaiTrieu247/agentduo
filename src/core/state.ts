@@ -140,12 +140,27 @@ export interface PreexistingFailure {
 }
 
 /**
+ * A change of the task's scope that only you can decide on: a critical review finding outside the scope (`finding`,
+ * `evidence` the reviewer's justification), or a suggestion outside it that a revised plan adopted (`suggestion`, a
+ * critique or sign-off issue; `evidence` the plan's answer to it). See src/core/scope.ts.
+ */
+export interface ScopeItem {
+  kind: "finding" | "suggestion";
+  id: string;
+  text: string;
+  evidence: string;
+}
+
+/**
  * What you accepted by a decision that the run would otherwise stop on: contradictions in the requirements (the plan
- * was implemented as it was), and pre-existing failures outside the task's scope. DONE and the report say so.
+ * was implemented as it was), pre-existing failures outside the task's scope, and your decisions about the scope (the
+ * critical findings outside it you kept out, the suggestions you let widen it). DONE and the report say so.
  */
 export interface Accepted {
   conflicts: string[];
   failures: PreexistingFailure[];
+  /** Absent in older runs: none. */
+  scope?: ScopeItem[];
 }
 
 /** One question of the chat and the answer it got. */
@@ -204,6 +219,8 @@ export interface RunState {
   conflicts?: string[] | null;
   /** Pre-existing failures waiting for your decision (`preexisting_failures`); absent or null: none. */
   preexisting?: PreexistingFailure[] | null;
+  /** Scope decisions waiting for you (`scope_expansion`, `out_of_scope_critical`); absent or null: none. */
+  scopePending?: ScopeItem[] | null;
   /** What you accepted; re-planning starts over. Absent: nothing. */
   accepted?: Accepted;
   /** The tree the last quality gates ran on; absent in older runs, null while none ran. */

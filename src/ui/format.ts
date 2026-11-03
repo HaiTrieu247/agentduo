@@ -30,6 +30,8 @@ const RESUME_HINTS: Record<string, string> = {
   budget_exhausted: "allow one more allowance of the budget reached and go on",
   requirements_conflict: "implement the plan as it is, accepting the contradiction",
   preexisting_failures: "accept them as pre-existing for this run, and finish",
+  scope_expansion: "go on with the wider plan, approving what it adds to the task",
+  out_of_scope_critical: "leave them unfixed in this run, and go on",
   // Reasons only agentduo 0.1 runs can be waiting on; kept so those runs can still be resumed from the prompt.
   dirty_worktree: "re-run this implementation round",
   guard_violation: "accept the changes and run the gates",
@@ -39,7 +41,10 @@ const RESUME_HINTS: Record<string, string> = {
 export const resumeHint = (reason: string): string => RESUME_HINTS[reason] ?? "re-run the step that stopped";
 
 /** Reasons whose resume is a choice of its own, which the label names. */
-const RESUME_LABELS: Record<string, string> = { requirements_conflict: "Implement as planned", preexisting_failures: "Accept as pre-existing" };
+const RESUME_LABELS: Record<string, string> = {
+  requirements_conflict: "Implement as planned", preexisting_failures: "Accept as pre-existing", scope_expansion: "Approve wider scope",
+  out_of_scope_critical: "Keep the scope",
+};
 
 /** The resume choice's label: a blocker's says that it takes something from you; a conflict's names its choice. */
 export const resumeLabel = (reason: string): string => (needsInput(reason) ? "Unblock and retry" : RESUME_LABELS[reason] ?? "Resume");

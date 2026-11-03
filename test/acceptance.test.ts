@@ -78,12 +78,16 @@ describe("acceptance: what fails after the change", () => {
       "'gate_failures' must attribute the failing required gate 'b'",
     ]);
     expect(attributionErrors(review(false, [finding("F1")]), ["critical", "high"], [])).toEqual([]);
+    // A finding outside the task's scope comes from nowhere the task touched: its evidence is a justification, asked only of a critical one.
+    expect(attributionErrors(review(false, [finding("F5", "high", "ui.css", "out_of_scope")]), ["critical", "high"], [])).toEqual([]);
   });
 
   it("splits blocking findings into the task's and the pre-existing ones, leaving out only what you accepted", () => {
-    const blocking = [finding("F1"), finding("F2", "high", "a.css", "pre_existing"), finding("F3", "high", "b.css", "pre_existing"), finding("F4", "high", "c", "unclear")];
+    const blocking = [finding("F1"), finding("F2", "high", "a.css", "pre_existing"), finding("F3", "high", "b.css", "pre_existing"), finding("F4", "high", "c", "unclear"),
+      finding("F5", "critical", "ui.css", "out_of_scope"), finding("F6", "high", "d", "in_scope", ["AC1"])];
     const split = splitFindings(blocking, new Set(["F3", "F1"]));
-    expect([split.fixable.map((f) => f.id), split.preexisting.map((f) => f.id)]).toEqual([["F1", "F4"], ["F2"]]);
+    // Outside the task's scope is never the task's to fix, whatever its severity.
+    expect([split.fixable.map((f) => f.id), split.preexisting.map((f) => f.id)]).toEqual([["F1", "F4", "F6"], ["F2"]]);
   });
 
   it("records what a decision accepts, and says it", () => {
@@ -107,5 +111,20 @@ describe("acceptance: what fails after the change", () => {
     expect([[...acceptedIds(st.accepted, "gate")], [...acceptedIds(st.accepted, "finding")]]).toEqual([["layout"], ["F2"]]);
     expect(acceptedText(st.accepted)).toBe("you accepted 2 pre-existing failure(s) outside the task's scope (gate 'layout', finding F2)");
     expect(acceptedText(undefined)).toBe("");
+  });
+
+  it("records the scope you kept or widened, and says it", () => {
+    const st = newState("t", "task", { max_planning_rounds: 1, max_review_rounds: 1 });
+    st.scopePending = [
+      { kind: "finding", id: "F3", text: "[critical] ui.css: bad", evidence: "leaks tokens" },
+      { kind: "suggestion", id: "C2", text: "[medium] also verify landscape", evidence: "accepted: cheap" },
+    ];
+    expect(acceptPending(st)).toEqual([
+      "kept outside the task's scope: finding F3 [critical] ui.css: bad (justification: leaks tokens)",
+      "scope widened: suggestion C2 [medium] also verify landscape (the plan's answer: accepted: cheap)",
+    ]);
+    expect([st.scopePending, st.accepted!.scope!.map((s) => s.id), st.accepted!.failures]).toEqual([null, ["F3", "C2"], []]);
+    expect(acceptedText(st.accepted)).toBe("you kept 1 critical finding(s) outside the task's scope unfixed (finding F3); you approved widening the " +
+      "task's scope for 1 suggestion(s) (C2)");
   });
 });

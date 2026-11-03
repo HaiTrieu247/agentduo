@@ -31,7 +31,8 @@
           "id",
           "severity",
           "description",
-          "suggestion"
+          "suggestion",
+          "scope"
         ],
         "properties": {
           "id": {
@@ -51,6 +52,13 @@
           },
           "suggestion": {
             "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "task",
+              "out_of_scope"
+            ]
           }
         }
       }

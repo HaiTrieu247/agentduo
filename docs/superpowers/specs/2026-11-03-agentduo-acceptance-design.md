@@ -1,7 +1,8 @@
 # agentduo: contradictory requirements and pre-existing failures
 
 Status: implemented. Amends `2026-10-27-agentduo-channel-design.md` (§5 escalation reasons, DONE). Builds on
-`2026-11-03-agentduo-review-state-design.md`.
+`2026-11-03-agentduo-review-state-design.md`. Amended by `2026-11-03-agentduo-scope-design.md`, which widens a
+finding's `in_scope` and adds `out_of_scope` for what the task does not ask.
 
 ## Problem
 

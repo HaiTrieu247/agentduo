@@ -19,6 +19,15 @@ describe("render", () => {
     expect(c).toContain("### Conflicts only the user can settle\n- `K1` AC2 vs scope (between: AC2; scope_out)");
   });
 
+  it("renders the criteria by id, an older plan's by place, and marks issues outside the task's scope", () => {
+    const md = planMarkdown(plan("Demo", { acceptance_criteria: [{ id: "AC1", criterion: "works" }, { id: "AC3", criterion: "is tested" }] }), 1);
+    expect(md).toContain("## Acceptance criteria\n- **AC1** works\n- **AC3** is tested");
+    expect(planMarkdown(plan("Old", { acceptance_criteria: ["works"] as never }), 1)).toContain("## Acceptance criteria\n- **AC1** works");
+    const c = critiqueMarkdown(critique(true, [issue("C1", "medium"), issue("C2", "high", "also verify landscape", "out_of_scope")]), 1, 1, "Claude");
+    expect(c).toContain("- `C1` [medium] problem");
+    expect(c).toContain("- `C2` [high] (outside the task's scope) also verify landscape");
+  });
+
   it("renders finding locations", () => {
     expect(findingsMarkdown([finding("F1"), { ...finding("F2"), file: "", line: null }])).toContain("`(general)`");
     expect(findingsMarkdown([])).toBe("_(no findings)_");

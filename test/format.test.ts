@@ -31,6 +31,9 @@ describe("format", () => {
     expect(resumeHint("agent_error")).toBe("re-run the step that stopped");
     // A contradiction or pre-existing failures: resume is a choice of its own, which the label names.
     expect([resumeLabel("requirements_conflict"), resumeLabel("preexisting_failures")]).toEqual(["Implement as planned", "Accept as pre-existing"]);
+    expect([resumeLabel("scope_expansion"), resumeLabel("out_of_scope_critical")]).toEqual(["Approve wider scope", "Keep the scope"]);
+    expect(resumeHint("out_of_scope_critical")).toBe("leave them unfixed in this run, and go on");
+    expect(resumeHint("scope_expansion")).toBe("go on with the wider plan, approving what it adds to the task");
     expect(resumeHint("preexisting_failures")).toBe("accept them as pre-existing for this run, and finish");
     expect(decisionCommand("duo", "r1", "implementer_blocked"))
       .toBe('duo resume r1 --decision resume --note "<what the implementer needs>" (or after changing the files), or --decision revise|abort');

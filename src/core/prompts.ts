@@ -7,7 +7,7 @@ import type { Change } from "./git.js";
 import type { FindingItem, ReviewFindings } from "./findings.js";
 import type { Approval, Critique, Implementation, Plan } from "./outputs.js";
 import { issuesMarkdown } from "./render.js";
-import type { ConversationContext, EarlierTask, Exchange, HumanNote, PreexistingFailure, RepoNote } from "./state.js";
+import type { ConversationContext, EarlierTask, Exchange, HumanNote, PreexistingFailure, RepoNote, ScopeItem } from "./state.js";
 
 /** Where an attachment's copy is, as a prompt names it: its absolute path, or null when its reference is unusable. */
 export type Locate = (a: Attachment) => string | null;
@@ -47,6 +47,8 @@ export interface ReviewContract {
   attribute: string[];
   /** Pre-existing failures the user accepted for this run. */
   accepted: PreexistingFailure[];
+  /** Critical findings outside the task's scope that the user decided to keep out of it. */
+  kept: ScopeItem[];
 }
 
 export interface ContinuedTurn {
@@ -384,7 +386,9 @@ export function planner(ctx: PromptContext, round: number, version: number, prev
       "- Goals and explicit scope (in / out). Keep the scope to what the task needs.\n" +
       "- Architecture / design decisions that fit the existing code and conventions.\n" +
       "- Ordered, concrete steps; list the files each step creates or changes.\n" +
-      "- Acceptance criteria that are objective and testable.\n" +
+      "- Acceptance criteria that are objective and testable, each with an `id` (`AC1`, `AC2`, ...). With the scope, they are the task's " +
+      "acceptance contract: the reviewers hold the change to them and cannot add to them, so derive them from the task and do not add what it " +
+      "does not need. When you revise the plan, keep each criterion's id, and give a new one the next free number.\n" +
       "- Risks with mitigations, and a test strategy (which tests to add or update).\n" +
       "- Open questions only for things that truly cannot be decided from the repository; state the assumption you made for each.\n" +
       "- Acceptance criteria and scope that agree with each other and with the baseline: a criterion must be reachable within the scope. " +
@@ -406,7 +410,10 @@ export function planner(ctx: PromptContext, round: number, version: number, prev
     out.push(feedbackSection(feedback));
     out.push("\nRevise the plan to address the feedback. In `feedback_resolution`, add one entry per issue id " +
       "above with decision `accepted`, `partially_accepted` or `disputed` and a rationale. Dispute only " +
-      "with a concrete technical reason; disputed critical/high issues will go back to the critic.\n");
+      "with a concrete technical reason; disputed critical/high issues will go back to the critic.\n" +
+      "Issues marked *outside the task's scope* are suggestions beyond what the task asks: do not adopt them (no scope, steps or criteria for " +
+      "them) unless a note from the user asks for it, and answer them `disputed`, giving that reason. Adopting one (`accepted` or " +
+      "`partially_accepted`) widens the task, and agentduo asks the user to approve that before the plan goes on.\n");
   }
   out.push(REPO_NOTES_ASK, OUTPUT_RULES);
   return out.join("\n");
@@ -423,7 +430,19 @@ function baselineDuty(ctx: PromptContext): string {
     "when the task itself rules the fix out, and say so.\n";
 }
 
-export function planReviewer(ctx: PromptContext, round: number, version: number, planMd: string, previousCritique: Critique | null): string {
+/** What a plan critic or sign-off is told about each issue's `scope`: only the task's own can hold the plan back. */
+const ISSUE_SCOPE = "Give every issue its `scope`:\n" +
+  "- `task`: about doing the task as it asks: the plan misses or gets wrong something the task needs, would not work in this codebase, or " +
+  "goes beyond the task (unnecessary scope).\n" +
+  "- `out_of_scope`: asks for more than the task needs: an extra feature, test, check, verification or fix that the task does not ask for. " +
+  "It is a suggestion: it never holds the plan back, and the plan does not take it on without the user's approval.\n" +
+  "Never mark an extra `task` to make it block: a plan that does what the task asks is approved, whatever else could be added to it.\n";
+
+/**
+ * `approvedScope`: the suggestions outside the task that the user let a plan adopt (the plan may now include them).
+ */
+export function planReviewer(ctx: PromptContext, round: number, version: number, planMd: string, previousCritique: Critique | null,
+  approvedScope: ScopeItem[] = []): string {
   const out = [
     ...opening("plan_reviewer", "Plan Critic", ctx, `- Planning round: ${round} · Plan under review: v${version}\n`),
     "## Plan under review\n" + planMd + "\n",
@@ -436,7 +455,7 @@ export function planReviewer(ctx: PromptContext, round: number, version: number,
       (ctx.gates.length ? "\nCommands agentduo runs after implementation:\n" + gateList(ctx.gates) + "\n" : "") + "\n" +
       SEVERITY_GUIDE + "\n\n" +
       "Decision rules:\n" +
-      "- Set `approved: true` and `status: \"approved\"` only if no critical or high issue remains. " +
+      "- Set `approved: true` and `status: \"approved\"` only if no critical or high issue of the task's scope remains. " +
       "Medium/low issues may accompany an approval as suggestions.\n" +
       "- Give each issue a stable id (`C1`, `C2`, ...). Reuse the same id when you re-raise an issue from a previous round.\n" +
       "- `accepted`: planner responses (by issue id and short reason) you now agree with. `disputed`: planner responses you " +
@@ -452,7 +471,12 @@ export function planReviewer(ctx: PromptContext, round: number, version: number,
       "limits), list it in `conflicts` (ids `K1`, `K2`, ...), naming in `between` the requirements, criteria, scope items or baseline " +
       "failures that clash. Only the user can settle these: agentduo stops for their decision before any implementation, so never list a " +
       "contradiction the plan can resolve on its own, and never suggest settling one by bending the task. Otherwise `conflicts` is empty.\n",
+    "## The task's scope\n" + ISSUE_SCOPE,
   ];
+  if (approvedScope.length) {
+    out.push("## Scope the user approved\n" + approvedScope.map((i) => `- ${i.kind} \`${i.id}\`: ${i.text}`).join("\n") +
+      "\nThe user approved widening the task's scope for these: the plan may include them, and they are not unnecessary scope.\n");
+  }
   if (previousCritique && ctx.continued) {
     out.push("\n## Your critique from the previous round\nYour last answer in this session. Check how the new plan version addressed each " +
       "of its issues (see its 'Response to feedback' section).\n");
@@ -473,7 +497,8 @@ export function planFinalizer(ctx: PromptContext, round: number, version: number
       "Confirm whether this exact plan version is final and ready for implementation. Approve " +
       "(`approved: true`, `status: \"approved\"`) unless you find a critical or high problem; then return " +
       "`changes_requested` with issues (ids `A1`, `A2`, ...) and the plan goes through another revision " +
-      "round. Do not request changes for style or wording alone.\n\n" + SEVERITY_GUIDE + "\n",
+      "round. Do not request changes for style or wording alone.\n\n" + ISSUE_SCOPE +
+      "\n" + SEVERITY_GUIDE + "\n",
     OUTPUT_RULES,
   ].join("\n");
 }
@@ -499,11 +524,17 @@ function findingLine(item: FindingItem, extra: string[]): string {
     extra.filter(Boolean).map((x) => `  \n  ${x}`).join("");
 }
 
-/** A finding the reviewer found there before the task, outside the plan's scope: not the implementer's to fix. */
+/** A finding that is not the implementer's to fix: there before the task outside the plan's scope, or beyond the task altogether. */
 const outOfScope = (item: FindingItem) => (item.finding.origin === "pre_existing"
   ? `The reviewer found it there before the task, outside the plan's scope${item.finding.evidence ? ` (${item.finding.evidence})` : ""}: do not fix it ` +
     "(that would go out of scope); answer it `not_applicable`. The user decides about it."
-  : "");
+  : item.finding.origin === "out_of_scope"
+    ? "The reviewer marks it outside the task's scope (a suggestion, not part of the task): do not act on it, since that would widen the task; " +
+      "answer it `not_applicable`. The user decides about it."
+    : "");
+
+/** The acceptance criteria a finding holds the change to. */
+const criteriaLine = (item: FindingItem) => (item.finding.criteria?.length ? `Fails acceptance criteria: ${item.finding.criteria.join(", ")}` : "");
 
 const answerText = (item: FindingItem) => {
   const a = item.answer;
@@ -527,7 +558,9 @@ function findingsToFix(f: ReviewFindings): string {
   const answered = f.items.filter((i) => i.answer);
   const out = ["### Code review findings (review round " + f.round + ", raised on revision " + short(f.revision) + ")",
     (f.summary ? f.summary + "\n\n" : "") + sinceRevision(f, "the current code")];
-  if (open.length) out.push("#### Open: not answered since that review\n" + open.map((i) => findingLine(i, [fileChangeText(i.fileChange) ?? "", outOfScope(i)])).join("\n"));
+  if (open.length) {
+    out.push("#### Open: not answered since that review\n" + open.map((i) => findingLine(i, [criteriaLine(i), fileChangeText(i.fileChange) ?? "", outOfScope(i)])).join("\n"));
+  }
   if (answered.length) {
     out.push("#### Answered since that review, not verified yet\nThe next review verifies these; leave them as they are unless the current code " +
       "shows that your answer no longer holds.\n" + answered.map((i) => findingLine(i, [`Your answer: ${answerText(i)}`, fileChangeText(i.fileChange) ?? ""])).join("\n"));
@@ -591,7 +624,7 @@ export function implementer(ctx: PromptContext, round: number, planMd: string, f
  */
 export function codeReviewer(ctx: PromptContext, round: number, planMd: string, base: string, snapshot: string, gateResults: GateResult[],
   diffStat: string, diff: string, truncated: boolean, previousFindings: ReviewFindings | null, implReport: Implementation, fullDiff?: string,
-  contract: ReviewContract = { attribute: [], accepted: [] }): string {
+  contract: ReviewContract = { attribute: [], accepted: [], kept: [] }): string {
   const tests = implReport.tests_run.map((t) => "- `" + t.command + "` passed=" + t.passed + " " + t.notes).join("\n") || "_(none)_";
   const fence = fenceFor(diff);
   const stat = diffStat.trimEnd() || "(no changes)";
@@ -640,18 +673,29 @@ export function codeReviewer(ctx: PromptContext, round: number, planMd: string, 
     "- Approve (`approved: true`, `status: \"approved\"`) only if there is no critical or high finding that the task must fix and the " +
     "acceptance criteria are met" + (ctx.gates.length ? ", and the required quality gates pass (or fail only as they did before the task, " +
     "outside its scope)" : "") + ".\n" +
+    "- Out-of-scope findings never hold back your approval: if they are all you would report, approve. A review that does not approve must " +
+    "say in its findings what blocks it.\n" +
     "- `reviewed_commit` must be exactly `" + snapshot + "`.\n" +
     "- New finding ids continue the sequence `F1`, `F2`, ...; `file` is workspace-relative (empty string if " +
     "general) and `line` may be null.\n",
-    "## Where each problem comes from\n" +
-      "For every finding give its `origin` and the `evidence` for it (required for a critical or high one):\n" +
-      "- `regression`: the change under review causes it. Evidence: what in the diff does.\n" +
-      "- `in_scope`: it was there before the task, and the plan's scope includes fixing it. The task is not done until it is fixed.\n" +
+    "## Where each problem stands against the task\n" +
+      "The final plan's acceptance criteria (`AC1`, `AC2`, ...) and its scope are the task's acceptance contract: hold the change to them, never " +
+      "to more. For every finding give its `origin`, the `criteria` it is about (their ids; an empty list when none) and the `evidence` for its " +
+      "origin (required for a critical or high one):\n" +
+      "- `regression`: the change under review causes it: it breaks behaviour that worked, or its own code is wrong or unsafe (a bug, crash, data " +
+      "loss, security hole). Evidence: what in the diff does.\n" +
+      "- `in_scope`: the task must still do it: the change does not meet the acceptance criteria named in `criteria` yet, or it was there before " +
+      "the task and the plan's scope includes fixing it. A critical or high one must name the criteria it fails. The task is not done until it is fixed.\n" +
       "- `pre_existing`: it was there before the task (the base revision has it; the baseline gates show it), and the plan's scope leaves " +
       "it out. Evidence: where it is at the base revision, and that the diff does not cause or worsen it. Such a finding does not weigh " +
       "against your approval of the change: agentduo puts it to the user, and the implementer is not asked to go out of scope for it.\n" +
+      "- `out_of_scope`: an improvement or concern beyond what the task and its criteria ask, which the change does not cause: an extra test, " +
+      "check or verification, hardening, a refactor, a feature or a fix nobody asked for. Report it so the user knows, but it never holds back " +
+      "your approval and the implementer is not asked to do it. Only a critical one blocks completion, and only with a clear justification in " +
+      "`evidence` (why it cannot wait: a correctness or security problem); agentduo then asks the user whether to widen the task.\n" +
       "- `unclear`: you cannot tell. It counts as the task's.\n" +
-      "Classify honestly: never call a problem pre-existing without that evidence, and never leave a real problem out to approve.\n",
+      "Classify honestly: never call a problem pre-existing without that evidence, never stretch a criterion to cover an extra, and never leave " +
+      "a real problem out to approve.\n",
     contract.attribute.length
       ? "## Required gates that failed before the task too\n" + contract.attribute.map((g) => "- `" + g + "`").join("\n") + "\n" +
         "Each failed before any change (see the baseline), and the plan leaves fixing it out of scope. In `gate_failures`, give one entry for " +
@@ -661,6 +705,11 @@ export function codeReviewer(ctx: PromptContext, round: number, planMd: string, 
     contract.accepted.length
       ? "## Pre-existing failures the user accepted for this run\n" + contract.accepted.map((f) => `- ${f.kind === "gate" ? `gate \`${f.id}\`` : `finding \`${f.id}\``}: ${f.text}`).join("\n") +
         "\nThey no longer weigh against your approval. Re-raise one only if it got worse, under the same id.\n"
+      : "",
+    contract.kept.length
+      ? "## Findings the user kept outside the task's scope\n" + contract.kept.map((f) => `- finding \`${f.id}\`: ${f.text}`).join("\n") +
+        "\nThe user decided not to widen the task for them: they no longer weigh against your approval, and the implementer was told not to " +
+        "act on them. Re-raise one only if the change made it worse, under the same id.\n"
       : "",
     REPO_NOTES_ASK,
     OUTPUT_RULES);

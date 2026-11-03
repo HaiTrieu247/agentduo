@@ -49,6 +49,24 @@ another fix round could not settle it, so the run asks you (`preexisting_failure
 requirements are never changed for you, and no failure is waived without your decision. The design is in
 [docs/superpowers/specs/2026-11-03-agentduo-acceptance-design.md](docs/superpowers/specs/2026-11-03-agentduo-acceptance-design.md).
 
+**The task's scope does not grow on its own.** The plan's acceptance criteria have ids (`AC1`, `AC2`, …). With the
+plan's scope they are the task's contract, and once implementation starts only your `revise` changes them. The
+reviewers classify what they report against that contract:
+
+- *Findings the task must fix*: a regression the change causes, or an `in_scope` finding that names the criteria it
+  fails (agentduo checks that those criteria exist).
+- *Pre-existing failures*: problems that were there before the task.
+- *Out of scope*: improvements or concerns beyond the task. These are suggestions. They never block, and the
+  implementer is not asked to act on them. A review or critique that withholds approval on them alone is asked again.
+
+Two things widen the scope, and each stops the run for your decision:
+
+- A critical problem outside the scope, which the reviewer must justify (`out_of_scope_critical`).
+- A revised plan that adopts a suggestion the critic marked out of scope (`scope_expansion`).
+
+The design is in
+[docs/superpowers/specs/2026-11-03-agentduo-scope-design.md](docs/superpowers/specs/2026-11-03-agentduo-scope-design.md).
+
 ### What each agent is given
 
 Each role (planner, plan critic, implementer, code reviewer) keeps one CLI session for the whole run.
@@ -347,6 +365,8 @@ In a terminal, agentduo shows the reason and a menu: Resume, Revise (with a note
 | `budget_exhausted` | Raises each limit the run reached by one more allowance, then runs the step it stopped before |
 | `requirements_conflict` (shown as *Implement as planned*) | Implements the plan as it is, accepting the contradiction. `revise` with a note that settles it re-plans instead |
 | `preexisting_failures` (shown as *Accept as pre-existing*) | Accepts them for this run. The run ends `DONE`, naming them, or the reviewer reviews once more first if it had not approved |
+| `out_of_scope_critical` (shown as *Keep the scope*) | Leaves the critical problems outside the task's scope unfixed in this run, and goes on: the fix round for the task's own findings, `DONE` (naming them), or another review. `revise` with a note brings them into the scope instead |
+| `scope_expansion` (shown as *Approve wider scope*) | Approves the suggestions outside the task that the revised plan adopted, and the critic reviews that plan. `revise` with a note re-plans instead, for example to keep to the task |
 
 `revise` goes back to planning with your note (after `budget_exhausted` it raises the limits reached too). `abort` ends the run.
 

@@ -19,6 +19,10 @@ import {
   preexistingFailures, preexistingReview, requirementConflicts, splitFindings,
 } from "./acceptance.js";
 import { recordResponses, reviewFindings, setFindings, unanswered, type ReviewFindings } from "./findings.js";
+import {
+  addedCriteria, adoptedSuggestions, criteriaErrors, criterionIds, expansionReview, issueRefusalErrors, keptIds, outOfScopeBlockers, reviewScopeErrors,
+  scopeReview, taskIssues,
+} from "./scope.js";
 import { blockedReview, changedParts, findingsDigest, heldReview, implementerSettings, nextBlocker } from "./progress.js";
 import { internalNotice, openRunGit, prepareRunGit } from "./run-git.js";
 import { leavesBase } from "../paths.js";
@@ -140,9 +144,10 @@ function consistentStatus(d: { approved: boolean; status: string }): string[] {
 
 const bySeverity = <T extends { severity: string }>(xs: T[]) =>
   [...xs].sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9));
-const issueItems = (issues: Issue[]) => bySeverity(issues).map((i) => `[${i.severity}] ${i.id} ${i.description}`);
-const findingItems = (findings: Finding[]) =>
-  bySeverity(findings).map((f) => `[${f.severity}] ${f.id} ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} ` : ""}${f.issue}`);
+const issueItems = (issues: Issue[]) =>
+  bySeverity(issues).map((i) => `[${i.severity}] ${i.id} ${i.description}${i.scope === "out_of_scope" ? " (outside the task's scope)" : ""}`);
+const findingItems = (findings: Finding[]) => bySeverity(findings).map((f) =>
+  `[${f.severity}] ${f.id} ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} ` : ""}${f.issue}${f.origin === "out_of_scope" ? " (outside the task's scope)" : ""}`);
 const listChanges = (changes: Change[], max = 10) =>
   changes.slice(0, max).map(([s, p]) => `${s} ${p}`).join(", ") + (changes.length > max ? `, … (${changes.length - max} more)` : "");
 
@@ -637,6 +642,7 @@ export class Workflow {
     await this.runBaseline(r);
     const check = (p: Plan) => [
       ...(["goals", "scope_in", "steps", "acceptance_criteria"] as const).filter((k) => p[k].length === 0).map((k) => `'${k}' must not be empty`),
+      ...criteriaErrors(p),
       ...missingBaselineEntries(p, st.baseline?.results),
     ];
     const res = await this.callReviewer<Plan>({
@@ -660,6 +666,14 @@ export class Workflow {
     this.record("PLAN", r, this.agentName("planner"), v === 1 ? "plan created" : "plan revised",
       `v${v} '${plan.title}' (${plan.steps.length} steps, ${plan.acceptance_criteria.length} acceptance criteria, ${plan.risks.length} risks)`,
       "info", `plan.v${v}.md`, res);
+    // The reviewers' suggestions beyond the task widen it only with your approval: asked before the critic spends a turn on them.
+    const adopted = adoptedSuggestions(plan, feedback, st.accepted);
+    if (adopted.length) {
+      st.scopePending = adopted;
+      const { message, details } = expansionReview(adopted, addedCriteria(previous, plan), v);
+      this.escalate("scope_expansion", message, "PLAN_REVIEW", details);
+      return;
+    }
     st.phase = "PLAN_REVIEW";
   }
 
@@ -671,15 +685,17 @@ export class Workflow {
     const planMd = store.readText(`plan.v${v}.md`);
     const previous = this.lastCritique(r);
     const res = await this.callReviewer<Critique>({
-      role: "plan_reviewer", agentRole: "plan_reviewer", label: "plan_review", schemaName: "plan_critique", round: r, check: consistentStatus,
-      build: (ctx) => prompts.planReviewer(ctx, r, v, planMd, previous),
+      role: "plan_reviewer", agentRole: "plan_reviewer", label: "plan_review", schemaName: "plan_critique", round: r,
+      check: (c) => [...consistentStatus(c), ...issueRefusalErrors(c)],
+      build: (ctx) => prompts.planReviewer(ctx, r, v, planMd, previous, (st.accepted?.scope ?? []).filter((i) => i.kind === "suggestion")),
       plan: { about: null, after: () => st.planHash },
     });
     if (!res) return;
     const critique = res.data as Critique;
     store.writeJson(`critique.r${r}.json`, await this.envelope("plan_reviewer", r, res));
     store.appendText("plan-feedback.md", render.critiqueMarkdown(critique, r, v, this.agentName("plan_reviewer")));
-    const blocking = this.blocking(critique.issues);
+    // Suggestions outside the task's scope never hold the plan back.
+    const blocking = this.blocking(taskIssues(critique.issues));
     const approved = critique.approved && blocking.length === 0;
     if (critique.approved && blocking.length) this.warn("the critic approved but raised blocking issues; treating as changes requested");
     this.message({
@@ -718,7 +734,8 @@ export class Workflow {
     const critique = store.readJson<{ output: Critique }>(`critique.r${r}.json`).output;
     const planMd = store.readText(`plan.v${v}.md`);
     const res = await this.callReviewer<Approval>({
-      role: "plan_finalizer", agentRole: "planner", label: "plan_finalize", schemaName: "plan_approval", round: r, check: consistentStatus,
+      role: "plan_finalizer", agentRole: "planner", label: "plan_finalize", schemaName: "plan_approval", round: r,
+      check: (a) => [...consistentStatus(a), ...issueRefusalErrors(a)],
       build: (ctx) => prompts.planFinalizer(ctx, r, v, planMd, critique),
       plan: { about: st.planHash, after: () => st.planHash, file: store.path(`plan.v${v}.md`) },
     });
@@ -726,7 +743,7 @@ export class Workflow {
     const approval = res.data as Approval;
     store.writeJson(`approval.r${r}.json`, await this.envelope("plan_finalizer", r, res));
     store.appendText("plan-feedback.md", render.approvalMarkdown(approval, r, v, this.agentName("planner")));
-    const blocking = this.blocking(approval.issues);
+    const blocking = this.blocking(taskIssues(approval.issues));
     const approved = approval.approved && blocking.length === 0;
     this.message({
       from: this.party("planner"), to: this.party("implementer"), kind: "approval",
@@ -1022,7 +1039,15 @@ export class Workflow {
       ? gateVerdicts({ results: gates, baseline: st.baseline?.results, outOfScope, attributions: null, accepted: acceptedGates })
         .filter((v) => v.kind === "pre_existing").map((v) => v.gate.name)
       : [];
-    const contract: prompts.ReviewContract = { attribute, accepted: st.accepted?.failures ?? [] };
+    const kept = keptIds(st.accepted);
+    const contract: prompts.ReviewContract = {
+      attribute, accepted: st.accepted?.failures ?? [], kept: (st.accepted?.scope ?? []).filter((i) => i.kind === "finding"),
+    };
+    // The task's acceptance contract: the final plan's criteria, which a finding the task must fix names.
+    const criteria = criterionIds(this.finalPlan());
+    // The findings you already decided on (accepted as pre-existing, or kept out of the scope) no longer hold anything back.
+    const decided = new Set([...acceptedIds(st.accepted, "finding"), ...kept]);
+    const gatesFailing = enforceGates && gates.some((g) => g.required && !g.passed && !acceptedGates.has(g.name));
     // What the reviewer's session last reviewed: a continued review gets the changes since then instead of the whole diff.
     const reviewed = st.sessions?.code_reviewer?.reviewed ?? null;
     const build = async (ctx: prompts.PromptContext): Promise<string> => {
@@ -1040,7 +1065,13 @@ export class Workflow {
     const check = (rv: Review) => {
       const errors = consistentStatus(rv);
       if (rv.reviewed_commit !== snap) errors.push(`reviewed_commit is '${rv.reviewed_commit}', expected '${snap}'`);
-      return [...errors, ...attributionErrors(rv, cfg.quality_gates.blocking_severities, attribute)];
+      return [
+        ...errors, ...attributionErrors(rv, cfg.quality_gates.blocking_severities, attribute),
+        ...reviewScopeErrors({
+          review: rv, criteria, blockingSeverities: cfg.quality_gates.blocking_severities, requireApproval: cfg.quality_gates.require_codex_approval,
+          gatesFailing, decided,
+        }),
+      ];
     };
     const res = await this.callReviewer<Review>({
       role: "code_reviewer", agentRole: "code_reviewer", label: "code_review", schemaName: "review", round: k, check, build,
@@ -1055,8 +1086,10 @@ export class Workflow {
     setFindings(st, review.findings, { round: k, revision: snap });
     // What still blocks: the task's to fix (its regressions, what its scope includes, what the reviewer cannot place), and
     // what was there before outside its scope, which no fix round can settle. Nothing you did not accept is left out.
+    // Beyond the task's scope nothing blocks, except a critical problem, which only you can add to the task.
     const blocking = this.blocking(review.findings);
     const { fixable, preexisting } = splitFindings(blocking, acceptedIds(st.accepted, "finding"));
+    const scope = outOfScopeBlockers(review.findings, kept);
     const verdicts = enforceGates
       ? gateVerdicts({ results: st.lastGates ?? [], baseline: st.baseline?.results, outOfScope, attributions: review.gate_failures, accepted: acceptedGates })
       : [];
@@ -1065,9 +1098,10 @@ export class Workflow {
     const gatesOk = verdicts.length === 0;
     const critical = fixable.filter((f) => f.severity === "critical");
     const approved = review.approved || !cfg.quality_gates.require_codex_approval;
-    const done = approved && !fixable.length && !pre.length && gatesOk;
+    const done = approved && !fixable.length && !pre.length && !scope.length && gatesOk;
     if (review.approved && fixable.length) this.warn("the reviewer approved but reported blocking findings; continuing with a fix round");
-    const counts = `${fixable.length + preexisting.length} blocking${pre.length ? ` (${pre.length} pre-existing)` : ""}`;
+    const held = [pre.length ? `${pre.length} pre-existing` : "", scope.length ? `${scope.length} outside the task's scope` : ""].filter(Boolean);
+    const counts = `${fixable.length + preexisting.length + scope.length} blocking${held.length ? ` (${held.join(", ")})` : ""}`;
     this.message({
       from: this.party("code_reviewer"), to: this.party("implementer"), kind: "review",
       headline: done
@@ -1081,11 +1115,25 @@ export class Workflow {
       st.phase = "DONE";
       return;
     }
-    if (!fixable.length && !fixableGates.length && pre.length) {
-      // Nothing left the task can fix: another round would loop on an impossible contract. You decide.
-      st.preexisting = pre;
+    if (!fixable.length && !fixableGates.length && (pre.length || scope.length)) {
+      // Nothing left the task can fix: another round would loop on an impossible contract, or widen the task. You decide.
+      st.preexisting = pre.length ? pre : null;
       const { message, details } = preexistingReview(pre, approved);
+      if (scope.length) {
+        st.scopePending = scope;
+        const next = approved ? "DONE" : "CODE_REVIEW";
+        const asked = scopeReview(scope, pre.length ? details : [], next);
+        this.escalate("out_of_scope_critical", asked.message, next, asked.details);
+        return;
+      }
       this.escalate("preexisting_failures", message, approved ? "DONE" : "CODE_REVIEW", details);
+      return;
+    }
+    if (scope.length) {
+      // A critical problem outside the task: before a fix round, you decide whether the task takes it on (by re-planning).
+      st.scopePending = scope;
+      const { message, details } = scopeReview(scope, [], "IMPLEMENT");
+      this.escalate("out_of_scope_critical", message, "IMPLEMENT", details);
       return;
     }
     if (critical.length && cfg.quality_gates.stop_on_critical_issue) {
@@ -1119,6 +1167,7 @@ export class Workflow {
       // Re-planning settles the contract anew: nothing accepted so far, and nothing pending, carries over.
       st.conflicts = null;
       st.preexisting = null;
+      st.scopePending = null;
       delete st.accepted;
       st.finalPlanVersion = null;
       st.finalPlanHash = null;

@@ -150,13 +150,40 @@ describe("prompts", () => {
 
   it("asks the reviewer where each problem comes from, which gates to attribute, and what the user accepted", () => {
     const sha = "b".repeat(40);
-    const contract = { attribute: ["layout"], accepted: [{ kind: "finding" as const, id: "F2", text: "[high] a.css: bad", evidence: "e" }] };
+    const contract = { attribute: ["layout"], accepted: [{ kind: "finding" as const, id: "F2", text: "[high] a.css: bad", evidence: "e" }], kept: [] };
     const p = prompts.codeReviewer(ctx, 2, "# Plan", "a".repeat(40), sha, [], "", "", false, null, impl(), undefined, contract);
-    for (const s of ["## Where each problem comes from", "- `pre_existing`: it was there before the task", "never call a problem pre-existing without that evidence",
+    for (const s of ["## Where each problem stands against the task", "- `pre_existing`: it was there before the task", "never call a problem pre-existing without that evidence",
       "## Required gates that failed before the task too\n- `layout`", "## Pre-existing failures the user accepted for this run\n- finding `F2`: [high] a.css: bad"]) {
       expect(p).toContain(s);
     }
     expect(prompts.codeReviewer(ctx, 1, "# Plan", "a".repeat(40), sha, [], "", "", false, null, impl())).toContain("`gate_failures` is an empty list.");
+  });
+
+  it("holds every role to the task's acceptance contract: criteria with ids, and nothing outside the task without the user", () => {
+    const planner = prompts.planner(ctx, 1, 1, null, null);
+    expect(planner).toContain("each with an `id` (`AC1`, `AC2`, ...)");
+    expect(planner).toContain("they are the task's acceptance contract");
+    const revision = prompts.planner(ctx, 2, 2, plan("Old plan"), { critique: critique(false, [issue("C2", "medium", "also verify landscape", "out_of_scope")]) });
+    expect(revision).toContain("`C2` [medium] (outside the task's scope) also verify landscape");
+    expect(revision).toContain("do not adopt them");
+    const critic = prompts.planReviewer(ctx, 1, 1, "# Plan", null);
+    for (const s of ["## The task's scope", "- `task`:", "- `out_of_scope`: asks for more than the task needs", "only if no critical or high issue of the task's scope remains"]) {
+      expect(critic).toContain(s);
+    }
+    expect(prompts.planReviewer(ctx, 2, 2, "# Plan", null, [{ kind: "suggestion", id: "C2", text: "[medium] also verify landscape", evidence: "accepted: ok" }]))
+      .toContain("## Scope the user approved\n- suggestion `C2`: [medium] also verify landscape");
+    expect(prompts.planFinalizer(ctx, 1, 1, "# Plan", critique(true))).toContain("`out_of_scope`");
+    const reviewer = prompts.codeReviewer(ctx, 1, "# Plan", "a".repeat(40), "b".repeat(40), [], "", "", false, null, impl(), undefined,
+      { attribute: [], accepted: [], kept: [{ kind: "finding", id: "F3", text: "[critical] ui.css: bad", evidence: "leaks" }] });
+    for (const s of ["## Where each problem stands against the task", "the task's acceptance contract: hold the change to them, never to more",
+      "- `out_of_scope`: an improvement or concern beyond what the task and its criteria ask", "Only a critical one blocks completion",
+      "Out-of-scope findings never hold back your approval", "## Findings the user kept outside the task's scope\n- finding `F3`: [critical] ui.css: bad"]) {
+      expect(reviewer).toContain(s);
+    }
+    const extra = { ...findingsOf(["F1"]), items: [{ finding: finding("F5", "high", "ui.css", "out_of_scope"), answer: null, fileChange: null }] };
+    expect(prompts.implementer(ctx, 2, "# Plan", extra, [], null)).toContain("The reviewer marks it outside the task's scope (a suggestion, not part of the task): do not act on it");
+    const traced = { ...findingsOf(["F1"]), items: [{ finding: finding("F6", "high", "app.txt", "in_scope", ["AC1", "AC2"]), answer: null, fileChange: null }] };
+    expect(prompts.implementer(ctx, 2, "# Plan", traced, [], null)).toContain("Fails acceptance criteria: AC1, AC2");
   });
 
   it("code reviewer sees the revision, gates, diff and previous findings, fenced safely", () => {

@@ -2,6 +2,7 @@ import { BUDGET_CONFIG, BUDGET_KEYS, describeLimit, usageOf } from "./budget.js"
 import { decisionCommand } from "./decisions.js";
 import { describeGates } from "./gates.js";
 import type { Approval, Critique, Finding, Issue, Plan, Review } from "./outputs.js";
+import { criteria } from "./scope.js";
 import type { RunState } from "./state.js";
 
 const bullets = (items: string[], empty = "_(none)_") => (items.length ? items.map((x) => `- ${x}`).join("\n") : empty);
@@ -17,7 +18,8 @@ export function planMarkdown(plan: Plan, version: number): string {
     "## Scope\n**In scope**\n" + bullets(plan.scope_in) + "\n\n**Out of scope**\n" + bullets(plan.scope_out),
     "## Architecture\n" + (plan.architecture || "_(none)_"),
     "## Steps\n" + steps,
-    "## Acceptance criteria\n" + bullets(plan.acceptance_criteria),
+    // The task's acceptance contract: reviewers cite each criterion by its id.
+    "## Acceptance criteria\n" + bullets(criteria(plan).map((c) => `**${c.id}** ${c.criterion}`)),
     "## Risks\n" + risks,
     "## Test strategy\n" + (plan.test_strategy || "_(none)_"),
     "## Open questions\n" + bullets(plan.open_questions),
@@ -35,7 +37,8 @@ export function planMarkdown(plan: Plan, version: number): string {
 
 export function issuesMarkdown(issues: Issue[]): string {
   if (!issues.length) return "_(no issues)_";
-  return issues.map((i) => "- `" + i.id + "` [" + i.severity + "] " + i.description + (i.suggestion ? `  \n  Suggestion: ${i.suggestion}` : "")).join("\n");
+  return issues.map((i) => "- `" + i.id + "` [" + i.severity + "] " + (i.scope === "out_of_scope" ? "(outside the task's scope) " : "") + i.description +
+    (i.suggestion ? `  \n  Suggestion: ${i.suggestion}` : "")).join("\n");
 }
 
 export function critiqueMarkdown(c: Critique, round: number, planVersion: number, agent: string): string {
@@ -57,7 +60,8 @@ export function findingsMarkdown(findings: Finding[]): string {
   if (!findings.length) return "_(no findings)_";
   return findings.map((f) => {
     const loc = f.file ? f.file + (f.line ? `:${f.line}` : "") : "(general)";
-    return "- `" + f.id + "` [" + f.severity + "] `" + loc + "` — " + f.issue + (f.recommendation ? `  \n  Recommendation: ${f.recommendation}` : "");
+    return "- `" + f.id + "` [" + f.severity + "] `" + loc + "` — " + (f.origin === "out_of_scope" ? "(outside the task's scope) " : "") + f.issue +
+      (f.criteria?.length ? `  \n  Criteria: ${f.criteria.join(", ")}` : "") + (f.recommendation ? `  \n  Recommendation: ${f.recommendation}` : "");
   }).join("\n");
 }
 
@@ -112,7 +116,10 @@ export function reportMarkdown(st: RunState, diffStat: string, lastReview: Revie
   lines.push(st.lastGates?.length ? describeGates(st.lastGates, false) : "_(not run)_");
   if (st.baseline?.results.length) lines.push("\n## Quality gates before any change (baseline)\n" + describeGates(st.baseline.results, false));
   const accepted = [...(st.accepted?.conflicts ?? []).map((c) => `[conflict, implemented as planned] ${c}`),
-    ...(st.accepted?.failures ?? []).map((f) => `[pre-existing ${f.kind}] \`${f.id}\` ${f.text}${f.evidence ? ` — evidence: ${f.evidence}` : ""}`)];
+    ...(st.accepted?.failures ?? []).map((f) => `[pre-existing ${f.kind}] \`${f.id}\` ${f.text}${f.evidence ? ` — evidence: ${f.evidence}` : ""}`),
+    ...(st.accepted?.scope ?? []).map((i) => (i.kind === "finding"
+      ? `[kept outside the task's scope] \`${i.id}\` ${i.text}${i.evidence ? ` — justification: ${i.evidence}` : ""}`
+      : `[scope widened] \`${i.id}\` ${i.text}${i.evidence ? ` — the plan's answer: ${i.evidence}` : ""}`))];
   if (accepted.length) lines.push("\n## Accepted by you\nThe run would have stopped on these; your decision let it go on.\n" + bullets(accepted));
   if (diffStat.trim()) lines.push("\n## Diff stat\n```\n" + diffStat.trimEnd() + "\n```");
   const unresolved: string[] = [];
@@ -123,8 +130,10 @@ export function reportMarkdown(st: RunState, diffStat: string, lastReview: Revie
     for (const f of lastReview.findings) {
       const a = answers.get(f.id);
       const answer = a ? `; the implementer answered ${a.resolution} in round ${a.round}, not re-reviewed yet` : "";
-      const origin = f.origin === "pre_existing" ? "; pre-existing, outside the task's scope" : "";
-      unresolved.push(`[review ${f.severity}] \`${f.id}\` ${f.file} — ${f.issue} (raised on \`${lastReview.reviewed_commit.slice(0, 12)}\`${origin}${answer})`);
+      const origin = f.origin === "pre_existing" ? "; pre-existing, outside the task's scope"
+        : f.origin === "out_of_scope" ? "; outside the task's scope, not the task's to fix" : "";
+      const trace = f.criteria?.length ? `; criteria ${f.criteria.join(", ")}` : "";
+      unresolved.push(`[review ${f.severity}] \`${f.id}\` ${f.file} — ${f.issue} (raised on \`${lastReview.reviewed_commit.slice(0, 12)}\`${trace}${origin}${answer})`);
     }
   } else if (lastCritique && st.phase !== "DONE") {
     for (const i of lastCritique.issues) unresolved.push(`[plan ${i.severity}] \`${i.id}\` ${i.description}`);

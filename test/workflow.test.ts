@@ -1287,6 +1287,156 @@ process.exit(ok ? 0 : 1);
   });
 });
 
+describe("Workflow: the task's scope", () => {
+  // A reviewer's extra: something the task does not ask for, which the change does not cause.
+  const extra = (id: string, severity: "critical" | "high" | "medium" | "low" = "high", evidence = "") =>
+    ({ ...finding(id, severity, "ui.css", "out_of_scope"), evidence });
+
+  it("reports findings outside the task's scope without a fix round, and refuses to hold the change back on them alone", async () => {
+    const scenario = {
+      ...happy(),
+      code_reviewer: [
+        // Changes requested for extras only: refused, and asked again.
+        { output: review(false, [extra("F1"), extra("F2", "medium")]) },
+        { output: review(true, [extra("F1"), extra("F2", "medium")]) },
+      ],
+    };
+    expect(await start(scenario)).toBe(0);
+    expect(fake.calls("code_reviewer")[0]!.prompt).toContain("- `out_of_scope`: an improvement or concern beyond what the task and its criteria ask");
+    expect(fake.calls("code_reviewer")[1]!.prompt).toContain("'approved' is false, but no finding the task must fix or that only the user can settle remains " +
+      "(F1, F2 are outside the task's scope, and those never hold back approval)");
+    const st = stateOf(h);
+    expect([st.phase, st.implRound, fake.calls("implementer").length]).toEqual(["DONE", 1, 1]);
+    expect(messages().find((m) => m.kind === "review")!.items).toContain("[high] F1 ui.css:1 bad (outside the task's scope)");
+    expect(readRun("report.md")).toContain("[review high] `F1` ui.css — bad (raised on `");
+    expect(readRun("report.md")).toContain("; outside the task's scope, not the task's to fix)");
+  });
+
+  it("holds the change only to the plan's acceptance criteria: a finding the task must fix names the ones it fails", async () => {
+    const untraced = finding("F1", "high", "app.txt", "in_scope");
+    const scenario = {
+      ...happy(),
+      implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed\nwith header\n" }, output: impl("completed", ["F1"]) }],
+      code_reviewer: [
+        { output: review(false, [untraced]) },
+        { output: review(false, [{ ...untraced, criteria: ["AC1"] }]) },
+        { output: review(true, [{ ...finding("F2", "low"), criteria: ["AC7"] }], ["F1"]) },
+        { output: review(true, [], ["F1"]) },
+      ],
+    };
+    expect(await start(scenario)).toBe(0);
+    // Each rejection is why the reviewer was asked again (the second continued its session, so the retry is a fresh one).
+    const retries = h.events.flatMap((e) => (e.type === "agent.retry" && e.role === "code_reviewer" ? [e.reason] : []));
+    expect(retries).toEqual([
+      expect.stringContaining("finding 'F1' is in_scope and high, so 'criteria' must name the acceptance criteria it fails (AC1)"),
+      expect.stringContaining("finding 'F2' cites 'AC7', which is not an acceptance criterion of the final plan (AC1)"),
+    ]);
+    expect(fake.calls("code_reviewer")).toHaveLength(4);
+    // The fix round sees which criterion the finding holds the change to.
+    expect(fake.calls("implementer")[1]!.prompt).toContain("Fails acceptance criteria: AC1");
+    expect(readRun("plan.final.md")).toContain("## Acceptance criteria\n- **AC1** check.mjs exits 0");
+    expect(stateOf(h).phase).toBe("DONE");
+  });
+
+  it("asks you before widening the task for a critical problem outside it, and keeps the scope when you say so", async () => {
+    const leak = extra("F3", "critical", "the settings page the change links to stores tokens in plain text");
+    const scenario = {
+      ...happy(),
+      implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed well\n" }, output: impl("completed", ["F1"]) }],
+      code_reviewer: [
+        // Critical and outside the scope, with no justification: refused.
+        { output: review(false, [finding("F1"), { ...leak, evidence: "" }]) },
+        { output: review(false, [finding("F1"), leak]) },
+        { output: review(true, [leak], ["F1"]) },
+      ],
+    };
+    expect(await start(scenario)).toBe(2);
+    expect(fake.calls("code_reviewer")[1]!.prompt).toContain("finding 'F3' is critical and out_of_scope, so its 'evidence' must justify why it cannot wait");
+    let st = stateOf(h);
+    // It stops before the fix round: the task's own finding waits for your decision about the scope.
+    expect(st.humanReview).toMatchObject({ reason: "out_of_scope_critical", fromPhase: "CODE_REVIEW", resumePhase: "IMPLEMENT" });
+    expect(st.humanReview!.details).toEqual(["finding F3 [critical] ui.css: bad (justification: the settings page the change links to stores tokens in plain text)"]);
+    expect([fake.calls("implementer").length, st.scopePending!.map((s) => s.id)]).toEqual([1, ["F3"]]);
+
+    // "Keep the scope": the fix round is for F1 only, and the reviewer no longer weighs F3.
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    expect(fake.calls("implementer")[1]!.prompt).toContain("The reviewer marks it outside the task's scope");
+    expect(fake.calls("code_reviewer")[2]!.prompt).toContain("## Findings the user kept outside the task's scope\n- finding `F3`: [critical] ui.css: bad");
+    st = stateOf(h);
+    expect([st.phase, st.implRound, st.scopePending]).toEqual(["DONE", 2, null]);
+    expect(h.events.at(-1)).toMatchObject({ summary: expect.stringContaining("; you kept 1 critical finding(s) outside the task's scope unfixed (finding F3)") });
+    expect(readRun("report.md")).toContain("- [kept outside the task's scope] `F3` [critical] ui.css: bad — justification: the settings page");
+  });
+
+  it("re-plans when you bring a critical problem outside the task into its scope", async () => {
+    const leak = extra("F3", "critical", "leaks tokens");
+    const widened = plan("v2", { acceptance_criteria: [{ id: "AC1", criterion: "check.mjs exits 0" }, { id: "AC2", criterion: "tokens are stored encrypted" }] });
+    const scenario = {
+      ...happy(),
+      planner: [{ output: plan() }, { output: widened }],
+      plan_reviewer: [{ output: critique(true) }, { output: critique(true) }],
+      plan_finalizer: [{ output: approval(true) }, { output: approval(true) }],
+      implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed\nencrypted\n" }, output: impl() }],
+      code_reviewer: [{ output: review(true, [leak]) }, { output: review(true) }],
+    };
+    expect(await start(scenario)).toBe(2);
+    expect(stateOf(h).humanReview).toMatchObject({ reason: "out_of_scope_critical", resumePhase: "DONE" });
+    expect(await resume(h, { decision: "revise", note: "fix F3 too: encrypt the tokens" })).toBe(0);
+    expect(fake.calls("planner")[1]!.prompt).toContain("fix F3 too: encrypt the tokens");
+    const st = stateOf(h);
+    expect([st.phase, st.finalPlanVersion, st.scopePending, st.accepted]).toEqual(["DONE", 2, null, undefined]);
+  });
+
+  it("does not let suggestions outside the task hold the plan back", async () => {
+    const landscape = issue("C2", "high", "also verify the layout in landscape", "out_of_scope");
+    const scenario = { ...happy(), plan_reviewer: [{ output: critique(false, [landscape]) }, { output: critique(true, [landscape]) }] };
+    expect(await start(scenario)).toBe(0);
+    expect(fake.calls("plan_reviewer")[0]!.prompt).toContain("- `out_of_scope`: asks for more than the task needs");
+    expect(fake.calls("plan_reviewer")[1]!.prompt).toContain("'approved' is false, but every issue is outside the task's scope (C2)");
+    // Approved with it as a suggestion: no revision for it.
+    expect(fake.calls("planner")).toHaveLength(1);
+    expect(messages().find((m) => m.kind === "critique")!.items).toEqual(["[high] C2 also verify the layout in landscape (outside the task's scope)"]);
+    expect(readRun("plan-feedback.md")).toContain("- `C2` [high] (outside the task's scope) also verify the layout in landscape");
+  });
+
+  it("asks you before a revised plan adopts a suggestion outside the task", async () => {
+    const landscape = issue("C2", "medium", "also verify the layout in landscape", "out_of_scope");
+    const widened = plan("v2", {
+      acceptance_criteria: [{ id: "AC1", criterion: "check.mjs exits 0" }, { id: "AC2", criterion: "the layout holds in landscape" }],
+      feedback_resolution: [{ issue_id: "C1", decision: "accepted", rationale: "done" }, { issue_id: "C2", decision: "accepted", rationale: "cheap to add" }],
+    });
+    const scenario = {
+      ...happy(),
+      planner: [{ output: plan() }, { output: widened }],
+      plan_reviewer: [{ output: critique(false, [issue("C1"), landscape]) }, { output: critique(true) }],
+    };
+    expect(await start(scenario)).toBe(2);
+    let st = stateOf(h);
+    expect(st.humanReview).toMatchObject({ reason: "scope_expansion", fromPhase: "PLAN", resumePhase: "PLAN_REVIEW" });
+    expect(st.humanReview!.details).toEqual(["suggestion C2 [medium] also verify the layout in landscape (the plan's answer: accepted: cheap to add)",
+      "acceptance criteria new in v2: AC2 the layout holds in landscape"]);
+    expect(fake.calls("plan_reviewer")).toHaveLength(1);
+    expect(fake.calls("planner")[1]!.prompt).toContain("do not adopt them");
+
+    // Approved by you: the critic reviews the wider plan knowing it, and DONE says what you approved.
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    expect(fake.calls("plan_reviewer")[1]!.prompt).toContain("## Scope the user approved\n- suggestion `C2`: [medium] also verify the layout in landscape");
+    st = stateOf(h);
+    expect(st.phase).toBe("DONE");
+    expect(h.events.at(-1)).toMatchObject({ summary: expect.stringContaining("; you approved widening the task's scope for 1 suggestion(s) (C2)") });
+  });
+
+  it("goes on without asking when the revised plan leaves the suggestions outside the task out", async () => {
+    const landscape = issue("C2", "medium", "also verify the layout in landscape", "out_of_scope");
+    const kept = plan("v2", { feedback_resolution: [
+      { issue_id: "C1", decision: "accepted", rationale: "done" }, { issue_id: "C2", decision: "disputed", rationale: "outside the task's scope" },
+    ] });
+    const scenario = { ...happy(), planner: [{ output: plan() }, { output: kept }], plan_reviewer: [{ output: critique(false, [issue("C1"), landscape]) }, { output: critique(true) }] };
+    expect(await start(scenario)).toBe(0);
+    expect(stateOf(h).history.some((e) => e.status === "scope_expansion")).toBe(false);
+  });
+});
+
 describe("Workflow: the run's budget", () => {
   const budgetWarnings = () => stateOf(h).warnings.filter((w) => w.startsWith("budget:"));
   const decisionItems = () => messages().filter((m) => m.kind === "decision").map((m) => m.items);
