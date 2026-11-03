@@ -7,9 +7,10 @@ import type { Attachment } from "./attachment-types.js";
 import { attachmentFile } from "./attachments.js";
 import type { Decider, DuoEvent, EventBus, HistoryEntry, Message, Party, PermissionDecider, Phase, Role } from "../events.js";
 import type { AgentRole, Backend, ConfigData } from "./config.js";
+import { acceptRepoNotes, addRepoNotes, planTurn, rememberSession, type Turn } from "./context.js";
 import { GatesInterrupted, requiredPassed, runGates, type GateResult } from "./gates.js";
 import type { Change, Git } from "./git.js";
-import type { Approval, Critique, Finding, Implementation, Issue, Plan, Review } from "./outputs.js";
+import type { Approval, Critique, Finding, Implementation, Issue, Plan, RepoNoteOutput, Review } from "./outputs.js";
 import * as prompts from "./prompts.js";
 import * as render from "./render.js";
 import { internalNotice, openRunGit, prepareRunGit } from "./run-git.js";
@@ -51,6 +52,25 @@ export function denialHint(backend: Backend, denials: PermissionDenial[]): strin
   if (names.some((n) => EDIT_TOOLS.has(n))) ways.push('permissions.defaultMode "acceptEdits" for edits');
   if (others.length) ways.push(`permissions.allow rules for ${others.join(", ")}${others.includes("Bash") ? ' (e.g. "Bash(npm test:*)")' : ""}`);
   return `${head}; allow them in your Claude Code settings (${ways.join("; ")}) or via claude.role_args.implementer (${reload})`;
+}
+
+/** One agent call of the pipeline, as callAgent makes it. */
+interface AgentTurn<T> {
+  role: Role;
+  agentRole: AgentRole;
+  label: string;
+  schemaName: SchemaName;
+  round: number;
+  check?: (data: T) => string[];
+  /** The prompt for a context: the fresh one, and the continued one when the role's session goes on. */
+  build: (ctx: prompts.PromptContext) => string | Promise<string>;
+  /**
+   * about: the plan the turn is about, which a continued session may already have (null: it gets it whole, or writes
+   * one); after: the plan its session has once the turn is done; file: where `about` is, to point a session at.
+   */
+  plan: { about: string | null; after: (data: T) => string | null; file?: string };
+  /** Code reviewer: the revision it reviews, which its next turn's diff starts from. */
+  reviewed?: string;
 }
 
 class Interrupted extends Error {}
@@ -364,7 +384,7 @@ export class Workflow {
     return {
       task_id: st.taskId, role, agent: r.backend, round, timestamp: nowIso(), git_sha: await this.git.head(),
       plan_version: st.planVersion, attempts: r.attempts, duration_sec: Math.round(r.durationSec * 10) / 10,
-      cost_usd: r.costUsd, tokens: r.tokens, meta: r.meta, ...extra, output: r.data,
+      cost_usd: r.costUsd, tokens: r.tokens, meta: r.meta, resumed_session: r.resumed, ...extra, output: r.data,
     };
   }
 
@@ -387,27 +407,58 @@ export class Workflow {
     return null;
   }
 
+  /**
+   * One agent turn against the workspace as it is now (`tree`): the prompt for a fresh session, with the repository
+   * notes the role may have, and, when the role's own session goes on, the prompt that gives it only what is new (and
+   * the files of the notes it has not seen). The runner falls back to the fresh prompt if that session is gone.
+   */
+  private async callAgent<T>(o: AgentTurn<T>, tree: string): Promise<{ res: AgentResult; turn: Turn }> {
+    const backend = this.o.cfg.agents[o.agentRole];
+    const turn = await planTurn({
+      state: this.state, role: o.agentRole, backend, keep: this.runner.backends[backend].keepsSessions(o.agentRole), tree,
+      planHash: o.plan.about, changes: (a, b) => this.git.nameStatus(a, b),
+    });
+    const ctx: prompts.PromptContext = { ...this.ctx(), planFile: o.plan.file };
+    const prompt = await o.build({ ...ctx, repoNotes: turn.repoNotes });
+    const c = turn.continuation;
+    const resume = c
+      ? {
+        id: c.session.id, attachments: c.attachments,
+        prompt: await o.build({ ...ctx, notes: c.notes, repoNotes: c.repoNotes, continued: { changed: c.changed, knowsPlan: c.knowsPlan } }),
+      }
+      : undefined;
+    const res = await this.runner.call({
+      role: o.role, agentRole: o.agentRole, prompt, schemaName: o.schemaName, logPrefix: this.logPrefix(o.label, o.round), check: o.check,
+      signal: this.abort.signal, attachments: this.files(), skipGitRepoCheck: this.internal, session: { keep: turn.keep, ...(resume ? { resume } : {}) },
+    });
+    return { res, turn };
+  }
+
+  /** After a turn that succeeded: what it recorded about the repository, then its session (which knows those notes). */
+  private afterTurn<T>(o: AgentTurn<T>, res: AgentResult, turn: Turn, tree: string): void {
+    const notes = acceptRepoNotes((res.data as { repo_notes?: RepoNoteOutput[] }).repo_notes, this.o.repo);
+    addRepoNotes(this.state, { role: o.agentRole, backend: res.backend, round: o.round, tree }, notes);
+    rememberSession(this.state, o.agentRole, res, turn, { tree, planHash: o.plan.after(res.data as T), reviewed: o.reviewed });
+  }
+
   /** Planner, plan critic, plan sign-off and code reviewer. Files they change are reported, never blocked. */
-  private async callReviewer<T>(role: Role, agentRole: AgentRole, label: string, prompt: string, schemaName: SchemaName,
-    round: number, check?: (data: T) => string[]): Promise<AgentResult | null> {
+  private async callReviewer<T>(o: AgentTurn<T>): Promise<AgentResult | null> {
     const beforeTree = await this.tree();
     const beforeOutside = await this.outsideTree();
-    const r = await this.runner.call({
-      role, agentRole, prompt, schemaName, logPrefix: this.logPrefix(label, round), check, signal: this.abort.signal, attachments: this.files(),
-      skipGitRepoCheck: this.internal,
-    });
+    const { res: r, turn } = await this.callAgent(o, beforeTree);
     this.addUsage(r);
     if (r.interrupted) throw new Interrupted();
     const afterTree = await this.tree();
     if (afterTree !== beforeTree) {
       const changed = await this.git.nameStatus(beforeTree, afterTree);
-      if (changed.length) this.warn(`${this.agentName(agentRole)} (${ROLE_NAMES[role]}) changed files: ${listChanges(changed)}`);
+      if (changed.length) this.warn(`${this.agentName(o.agentRole)} (${ROLE_NAMES[o.role]}) changed files: ${listChanges(changed)}`);
     }
     await this.warnOutside(beforeOutside, this.state.phase);
     if (!r.ok) {
-      this.escalate("agent_error", `${role} (${r.backend}) failed after ${r.attempts} attempt(s): ${r.error}`, this.state.phase);
+      this.escalate("agent_error", `${o.role} (${r.backend}) failed after ${r.attempts} attempt(s): ${r.error}`, this.state.phase);
       return null;
     }
+    this.afterTurn(o, r, turn, afterTree);
     return r;
   }
 
@@ -418,9 +469,13 @@ export class Workflow {
     const r = st.planningRound;
     const v = st.planVersion + 1;
     const previous = v > 1 ? store.readJson<{ output: Plan }>(`plan.v${v - 1}.json`).output : null;
-    const prompt = prompts.planner(this.ctx(), r, v, previous, st.planFeedback);
+    const feedback = st.planFeedback;
     const check = (p: Plan) => (["goals", "scope_in", "steps", "acceptance_criteria"] as const).filter((k) => p[k].length === 0).map((k) => `'${k}' must not be empty`);
-    const res = await this.callReviewer<Plan>("planner", "planner", "plan", prompt, "plan", r, check);
+    const res = await this.callReviewer<Plan>({
+      role: "planner", agentRole: "planner", label: "plan", schemaName: "plan", round: r, check,
+      build: (ctx) => prompts.planner(ctx, r, v, previous, feedback),
+      plan: { about: previous ? st.planHash : null, after: (p) => planHash(p), file: previous ? store.path(`plan.v${v - 1}.md`) : undefined },
+    });
     if (!res) return;
     const plan = res.data as Plan;
     store.writeJson(`plan.v${v}.json`, await this.envelope("planner", r, res, { plan_version: v }));
@@ -445,8 +500,13 @@ export class Workflow {
     const { store, cfg } = this.o;
     const r = st.planningRound;
     const v = st.planVersion;
-    const prompt = prompts.planReviewer(this.ctx(), r, v, store.readText(`plan.v${v}.md`), this.lastCritique(r));
-    const res = await this.callReviewer<Critique>("plan_reviewer", "plan_reviewer", "plan_review", prompt, "plan_critique", r, consistentStatus);
+    const planMd = store.readText(`plan.v${v}.md`);
+    const previous = this.lastCritique(r);
+    const res = await this.callReviewer<Critique>({
+      role: "plan_reviewer", agentRole: "plan_reviewer", label: "plan_review", schemaName: "plan_critique", round: r, check: consistentStatus,
+      build: (ctx) => prompts.planReviewer(ctx, r, v, planMd, previous),
+      plan: { about: null, after: () => st.planHash },
+    });
     if (!res) return;
     const critique = res.data as Critique;
     store.writeJson(`critique.r${r}.json`, await this.envelope("plan_reviewer", r, res));
@@ -477,8 +537,12 @@ export class Workflow {
     const r = st.planningRound;
     const v = st.planVersion;
     const critique = store.readJson<{ output: Critique }>(`critique.r${r}.json`).output;
-    const prompt = prompts.planFinalizer(this.ctx(), r, v, store.readText(`plan.v${v}.md`), critique);
-    const res = await this.callReviewer<Approval>("plan_finalizer", "planner", "plan_finalize", prompt, "plan_approval", r, consistentStatus);
+    const planMd = store.readText(`plan.v${v}.md`);
+    const res = await this.callReviewer<Approval>({
+      role: "plan_finalizer", agentRole: "planner", label: "plan_finalize", schemaName: "plan_approval", round: r, check: consistentStatus,
+      build: (ctx) => prompts.planFinalizer(ctx, r, v, planMd, critique),
+      plan: { about: st.planHash, after: () => st.planHash, file: store.path(`plan.v${v}.md`) },
+    });
     if (!res) return;
     const approval = res.data as Approval;
     store.writeJson(`approval.r${r}.json`, await this.envelope("plan_finalizer", r, res));
@@ -563,17 +627,22 @@ export class Workflow {
     const k = st.implRound;
     // A round re-run after an error or interrupt keeps its first starting point, so its record covers every attempt.
     const preRef = this.ref(`impl-r${k}-pre`);
-    const pre = (await this.git.readRef(preRef)) ?? await this.git.snapshot(this.snapshotExclude, preRef, `agentduo ${st.taskId}: before implementation round ${k}`);
+    const started = await this.git.readRef(preRef);
+    const pre = started ?? await this.git.snapshot(this.snapshotExclude, preRef, `agentduo ${st.taskId}: before implementation round ${k}`);
+    // A re-run round keeps its first starting point, but the turn is told about the workspace as it is now.
+    const now = started ? await this.tree() : pre.tree;
     const beforeOutside = await this.outsideTree();
     const review = store.exists("review.json") ? store.readJson<{ output: Review }>("review.json").output : null;
     const failed = k > 1 ? (st.lastGates ?? []).filter((g) => !g.passed) : [];
-    const prompt = prompts.implementer(this.ctx(), k, store.readText("plan.final.md"), st.openFindings, review, failed, st.lastImplementation);
+    const planMd = store.readText("plan.final.md");
     const check = (rep: Implementation) =>
       rep.status === "blocked" && !(rep.blocking_reason ?? "").trim() ? ["status is 'blocked' but blocking_reason is empty"] : [];
-    const res = await this.runner.call({
-      role: "implementer", agentRole: "implementer", prompt, schemaName: "implementation", logPrefix: this.logPrefix("implement", k),
-      check, signal: this.abort.signal, attachments: this.files(), skipGitRepoCheck: this.internal,
-    });
+    const turnSpec: AgentTurn<Implementation> = {
+      role: "implementer", agentRole: "implementer", label: "implement", schemaName: "implementation", round: k, check,
+      build: (ctx) => prompts.implementer(ctx, k, planMd, st.openFindings, review, failed, st.lastImplementation),
+      plan: { about: st.finalPlanHash, after: () => st.finalPlanHash, file: store.path("plan.final.md") },
+    };
+    const { res, turn } = await this.callAgent(turnSpec, now);
     this.addUsage(res);
     const post = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}`), `agentduo ${st.taskId}: implementation round ${k}`);
     st.lastSnapshot = { commit: post.commit, tree: post.tree };
@@ -593,6 +662,7 @@ export class Workflow {
       this.escalate("agent_error", `implementer (${res.backend}) failed after ${res.attempts} attempt(s): ${res.error}`, "IMPLEMENT");
       return;
     }
+    this.afterTurn(turnSpec, res, turn, post.tree);
     this.message({
       from: this.party("implementer"), to: this.party("code_reviewer"), kind: "implementation",
       headline: report.status === "blocked" ? `blocked: ${report.blocking_reason}` : `completed · ${changes.length} file(s) changed`,
@@ -673,14 +743,33 @@ export class Workflow {
     const fullDiff = store.writeText(`diff.r${k}.patch`, diff);
     const maxChars = cfg.limits.max_diff_chars;
     const implReport = store.readJson<{ output: Implementation }>(`implementation.r${k}.json`).output;
-    const prompt = prompts.codeReviewer(this.ctx(), k, store.readText("plan.final.md"), base, snap, st.lastGates ?? [],
-      await this.git.diffStat(base, snap), diff.slice(0, maxChars), diff.length > maxChars, st.openFindings, implReport, fullDiff);
+    const planMd = store.readText("plan.final.md");
+    const diffStat = await this.git.diffStat(base, snap);
+    const gates = st.lastGates ?? [];
+    const findings = st.openFindings;
+    // What the reviewer's session last reviewed: a continued review gets the changes since then instead of the whole diff.
+    const reviewed = st.sessions?.code_reviewer?.reviewed ?? null;
+    const build = async (ctx: prompts.PromptContext): Promise<string> => {
+      if (ctx.continued && reviewed) {
+        try {
+          const since = await this.git.diff(reviewed, snap);
+          const sinceReviewed = { from: reviewed, stat: await this.git.diffStat(reviewed, snap), diff: since.slice(0, maxChars), truncated: since.length > maxChars };
+          ctx = { ...ctx, continued: { ...ctx.continued, sinceReviewed } };
+        } catch {
+          // that revision is gone: the whole diff, as a fresh review gets it
+        }
+      }
+      return prompts.codeReviewer(ctx, k, planMd, base, snap, gates, diffStat, diff.slice(0, maxChars), diff.length > maxChars, findings, implReport, fullDiff);
+    };
     const check = (rv: Review) => {
       const errors = consistentStatus(rv);
       if (rv.reviewed_commit !== snap) errors.push(`reviewed_commit is '${rv.reviewed_commit}', expected '${snap}'`);
       return errors;
     };
-    const res = await this.callReviewer<Review>("code_reviewer", "code_reviewer", "code_review", prompt, "review", k, check);
+    const res = await this.callReviewer<Review>({
+      role: "code_reviewer", agentRole: "code_reviewer", label: "code_review", schemaName: "review", round: k, check, build,
+      plan: { about: st.finalPlanHash, after: () => st.finalPlanHash, file: store.path("plan.final.md") }, reviewed: snap,
+    });
     if (!res) return;
     const review = res.data as Review;
     const envelope = await this.envelope("code_reviewer", k, res, { base, snapshot: snap });

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AgentRunner } from "../src/agents/runner.js";
+import { AgentRunner, type CallSession } from "../src/agents/runner.js";
 import type { Attachment } from "../src/core/attachment-types.js";
 import { AttachmentStore, existingAttachmentFile } from "../src/core/attachments.js";
 import { png } from "./helpers/images.js";
@@ -238,5 +238,61 @@ describe("AgentRunner", () => {
     setTimeout(() => controller.abort(), 300);
     const r = await runner().call({ role: "planner", agentRole: "planner", prompt: prompt("planner"), schemaName: "plan", logPrefix: "007", signal: controller.signal });
     expect(r).toMatchObject({ ok: false, interrupted: true });
+  });
+});
+
+describe("AgentRunner sessions", () => {
+  const call = (r: AgentRunner, role: "planner" | "plan_reviewer", logPrefix: string, o: { attachments?: Attachment[]; session?: CallSession }) =>
+    r.call({
+      role, agentRole: role, prompt: `${prompt(role)}\nWHOLE`, schemaName: role === "planner" ? "plan" : "plan_critique", logPrefix, ...o,
+    });
+
+  it("continues a kept session with only what is new, and the files it was not given", async () => {
+    fake.setScenario({ planner: [{ output: plan("v1") }, { output: plan("v2") }] });
+    const r = runner();
+    const { shot, pdf } = attached();
+    const first = await call(r, "planner", "001-plan-r1", { attachments: [shot], session: { keep: true } });
+    expect(first).toMatchObject({ ok: true, resumed: false, sessionId: fake.calls("planner")[0]!.session });
+    expect(fake.calls("planner")[0]!.args).not.toContain("--ephemeral");
+    const second = await call(r, "planner", "002-plan-r2", {
+      attachments: [shot, pdf], session: { keep: true, resume: { id: first.sessionId!, prompt: `${prompt("planner")}\nNEW ONLY`, attachments: [] } },
+    });
+    expect(second).toMatchObject({ ok: true, resumed: true, attempts: 1, sessionId: first.sessionId });
+    const continued = fake.calls("planner")[1]!;
+    expect(continued.resumed).toBe(first.sessionId);
+    expect(continued.prompt).toBe(`${prompt("planner")}\nNEW ONLY`);
+    expect(continued.images).toBeUndefined();
+    expect(readFileSync(join(t.path, "logs", "002-plan-r2.a1.prompt.md"), "utf8")).toContain("NEW ONLY");
+  });
+
+  it("starts a fresh session with the whole prompt when the CLI lost the one to continue, without costing a retry", async () => {
+    fake.setScenario({ sessions: { lost: true }, planner: [{ output: plan() }], plan_reviewer: [{ output: critique(true) }] });
+    const r = runner({ limits: { max_retries: 0 } });
+    const { shot } = attached();
+    for (const role of ["planner", "plan_reviewer"] as const) {
+      const res = await call(r, role, `001-${role}`, { attachments: [shot], session: { keep: true, resume: { id: `gone-${role}`, prompt: `${prompt(role)}\nNEW ONLY` } } });
+      expect(res, role).toMatchObject({ ok: true, resumed: false, attempts: 2 });
+      const [lost, fresh] = fake.calls(role);
+      expect([lost!.resumed, lost!.lost], role).toEqual([`gone-${role}`, true]);
+      expect(fresh!.resumed, role).toBeUndefined();
+      // The fresh session never saw the lost attempt: the whole prompt, its files, and no rejection note.
+      expect(fresh!.prompt, role).toBe(`${prompt(role)}\nWHOLE`);
+      expect(fresh!.images, role).toHaveLength(1);
+      expect(res.sessionId, role).toBe(fresh!.session);
+    }
+    const retries = events.filter((e) => e.type === "agent.retry");
+    expect(retries).toHaveLength(2);
+    expect(retries[0]).toMatchObject({ attempt: 2, max: 2, reason: expect.stringContaining("the earlier session could not be continued (codex exited with code 1") });
+    expect(retries[1]).toMatchObject({ reason: expect.stringContaining("No conversation found with session ID: gone-plan_reviewer") });
+  });
+
+  it("keeps each conversation turn's session off disk", async () => {
+    const r = runner();
+    for (const backend of ["codex", "claude"] as const) {
+      await r.call({ mode: "text", backend, prompt: "[agentduo-conversation]\nhi", logPrefix: `001-${backend}`, conversationId: "c1", turnId: `t-${backend}` });
+    }
+    const [codex, claude] = fake.calls();
+    expect(codex!.args).toContain("--ephemeral");
+    expect(claude!.args).toContain("--no-session-persistence");
   });
 });

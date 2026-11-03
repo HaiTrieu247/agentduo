@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import type { ConfigData } from "../core/config.js";
+import type { AgentRole, ConfigData } from "../core/config.js";
 import { implementerPermissionArgs } from "../core/settings.js";
 import type { Activity, PermissionAnswer } from "../events.js";
 import { resolveBinary } from "./resolve.js";
@@ -10,6 +10,8 @@ import {
 } from "./types.js";
 
 const DENIAL_RE = /permission|denied|haven't granted|not allowed/i;
+/** Claude's flag for a session that is not written to disk (and so cannot be resumed). */
+export const CLAUDE_NO_PERSISTENCE = "--no-session-persistence";
 const countLines = (text: unknown): number =>
   typeof text === "string" && text.length ? text.split("\n").length - (text.endsWith("\n") ? 1 : 0) : 0;
 
@@ -179,12 +181,21 @@ export class ClaudeBackend implements AgentBackend {
     return found;
   }
 
+  keepsSessions(role: AgentRole): boolean {
+    return ![...this.cfg.args, ...(this.cfg.role_args[role] ?? [])].includes(CLAUDE_NO_PERSISTENCE);
+  }
+
   /**
    * Protocol flags only; what Claude may do comes from the user's Claude Code settings plus args/role_args. A
    * conversation turn (text mode) has no schema and no role, but keeps the implementer's permission mode, which is
    * what /mode sets for Claude in the chat too.
+   *
+   * A session nobody will continue gets --no-session-persistence (unless the user's args already pass it), so it stays
+   * off disk; a kept one does not, and a resumed call names its session with --resume.
    */
   buildArgs(a: BuildArgs): string[] {
+    const session = a.mode === "text" ? undefined : a.session;
+    const own = [...this.cfg.args, ...(a.mode === "text" ? implementerPermissionArgs(this.cfg) : this.cfg.role_args[a.role] ?? [])];
     return [
       "-p",
       "--output-format", "stream-json",
@@ -198,8 +209,9 @@ export class ClaudeBackend implements AgentBackend {
       ...(a.askPermissions ? ["--permission-prompts", "host", "--permission-prompt-tool", "stdio"] : ["--permission-prompts", "none"]),
       ...(this.cfg.model ? ["--model", this.cfg.model] : []),
       ...(this.cfg.max_budget_usd ? ["--max-budget-usd", String(this.cfg.max_budget_usd)] : []),
-      ...this.cfg.args,
-      ...(a.mode === "text" ? implementerPermissionArgs(this.cfg) : this.cfg.role_args[a.role] ?? []),
+      ...(session?.keep || own.includes(CLAUDE_NO_PERSISTENCE) ? [] : [CLAUDE_NO_PERSISTENCE]),
+      ...(session?.resume ? ["--resume", session.resume] : []),
+      ...own,
     ];
   }
 

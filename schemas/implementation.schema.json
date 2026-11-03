@@ -8,7 +8,8 @@
     "files_changed",
     "tests_run",
     "addressed_findings",
-    "blocking_reason"
+    "blocking_reason",
+    "repo_notes"
   ],
   "properties": {
     "status": {
@@ -83,6 +84,25 @@
         "string",
         "null"
       ]
+    },
+    "repo_notes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "note"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        }
+      }
     }
   }
 }

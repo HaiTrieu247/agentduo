@@ -20,7 +20,8 @@ describe("runDoctor", () => {
     const checks = await runDoctor({ dir: repo, cfg: testConfig(new FakeClis(t.path)), sources: ["ws.yaml"], runsDir: join(repo, ".agentduo", "runs") });
     expect(checks.filter((c) => !c.ok && c.required)).toEqual([]);
     const text = checks.map((c) => c.message).join("\n");
-    for (const s of ["codex CLI:", "codex-fake 1.0.0", "claude supports --output-format, --verbose, --json-schema, --permission-prompts, --input-format, --permission-prompt-tool",
+    for (const s of ["codex CLI:", "codex-fake 1.0.0", "claude supports --output-format, --verbose, --json-schema, --permission-prompts, --no-session-persistence, --resume, --input-format, --permission-prompt-tool",
+      "codex supports --json, --output-schema, --output-last-message, --cd, --skip-git-repo-check, --ephemeral, resume",
       "schema review", ".agentduo/runs/ is git-ignored", "config: ws.yaml", "Claude asks you in the terminal before a tool call its settings do not allow"]) {
       expect(text).toContain(s);
     }

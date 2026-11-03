@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import type { ConfigData } from "../core/config.js";
+import type { AgentRole, ConfigData } from "../core/config.js";
 import type { Activity } from "../events.js";
 import { resolveBinary } from "./resolve.js";
 import { schemaPath } from "./schema.js";
@@ -20,12 +20,17 @@ export function unwrapShell(command: string): string {
 
 type Item = Record<string, unknown> & { id?: unknown; type?: unknown };
 
+/** Codex's flag for a session that is not written to disk (and so cannot be resumed). */
+export const CODEX_EPHEMERAL = "--ephemeral";
+
 export class CodexParser implements StreamParser {
   tokens = 0;
   lastAgentMessage: string | null = null;
   error: string | null = null;
   /** The turn itself failed (not just a reported error the CLI recovered from). */
   failed = false;
+  /** The thread (session) the call ran in, which `codex exec resume` continues. */
+  threadId: string | null = null;
 
   usage(): { tokens?: number } {
     return { tokens: this.tokens || undefined };
@@ -39,6 +44,10 @@ export class CodexParser implements StreamParser {
       return [];
     }
     if (!event || typeof event !== "object" || Array.isArray(event)) return [];
+    if (event.type === "thread.started" && typeof event.thread_id === "string" && event.thread_id) {
+      this.threadId = event.thread_id;
+      return [];
+    }
     if (event.type === "turn.completed" && event.usage && typeof event.usage === "object") {
       const usage = event.usage as { input_tokens?: number; output_tokens?: number };
       this.tokens += (Number(usage.input_tokens) || 0) + (Number(usage.output_tokens) || 0);
@@ -107,21 +116,35 @@ export class CodexBackend implements AgentBackend {
     return found;
   }
 
+  keepsSessions(role: AgentRole): boolean {
+    return ![...this.cfg.args, ...(this.cfg.role_args[role] ?? [])].includes(CODEX_EPHEMERAL);
+  }
+
   /**
    * A conversation turn (text mode) gets no schema and no role_args: only the args every call gets. It may run outside
    * a git repository, where `codex exec` refuses to start without --skip-git-repo-check (inside one the flag changes
    * nothing); so may a workflow call of a run with agentduo's own snapshot repository, which says so.
+   *
+   * A session nobody will continue gets --ephemeral (unless the user's args already pass it), so it stays off disk;
+   * a kept one does not. A resumed call is `codex exec <exec options> resume <id> -`: exec takes its options before
+   * the subcommand, and the images go after it, as the resumed prompt's.
    */
   buildArgs(a: BuildArgs): string[] {
+    const text = a.mode === "text";
+    const session = text ? undefined : a.session;
+    const roleArgs = text ? [] : this.cfg.role_args[a.role] ?? [];
+    const ephemeral = session?.keep || [...this.cfg.args, ...roleArgs].includes(CODEX_EPHEMERAL) ? [] : [CODEX_EPHEMERAL];
     return [
       "exec", "--json",
       "--color", "never",
-      ...(a.mode === "text" ? ["--skip-git-repo-check"] : [...(a.skipGitRepoCheck ? ["--skip-git-repo-check"] : []), "--output-schema", schemaPath(a.schemaName)]),
+      ...(text ? ["--skip-git-repo-check"] : [...(a.skipGitRepoCheck ? ["--skip-git-repo-check"] : []), "--output-schema", schemaPath(a.schemaName)]),
       "--output-last-message", a.lastMessageFile,
       "--cd", this.repo,
       ...(this.cfg.model ? ["--model", this.cfg.model] : []),
+      ...ephemeral,
       ...this.cfg.args,
-      ...(a.mode === "text" ? [] : this.cfg.role_args[a.role] ?? []),
+      ...roleArgs,
+      ...(session?.resume ? ["resume", session.resume] : []),
       // One token per image: `--image` takes several values, so in `--image a.png -` the `-` could be read as one more.
       ...(a.images ?? []).map((img) => `--image=${img.file}`),
       "-", // read the prompt from stdin
@@ -136,7 +159,7 @@ export class CodexBackend implements AgentBackend {
     const p = parser as CodexParser;
     const fromFile = lastMessageFile && existsSync(lastMessageFile) ? readFileSync(lastMessageFile, "utf8") : "";
     const text = fromFile.trim() ? fromFile : p.lastAgentMessage ?? "";
-    const meta: AgentMeta = { tokens: p.tokens || undefined, permissionDenials: [] };
+    const meta: AgentMeta = { tokens: p.tokens || undefined, sessionId: p.threadId ?? undefined, permissionDenials: [] };
     if (mode === "text" && p.failed) throw new AgentFailure(`codex failed: ${p.error}`, meta);
     if (!text.trim()) throw new AgentFailure(p.error ? `codex failed: ${p.error}` : "codex produced no final message", meta);
     // An answer is shown as Codex wrote it, also when it happens to look like JSON.

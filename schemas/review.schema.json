@@ -8,7 +8,8 @@
     "reviewed_commit",
     "summary",
     "findings",
-    "resolved_findings"
+    "resolved_findings",
+    "repo_notes"
   ],
   "properties": {
     "status": {
@@ -75,6 +76,25 @@
       "type": "array",
       "items": {
         "type": "string"
+      }
+    },
+    "repo_notes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "note"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        }
       }
     }
   }

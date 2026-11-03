@@ -9,6 +9,15 @@ export interface Issue {
   suggestion: string;
 }
 
+/**
+ * A fact an agent checked in the repository and leaves for the agents after it (schemas' `repo_notes`): the
+ * workspace-relative file or folder it is about, which is how agentduo tells when it may no longer hold.
+ */
+export interface RepoNoteOutput {
+  path: string;
+  note: string;
+}
+
 export interface Plan {
   title: string;
   summary: string;
@@ -22,6 +31,7 @@ export interface Plan {
   test_strategy: string;
   open_questions: string[];
   feedback_resolution: Array<{ issue_id: string; decision: "accepted" | "partially_accepted" | "disputed"; rationale: string }>;
+  repo_notes: RepoNoteOutput[];
 }
 
 export interface Critique {
@@ -32,6 +42,7 @@ export interface Critique {
   accepted: string[];
   disputed: string[];
   proposed_changes: string[];
+  repo_notes: RepoNoteOutput[];
 }
 
 export interface Approval {
@@ -48,6 +59,7 @@ export interface Implementation {
   tests_run: Array<{ command: string; passed: boolean; notes: string }>;
   addressed_findings: Array<{ finding_id: string; resolution: "fixed" | "disputed" | "not_applicable"; notes: string }>;
   blocking_reason: string | null;
+  repo_notes: RepoNoteOutput[];
 }
 
 export interface Finding {
@@ -66,4 +78,5 @@ export interface Review {
   summary: string;
   findings: Finding[];
   resolved_findings: string[];
+  repo_notes: RepoNoteOutput[];
 }

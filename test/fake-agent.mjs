@@ -22,15 +22,21 @@
 // (.rateLimits, or the error .rateLimitsError) until stdin closes; .hang never answers, .exit and .stderr fail it.
 // A response's `pid` names a file (relative to the working directory) the agent writes its process id to, the process
 // a stop must end: on Windows the agent runs under the cmd.exe of its .cmd shim, so only the tree kill reaches it.
+// Sessions work as the real CLIs keep them: a call gets a new session id (Codex's thread_id, Claude's session_id) and
+// stores it in $FAKE_COUNTS.sessions.json unless it ran with --ephemeral / --no-session-persistence (or the scenario
+// has `sessions: { lost: true }`: the CLI's storage was wiped). `codex exec … resume <id> -` and `claude --resume <id>`
+// continue a stored session under the same id; one that is not stored fails before any turn, as the real CLIs do
+// (logged with `lost: true`, consuming no scripted response). Every call logs its `session`, and `resumed` when it
+// continued one.
 import { execSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline";
 
 const HELP = {
-  codex: "Usage: codex exec [OPTIONS] --json --output-schema --sandbox --output-last-message --cd --skip-git-repo-check",
-  claude: "Usage: claude [options] --output-format --input-format --verbose --json-schema --permission-mode --permission-prompts --permission-prompt-tool --tools --allowedTools --disallowedTools",
+  codex: "Usage: codex exec [OPTIONS] --json --output-schema --sandbox --output-last-message --cd --skip-git-repo-check --ephemeral\nCommands:\n  resume  Resume a previous session",
+  claude: "Usage: claude [options] --output-format --input-format --verbose --json-schema --permission-mode --permission-prompts --permission-prompt-tool --tools --allowedTools --disallowedTools --no-session-persistence --resume",
 };
 
 async function main() {
@@ -74,6 +80,29 @@ async function main() {
   const step = chat ? /^\[agentduo-discussion: (\w+)/m.exec(prompt)?.[1] : undefined;
   const role = step ? `discuss_${step}` : chat ? `chat_${backend}` : /\[orchestrator-role: (\w+)\]/.exec(prompt)?.[1] ?? "unknown";
   const scenario = JSON.parse(readFileSync(process.env.FAKE_SCENARIO, "utf8"));
+  const sessionsFile = `${process.env.FAKE_COUNTS}.sessions.json`;
+  const sessions = existsSync(sessionsFile) ? JSON.parse(readFileSync(sessionsFile, "utf8")) : {};
+  const resumed = backend === "codex"
+    ? (args.includes("resume") ? args[args.indexOf("resume") + 1] : undefined)
+    : (args.includes("--resume") ? args[args.indexOf("--resume") + 1] : undefined);
+  if (resumed && !sessions[resumed]) {
+    appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend, role, call: null, args, prompt, resumed, lost: true }) + "\n");
+    if (backend === "codex") {
+      process.stderr.write(`Error: thread/resume: thread/resume failed: no rollout found for thread id ${resumed} (code -32600)\n`);
+    } else {
+      const error = `No conversation found with session ID: ${resumed}`;
+      process.stderr.write(`${error}\n`);
+      process.stdout.write(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, num_turns: 0, session_id: resumed, total_cost_usd: 0, permission_denials: [], errors: [error] }) + "\n");
+    }
+    return 1;
+  }
+  const session = resumed ?? randomUUID();
+  const persisted = !args.includes(backend === "codex" ? "--ephemeral" : "--no-session-persistence") && !scenario.sessions?.lost;
+  if (persisted) {
+    sessions[session] = { backend, role };
+    writeFileSync(`${sessionsFile}.${process.pid}.tmp`, JSON.stringify(sessions));
+    renameSync(`${sessionsFile}.${process.pid}.tmp`, sessionsFile);
+  }
   const counts = existsSync(process.env.FAKE_COUNTS) ? JSON.parse(readFileSync(process.env.FAKE_COUNTS, "utf8")) : {};
   const n = counts[role] ?? 0;
   counts[role] = n + 1;
@@ -85,7 +114,9 @@ async function main() {
   const resp = responses[Math.min(n, responses.length - 1)];
   // What a host must keep to itself (Electron run as Node, its IPC channel): logged when it reached the agent.
   const leaked = ["ELECTRON_RUN_AS_NODE", "NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE"].filter((k) => process.env[k] !== undefined);
-  appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend, role, call: n, args, prompt, ...(images.length ? { images } : {}), ...(leaked.length ? { leaked } : {}) }) + "\n");
+  appendFileSync(process.env.FAKE_LOG, JSON.stringify({
+    backend, role, call: n, args, prompt, session, ...(resumed ? { resumed } : {}), ...(images.length ? { images } : {}), ...(leaked.length ? { leaked } : {}),
+  }) + "\n");
 
   const writeFiles = (files) => {
     for (const [path, content] of Object.entries(files ?? {})) {
@@ -141,7 +172,7 @@ async function main() {
   const activities = resp.activities ?? [];
   const sleep = () => (resp.sleep ? new Promise((r) => setTimeout(r, resp.sleep)) : Promise.resolve());
   if (backend === "codex") {
-    emit({ type: "thread.started", thread_id: "fake" });
+    emit({ type: "thread.started", thread_id: session });
     emit({ type: "turn.started" });
     activities.forEach((a, i) => {
       const item = { id: `item_${i}`, type: "command_execution", command: `/bin/zsh -lc '${a.command}'`, aggregated_output: "", exit_code: null, status: "in_progress" };
@@ -154,7 +185,7 @@ async function main() {
     if (!resp.noLastMessage) writeFileSync(args[args.indexOf("--output-last-message") + 1], text);
   } else {
     const model = args.includes("--model") ? args[args.lastIndexOf("--model") + 1] : resp.model ?? "claude-fake-default";
-    emit({ type: "system", subtype: "init", session_id: "fake", model });
+    emit({ type: "system", subtype: "init", session_id: session, model });
     const usage = { input_tokens: 10, output_tokens: 5 };
     activities.forEach((a, i) => {
       emit({ type: "assistant", uuid: `u${i}`, message: { id: "m", usage, content: [{ type: "tool_use", id: `t${i}`, name: a.tool, input: a.input ?? {} }] } });
@@ -162,7 +193,7 @@ async function main() {
     });
     await sleep();
     if ("answer" in resp && text) emit({ type: "assistant", uuid: "final", message: { id: "m-final", usage, content: [{ type: "text", text }] } });
-    const envelope = { type: "result", subtype: "success", is_error: false, result: text, total_cost_usd: 0.01, session_id: "fake", num_turns: 1, permission_denials: denials };
+    const envelope = { type: "result", subtype: "success", is_error: false, result: text, total_cost_usd: 0.01, session_id: session, num_turns: 1, permission_denials: denials };
     if (!prose) envelope.structured_output = JSON.parse(text);
     emit(envelope);
     // Real Claude keeps reading stdin in host mode until the host closes it.

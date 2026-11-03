@@ -13,6 +13,7 @@ export interface PermissionDenial {
 export interface AgentMeta {
   costUsd?: number;
   tokens?: number;
+  /** The CLI's session of the call (Claude's session_id, Codex's thread_id): what a later call resumes. */
   sessionId?: string;
   numTurns?: number;
   /** The model the CLI's own stream named (Claude's init event). */
@@ -57,6 +58,16 @@ interface CallArgs {
   images?: NativeImage[];
 }
 
+/**
+ * What a pipeline call does with its CLI session. keep: leave it on disk, so a later call of the same role can continue
+ * it (otherwise agentduo passes the CLI's own flag for a session nobody resumes). resume: the session this call
+ * continues, whose earlier turns the prompt does not repeat.
+ */
+export interface SessionArgs {
+  keep: boolean;
+  resume?: string;
+}
+
 export type BuildArgs =
   | ({
     mode?: "structured";
@@ -65,6 +76,8 @@ export type BuildArgs =
     role: AgentRole;
     /** The workspace may be in no git repository (a run with agentduo's own snapshot repository). */
     skipGitRepoCheck?: boolean;
+    /** Absent: a session of its own that is not kept, as a conversation turn's. */
+    session?: SessionArgs;
   } & CallArgs)
   | ({ mode: "text" } & CallArgs);
 
@@ -78,6 +91,11 @@ export interface AgentBackend {
   readonly name: "codex" | "claude";
   binary(): string;
   buildArgs(args: BuildArgs): string[];
+  /**
+   * Whether this role's sessions can be continued later: false when the user's args or role_args turn the CLI's session
+   * persistence off (Codex's --ephemeral, Claude's --no-session-persistence), which agentduo respects.
+   */
+  keepsSessions(role: AgentRole): boolean;
   createParser(): StreamParser;
   /** Extract the final JSON (or, in text mode, the answer); throws AgentFailure (carrying whatever meta is known) when unusable. */
   finalize(parser: StreamParser, stdout: string, lastMessageFile: string, mode?: CallMode): FinalOutput;

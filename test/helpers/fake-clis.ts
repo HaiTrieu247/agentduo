@@ -14,6 +14,12 @@ export interface FakeCall {
   images?: Array<{ mediaType?: string; base64?: number; file?: string; missing?: boolean; sha256?: string }>;
   /** Host variables that reached the agent (ELECTRON_RUN_AS_NODE, NODE_CHANNEL_FD…); absent when none did. */
   leaked?: string[];
+  /** The CLI session the call ran in (absent for a resume that failed). */
+  session?: string;
+  /** The session the call continued (`codex exec … resume <id>`, `claude --resume <id>`). */
+  resumed?: string;
+  /** The session to continue was not stored (ephemeral, or lost): the call failed before any turn. */
+  lost?: boolean;
 }
 
 /**

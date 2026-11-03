@@ -35,6 +35,28 @@ A run reaches `DONE` when all of these hold:
 
 When a limit is reached, an agent fails or blocks, or a critical finding appears, the run asks you what to do.
 
+### What each agent is given
+
+Each role (planner, plan critic, implementer, code reviewer) keeps one CLI session for the whole run.
+
+- **First call:** the full picture. That is the task, the chat before it, your notes and what earlier agents
+  recorded.
+- **Later calls:** they continue that session (`claude --resume`, `codex exec resume`) and get only what is new. That
+  is the files changed since the role's last turn, your new notes, and the work to act on. The reviewer, for example,
+  gets the diff since the revision it last reviewed. So a fix round does not re-read the repository from scratch.
+- **Plan sign-off** continues the planner's session.
+- **No session ever passes from one role to another**, so the reviewer never sees the implementer's reasoning.
+
+The planner, critic, implementer and reviewer also leave short notes about the repository: what a file holds, a
+convention, the test command. Each note names its file or folder. Later roles get the notes that still hold: a note
+is dropped once anything under its path changes. A role never gets the notes of the agent whose work it judges. The
+plan critic gets none of the planner's, and the code reviewer none of the implementer's.
+
+If a CLI has lost a session, the call starts a fresh one with the full prompt, without spending a retry. Kept sessions
+show up in each CLI's own session list. To start every call afresh instead, put `--no-session-persistence` in
+`claude.args` or `--ephemeral` in `codex.args` (or in `role_args` for one role). The design is in
+[docs/superpowers/specs/2026-11-03-agentduo-context-sharing-design.md](docs/superpowers/specs/2026-11-03-agentduo-context-sharing-design.md).
+
 ## Requirements
 
 - Node.js ≥ 22.12 and git. A pipeline run (`duo "<task>"`, `/pipeline`) snapshots and diffs your files with git, in
@@ -305,7 +327,7 @@ In a terminal, agentduo shows the reason and a menu: Resume, Revise (with a note
 Settings are merged in this order, later sources winning: built-in defaults, then `~/.config/agentduo/config.yaml` (or `$XDG_CONFIG_HOME/agentduo/` or `%APPDATA%\agentduo\` on Windows), then `<workspace>/.agentduo/config.yaml` or `--config`. A misspelled key produces a warning. A value of the wrong type produces an error that names the file.
 
 - **Mappings** are merged key by key, and `role_args` role by role.
-- **Lists** (`args`, `gates`, `blocking_severities`) replace the earlier value. `claude.args: [--strict-mcp-config]` therefore drops the default `--no-session-persistence` unless you list it too.
+- **Lists** (`args`, `gates`, `blocking_severities`) replace the earlier value. A workspace's `claude.args: [--strict-mcp-config]` therefore drops the flags your user config lists in `claude.args`, unless you list them too.
 
 ```yaml
 agents: { planner: codex, plan_reviewer: claude, implementer: claude, code_reviewer: codex }
@@ -314,8 +336,8 @@ gates:                       # optional
   - name: tests
     command: "npm test"
     required: true
-codex:  { model: null, args: [--ephemeral], role_args: {} }
-claude: { model: null, max_budget_usd: null, permission_prompts: ask, args: [--no-session-persistence], role_args: {} }
+codex:  { model: null, args: [], role_args: {} }          # args: [--ephemeral] starts every call afresh
+claude: { model: null, max_budget_usd: null, permission_prompts: ask, args: [], role_args: {} }   # or [--no-session-persistence]
 ```
 
 `agent_idle_timeout_sec` stops an agent that prints nothing for that long; set it to 0 to turn the check off.
@@ -324,7 +346,7 @@ claude: { model: null, max_budget_usd: null, permission_prompts: ask, args: [--n
 
 Everything about a run lives in `.agentduo/runs/<run-id>/`:
 
-- `state.json`: makes the run resumable;
+- `state.json`: makes the run resumable; it also keeps each role's session id and the agents' notes about the repository;
 - `config.json`: the config the run started with;
 - `report.md`: timeline, gates, diff stat, unresolved issues, warnings, cost and tokens;
 - the plans, the critiques, and every agent's JSON (with task id, round, timestamp, git SHA and plan version);
@@ -356,7 +378,8 @@ The runs directory carries its own `.gitignore`, so run data stays out of `git s
   deleted, or files were deleted from it (see [Folders without a git repository](#folders-without-a-git-repository));
   abort the run and start a new one.
 - **The terminal behaves oddly after agentduo was killed with `kill -9`.** Run `reset`. A SIGKILL gives no process a chance to restore the terminal.
-- **Costs.** `claude.args: [--strict-mcp-config, --no-session-persistence]` skips loading your MCP servers for agentduo runs, which makes each call noticeably cheaper. `claude.max_budget_usd` caps the cost of each call.
+- **Costs.** `claude.args: [--strict-mcp-config]` skips loading your MCP servers for agentduo runs, which makes each call noticeably cheaper. `claude.max_budget_usd` caps the cost of each call. Continued sessions save the most: keep `--no-session-persistence` and `--ephemeral` out of your args.
+- **Every step starts afresh** (no `--resume` or `resume` in `logs/*.cmd.json`). Your `args` or `role_args` list `--no-session-persistence` (Claude) or `--ephemeral` (Codex), or the run started with a config that did; `duo resume --reload-config` picks up a change. A retry that says "the earlier session could not be continued" means the CLI no longer had the session, and the step went on in a fresh one.
 - **Windows** is experimental and not covered by CI.
 
 ## Development

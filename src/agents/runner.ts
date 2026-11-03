@@ -30,6 +30,19 @@ export interface StructuredCall extends WithAttachments {
   signal?: AbortSignal;
   /** The workspace may be in no git repository (its snapshots are agentduo's own): Codex must start there anyway. */
   skipGitRepoCheck?: boolean;
+  /** The role's CLI session; absent: a session of its own that is not kept. */
+  session?: CallSession;
+}
+
+/**
+ * keep: leave the call's session on disk, for the role's next call to continue. resume: continue that session first,
+ * with a prompt that gives only what changed (and the files it was not given yet). A resumed attempt that fails (the
+ * CLI lost the session, or its answer is unusable) is followed by a fresh session with the whole `prompt` and its
+ * `attachments`, which keeps every attempt of its own.
+ */
+export interface CallSession {
+  keep: boolean;
+  resume?: { id: string; prompt: string; attachments?: Attachment[] };
 }
 
 /** A conversation turn: `backend` answers in prose; no schema, no role, one attempt (the user asks again if it fails). */
@@ -59,6 +72,10 @@ export interface AgentResult {
   interrupted: boolean;
   /** The model the CLI's stream named, also for an attempt that never finished. */
   model: string | null;
+  /** The CLI session the last attempt ran in (what a later call can resume), when the CLI named it. */
+  sessionId: string | null;
+  /** The answer came from the session the call continued, not from a fresh one. */
+  resumed: boolean;
 }
 
 export interface RunnerOptions {
@@ -170,7 +187,9 @@ export class AgentRunner {
     const backend = this.backends[o.mode === "text" ? o.backend : this.cfg.agents[o.agentRole]];
     const agent: Party = backend.name;
     const channel = this.channel(o, agent);
-    const attemptsAllowed = text ? 1 : this.cfg.limits.max_retries + 1;
+    const resume = o.mode === "text" ? undefined : o.session?.resume;
+    // A resumed first attempt comes on top of the fresh attempts, so a lost session never costs a retry.
+    const attemptsAllowed = (text ? 1 : this.cfg.limits.max_retries + 1) + (resume ? 1 : 0);
     const timeoutMs = this.cfg.limits.agent_timeout_sec * 1000;
     const idleTimeoutMs = this.cfg.limits.agent_idle_timeout_sec * 1000;
     mkdirSync(this.logDir, { recursive: true });
@@ -185,19 +204,28 @@ export class AgentRunner {
     let meta: AgentMeta = { permissionDenials: [] };
     let model: string | null = null;
     let lastError: string | null = null;
+    let resuming: CallSession["resume"];
     const finish = (ok: boolean, attempts: number, data: unknown, error: string | null, interrupted = false): AgentResult => ({
       ok, data, error, attempts, durationSec: (Date.now() - started) / 1000,
       costUsd: costSeen ? cost : null, tokens: tokensSeen ? tokens : null, meta, backend: backend.name, interrupted, model,
+      sessionId: meta.sessionId ?? null, resumed: ok && !!resuming,
     });
 
-    const attachments = o.attachments ?? [];
-    this.warnFallback(backend, attachments);
+    this.warnFallback(backend, o.attachments ?? []);
     for (let attempt = 1; attempt <= attemptsAllowed; attempt++) {
+      resuming = attempt === 1 ? resume : undefined;
+      // The fresh session after a resumed attempt never saw that attempt, so it gets no rejection note.
+      const fellBack = attempt === 2 && !!resume;
+      if (fellBack) lastError = `the earlier session could not be continued (${lastError ?? "no answer"}); starting a new one`;
       if (attempt > 1 && o.mode !== "text") this.bus.emit({ type: "agent.retry", role: o.role, agent, attempt, max: attemptsAllowed, reason: lastError ?? "" });
       const stem = join(this.logDir, `${prefix}.a${attempt}`);
-      const prompt = lastError
-        ? `${o.prompt}\n\n## Previous attempt was rejected by the orchestrator\n${lastError}\nReturn ONLY a JSON object that matches the required schema exactly.\n`
-        : o.prompt;
+      const prompt = resuming
+        ? resuming.prompt
+        : lastError && !fellBack
+          ? `${o.prompt}\n\n## Previous attempt was rejected by the orchestrator\n${lastError}\nReturn ONLY a JSON object that matches the required schema exactly.\n`
+          : o.prompt;
+      // A resumed session already has the files of its earlier turns: it gets only the ones it was not given.
+      const attachments = resuming ? resuming.attachments ?? [] : o.attachments ?? [];
       const lastMessageFile = `${stem}.last.${text ? "md" : "json"}`;
       const host = this.hosts(backend);
       // Checked before every attempt: a copy removed meanwhile fails the call before it starts.
@@ -212,7 +240,10 @@ export class AgentRunner {
         binary = backend.binary();
         args = o.mode === "text"
           ? backend.buildArgs({ mode: "text", lastMessageFile, askPermissions: host, images })
-          : backend.buildArgs({ schemaName: o.schemaName, lastMessageFile, role: o.agentRole, askPermissions: host, images, skipGitRepoCheck: o.skipGitRepoCheck });
+          : backend.buildArgs({
+            schemaName: o.schemaName, lastMessageFile, role: o.agentRole, askPermissions: host, images, skipGitRepoCheck: o.skipGitRepoCheck,
+            ...(o.session ? { session: { keep: o.session.keep, ...(resuming ? { resume: resuming.id } : {}) } } : {}),
+          });
       } catch (e) {
         if (e instanceof BinaryNotFound) return finish(false, attempt, null, e.message);
         throw e;

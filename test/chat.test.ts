@@ -751,13 +751,17 @@ describe("Chat: the pipeline", () => {
     await chat.idle();
     await chat.submit("/pipeline Now make it say fixed twice");
     await chat.idle();
-    for (const role of ["planner", "plan_reviewer", "plan_finalizer", "implementer", "code_reviewer"]) {
+    for (const role of ["planner", "plan_reviewer", "implementer", "code_reviewer"]) {
       const prompt = fake.calls(role).at(-1)!.prompt;
       expect(prompt, role).toContain("## Conversation before this task");
       expect(prompt, role).toContain("How should the second task be done?");
       expect(prompt, role).toContain("Use a constant for the word fixed.");
       expect(prompt.match(/Make app\.txt fixed — done/g), role).toHaveLength(1);
     }
+    // Plan sign-off continues the second run's planner session (never the first run's), which has all of it already.
+    expect(fake.calls("plan_finalizer").at(-1)!.resumed).toBe(fake.calls("planner").at(-1)!.session);
+    expect(fake.calls("plan_finalizer").at(-1)!.prompt).not.toContain("## Conversation before this task");
+    expect(fake.calls("planner").at(-1)!.resumed).toBeUndefined();
     expect(latest().conversationContext?.exchanges).toHaveLength(1);
     // The question after the first run knows how it ended, once.
     expect(fake.calls("chat_codex")[0]!.prompt.match(/Make app\.txt fixed — done/g)).toHaveLength(1);
@@ -1187,10 +1191,12 @@ describe("Chat: attached files", () => {
     await chat.idle();
     expect(latest().phase).toBe("DONE");
     const roles = fake.calls().map((c) => [c.role, c.images?.length ?? 0, c.images?.[0]?.sha256 === sha(shot)]);
+    // Plan sign-off continues the planner's session, which has the file already; the stopped implementer kept no session.
     expect(roles).toEqual([
-      ["planner", 1, true], ["plan_reviewer", 1, true], ["plan_finalizer", 1, true], ["implementer", 1, true], ["implementer", 1, true], ["code_reviewer", 1, true],
+      ["planner", 1, true], ["plan_reviewer", 1, true], ["plan_finalizer", 0, false], ["implementer", 1, true], ["implementer", 1, true], ["code_reviewer", 1, true],
     ]);
-    for (const c of fake.calls()) expect(c.prompt).toContain("### Files the user attached to the task");
+    for (const c of fake.calls()) expect(c.prompt.includes("### Files the user attached to the task"), c.role).toBe(c.role !== "plan_finalizer");
+    expect(fake.calls("implementer")[1]!.resumed).toBeUndefined();
   });
 
   it("gives a note's files to the steps after it, never to a decision, which leaves them waiting", async () => {

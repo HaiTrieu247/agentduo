@@ -210,11 +210,32 @@ Mọi lệnh đều nhận `--dir`, `--config`, `--plain`, `-v` và `--no-color`
 
 Thứ tự gộp là: mặc định, rồi `~/.config/agentduo/config.yaml`, rồi `.agentduo/config.yaml` của workspace (hoặc `--config`). Nguồn sau thắng nguồn trước.
 - **Mapping** được gộp theo từng khoá, và `role_args` được gộp theo từng vai trò.
-- **List** (`args`, `gates`, `blocking_severities`) thay hẳn giá trị trước. Ví dụ, `claude.args: [--strict-mcp-config]` sẽ bỏ mất `--no-session-persistence` mặc định nếu bạn không ghi lại nó.
+- **List** (`args`, `gates`, `blocking_severities`) thay hẳn giá trị trước. Ví dụ, `claude.args: [--strict-mcp-config]` ở workspace sẽ bỏ mất các flag mà `claude.args` trong user config đã ghi, nếu bạn không ghi lại chúng.
 
 ## Quality gates
 
 Gate là tuỳ chọn. Mặc định không có gate: Claude tự chạy test theo config của nó, và run DONE khi Codex approve. Nếu bạn khai báo `gates`, agentduo chạy chúng sau mỗi vòng implement và chuyển kết quả cho Codex. `duo init` gợi ý sẵn các gate tìm được, dưới dạng comment.
+
+## Ngữ cảnh giữa các agent
+
+Mỗi vai trò (planner, plan critic, implementer, code reviewer) giữ một session CLI riêng suốt cả run.
+
+- **Lần gọi đầu:** nhận đủ bối cảnh, gồm task, đoạn chat trước task, các note của bạn và những gì agent trước đã ghi lại.
+- **Các lần gọi sau:** tiếp tục đúng session đó (`claude --resume`, `codex exec resume`) và chỉ nhận phần mới: các file
+  đã đổi từ lượt trước của vai trò đó, note mới của bạn, và việc cần làm. Ví dụ, reviewer chỉ nhận diff kể từ revision nó
+  đã review. Nhờ vậy vòng sửa không phải đọc lại repo từ đầu.
+- **Bước chốt plan** tiếp tục session của planner.
+- **Session không bao giờ chuyển từ vai trò này sang vai trò khác**, nên reviewer không thấy lập luận của implementer.
+
+Planner, critic, implementer và reviewer còn để lại các ghi chú ngắn về repo: file nào chứa gì, quy ước, lệnh chạy test.
+Mỗi ghi chú gắn với một file hoặc thư mục. Vai trò sau chỉ nhận những ghi chú còn đúng: chỉ cần có gì dưới đường dẫn đó
+thay đổi là ghi chú bị bỏ. Một vai trò không bao giờ nhận ghi chú của agent mà nó đang thẩm định: plan critic không nhận
+ghi chú của planner, code reviewer không nhận ghi chú của implementer.
+
+Nếu CLI đã mất session, lần gọi đó chạy một session mới với prompt đầy đủ và không bị tính là một lần retry. Các session
+được giữ sẽ hiện trong danh sách session của từng CLI. Muốn mọi lần gọi đều bắt đầu mới, thêm `--no-session-persistence`
+vào `claude.args` hoặc `--ephemeral` vào `codex.args` (hoặc vào `role_args` cho một vai trò). Thiết kế chi tiết ở
+[2026-11-03-agentduo-context-sharing-design.md](superpowers/specs/2026-11-03-agentduo-context-sharing-design.md).
 
 ## Exit code
 
@@ -236,5 +257,6 @@ Gate là tuỳ chọn. Mặc định không có gate: Claude tự chạy test th
 - **Task bắt đầu bằng `-`** bị hiểu nhầm là option. Đặt `--` trước nó: `duo -- "-x bị lỗi"`.
 - **"Git is not installed"** khi bắt đầu run: cài git (chat và `/discuss` vẫn chạy không cần git). **"cannot use its snapshot repository"** hoặc **"the snapshots of run … are damaged"** khi resume: kho riêng của run đã bị di chuyển hoặc xóa, hoặc có file trong kho bị xóa (xem [Folder chưa có git repo](#folder-chưa-có-git-repo)); hãy abort run đó và tạo run mới.
 - **Terminal hiển thị lạ sau khi agentduo bị `kill -9`:** gõ `reset`.
-- **Giảm chi phí:** đặt `claude.args: [--strict-mcp-config, --no-session-persistence]` để agentduo không nạp các MCP server của bạn.
+- **Giảm chi phí:** đặt `claude.args: [--strict-mcp-config]` để agentduo không nạp các MCP server của bạn. Tiếp tục session tiết kiệm nhiều nhất, nên đừng thêm `--no-session-persistence` hay `--ephemeral` vào args.
+- **Bước nào cũng bắt đầu lại từ đầu** (không có `--resume` hay `resume` trong `logs/*.cmd.json`): `args` hoặc `role_args` của bạn có `--no-session-persistence` (Claude) hoặc `--ephemeral` (Codex), hoặc run bắt đầu với config như vậy; `duo resume --reload-config` sẽ nhận thay đổi.
 - **Windows** ở mức thử nghiệm.

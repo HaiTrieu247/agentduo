@@ -6,7 +6,7 @@ export function plan(title = "Demo plan", extra: Partial<Plan> = {}): Plan {
     scope_out: ["everything else"], architecture: "single file",
     steps: [{ id: "S1", description: "write app.txt", files: ["app.txt"] }],
     acceptance_criteria: ["check.mjs exits 0"], risks: [{ risk: "none", mitigation: "n/a" }],
-    test_strategy: "run check.mjs", open_questions: [], feedback_resolution: [], ...extra,
+    test_strategy: "run check.mjs", open_questions: [], feedback_resolution: [], repo_notes: [], ...extra,
   };
 }
 
@@ -15,7 +15,7 @@ export const issue = (id: string, severity: Severity = "high", description = "pr
 
 export const critique = (approved: boolean, issues: Issue[] = []): Critique => ({
   status: approved ? "approved" : "changes_requested", approved, summary: "critique", issues,
-  accepted: [], disputed: [], proposed_changes: [],
+  accepted: [], disputed: [], proposed_changes: [], repo_notes: [],
 });
 
 export const approval = (approved: boolean, issues: Issue[] = []): Approval =>
@@ -26,7 +26,7 @@ export const impl = (status: Implementation["status"] = "completed", addressed: 
   status, summary: `implementation ${status}`, files_changed: ["app.txt"],
   tests_run: [{ command: "node check.mjs", passed: true, notes: "" }],
   addressed_findings: addressed.map((finding_id) => ({ finding_id, resolution: "fixed" as const, notes: "" })),
-  blocking_reason: blockingReason,
+  blocking_reason: blockingReason, repo_notes: [],
 });
 
 export const finding = (id: string, severity: Severity = "high", file = "app.txt"): Finding =>
@@ -35,5 +35,5 @@ export const finding = (id: string, severity: Severity = "high", file = "app.txt
 export const review = (approved: boolean, findings: Finding[] = [], resolved: string[] = [],
   commit = "$SNAPSHOT"): Review => ({
   status: approved ? "approved" : "changes_requested", approved, reviewed_commit: commit,
-  summary: "review", findings, resolved_findings: resolved,
+  summary: "review", findings, resolved_findings: resolved, repo_notes: [],
 });

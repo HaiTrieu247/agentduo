@@ -13,10 +13,13 @@ export interface Check {
   message: string;
 }
 
-/** Flags agentduo itself needs (the protocol); permissions are the CLIs' own business. */
+/**
+ * Flags agentduo itself needs (the protocol); permissions are the CLIs' own business. The session flags keep a call
+ * that nobody continues off disk, and continue a pipeline role's session (`codex exec … resume <id>`, `claude --resume`).
+ */
 const PROTOCOL_FLAGS = {
-  codex: { args: ["exec", "--help"], flags: ["--json", "--output-schema", "--output-last-message", "--cd", "--skip-git-repo-check"] },
-  claude: { args: ["--help"], flags: ["--output-format", "--verbose", "--json-schema", "--permission-prompts"] },
+  codex: { args: ["exec", "--help"], flags: ["--json", "--output-schema", "--output-last-message", "--cd", "--skip-git-repo-check", "--ephemeral", "resume"] },
+  claude: { args: ["--help"], flags: ["--output-format", "--verbose", "--json-schema", "--permission-prompts", "--no-session-persistence", "--resume"] },
 } as const;
 /** Relaying permission prompts (claude.permission_prompts: ask) needs Claude's host protocol. */
 const CLAUDE_HOST_FLAGS = ["--input-format", "--permission-prompt-tool"];

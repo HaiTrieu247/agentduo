@@ -26,6 +26,31 @@ describe("ClaudeBackend", () => {
     expect(impl.slice(-3)).toEqual(["--no-session-persistence", "--permission-mode", "acceptEdits"]);
   });
 
+  it("keeps a pipeline role's session and continues it with --resume; every other call keeps none, without repeating the user's flag", () => {
+    const cfg = defaultConfig();
+    const backend = new ClaudeBackend(cfg.claude, "/ws");
+    const call = (session?: { keep: boolean; resume?: string }) =>
+      backend.buildArgs({ schemaName: "implementation", lastMessageFile: "", role: "implementer", ...(session ? { session } : {}) });
+    expect(call()).toContain("--no-session-persistence");
+    expect(call({ keep: true })).not.toContain("--no-session-persistence");
+    const resumed = call({ keep: true, resume: "s-1" });
+    expect(resumed[resumed.indexOf("--resume") + 1]).toBe("s-1");
+    expect(resumed).not.toContain("--no-session-persistence");
+    expect(call({ keep: false })).not.toContain("--resume");
+    // A conversation turn is never continued: its session is never kept.
+    expect(backend.buildArgs({ mode: "text", lastMessageFile: "" })).toContain("--no-session-persistence");
+    expect(backend.keepsSessions("implementer")).toBe(true);
+    // The user's own flag turns sessions off for every role it reaches, and is passed once.
+    cfg.claude.role_args = { implementer: ["--no-session-persistence"] };
+    expect(backend.keepsSessions("implementer")).toBe(false);
+    expect(backend.keepsSessions("plan_reviewer")).toBe(true);
+    expect(call().filter((a) => a === "--no-session-persistence")).toHaveLength(1);
+    cfg.claude.args = ["--no-session-persistence"];
+    cfg.claude.role_args = {};
+    expect(backend.keepsSessions("plan_reviewer")).toBe(false);
+    expect(backend.buildArgs({ mode: "text", lastMessageFile: "" }).filter((a) => a === "--no-session-persistence")).toHaveLength(1);
+  });
+
   it("reads stream-json input whenever it gets images, without changing who answers permission prompts", () => {
     const t = tempDir();
     try {
@@ -123,7 +148,7 @@ describe("CodexBackend", () => {
     const backend = new CodexBackend(defaultConfig().codex, "/ws");
     const args = backend.buildArgs({ schemaName: "review", lastMessageFile: "/tmp/last.json", role: "code_reviewer", skipGitRepoCheck: true });
     expect(args).toEqual(["exec", "--json", "--color", "never", "--skip-git-repo-check", "--output-schema", schemaPath("review"), "--output-last-message",
-      "/tmp/last.json", "--cd", "/ws", ...defaultConfig().codex.args, "-"]);
+      "/tmp/last.json", "--cd", "/ws", "--ephemeral", "-"]);
   });
 
   it("passes each image as one --image=<path> token, so the - that reads the prompt from stdin stays last", () => {
@@ -134,6 +159,38 @@ describe("CodexBackend", () => {
     expect(args).not.toContain("--image");
     expect(args).not.toContain("-i");
     expect(backend.buildArgs({ mode: "text", lastMessageFile: "/tmp/last.md" }).at(-1)).toBe("-");
+  });
+
+  it("continues a role's session as `codex exec <options> resume <id> -`, and keeps no other session", () => {
+    const cfg = defaultConfig();
+    cfg.codex.role_args = { implementer: ["--sandbox", "workspace-write"] };
+    const backend = new CodexBackend(cfg.codex, "/ws");
+    const images = [{ file: "/ws/a.png", mediaType: "image/png" }];
+    const resumed = backend.buildArgs({ schemaName: "implementation", lastMessageFile: "/tmp/l.json", role: "implementer", images, session: { keep: true, resume: "t-1" } });
+    // exec's own options (schema, last message, workspace, role args) come before the subcommand; the images are the resumed prompt's.
+    expect(resumed.slice(0, 2)).toEqual(["exec", "--json"]);
+    expect(resumed.slice(-6)).toEqual(["--sandbox", "workspace-write", "resume", "t-1", "--image=/ws/a.png", "-"]);
+    expect(resumed.indexOf("--output-schema")).toBeLessThan(resumed.indexOf("resume"));
+    expect(resumed).not.toContain("--ephemeral");
+    const kept = backend.buildArgs({ schemaName: "plan", lastMessageFile: "/tmp/l.json", role: "planner", session: { keep: true } });
+    expect(kept).not.toContain("--ephemeral");
+    expect(kept).not.toContain("resume");
+    expect(backend.buildArgs({ schemaName: "plan", lastMessageFile: "/tmp/l.json", role: "planner" })).toContain("--ephemeral");
+    expect(backend.buildArgs({ mode: "text", lastMessageFile: "/tmp/l.md" })).toContain("--ephemeral");
+    cfg.codex.args = ["--ephemeral"];
+    expect(backend.keepsSessions("planner")).toBe(false);
+    expect(backend.buildArgs({ mode: "text", lastMessageFile: "/tmp/l.md" }).filter((a) => a === "--ephemeral")).toHaveLength(1);
+  });
+
+  it("names the thread a call ran in, which a later call resumes", () => {
+    const p = new CodexParser();
+    for (const line of readFileSync(join(import.meta.dirname, "fixtures", "codex-stream.jsonl"), "utf8").split("\n").filter(Boolean)) p.feed(line);
+    const t = tempDir();
+    try {
+      expect(new CodexBackend(defaultConfig().codex, "/repo").finalize(p, "", join(t.path, "none"), "text").meta.sessionId).toBe("01a17c13-e50d-7603-8538-a3f4ebfe421d");
+    } finally {
+      t.cleanup();
+    }
   });
 
   it("lets a conversation turn run outside a git repository; the workflow's calls run inside one", () => {

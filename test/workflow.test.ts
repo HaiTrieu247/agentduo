@@ -32,7 +32,7 @@ afterEach(() => {
   t.cleanup();
 });
 
-type Scenario = Record<string, unknown[]>;
+type Scenario = Record<string, unknown[] | Record<string, unknown>>;
 function start(scenario: Scenario, overrides?: ConfigOverrides, opts: { task?: string; decider?: ScriptedDecider } = {}): Promise<number> {
   fake.setScenario(scenario);
   if (overrides) h.cfg = testConfig(fake, overrides);
@@ -128,7 +128,11 @@ describe("Workflow", () => {
     });
     expect(await wf.run()).toBe(0);
     const calls = fake.calls().map((c) => [c.role, c.call, c.images?.length ?? 0]);
-    expect(calls).toEqual([["planner", 0, 1], ["planner", 1, 1], ["plan_reviewer", 0, 2], ["plan_finalizer", 0, 2], ["implementer", 0, 2], ["code_reviewer", 0, 2]]);
+    // Plan sign-off continues the planner's session, which has the task's image: it gets only the note's.
+    expect(calls).toEqual([["planner", 0, 1], ["planner", 1, 1], ["plan_reviewer", 0, 2], ["plan_finalizer", 0, 1], ["implementer", 0, 2], ["code_reviewer", 0, 2]]);
+    expect(fake.calls("plan_finalizer")[0]!.prompt).toContain("## New notes from the human operator");
+    expect(fake.calls("plan_finalizer")[0]!.prompt).toContain("notes.txt");
+    expect(fake.calls("plan_finalizer")[0]!.prompt).not.toContain("mockup.png");
     expect(fake.calls("plan_reviewer")[0]!.prompt).toContain("and this detail\n  Files:");
     expect(fake.calls("plan_reviewer")[0]!.prompt).toContain("notes.txt");
     expect(fake.calls("planner")[1]!.prompt).not.toContain("and this detail");
@@ -651,11 +655,15 @@ describe("Workflow after a chat discussion", () => {
     expect(st.conversationContext?.exchanges).toEqual([
       { backend: "codex", question: "Should the fix keep the old format?", answer: "SYNTHESIS: keep the old format readable for old readers.", discussedWith: "claude" },
     ]);
-    for (const role of ["planner", "plan_reviewer", "plan_finalizer", "implementer", "code_reviewer"]) {
+    for (const role of ["planner", "plan_reviewer", "implementer", "code_reviewer"]) {
       const prompt = fake.calls(role)[0]!.prompt;
       expect(prompt, role).toContain("**Codex, after discussing it with Claude Code:**\nSYNTHESIS: keep the old format readable for old readers.");
       for (const draft of ["DRAFT: keep it.", "DRAFT 2:", "REVIEW: say why."]) expect(prompt, role).not.toContain(draft);
     }
+    // Plan sign-off continues the planner's session, which was told the conversation already.
+    const signOff = fake.calls("plan_finalizer")[0]!;
+    expect(signOff.resumed).toBe(fake.calls("planner")[0]!.session);
+    expect(signOff.prompt).not.toContain("SYNTHESIS:");
   });
 });
 
@@ -787,5 +795,137 @@ describe("Workflow with settings changed while it runs", () => {
     } finally {
       await chat.stop();
     }
+  });
+});
+
+describe("Workflow: context shared between the agents", () => {
+  /** Two planning rounds and two implementation rounds; the code reviewer leaves a file of its own in round 1. */
+  const twoRounds = (): Scenario => ({
+    planner: [{ output: plan("v1") }, { output: plan("v2", { feedback_resolution: [{ issue_id: "C1", decision: "accepted", rationale: "ok" }] }) }],
+    plan_reviewer: [{ output: critique(false, [issue("C1")]) }, { output: critique(true) }],
+    plan_finalizer: [{ output: approval(true) }],
+    implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed\nedge case handled\n" }, output: impl("completed", ["F1"]) }],
+    code_reviewer: [{ write: { "scratch.txt": "reviewer's\n" }, output: review(false, [finding("F1")]) }, { output: review(true, [], ["F1"]) }],
+  });
+  const calls = (role: string) => fake.calls(role).filter((c) => !c.lost);
+
+  it("continues each role's own session with only what is new, and never passes a session from one role to another", async () => {
+    expect(await start(twoRounds())).toBe(0);
+    const [planner1, planner2] = calls("planner");
+    const [critic1, critic2] = calls("plan_reviewer");
+    const [impl1, impl2] = calls("implementer");
+    const [review1, review2] = calls("code_reviewer");
+    const signOff = calls("plan_finalizer")[0]!;
+    for (const first of [planner1, critic1, impl1, review1]) expect(first!.resumed).toBeUndefined();
+    expect(planner2!.resumed).toBe(planner1!.session);
+    expect(signOff.resumed).toBe(planner1!.session);
+    expect(critic2!.resumed).toBe(critic1!.session);
+    expect(impl2!.resumed).toBe(impl1!.session);
+    expect(review2!.resumed).toBe(review1!.session);
+    // Four sessions, one per role: plan sign-off is the planner's own.
+    expect(new Set(fake.calls().map((c) => c.session)).size).toBe(4);
+    expect(stateOf(h).sessions).toEqual({
+      planner: expect.objectContaining({ backend: "codex", id: planner1!.session }),
+      plan_reviewer: expect.objectContaining({ backend: "claude", id: critic1!.session }),
+      implementer: expect.objectContaining({ backend: "claude", id: impl1!.session, planHash: stateOf(h).finalPlanHash }),
+      code_reviewer: expect.objectContaining({ backend: "codex", id: review1!.session, reviewed: stateOf(h).lastSnapshot!.commit }),
+    });
+    for (const c of [planner2, critic2, signOff, impl2, review2]) {
+      expect(c!.prompt, c!.role).toContain("this message continues your session");
+      expect(c!.prompt, c!.role).not.toContain("Make app.txt fixed");
+    }
+    for (const c of [planner1, critic1, impl1, review1]) expect(c!.prompt, c!.role).toContain("## Task\nMake app.txt fixed");
+    expect(planner2!.prompt).toContain("problem"); // the critique's issue
+    expect(planner2!.prompt).not.toContain("as JSON");
+    expect(critic2!.prompt).toContain("# Plan v2: v2");
+    // The implementer is told what changed after its turn (the reviewer's file), not its own edit.
+    expect(impl2!.prompt).toContain("## Files changed since your last turn");
+    expect(impl2!.prompt).toContain("- A `scratch.txt`");
+    expect(impl2!.prompt).not.toContain("- M `app.txt`");
+    expect(impl2!.prompt).toContain("`F1`");
+    expect(impl2!.prompt).not.toContain("# Plan v2");
+    // The reviewer gets the changes since the revision it reviewed, not the whole diff again.
+    const reviewed = JSON.parse(readRun("review.r1.json")).snapshot as string;
+    expect(review2!.prompt).toContain("## Changes since the revision you last reviewed (`" + reviewed + "` → ");
+    expect(review2!.prompt).toContain("+edge case handled");
+    expect(review2!.prompt).not.toContain("\n+fixed\n+edge case handled");
+    expect(review2!.prompt).toContain("- M `app.txt`");
+    expect(JSON.parse(readRun("review.r2.json")).resumed_session).toBe(true);
+    expect(JSON.parse(readRun("review.r1.json")).resumed_session).toBe(false);
+  });
+
+  it("starts a fresh session with the whole prompt when the CLI lost the one to continue, without spending a retry", async () => {
+    expect(await start({ ...twoRounds(), sessions: { lost: true } }, { limits: { max_retries: 0 } })).toBe(0);
+    const lost = fake.calls().filter((c) => c.lost).map((c) => c.role);
+    expect(lost).toEqual(["planner", "plan_reviewer", "plan_finalizer", "implementer", "code_reviewer"]);
+    for (const role of ["planner", "plan_reviewer", "plan_finalizer", "implementer", "code_reviewer"]) {
+      for (const c of calls(role)) {
+        expect(c.resumed, role).toBeUndefined();
+        expect(c.prompt, role).toContain("## Task\nMake app.txt fixed");
+      }
+    }
+    expect(stateOf(h).history.map((x) => `${x.phase}:${x.status}`)).toContain("CODE_REVIEW:approved");
+    expect(h.events.filter((e) => e.type === "agent.retry")).toHaveLength(5);
+  });
+
+  it("keeps no session when the user's args turn the CLI's sessions off, and passes their flag once", async () => {
+    expect(await start(twoRounds(), { codex: { args: ["--ephemeral"] }, claude: { args: ["--no-session-persistence"] } })).toBe(0);
+    for (const c of fake.calls()) {
+      expect(c.resumed, c.role).toBeUndefined();
+      expect(c.args.filter((a) => a === "--ephemeral" || a === "--no-session-persistence"), c.role).toHaveLength(1);
+      if (c.role !== "plan_finalizer") expect(c.prompt, c.role).toContain("## Task\nMake app.txt fixed");
+    }
+    expect(stateOf(h).sessions ?? {}).toEqual({});
+  });
+
+  it("continues the sessions of a resumed run from its state, with the decision's note, and starts fresh on a role's new CLI", async () => {
+    const scenario = { ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }, { output: review(false, [finding("F1")]) }, { output: review(true, [], ["F1"]) }] };
+    expect(await start(scenario, { limits: { max_review_rounds: 1 } })).toBe(2);
+    const saved = stateOf(h).sessions!;
+    expect(await resume(h, { decision: "resume", note: "try the edge case" })).toBe(2);
+    const impl2 = calls("implementer")[1]!;
+    expect(impl2.resumed).toBe(saved.implementer!.id);
+    expect(impl2.prompt).toContain("## New notes from the human operator (highest priority)\n- (");
+    expect(impl2.prompt).toContain("try the edge case");
+    expect(calls("code_reviewer")[1]!.resumed).toBe(saved.code_reviewer!.id);
+    // The implementer moves to Codex: its Claude session cannot go on there.
+    h.cfg = testConfig(fake, { limits: { max_review_rounds: 1 }, agents: { ...h.cfg.agents, implementer: "codex" } });
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    const impl3 = calls("implementer")[2]!;
+    expect([impl3.backend, impl3.resumed]).toEqual(["codex", undefined]);
+    expect(impl3.prompt).toContain("## Task\nMake app.txt fixed");
+    expect(stateOf(h).sessions!.implementer).toMatchObject({ backend: "codex", id: impl3.session });
+  });
+
+  it("passes on what agents recorded about the repository while it holds, never to the role that judges its author", async () => {
+    const notes = (...list: Array<[string, string]>) => ({ repo_notes: list.map(([path, note]) => ({ path, note })) });
+    expect(await start({
+      planner: [{ output: plan("v1", notes(["check.mjs", "CHECK-NOTE"], ["README.md", "README-NOTE"], ["nope.txt", "MISSING-NOTE"])) }],
+      plan_reviewer: [{ output: { ...critique(true), ...notes(["README.md", "CRITIC-NOTE"]) } }],
+      plan_finalizer: [{ output: approval(true) }],
+      implementer: [
+        { write: { "app.txt": "fixed\n", "README.md": "demo, fixed\n" }, output: { ...impl(), ...notes(["app.txt", "IMPL-NOTE"]) } },
+        { write: { "app.txt": "fixed\nedge case handled\n" }, output: impl("completed", ["F1"]) },
+      ],
+      code_reviewer: [{ output: { ...review(false, [finding("F1")]), ...notes(["check.mjs", "REVIEW-NOTE"]) } }, { output: review(true, [], ["F1"]) }],
+    })).toBe(0);
+    const prompt = (role: string, i = 0) => calls(role)[i]!.prompt;
+    // The critic checks the planner's assumptions itself.
+    expect(prompt("plan_reviewer")).not.toContain("CHECK-NOTE");
+    // Plan sign-off continues the planner's session: only the critic's note is new to it.
+    expect(prompt("plan_finalizer")).toContain("## New repository notes");
+    expect(prompt("plan_finalizer")).toContain("- `README.md`: CRITIC-NOTE (Claude Code, plan critic)");
+    expect(prompt("plan_finalizer")).not.toContain("CHECK-NOTE");
+    for (const note of ["- `check.mjs`: CHECK-NOTE (Codex, planner)", "README-NOTE", "CRITIC-NOTE"]) expect(prompt("implementer"), note).toContain(note);
+    expect(prompt("implementer")).not.toContain("MISSING-NOTE");
+    // README.md changed in the implementation: its notes no longer hold. The implementer's own never reach its reviewer.
+    expect(prompt("code_reviewer")).toContain("CHECK-NOTE");
+    for (const note of ["README-NOTE", "CRITIC-NOTE", "IMPL-NOTE"]) expect(prompt("code_reviewer"), note).not.toContain(note);
+    // The implementer's next turn is given the reviewer's note, and none of the ones its session has.
+    expect(prompt("implementer", 1)).toContain("- `check.mjs`: REVIEW-NOTE (Codex, code reviewer)");
+    expect(prompt("implementer", 1)).not.toContain("CHECK-NOTE");
+    expect(stateOf(h).repoNotes!.map((n) => `${n.role}:${n.note}`)).toEqual([
+      "planner:CHECK-NOTE", "planner:README-NOTE", "plan_reviewer:CRITIC-NOTE", "implementer:IMPL-NOTE", "code_reviewer:REVIEW-NOTE",
+    ]);
   });
 });

@@ -31,7 +31,7 @@ export function argumentOptions(backend: string): OptionSpec[] {
     { id: "deny", label: "Denied tool", description: "A tool or rule Claude must not use.", flags: ["--disallowedTools", "--disallowed-tools"], placeholder: "e.g. Bash(rm:*)", repeatable: true },
     folder,
     { id: "no-mcp", label: "Skip MCP servers", description: "Loads none of your MCP servers, which makes each call cheaper.", flags: ["--strict-mcp-config"], switch: true },
-    { id: "no-sessions", label: "Don't save sessions", description: "Claude Code keeps no session history of AgentDuo's calls.", flags: ["--no-session-persistence"], switch: true },
+    { id: "no-sessions", label: "Don't save sessions", description: "Claude Code keeps no session of AgentDuo's calls, so each pipeline step starts afresh instead of continuing its role's session.", flags: ["--no-session-persistence"], switch: true },
   ] : [
     { id: "effort", label: "Reasoning effort", description: "How much Codex reasons before it answers.", flags: ["-c", "--config"], prefix: "model_reasoning_effort=", choices: CODEX_EFFORTS },
     {
@@ -39,7 +39,7 @@ export function argumentOptions(backend: string): OptionSpec[] {
       labels: { "read-only": "Read only", "workspace-write": "Workspace access", "danger-full-access": "Full access" },
     },
     folder,
-    { id: "ephemeral", label: "Don't save sessions", description: "Codex keeps no session files of AgentDuo's calls.", flags: ["--ephemeral"], switch: true },
+    { id: "ephemeral", label: "Don't save sessions", description: "Codex keeps no session files of AgentDuo's calls, so each pipeline step starts afresh instead of continuing its role's session.", flags: ["--ephemeral"], switch: true },
   ];
 }
 

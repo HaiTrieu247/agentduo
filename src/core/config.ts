@@ -76,8 +76,10 @@ const DEFAULTS: ConfigData = {
   },
   gates: [],
   safety: { pause_before_implement: false },
-  codex: { bin: "codex", model: null, args: ["--ephemeral"], role_args: {} },
-  claude: { bin: "claude", model: null, max_budget_usd: null, permission_prompts: "ask", args: ["--no-session-persistence"], role_args: {} },
+  // No session flag here: agentduo keeps a pipeline role's sessions to continue them, and passes --ephemeral /
+  // --no-session-persistence to every other call. Listing one in args turns the continuation off.
+  codex: { bin: "codex", model: null, args: [], role_args: {} },
+  claude: { bin: "claude", model: null, max_budget_usd: null, permission_prompts: "ask", args: [], role_args: {} },
   paths: { runs_dir: ".agentduo/runs" },
 };
 

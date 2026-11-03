@@ -3,6 +3,7 @@ import { basename, dirname, join } from "node:path";
 import type { PermissionDenial } from "../agents/types.js";
 import type { HistoryEntry, HumanReview, Phase } from "../events.js";
 import type { Attachment } from "./attachment-types.js";
+import type { AgentRole, Backend } from "./config.js";
 import type { GateResult } from "./gates.js";
 import type { Snapshot } from "./git.js";
 import type { Approval, Critique, Finding } from "./outputs.js";
@@ -31,6 +32,40 @@ export interface EarlierTask {
 export type RunGit =
   | { mode: "native" }
   | { mode: "internal"; repositoryId: string; workspace: string; gitDir: string };
+
+/**
+ * A pipeline role's CLI session, which the role's next call continues, and how far it has been told about the run:
+ * that call's prompt gives only what came after. Keyed by config role, so plan sign-off continues the planner's
+ * session and no session ever passes from one role to another.
+ */
+export interface RoleSession {
+  backend: Backend;
+  id: string;
+  /** The workspace tree when its last turn ended: the files changed since are listed in its next turn. */
+  tree: string;
+  /** How many of the run's human notes it was given. */
+  notes: number;
+  /** The newest repository note (`seq`) it was given; 0: none. */
+  repoNotes: number;
+  /** The hash of the plan its last turn had (the one it wrote, critiqued or worked from). */
+  planHash: string | null;
+  /** Code reviewer: the revision it last reviewed, which its next diff starts from. */
+  reviewed: string | null;
+}
+
+/**
+ * A fact an agent of the run checked in the repository (its output's `repo_notes`), shared with the roles after it:
+ * `tree` is the workspace when the agent's turn ended, and a note whose path changed since is no longer given.
+ */
+export interface RepoNote {
+  seq: number;
+  role: AgentRole;
+  backend: Backend;
+  round: number;
+  path: string;
+  note: string;
+  tree: string;
+}
 
 /** One question of the chat and the answer it got. */
 export interface Exchange {
@@ -90,6 +125,10 @@ export interface RunState {
   conversationContext?: ConversationContext;
   /** Files attached to the task, copied into the run (so a resume needs neither the originals nor the chat); absent: none. */
   attachments?: Attachment[];
+  /** Each role's session that its next call continues; absent in older runs and while none is kept. */
+  sessions?: Partial<Record<AgentRole, RoleSession>>;
+  /** What the agents recorded about the repository, oldest first, at most MAX_REPO_NOTES; absent: none yet. */
+  repoNotes?: RepoNote[];
   costUsd: number;
   tokens: number;
   step: number;

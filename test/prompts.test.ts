@@ -236,3 +236,87 @@ describe("attachment manifests", () => {
     expect(prompts.planner(ctx, 1, 1, null, null)).not.toContain("Files");
   });
 });
+
+describe("prompts shared between the agents of a run", () => {
+  const conversation = { exchanges: [{ backend: "codex" as const, question: "Which file?", answer: "CONVERSATION-ANSWER" }], omitted: 0 };
+  const full: prompts.PromptContext = { ...ctx, conversation, earlier: [{ task: "EARLIER-TASK", outcome: "done" }], planFile: "/runs/t1/plan.final.md" };
+  /** A turn that continues the role's session: only the note it has not seen, and the files changed since its last turn. */
+  const continued = (extra: Partial<prompts.ContinuedTurn> = {}): prompts.PromptContext => ({
+    ...full, notes: [{ at: "2026-11-03T09:00:00+07:00", phase: "CODE_REVIEW", note: "NEW-NOTE" }],
+    continued: { changed: [["M", "app.txt"], ["A", "docs/new.md"]], knowsPlan: true, ...extra },
+  });
+  const planMd = "# Plan v2: PLAN-BODY";
+  const base = "a".repeat(40);
+  const snap = "b".repeat(40);
+  const all = (c: prompts.PromptContext) => ({
+    planner: prompts.planner(c, 2, 2, plan("PREVIOUS-PLAN"), { critique: critique(false, [issue("C1", "high", "CRITIQUE-ISSUE")]) }),
+    plan_reviewer: prompts.planReviewer(c, 2, 2, planMd, critique(false, [issue("C1", "high", "MY-OLD-ISSUE")])),
+    plan_finalizer: prompts.planFinalizer(c, 2, 2, planMd, critique(true)),
+    implementer: prompts.implementer(c, 2, planMd, [finding("F1")], review(false, [finding("F1")]), [], { summary: "MY-OLD-REPORT" }),
+    code_reviewer: prompts.codeReviewer(c, 2, planMd, base, snap, [], " app.txt | 1 +", "WHOLE-DIFF", false, [finding("F1")], impl("completed", ["F1"])),
+  });
+
+  it("give a continued session only what is new: what changed, the notes it has not seen, and the work to judge", () => {
+    for (const [role, p] of Object.entries(all(continued()))) {
+      expect(p.split("\n")[0], role).toBe(`[orchestrator-role: ${role}]`);
+      expect(p, role).toContain("this message continues your session");
+      expect(p, role).toContain("## Files changed since your last turn");
+      expect(p, role).toContain("- M `app.txt`\n- A `docs/new.md`");
+      expect(p, role).toContain("## New notes from the human operator (highest priority)\n- (2026-11-03T09:00:00+07:00, during CODE_REVIEW) NEW-NOTE");
+      expect(p, role).toContain("single JSON object");
+      // What the session holds already: the task, what came before it, the roles, and the agent's own earlier answers.
+      for (const old of ["## Task", "Sửa app.txt cho đúng", "CONVERSATION-ANSWER", "EARLIER-TASK", "Roles: planner", "PREVIOUS-PLAN", "MY-OLD-ISSUE", "MY-OLD-REPORT"]) {
+        expect(p, `${role}: ${old}`).not.toContain(old);
+      }
+    }
+    const p = all(continued());
+    expect(p.planner).toContain("CRITIQUE-ISSUE");
+    expect(p.planner).toContain("The plan you returned earlier in this session. It is also in `/runs/t1/plan.final.md`.");
+    expect(p.plan_reviewer).toContain(planMd);
+    expect(p.plan_reviewer).toContain("Your last answer in this session");
+    for (const role of ["plan_finalizer", "implementer", "code_reviewer"] as const) {
+      expect(p[role], role).not.toContain("PLAN-BODY");
+      expect(p[role], role).toContain("It is also in `/runs/t1/plan.final.md`.");
+    }
+    expect(p.implementer).toContain("`F1`");
+    expect(p.code_reviewer).toContain("Implementer: fixed");
+    // Without the revision it last reviewed, a continued review gets the whole diff, as a fresh one does.
+    expect(p.code_reviewer).toContain("## Diff\n```diff\nWHOLE-DIFF\n```");
+  });
+
+  it("give a continued session the plan again when it changed, and its own answers when it does not have them", () => {
+    const p = all(continued({ knowsPlan: false }));
+    for (const role of ["plan_finalizer", "implementer", "code_reviewer"] as const) expect(p[role], role).toContain(`(new since your last turn)\n${planMd}`);
+    expect(p.planner).toContain("## Previous plan (v1) as JSON");
+    expect(prompts.planner(continued({ changed: [] }), 1, 1, null, null)).toContain("None: the workspace is as your last turn left it.");
+    const many = Array.from({ length: 103 }, (_, i): [string, string] => ["M", `f${i}.ts`]);
+    expect(prompts.implementer(continued({ changed: many }), 2, planMd, [], null, [], null)).toContain("- … and 3 more");
+  });
+
+  it("give a continued code review the changes since the revision it reviewed, and say where the whole diff is", () => {
+    const since = { from: "c".repeat(40), stat: " app.txt | 2 +-", diff: "SINCE-DIFF", truncated: false };
+    const p = prompts.codeReviewer(continued({ sinceReviewed: since }), 2, planMd, base, snap, [], " app.txt | 1 +", "WHOLE-DIFF", false, [], impl());
+    expect(p).toContain("## Changes since the revision you last reviewed (`" + since.from + "` → `" + snap + "`)");
+    expect(p).toContain("SINCE-DIFF");
+    expect(p).not.toContain("WHOLE-DIFF");
+    expect(p).toContain("Judge the whole change all the same: run `git diff " + base + " " + snap + " -- .` for the full diff.");
+    expect(p).toContain("## Diff stat (base → revision)");
+    const internal = prompts.codeReviewer({ ...continued({ sinceReviewed: { ...since, truncated: true } }), internalSnapshots: true }, 2, planMd, base, snap, [], "", "WHOLE-DIFF",
+      false, [], impl(), "/runs/t1/diff.r2.patch");
+    expect(internal).toContain("read the whole diff in `/runs/t1/diff.r2.patch`. This diff is TRUNCATED.");
+  });
+
+  it("pass on what earlier agents recorded about the repository, and ask the exploring roles for theirs", () => {
+    const repoNotes = [{ seq: 1, role: "planner" as const, backend: "codex" as const, round: 1, path: "src/x.ts", note: "Builds the prompts.", tree: "T" }];
+    const fresh = all({ ...full, repoNotes });
+    for (const [role, p] of Object.entries(fresh)) {
+      expect(p, role).toContain("## Repository notes from earlier agents");
+      expect(p, role).toContain("- `src/x.ts`: Builds the prompts. (Codex, planner)");
+      expect(p.indexOf("## Repository notes from earlier agents"), role).toBeGreaterThan(p.indexOf("## Notes from the human operator"));
+      // The sign-off's schema has no notes; every other role leaves its own.
+      expect(p.includes("In `repo_notes`, leave the facts"), role).toBe(role !== "plan_finalizer");
+    }
+    expect(all({ ...continued(), repoNotes }).implementer).toContain("## New repository notes\nRecorded by other agents of this run since your last turn");
+    expect(all(full).implementer).not.toContain("Repository notes from");
+  });
+});

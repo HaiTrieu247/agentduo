@@ -14,7 +14,8 @@
     "risks",
     "test_strategy",
     "open_questions",
-    "feedback_resolution"
+    "feedback_resolution",
+    "repo_notes"
   ],
   "properties": {
     "title": {
@@ -127,6 +128,25 @@
             ]
           },
           "rationale": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "repo_notes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "note"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "note": {
             "type": "string"
           }
         }

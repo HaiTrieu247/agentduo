@@ -1,10 +1,12 @@
 import type { DiscussionStep, Verdict } from "../events.js";
 import { attachmentDetail, type Attachment } from "./attachment-types.js";
 import type { AgentRole, Backend, GateConfig } from "./config.js";
+import { MAX_NOTES_PER_TURN } from "./context.js";
 import { describeGates, type GateResult } from "./gates.js";
+import type { Change } from "./git.js";
 import type { Approval, Critique, Finding, Implementation, Plan, Review } from "./outputs.js";
 import { findingsMarkdown, issuesMarkdown } from "./render.js";
-import type { ConversationContext, EarlierTask, Exchange, HumanNote } from "./state.js";
+import type { ConversationContext, EarlierTask, Exchange, HumanNote, RepoNote } from "./state.js";
 
 /** Where an attachment's copy is, as a prompt names it: its absolute path, or null when its reference is unusable. */
 export type Locate = (a: Attachment) => string | null;
@@ -25,6 +27,24 @@ export interface PromptContext {
   locate?: Locate;
   /** The run keeps its snapshots in agentduo's own Git repository, outside the workspace (which may have none). */
   internalSnapshots?: boolean;
+  /** What earlier agents of the run recorded about the repository, already limited to the notes this role may have that still hold. */
+  repoNotes?: RepoNote[];
+  /**
+   * The call continues the role's own session: its prompt gives only what is new since the session's last turn, and
+   * `notes` and `repoNotes` are only the ones it was not given yet.
+   */
+  continued?: ContinuedTurn;
+  /** The file of the plan the prompt is about, which a continued session that already has the plan is pointed to. */
+  planFile?: string;
+}
+
+export interface ContinuedTurn {
+  /** Files of the workspace that changed after the session's last turn ended. */
+  changed: Change[];
+  /** The plan the prompt is about is the one the session's last turn had. */
+  knowsPlan: boolean;
+  /** Code reviewer: the changes since the revision it last reviewed, given instead of the whole diff. */
+  sinceReviewed?: { from: string; stat: string; diff: string; truncated: boolean };
 }
 
 const INTERNAL_SNAPSHOTS = "- Snapshots: agentduo keeps this run's snapshots in a Git repository of its own, outside the workspace. The workspace " +
@@ -49,6 +69,9 @@ export const SEVERITY_GUIDE = [
 export const OUTPUT_RULES = "## Output\nYour final message must be a single JSON object matching the provided output schema. No prose outside the JSON.\n";
 
 const NAMES: Record<Backend, string> = { codex: "Codex", claude: "Claude Code" };
+const ROLE_TITLES: Record<AgentRole, string> = { planner: "planner", plan_reviewer: "plan critic", implementer: "implementer", code_reviewer: "code reviewer" };
+/** The most changed files a continued turn lists one by one. */
+const MAX_CHANGED_LISTED = 100;
 
 /** A markdown fence longer than any backtick run inside `text`, so the text cannot close it early. */
 export function fenceFor(text: string): string {
@@ -66,6 +89,65 @@ function header(role: string, title: string, ctx: PromptContext): string {
     "- Workspace: `" + ctx.repo + "`\n" +
     "- Task ID: `" + ctx.taskId + "`\n" +
     (ctx.internalSnapshots ? INTERNAL_SNAPSHOTS : "");
+}
+
+/** The opening of a turn that continues the role's session, which holds everything the first turn of it was given. */
+function continuedHeader(role: string, title: string, ctx: PromptContext): string {
+  return "[orchestrator-role: " + role + "]\n" +
+    "You are the **" + title + "** of task `" + ctx.taskId + "` in the same two-agent workflow, and this message continues your session. " +
+    "Your earlier turns hold the task, the conversation, the earlier notes, the roles and what you read in the repository; this message " +
+    "gives only what is new since your last turn. Read a file again before you rely on what you remember of it, above all a file listed below.\n" +
+    (ctx.internalSnapshots ? INTERNAL_SNAPSHOTS : "");
+}
+
+function changedSection(changed: Change[]): string {
+  const title = "## Files changed since your last turn\n";
+  if (!changed.length) return title + "None: the workspace is as your last turn left it.\n";
+  const shown = changed.slice(0, MAX_CHANGED_LISTED).map(([status, path]) => `- ${status} ${inlineCode(path)}`).join("\n");
+  const more = changed.length > MAX_CHANGED_LISTED ? `\n- … and ${changed.length - MAX_CHANGED_LISTED} more` : "";
+  return title + "Another agent, a quality gate or the user changed these after your last turn ended (A added, M modified, D deleted); " +
+    "what you remember of them is out of date.\n" + shown + more + "\n";
+}
+
+function repoNotesSection(list: RepoNote[] | undefined, continued: boolean): string {
+  if (!list?.length) return "";
+  const title = continued ? "## New repository notes" : "## Repository notes from earlier agents";
+  const intro = (continued ? "Recorded by other agents of this run since your last turn" : "Recorded by earlier agents of this run") +
+    ". Each still holds as far as agentduo can tell: nothing under its path changed since it was written. Use them instead of looking the " +
+    "same things up again, and read the file when a detail matters.";
+  return `\n${title}\n${intro}\n` + list.map((n) => `- ${inlineCode(n.path)}: ${n.note} (${NAMES[n.backend]}, ${ROLE_TITLES[n.role]})`).join("\n") + "\n";
+}
+
+/** What a role that explores the repository leaves for the next ones (the schemas' `repo_notes`). */
+const REPO_NOTES_ASK = "## Repository notes\nIn `repo_notes`, leave the facts about this repository that you checked in its files and that the " +
+  "agents after you would otherwise have to look up again: what a file or folder holds, where something is defined, a convention, the command " +
+  `that runs the tests. One fact per entry, in a sentence, at most ${MAX_NOTES_PER_TURN}, each with the workspace-relative \`path\` of the file ` +
+  "or folder it is about (for a command, the file that defines it, such as package.json): agentduo stops passing a note on as soon as anything " +
+  "under its path changes. Only what the files show, with no plans, opinions or verdicts, and nothing the notes you were given already say; " +
+  "an empty list is fine.\n";
+
+/**
+ * The start of a role's prompt. Fresh: who is who, the task and its files, what came before it, the notes and what
+ * earlier agents recorded. Continued: only the files changed since the session's last turn, and the notes it was not
+ * given yet.
+ */
+function opening(role: string, title: string, ctx: PromptContext, position: string): string[] {
+  if (ctx.continued) {
+    return [
+      continuedHeader(role, title, ctx),
+      position,
+      changedSection(ctx.continued.changed),
+      notes(ctx.notes, ctx.locate, true),
+      repoNotesSection(ctx.repoNotes, true),
+    ].filter(Boolean);
+  }
+  return [header(role, title, ctx), position, taskSection(ctx), earlier(ctx), notes(ctx.notes, ctx.locate), repoNotesSection(ctx.repoNotes, false)];
+}
+
+/** The plan section of a prompt about a plan the session may already have: a pointer then, and the whole plan otherwise. */
+function planSection(title: string, planMd: string, ctx: PromptContext, had: string): string {
+  if (ctx.continued?.knowsPlan) return `## ${title}\n${had}` + (ctx.planFile ? ` It is also in \`${ctx.planFile}\`.` : "") + "\n";
+  return `## ${title}${ctx.continued ? " (new since your last turn)" : ""}\n${planMd}\n`;
 }
 
 function gateList(gates: GateConfig[]): string {
@@ -242,11 +324,12 @@ export function discussion(o: {
 const NOTE_FILES = "agentduo keeps a copy of each file that came with a note at the path given. The images your CLI can take are also attached " +
   "to this message as images; read the other files at their paths.";
 
-function notes(list: HumanNote[], locate?: Locate): string {
+function notes(list: HumanNote[], locate?: Locate, onlyNew = false): string {
   if (!list.length) return "";
   const files = (n: HumanNote) => (n.attachments?.length && locate ? `\n  Files:\n${attachmentLines(n.attachments, locate, "  ")}` : "");
   const intro = locate && list.some((n) => n.attachments?.length) ? `${NOTE_FILES}\n` : "";
-  return "\n## Notes from the human operator (highest priority)\n" + intro + list.map((n) => `- (${n.at}, during ${n.phase}) ${n.note}${files(n)}`).join("\n") + "\n";
+  return `\n## ${onlyNew ? "New notes" : "Notes"} from the human operator (highest priority)\n` + intro +
+    list.map((n) => `- (${n.at}, during ${n.phase}) ${n.note}${files(n)}`).join("\n") + "\n";
 }
 
 function feedbackSection(feedback: PlanFeedback | null): string {
@@ -264,11 +347,7 @@ function feedbackSection(feedback: PlanFeedback | null): string {
 
 export function planner(ctx: PromptContext, round: number, version: number, previousPlan: Plan | null, feedback: PlanFeedback | null): string {
   const out = [
-    header("planner", "Planner / Architect", ctx),
-    `- Planning round: ${round} · Producing plan version: v${version}\n`,
-    taskSection(ctx),
-    earlier(ctx),
-    notes(ctx.notes, ctx.locate),
+    ...opening("planner", "Planner / Architect", ctx, `- Planning round: ${round} · Producing plan version: v${version}\n`),
     "## Your job\n" +
       "Study the repository and produce an implementation plan that the implementer can execute without further clarification.\n" +
       "- Goals and explicit scope (in / out). Keep the scope to what the task needs.\n" +
@@ -282,25 +361,26 @@ export function planner(ctx: PromptContext, round: number, version: number, prev
   if (!previousPlan) {
     out.push("\nThis is the first version: return `feedback_resolution` as an empty list.\n");
   } else {
-    const json = JSON.stringify(previousPlan, null, 2);
-    const fence = fenceFor(json);
-    out.push(`\n## Previous plan (v${version - 1}) as JSON\n${fence}json\n${json}\n${fence}\n`);
+    if (ctx.continued?.knowsPlan) {
+      // Its own answer, already in its session.
+      out.push(`\n## Previous plan (v${version - 1})\nThe plan you returned earlier in this session.` + (ctx.planFile ? ` It is also in \`${ctx.planFile}\`.` : "") + "\n");
+    } else {
+      const json = JSON.stringify(previousPlan, null, 2);
+      const fence = fenceFor(json);
+      out.push(`\n## Previous plan (v${version - 1}) as JSON\n${fence}json\n${json}\n${fence}\n`);
+    }
     out.push(feedbackSection(feedback));
     out.push("\nRevise the plan to address the feedback. In `feedback_resolution`, add one entry per issue id " +
       "above with decision `accepted`, `partially_accepted` or `disputed` and a rationale. Dispute only " +
       "with a concrete technical reason; disputed critical/high issues will go back to the critic.\n");
   }
-  out.push(OUTPUT_RULES);
+  out.push(REPO_NOTES_ASK, OUTPUT_RULES);
   return out.join("\n");
 }
 
 export function planReviewer(ctx: PromptContext, round: number, version: number, planMd: string, previousCritique: Critique | null): string {
   const out = [
-    header("plan_reviewer", "Plan Critic", ctx),
-    `- Planning round: ${round} · Plan under review: v${version}\n`,
-    taskSection(ctx),
-    earlier(ctx),
-    notes(ctx.notes, ctx.locate),
+    ...opening("plan_reviewer", "Plan Critic", ctx, `- Planning round: ${round} · Plan under review: v${version}\n`),
     "## Plan under review\n" + planMd + "\n",
     "## Your job\n" +
       "Judge whether this plan is feasible in THIS codebase; the implementer must be able to execute it without guessing:\n" +
@@ -318,22 +398,21 @@ export function planReviewer(ctx: PromptContext, round: number, version: number,
       "still disagree with, with your reasoning; re-raise any still-blocking one in `issues`.\n" +
       "- `proposed_changes`: concrete edits to the plan you recommend.\n",
   ];
-  if (previousCritique) {
+  if (previousCritique && ctx.continued) {
+    out.push("\n## Your critique from the previous round\nYour last answer in this session. Check how the new plan version addressed each " +
+      "of its issues (see its 'Response to feedback' section).\n");
+  } else if (previousCritique) {
     out.push("\n## Your critique from the previous round\n" + issuesMarkdown(previousCritique.issues) +
       "\n\nCheck how the new plan version addressed each of these (see its 'Response to feedback' section).\n");
   }
-  out.push(OUTPUT_RULES);
+  out.push(REPO_NOTES_ASK, OUTPUT_RULES);
   return out.join("\n");
 }
 
 export function planFinalizer(ctx: PromptContext, round: number, version: number, planMd: string, critique: Critique): string {
   return [
-    header("plan_finalizer", "Planner / Architect (final plan sign-off)", ctx),
-    `- Planning round: ${round} · Plan up for sign-off: v${version}\n`,
-    taskSection(ctx),
-    earlier(ctx),
-    notes(ctx.notes, ctx.locate),
-    "## Plan\n" + planMd + "\n",
+    ...opening("plan_finalizer", "Planner / Architect (final plan sign-off)", ctx, `- Planning round: ${round} · Plan up for sign-off: v${version}\n`),
+    planSection("Plan", planMd, ctx, `The plan up for sign-off is v${version}, the one you returned in your last turn.`),
     "## The critic approved this version\n" + critique.summary + "\n\nRemaining suggestions:\n" + issuesMarkdown(critique.issues) + "\n",
     "## Your job\n" +
       "Confirm whether this exact plan version is final and ready for implementation. Approve " +
@@ -347,12 +426,8 @@ export function planFinalizer(ctx: PromptContext, round: number, version: number
 export function implementer(ctx: PromptContext, round: number, planMd: string, findings: Finding[], review: Review | null,
   failedGates: GateResult[], previousReport: { summary: string | null } | null): string {
   const out = [
-    header("implementer", "Implementer", ctx),
-    `- Implementation round: ${round}\n`,
-    taskSection(ctx),
-    earlier(ctx),
-    notes(ctx.notes, ctx.locate),
-    "## Final approved plan\n" + planMd + "\n",
+    ...opening("implementer", "Implementer", ctx, `- Implementation round: ${round}\n`),
+    planSection("Final approved plan", planMd, ctx, "Unchanged: the final approved plan you were given earlier in this session."),
     "## How to work\n" +
       "- Implement the plan and stay within its scope.\n" +
       (ctx.gates.length
@@ -373,10 +448,11 @@ export function implementer(ctx: PromptContext, round: number, planMd: string, f
         "`not_applicable`, or `disputed` with a concrete technical justification.\n");
     }
     if (failedGates.length) out.push("### Failing quality gates (run by agentduo)\n" + describeGates(failedGates) + "\n");
-    if (previousReport?.summary) out.push("### Your previous report\n" + previousReport.summary + "\n");
+    // A continued session has its own previous report already.
+    if (previousReport?.summary && !ctx.continued) out.push("### Your previous report\n" + previousReport.summary + "\n");
   }
-  out.push("## Output\nYour final message must be a single JSON object matching the output schema: summary, files_changed, " +
-    "tests_run (what you actually ran and whether it passed) and addressed_findings.\n");
+  out.push(REPO_NOTES_ASK, "## Output\nYour final message must be a single JSON object matching the output schema: summary, files_changed, " +
+    "tests_run (what you actually ran and whether it passed), addressed_findings and repo_notes.\n");
   return out.join("\n");
 }
 
@@ -391,22 +467,28 @@ export function codeReviewer(ctx: PromptContext, round: number, planMd: string, 
   const stat = diffStat.trimEnd() || "(no changes)";
   const statFence = fenceFor(stat);
   const whole = ctx.internalSnapshots && fullDiff ? "read the whole diff in `" + fullDiff + "`" : "run `git diff " + base + " " + snapshot + " -- .` for the full diff";
+  const since = ctx.continued?.sinceReviewed;
   const out = [
-    header("code_reviewer", "Code Reviewer", ctx),
-    `- Review round: ${round}\n` +
+    ...opening("code_reviewer", "Code Reviewer", ctx, `- Review round: ${round}\n` +
       "- Revision under review: `" + snapshot + "` (agentduo snapshot of the workspace" +
       (ctx.internalSnapshots ? ", in agentduo's own repository: review it from the diff below" : "") + ")\n" +
-      "- Base revision: `" + base + "`\n",
-    taskSection(ctx),
-    earlier(ctx),
-    notes(ctx.notes, ctx.locate),
-    "## Final approved plan\n" + planMd + "\n",
+      "- Base revision: `" + base + "`\n"),
+    planSection("Final approved plan", planMd, ctx, "Unchanged: the final approved plan you were given earlier in this session."),
     "## Quality gate results (run by agentduo on this revision)\n" + describeGates(gateResults) + "\n",
     "## Implementer's report\n" + implReport.summary + "\n\nTests the implementer says it ran:\n" + tests + "\n",
     "## Diff stat (base → revision)\n" + statFence + "\n" + stat + "\n" + statFence + "\n",
-    "## Diff" + (truncated ? " (TRUNCATED: " + whole + ")" : "") + "\n" +
-      fence + "diff\n" + diff + "\n" + fence + "\n",
   ];
+  if (since) {
+    // The session reviewed the diff up to `since.from`; it gets what changed after it, and is told where the whole one is.
+    const sinceStat = since.stat.trimEnd() || "(no changes)";
+    const sinceFence = fenceFor(since.diff);
+    out.push("## Changes since the revision you last reviewed (`" + since.from + "` → `" + snapshot + "`)\n" +
+      "You reviewed the diff up to `" + since.from + "` in your last turn; this is what changed after it. Judge the whole change all the same: " +
+      whole + (since.truncated ? ". This diff is TRUNCATED." : ".") + "\n" +
+      fenceFor(sinceStat) + "\n" + sinceStat + "\n" + fenceFor(sinceStat) + "\n\n" + sinceFence + "diff\n" + since.diff + "\n" + sinceFence + "\n");
+  } else {
+    out.push("## Diff" + (truncated ? " (TRUNCATED: " + whole + ")" : "") + "\n" + fence + "diff\n" + diff + "\n" + fence + "\n");
+  }
   if (previousFindings.length) {
     const responses = new Map(implReport.addressed_findings.map((a) => [a.finding_id, a]));
     const lines = previousFindings.map((f) => {
@@ -430,6 +512,7 @@ export function codeReviewer(ctx: PromptContext, round: number, planMd: string, 
     "- `reviewed_commit` must be exactly `" + snapshot + "`.\n" +
     "- New finding ids continue the sequence `F1`, `F2`, ...; `file` is workspace-relative (empty string if " +
     "general) and `line` may be null.\n",
+    REPO_NOTES_ASK,
     OUTPUT_RULES);
   return out.join("\n");
 }

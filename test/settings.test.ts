@@ -61,6 +61,7 @@ describe("settings", () => {
 
   it("sets Claude's model and effort, its allow and deny rules, and extra directories", () => {
     const cfg = defaultConfig();
+    cfg.claude.args = ["--no-session-persistence"]; // an arg of the user's own, which no setting touches
     settings.claudeModel("opus").apply(cfg);
     settings.claudeEffort("high").apply(cfg);
     settings.claudeEffort("max").apply(cfg);
@@ -87,6 +88,7 @@ describe("settings", () => {
 
   it("sets Codex's model, reasoning effort and permission preset", () => {
     const cfg = defaultConfig();
+    cfg.codex.args = ["--ephemeral"]; // an arg of the user's own, which no setting touches
     settings.codexModel("gpt-5.5", "high").apply(cfg);
     settings.codexModel("gpt-5.5", "xhigh").apply(cfg);
     settings.codexPermissions("auto").apply(cfg);

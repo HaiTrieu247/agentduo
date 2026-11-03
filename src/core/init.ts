@@ -75,7 +75,7 @@ export function renderConfigYaml(gates: DetectedGate[]): string {
     "#   role_args:",
     "#     implementer: [--permission-mode, acceptEdits]",
     "# codex:",
-    "#   args: [--ephemeral]",
+    "#   args: [--ephemeral]   # start every Codex call fresh instead of continuing its role's session (claude: --no-session-persistence)",
     "",
     "# limits:",
     "#   max_planning_rounds: 4",

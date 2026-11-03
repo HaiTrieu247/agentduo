@@ -36,8 +36,9 @@ describe("loadConfig", () => {
     expect(data.gates).toEqual([]);
     expect(data.limits.agent_idle_timeout_sec).toBe(900);
     expect(data.limits.max_discussion_rounds).toBe(3);
-    expect(data.codex.args).toEqual(["--ephemeral"]);
-    expect(data.claude.args).toEqual(["--no-session-persistence"]);
+    // No session flag by default: agentduo decides per call which sessions are kept (see the backends' buildArgs).
+    expect(data.codex.args).toEqual([]);
+    expect(data.claude.args).toEqual([]);
     expect(data.paths.runs_dir).toBe(".agentduo/runs");
     expect(sources).toHaveLength(2);
     expect(warnings).toEqual([]);
@@ -82,7 +83,7 @@ describe("loadConfig", () => {
     const { dir, env } = setup("codex:\nclaude:\n  args:\ngates:\n");
     const { data } = loadConfig({ dir, env });
     expect(data.codex.bin).toBe("codex");
-    expect(data.claude.args).toEqual(["--no-session-persistence"]);
+    expect(data.claude.args).toEqual([]);
     expect(data.gates).toEqual([]);
   });
 
