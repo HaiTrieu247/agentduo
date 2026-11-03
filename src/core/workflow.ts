@@ -14,10 +14,11 @@ import type { Change, Git } from "./git.js";
 import type { Approval, Critique, Finding, Implementation, Issue, Plan, RepoNoteOutput, Review } from "./outputs.js";
 import * as prompts from "./prompts.js";
 import * as render from "./render.js";
+import { recordResponses, reviewFindings, setFindings, unanswered, type ReviewFindings } from "./findings.js";
 import { blockedReview, changedParts, findingsDigest, heldReview, implementerSettings, nextBlocker } from "./progress.js";
 import { internalNotice, openRunGit, prepareRunGit } from "./run-git.js";
 import { leavesBase } from "../paths.js";
-import { nowIso, type ProgressMark, type RunState, type RunStore } from "./state.js";
+import { nowIso, type FindingsSource, type ProgressMark, type RunState, type RunStore } from "./state.js";
 
 export const EXIT = { DONE: 0, ERROR: 1, HUMAN_REVIEW: 2, ABORTED: 3, INTERRUPTED: 130 } as const;
 
@@ -76,6 +77,23 @@ interface AgentTurn<T> {
 }
 
 class Interrupted extends Error {}
+
+/** implementation.r<k>.json, as far as a re-run of the round reads it back. */
+interface ImplementationRecord {
+  snapshot: string;
+  output: Implementation | null;
+  attempt_changes?: Array<{ status: string; path: string }>;
+  changes: Array<{ status: string; path: string }>;
+  earlier_attempts?: unknown[];
+}
+
+/** An earlier attempt of a round, as the round's record keeps it once a later attempt replaces it. */
+function attemptOf(r: ImplementationRecord): Record<string, unknown> {
+  return {
+    snapshot: r.snapshot, status: r.output?.status ?? null, summary: r.output?.summary ?? null, blocking_reason: r.output?.blocking_reason ?? null,
+    addressed_findings: r.output?.addressed_findings ?? [], changes: r.attempt_changes ?? r.changes,
+  };
+}
 
 export class DecisionError extends Error {
   override name = "DecisionError";
@@ -283,7 +301,10 @@ export class Workflow {
     const approved = store.exists("review.json") && store.readJson<{ output: Review }>("review.json").output.approved;
     const review = approved ? "the review approved" : "the review did not approve (require_codex_approval is off)";
     if (!cfg.gates.length) return `${review}; no quality gates configured`;
-    const gates = requiredPassed(this.state.lastGates ?? []) ? "quality gates passed" : "required gates failing (require_tests_pass is off)";
+    const st = this.state;
+    // Gates of an earlier revision: the files kept changing after they ran (CODE_REVIEW re-runs them once a round).
+    const earlier = st.gatesTree != null && st.lastSnapshot != null && st.gatesTree !== st.lastSnapshot.tree ? " on an earlier revision" : "";
+    const gates = requiredPassed(st.lastGates ?? []) ? `quality gates passed${earlier}` : `required gates failing${earlier} (require_tests_pass is off)`;
     return `${gates} and ${review}`;
   }
 
@@ -660,8 +681,9 @@ export class Workflow {
     if (st.base !== null) {
       // Re-planned after implementation started: continue in a new round, with no stale review or gate results.
       st.implRound += 1;
-      st.openFindings = [];
+      setFindings(st, [], null);
       st.lastGates = null;
+      st.gatesTree = null;
       st.consecutiveGateFailures = 0;
       this.ensureReviewBudget();
     }
@@ -673,6 +695,47 @@ export class Workflow {
   }
 
   // -------------------------------------------------------- implementation
+  /** The review the open findings come from; an older run's is in review.json. Null while there are none. */
+  private findingsSource(): FindingsSource | null {
+    const st = this.state;
+    if (st.findingsSource !== undefined || !st.openFindings.length) return st.findingsSource ?? null;
+    if (!this.o.store.exists("review.json")) return null;
+    const r = this.o.store.readJson<{ round: number; output: Review }>("review.json");
+    return { round: r.round, revision: r.output.reviewed_commit };
+  }
+
+  /** The open findings as they stand against `tree`: what was answered since their review, and which files changed since its revision. */
+  private async findingsAt(tree: string): Promise<ReviewFindings | null> {
+    const st = this.state;
+    if (!st.openFindings.length) return null;
+    const source = this.findingsSource();
+    let changedSince: Change[] | null = null;
+    try {
+      changedSince = source ? await this.git.nameStatus(source.revision, tree) : null;
+    } catch {
+      // that revision is gone (pruned, or another repository): the findings go without what changed since
+    }
+    const store = this.o.store;
+    const summary = store.exists("review.json") ? store.readJson<{ output: Review }>("review.json").output.summary : "";
+    return reviewFindings({ state: st, source, summary, changedSince, workspace: this.o.repo });
+  }
+
+  /**
+   * Brings the round's snapshot up to the workspace, when files changed after it was taken by something other than the
+   * step that took it (you, another process, while the run waited or ran): the step that comes next must judge the code
+   * that is there, not an older revision of it.
+   */
+  private async catchUp(phase: Phase): Promise<void> {
+    const st = this.state;
+    const k = st.implRound;
+    const tree = await this.tree();
+    if (tree === st.lastSnapshot!.tree) return;
+    const changed = await this.git.nameStatus(st.lastSnapshot!.tree, tree);
+    const snap = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}`), `agentduo ${st.taskId}: round ${k} before ${phase}`);
+    st.lastSnapshot = { commit: snap.commit, tree: snap.tree };
+    if (changed.length) this.warn(`${changed.length} file(s) changed after the last snapshot, not by the run's last step: ${listChanges(changed)}; ${phase} takes the workspace as it is now`);
+  }
+
   private ensureReviewBudget(): void {
     const st = this.state;
     if (st.implRound > st.limits.reviewRounds) st.limits.reviewRounds = st.implRound + this.o.cfg.limits.max_review_rounds - 1;
@@ -706,14 +769,20 @@ export class Workflow {
     // A re-run round keeps its first starting point, but the turn is told about the workspace as it is now.
     const now = started ? await this.tree() : pre.tree;
     const beforeOutside = await this.outsideTree();
-    const review = store.exists("review.json") ? store.readJson<{ output: Review }>("review.json").output : null;
+    // The findings as they stand against the workspace now, which the round's earlier attempts may have changed.
+    const findings = await this.findingsAt(now);
+    const last = st.lastImplementation?.round === k ? st.lastImplementation : null;
+    // A re-run of the round is told what its earlier attempt left in the working tree, so that it goes on from there.
+    const rerun: prompts.EarlierAttempt | null = started
+      ? { status: last?.status ?? null, summary: last?.summary ?? null, blockingReason: last?.blockingReason ?? null, changes: await this.git.nameStatus(pre.tree, now) }
+      : null;
     const failed = k > 1 ? (st.lastGates ?? []).filter((g) => !g.passed) : [];
     const planMd = store.readText("plan.final.md");
     const check = (rep: Implementation) =>
       rep.status === "blocked" && !(rep.blocking_reason ?? "").trim() ? ["status is 'blocked' but blocking_reason is empty"] : [];
     const turnSpec: AgentTurn<Implementation> = {
       role: "implementer", agentRole: "implementer", label: "implement", schemaName: "implementation", round: k, check,
-      build: (ctx) => prompts.implementer(ctx, k, planMd, st.openFindings, review, failed, st.lastImplementation),
+      build: (ctx) => prompts.implementer(ctx, k, planMd, findings, failed, { summary: st.lastImplementation?.summary ?? null, rerun }),
       plan: { about: st.finalPlanHash, after: () => st.finalPlanHash, file: store.path("plan.final.md") },
     };
     // The notes this attempt is given: one added while it runs reaches only the next.
@@ -727,12 +796,20 @@ export class Workflow {
     await this.warnOutside(beforeOutside, "IMPLEMENT");
     const denials = res.meta.permissionDenials ?? [];
     const report = res.data as Implementation | null;
-    const answered = new Set((report?.addressed_findings ?? []).map((a) => a.finding_id));
-    const missing = report ? st.openFindings.filter((f) => !answered.has(f.id)).map((f) => f.id) : [];
-    store.writeJson(`implementation.r${k}.json`, await this.envelope("implementer", k, res, {
-      pre_snapshot: pre.commit, snapshot: post.commit, changes: changes.map(([status, path]) => ({ status, path })), unanswered_findings: missing,
+    // Its answers hold until the next review, also from an attempt that ended blocked: no later attempt is asked again.
+    if (report) recordResponses(st, report, k);
+    const missing = report ? unanswered(st).map((f) => f.id) : [];
+    // The round's record covers all its attempts: each one's own changes, and the earlier ones' outcomes, which a re-run keeps.
+    const recordName = `implementation.r${k}.json`;
+    const earlier = started && store.exists(recordName) ? store.readJson<ImplementationRecord>(recordName) : null;
+    store.writeJson(recordName, await this.envelope("implementer", k, res, {
+      pre_snapshot: pre.commit, snapshot: post.commit, changes: changes.map(([status, path]) => ({ status, path })),
+      attempt_changes: (now === post.tree ? [] : await this.git.nameStatus(now, post.tree)).map(([status, path]) => ({ status, path })),
+      unanswered_findings: missing, earlier_attempts: earlier ? [...(earlier.earlier_attempts ?? []), attemptOf(earlier)] : [],
     }));
-    st.lastImplementation = { round: k, summary: report?.summary ?? null, status: report?.status ?? null, permissionDenials: denials };
+    st.lastImplementation = {
+      round: k, summary: report?.summary ?? null, status: report?.status ?? null, blockingReason: report?.blocking_reason ?? null, permissionDenials: denials,
+    };
     if (denials.length) this.warn(denialHint(cfg.agents.implementer, denials));
     if (!res.ok || !report) {
       if (!this.budgetExhausted("IMPLEMENT")) {
@@ -752,7 +829,8 @@ export class Workflow {
     });
     this.record("IMPLEMENT", k, this.agentName("implementer"), report.status, `${changes.length} file(s) changed; ${report.summary.slice(0, 140)}`,
       report.status === "completed" ? "ok" : "warn", `implementation.r${k}.json`, res);
-    if (missing.length) this.warn(`implementer did not respond to finding(s): ${missing.join(", ")}`);
+    // A blocked attempt stops before some findings by its nature; the round's next attempt answers them.
+    if (missing.length && report.status !== "blocked") this.warn(`implementer did not respond to finding(s): ${missing.join(", ")}`);
     if (report.status === "blocked") {
       // A blocker needs something from you: until something the implementer is given changes, resume does not run it.
       const mark = await this.progressMark(post.tree, notesGiven);
@@ -769,6 +847,8 @@ export class Workflow {
     const st = this.state;
     const { store, cfg } = this.o;
     const k = st.implRound;
+    // Gates judge the code that is there; what changed since the implementation is not theirs.
+    await this.catchUp("VERIFY");
     const beforeOutside = await this.outsideTree();
     let results: GateResult[];
     try {
@@ -790,6 +870,7 @@ export class Workflow {
     await this.warnOutside(beforeOutside, "VERIFY");
     store.writeJson(`gates.r${k}.json`, { round: k, snapshot: st.lastSnapshot!.commit, timestamp: nowIso(), results });
     st.lastGates = results;
+    st.gatesTree = st.lastSnapshot!.tree;
     const passed = requiredPassed(results);
     st.consecutiveGateFailures = passed ? 0 : st.consecutiveGateFailures + 1;
     const enforce = cfg.quality_gates.require_tests_pass;
@@ -820,6 +901,18 @@ export class Workflow {
     const { store, cfg } = this.o;
     const k = st.implRound;
     const base = st.base!.commit;
+    // Review the code that is there now; gates that ran on an earlier revision run once more first.
+    const gatedBefore = st.gatesTree === undefined ? st.lastSnapshot!.tree : st.gatesTree;
+    await this.catchUp("CODE_REVIEW");
+    if (cfg.gates.length && gatedBefore !== st.lastSnapshot!.tree) {
+      if (st.reverifiedRound !== k) {
+        st.reverifiedRound = k; // once a round: files that never stop changing must not keep the run from its review
+        this.record("CODE_REVIEW", k, "orchestrator", "gates out of date", "the quality gates ran on an earlier revision; running them on this one before the review", "warn");
+        st.phase = "VERIFY";
+        return;
+      }
+      this.warn("the workspace changed again after the quality gates ran: the review gets the results of an earlier revision");
+    }
     const snap = st.lastSnapshot!.commit;
     const diff = await this.git.diff(base, snap);
     // The whole diff, for a review that gets it cut short (and for the report): readable without any repository.
@@ -829,7 +922,8 @@ export class Workflow {
     const planMd = store.readText("plan.final.md");
     const diffStat = await this.git.diffStat(base, snap);
     const gates = st.lastGates ?? [];
-    const findings = st.openFindings;
+    // The previous findings with every answer since their review (from any attempt), and which files changed since their revision.
+    const findings = await this.findingsAt(st.lastSnapshot!.tree);
     // What the reviewer's session last reviewed: a continued review gets the changes since then instead of the whole diff.
     const reviewed = st.sessions?.code_reviewer?.reviewed ?? null;
     const build = async (ctx: prompts.PromptContext): Promise<string> => {
@@ -858,7 +952,8 @@ export class Workflow {
     const envelope = await this.envelope("code_reviewer", k, res, { base, snapshot: snap });
     store.writeJson(`review.r${k}.json`, envelope);
     store.writeJson("review.json", envelope);
-    st.openFindings = review.findings;
+    // Fresh evidence: the findings of this revision replace the open ones and every answer to them.
+    setFindings(st, review.findings, { round: k, revision: snap });
     const blocking = this.blocking(review.findings);
     const critical = review.findings.filter((f) => f.severity === "critical");
     const gatesOk = !cfg.gates.length || !cfg.quality_gates.require_tests_pass || requiredPassed(st.lastGates ?? []);
@@ -907,6 +1002,7 @@ export class Workflow {
       st.finalPlanVersion = null;
       st.finalPlanHash = null;
       st.lastGates = null;
+      st.gatesTree = null;
       st.consecutiveGateFailures = 0;
       st.planningRound += 1;
       st.limits.planningRounds = Math.max(st.limits.planningRounds, st.planningRound + this.o.cfg.limits.max_planning_rounds - 1);

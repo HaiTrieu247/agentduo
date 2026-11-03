@@ -108,6 +108,26 @@ export interface Blocker {
   mark: ProgressMark;
 }
 
+/** The review the open findings come from: they hold for the revision it reviewed, not necessarily for the code now. */
+export interface FindingsSource {
+  round: number;
+  /** The snapshot commit it reviewed (its `reviewed_commit`). */
+  revision: string;
+}
+
+/**
+ * What the implementer answered about an open finding since the review that raised it: a claim, which the next review
+ * verifies. One per finding, the latest; kept from blocked attempts too.
+ */
+export interface FindingResponse {
+  id: string;
+  resolution: "fixed" | "disputed" | "not_applicable";
+  notes: string;
+  /** The implementation round, and how the attempt that answered ended. */
+  round: number;
+  status: "completed" | "blocked";
+}
+
 /** One question of the chat and the answer it got. */
 export interface Exchange {
   backend: "codex" | "claude";
@@ -151,7 +171,18 @@ export interface RunState {
   lastGates: GateResult[] | null;
   consecutiveGateFailures: number;
   openFindings: Finding[];
-  lastImplementation: { round: number; summary: string | null; status: string | null; permissionDenials: PermissionDenial[] } | null;
+  /** The review `openFindings` come from; absent in older runs (review.json says), null while there are none. */
+  findingsSource?: FindingsSource | null;
+  /** The implementer's answers to `openFindings` since that review; absent: none. */
+  findingResponses?: FindingResponse[];
+  /** The tree the last quality gates ran on; absent in older runs, null while none ran. */
+  gatesTree?: string | null;
+  /** The round whose review sent the run back to its gates once, because they ran on an earlier revision. */
+  reverifiedRound?: number;
+  /** The last implementation attempt; `blockingReason` absent in older runs. */
+  lastImplementation: {
+    round: number; summary: string | null; status: string | null; blockingReason?: string | null; permissionDenials: PermissionDenial[];
+  } | null;
   /** The implementer's blocker while it holds; absent in older runs and while there is none. */
   blocker?: Blocker | null;
   humanReview: HumanReview | null;

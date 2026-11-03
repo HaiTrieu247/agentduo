@@ -49,8 +49,14 @@ export function acceptRepoNotes(notes: RepoNoteOutput[] | undefined, workspace: 
   return kept;
 }
 
-/** `path` relative to the workspace, with forward slashes and no trailing one; null when it is not a path in it. */
+/** `path` relative to the workspace (workspacePath); null unless it names a file or folder that exists there. */
 function notePath(raw: string, workspace: string): string | null {
+  const path = workspacePath(raw, workspace);
+  return path && existsSync(join(workspace, path)) ? path : null;
+}
+
+/** `raw` (relative to the workspace, or absolute) as git names it in the workspace: forward slashes, no trailing one; null outside it. */
+export function workspacePath(raw: string, workspace: string): string | null {
   let path = raw.trim().replace(/\\/g, "/");
   if (!path) return null;
   if (isAbsolute(path) || /^[a-zA-Z]:\//.test(path)) {
@@ -59,7 +65,7 @@ function notePath(raw: string, workspace: string): string | null {
   }
   path = posix.normalize(path).replace(/^(\.\/)+/, "").replace(/\/+$/, "");
   if (!path || path === "." || path === ".." || path.startsWith("../")) return null;
-  return existsSync(join(workspace, path)) ? path : null;
+  return path;
 }
 
 /** Appends a turn's accepted notes with the tree they were written against; the run keeps the newest MAX_REPO_NOTES. */
@@ -78,7 +84,7 @@ export function latestRepoNote(state: RunState): number {
 }
 
 /** Whether `path` (a file or folder) or anything under it is among `changed`. */
-function touched(path: string, changed: Set<string>): boolean {
+export function touched(path: string, changed: Set<string>): boolean {
   if (changed.has(path)) return true;
   for (const p of changed) if (p.startsWith(`${path}/`)) return true;
   return false;

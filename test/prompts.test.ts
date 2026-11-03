@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type { ReviewFindings } from "../src/core/findings.js";
 import type { GateResult } from "../src/core/gates.js";
+import type { Change } from "../src/core/git.js";
 import * as prompts from "../src/core/prompts.js";
-import { critique, finding, impl, issue, plan, review } from "./helpers/builders.js";
+import { critique, finding, impl, issue, plan } from "./helpers/builders.js";
 
 const agents = { planner: "codex", plan_reviewer: "claude", implementer: "claude", code_reviewer: "codex" } as const;
 const ctx: prompts.PromptContext = {
@@ -11,6 +13,14 @@ const ctx: prompts.PromptContext = {
 };
 const noGates: prompts.PromptContext = { ...ctx, gates: [] };
 const failedGate: GateResult = { name: "tests", command: "npm test", required: true, exitCode: 1, timedOut: false, passed: false, durationSec: 1, log: "/x", outputTail: "check failed: boom" };
+/** The open findings of a review of `revision`; `answered` ids carry the implementer's `fixed`. */
+const findingsOf = (ids: string[], o: { answered?: string[]; revision?: string; changedSince?: Change[] | null } = {}): ReviewFindings => ({
+  round: 1, revision: o.revision ?? "a".repeat(40), summary: "REVIEW-SUMMARY", changedSince: o.changedSince === undefined ? [] : o.changedSince,
+  items: ids.map((id) => ({
+    finding: finding(id), fileChange: o.changedSince?.some(([, p]) => p === "app.txt") ? "M" : null,
+    answer: o.answered?.includes(id) ? { id, resolution: "fixed" as const, notes: "done", round: 2, status: "completed" as const } : null,
+  })),
+});
 const RULE_WORDS = ["READ-ONLY", "Hard rules", "protected paths", "Chained commands", "Never commit", "byte-for-byte"];
 
 describe("prompts", () => {
@@ -19,8 +29,8 @@ describe("prompts", () => {
       prompts.planner(ctx, 1, 1, null, null),
       prompts.planReviewer(ctx, 1, 1, "# Plan", null),
       prompts.planFinalizer(ctx, 1, 1, "# Plan", critique(true)),
-      prompts.implementer(ctx, 1, "# Plan", [], null, [], null),
-      prompts.codeReviewer(ctx, 1, "# Plan", "a".repeat(40), "b".repeat(40), [], "", "", false, [], impl()),
+      prompts.implementer(ctx, 1, "# Plan", null, [], null),
+      prompts.codeReviewer(ctx, 1, "# Plan", "a".repeat(40), "b".repeat(40), [], "", "", false, null, impl()),
     ];
     for (const p of all) {
       for (const word of RULE_WORDS) expect(p).not.toContain(word);
@@ -37,8 +47,8 @@ describe("prompts", () => {
       prompts.planner(withEarlier, 1, 1, null, null),
       prompts.planReviewer(withEarlier, 1, 1, "# Plan", null),
       prompts.planFinalizer(withEarlier, 1, 1, "# Plan", critique(true)),
-      prompts.implementer(withEarlier, 1, "# Plan", [], null, [], null),
-      prompts.codeReviewer(withEarlier, 1, "# Plan", "a".repeat(40), "b".repeat(40), [], "", "", false, [], impl()),
+      prompts.implementer(withEarlier, 1, "# Plan", null, [], null),
+      prompts.codeReviewer(withEarlier, 1, "# Plan", "a".repeat(40), "b".repeat(40), [], "", "", false, null, impl()),
     ];
     for (const p of all) {
       expect(p).toContain("## Previous pipeline tasks");
@@ -66,7 +76,7 @@ describe("prompts", () => {
   it("fences the previous plan and the diff stat by their content", () => {
     const fenced = { ...plan("Old plan"), summary: "run ```npm test``` first" };
     expect(prompts.planner(ctx, 2, 2, fenced, null)).toContain("````json\n");
-    const p = prompts.codeReviewer(ctx, 1, "# Plan", "a".repeat(40), "b".repeat(40), [], " ```weird``` | 1 +", "", false, [], impl());
+    const p = prompts.codeReviewer(ctx, 1, "# Plan", "a".repeat(40), "b".repeat(40), [], " ```weird``` | 1 +", "", false, null, impl());
     expect(p).toContain("## Diff stat (base → revision)\n````\n");
   });
 
@@ -80,23 +90,58 @@ describe("prompts", () => {
   });
 
   it("implementer prompts for the first round and fix rounds", () => {
-    const first = prompts.implementer(ctx, 1, "# Final plan", [], null, [], null);
+    const first = prompts.implementer(ctx, 1, "# Final plan", null, [], null);
     expect(first).toContain("Implement the plan now");
     expect(first).toContain("After your turn agentduo runs these commands");
-    expect(prompts.implementer(noGates, 1, "# Final plan", [], null, [], null)).toContain("Run the project's checks yourself");
-    const fix = prompts.implementer(ctx, 2, "# Final plan", [finding("F1")], review(false, [finding("F1")], [], "a".repeat(40)), [failedGate], { summary: "did the thing" });
-    for (const s of ["This is a fix round", "reviewed revision `aaaaaaaaaaaa`", "`F1` [high] `app.txt:1`", "Failing quality gates", "check failed: boom", "did the thing"]) {
+    expect(prompts.implementer(noGates, 1, "# Final plan", null, [], null)).toContain("Run the project's checks yourself");
+    const fix = prompts.implementer(ctx, 2, "# Final plan", findingsOf(["F1"]), [failedGate], { summary: "did the thing" });
+    for (const s of ["This is a fix round", "raised on revision `aaaaaaaaaaaa`", "`F1` [high] `app.txt:1`", "Failing quality gates", "check failed: boom", "did the thing"]) {
       expect(fix).toContain(s);
     }
+  });
+
+  it("tells the implementer which findings are still open, which it answered since, and which may be out of date", () => {
+    const p = prompts.implementer(ctx, 3, "# Final plan", findingsOf(["F1", "F2"], { answered: ["F1"], changedSince: [["M", "app.txt"]] }), [], null);
+    for (const s of ["### Code review findings (review round 1, raised on revision `aaaaaaaaaaaa`)", "REVIEW-SUMMARY",
+      "Since `aaaaaaaaaaaa` these files changed (A added, M modified, D deleted):\n- M `app.txt`\nA finding about one of them may be fixed already",
+      "#### Open: not answered since that review\n- `F2` [high] `app.txt:1` — bad", "its file changed since that revision",
+      "#### Answered since that review, not verified yet\nThe next review verifies these", "Your answer: fixed: done (round 2)",
+      "answer every open finding", "answer an already answered one again only if your answer changes."]) {
+      expect(p).toContain(s);
+    }
+    expect(p.indexOf("`F2` [high]")).toBeLessThan(p.indexOf("`F1` [high]"));
+    expect(prompts.implementer(ctx, 3, "# Final plan", findingsOf(["F1"], { answered: ["F1"] }), [failedGate], null))
+      .toContain("Every finding is answered: add an entry to `addressed_findings` only for one whose answer changes.");
+    expect(prompts.implementer(ctx, 3, "# Final plan", findingsOf(["F1"]), [], null)).toContain("No file changed since `aaaaaaaaaaaa`.");
+    expect(prompts.implementer(ctx, 3, "# Final plan", findingsOf(["F1"], { changedSince: null }), [], null))
+      .toContain("agentduo cannot tell what changed since `aaaaaaaaaaaa`: check each finding against the current code");
+  });
+
+  it("tells a re-run of a round what its earlier attempt left in the working tree", () => {
+    const rerun = { status: "blocked", summary: "EARLIER-SUMMARY", blockingReason: "API key needed", changes: [["M", "app.txt"]] as Change[] };
+    const p = prompts.implementer(ctx, 1, "# Final plan", null, [], { summary: "EARLIER-SUMMARY", rerun });
+    for (const s of ["## An earlier attempt of this round\nIt ended blocked: API key needed.\nIts report: EARLIER-SUMMARY", "by it or by the user since",
+      "- M `app.txt`", "These changes are in the working tree: continue from them.", "Finish implementing the plan."]) {
+      expect(p).toContain(s);
+    }
+    expect(p).not.toContain("Implement the plan now");
+    expect(p.match(/EARLIER-SUMMARY/g)).toHaveLength(1);
+    const stopped = prompts.implementer(ctx, 2, "# Final plan", findingsOf(["F1"]), [], { summary: "ROUND-1", rerun: { status: null, summary: null, blockingReason: null, changes: [] } });
+    for (const s of ["It did not finish: it failed, or the run was stopped.", "No file changed in this round so far.", "This is a fix round"]) expect(stopped).toContain(s);
+    expect(stopped).not.toContain("ROUND-1");
   });
 
   it("code reviewer sees the revision, gates, diff and previous findings, fenced safely", () => {
     const sha = "b".repeat(40);
     const diff = "+```js\n+code\n+```";
-    const p = prompts.codeReviewer(ctx, 2, "# Final plan", "a".repeat(40), sha, [failedGate], " app.txt | 1 +", diff, true, [finding("F1")], impl("completed", ["F1"]));
-    for (const s of [`Revision under review: \`${sha}\``, "[FAIL] tests", "TRUNCATED", "Implementer: fixed", `\`reviewed_commit\` must be exactly \`${sha}\``, "````diff\n+```js"]) {
+    const p = prompts.codeReviewer(ctx, 2, "# Final plan", "a".repeat(40), sha, [failedGate], " app.txt | 1 +", diff, true, findingsOf(["F1"], { answered: ["F1"] }), impl("completed", ["F1"]));
+    for (const s of [`Revision under review: \`${sha}\``, "[FAIL] tests", "TRUNCATED", `\`reviewed_commit\` must be exactly \`${sha}\``, "````diff\n+```js",
+      "## Findings from the previous review (round 1, raised on revision `aaaaaaaaaaaa`) and the implementer's answers\nNo file changed since `aaaaaaaaaaaa`.",
+      "Implementer: fixed: done (round 2)  \n  its file did not change since that revision", `Verify each finding against the revision under review (\`${sha}\`)`]) {
       expect(p).toContain(s);
     }
+    const changed = prompts.codeReviewer(ctx, 2, "# Final plan", "a".repeat(40), sha, [], "", "", false, findingsOf(["F1"], { changedSince: [["M", "app.txt"]] }), impl());
+    expect(changed).toContain("Implementer: no answer  \n  its file changed since that revision");
     expect(prompts.fenceFor("no backticks")).toBe("```");
     expect(prompts.fenceFor("a ````` b")).toBe("``````");
   });
@@ -104,13 +149,13 @@ describe("prompts", () => {
   it("tells every role of a run with agentduo's own snapshots, and points the reviewer at the whole diff, never at git in the workspace", () => {
     const sha = "b".repeat(40);
     const internal = { ...ctx, internalSnapshots: true };
-    const cut = prompts.codeReviewer(internal, 1, "# Final plan", "a".repeat(40), sha, [], " app.txt | 1 +", "+x", true, [], impl(), "/runs/r/diff.r1.patch");
+    const cut = prompts.codeReviewer(internal, 1, "# Final plan", "a".repeat(40), sha, [], " app.txt | 1 +", "+x", true, null, impl(), "/runs/r/diff.r1.patch");
     for (const s of ["- Snapshots: agentduo keeps this run's snapshots in a Git repository of its own", "TRUNCATED: read the whole diff in `/runs/r/diff.r1.patch`",
       "in agentduo's own repository: review it from the diff below"]) expect(cut).toContain(s);
     expect(cut).not.toContain("run `git diff");
     expect(prompts.planner(internal, 1, 1, null, null)).toContain("- Snapshots: agentduo keeps");
     // A native run's prompts are as they were.
-    const native = prompts.codeReviewer(ctx, 1, "# Final plan", "a".repeat(40), sha, [], " app.txt | 1 +", "+x", true, [], impl(), "/runs/r/diff.r1.patch");
+    const native = prompts.codeReviewer(ctx, 1, "# Final plan", "a".repeat(40), sha, [], " app.txt | 1 +", "+x", true, null, impl(), "/runs/r/diff.r1.patch");
     expect(native).toContain("TRUNCATED: run `git diff " + "a".repeat(40) + " " + sha + " -- .` for the full diff");
     expect(native).not.toContain("Snapshots:");
   });
@@ -227,7 +272,7 @@ describe("attachment manifests", () => {
       ...ctx, attachments: [spec], locate,
       notes: [{ at: "2026-10-29T10:00:00+07:00", phase: "IMPLEMENT", note: "match this mockup", attachments: [shot] }, { ...ctx.notes[0]!, attachments: [{ ...shot, id: "gone" }] }],
     };
-    for (const p of [prompts.planner(withFiles, 1, 1, null, null), prompts.implementer(withFiles, 1, "# Plan", [], null, [], null)]) {
+    for (const p of [prompts.planner(withFiles, 1, 1, null, null), prompts.implementer(withFiles, 1, "# Plan", null, [], null)]) {
       expect(count(p, "/attachments/a2/spec.pdf")).toBe(1);
       expect(p.indexOf("### Files the user attached to the task")).toBeGreaterThan(p.indexOf("## Task"));
       expect(p).toContain("- (2026-10-29T10:00:00+07:00, during IMPLEMENT) match this mockup\n  Files:\n  - ``shot `1`.png``");
@@ -252,8 +297,8 @@ describe("prompts shared between the agents of a run", () => {
     planner: prompts.planner(c, 2, 2, plan("PREVIOUS-PLAN"), { critique: critique(false, [issue("C1", "high", "CRITIQUE-ISSUE")]) }),
     plan_reviewer: prompts.planReviewer(c, 2, 2, planMd, critique(false, [issue("C1", "high", "MY-OLD-ISSUE")])),
     plan_finalizer: prompts.planFinalizer(c, 2, 2, planMd, critique(true)),
-    implementer: prompts.implementer(c, 2, planMd, [finding("F1")], review(false, [finding("F1")]), [], { summary: "MY-OLD-REPORT" }),
-    code_reviewer: prompts.codeReviewer(c, 2, planMd, base, snap, [], " app.txt | 1 +", "WHOLE-DIFF", false, [finding("F1")], impl("completed", ["F1"])),
+    implementer: prompts.implementer(c, 2, planMd, findingsOf(["F1"]), [], { summary: "MY-OLD-REPORT" }),
+    code_reviewer: prompts.codeReviewer(c, 2, planMd, base, snap, [], " app.txt | 1 +", "WHOLE-DIFF", false, findingsOf(["F1"], { answered: ["F1"] }), impl("completed", ["F1"])),
   });
 
   it("give a continued session only what is new: what changed, the notes it has not seen, and the work to judge", () => {
@@ -290,19 +335,19 @@ describe("prompts shared between the agents of a run", () => {
     expect(p.planner).toContain("## Previous plan (v1) as JSON");
     expect(prompts.planner(continued({ changed: [] }), 1, 1, null, null)).toContain("None: the workspace is as your last turn left it.");
     const many = Array.from({ length: 103 }, (_, i): [string, string] => ["M", `f${i}.ts`]);
-    expect(prompts.implementer(continued({ changed: many }), 2, planMd, [], null, [], null)).toContain("- … and 3 more");
+    expect(prompts.implementer(continued({ changed: many }), 2, planMd, null, [], null)).toContain("- … and 3 more");
   });
 
   it("give a continued code review the changes since the revision it reviewed, and say where the whole diff is", () => {
     const since = { from: "c".repeat(40), stat: " app.txt | 2 +-", diff: "SINCE-DIFF", truncated: false };
-    const p = prompts.codeReviewer(continued({ sinceReviewed: since }), 2, planMd, base, snap, [], " app.txt | 1 +", "WHOLE-DIFF", false, [], impl());
+    const p = prompts.codeReviewer(continued({ sinceReviewed: since }), 2, planMd, base, snap, [], " app.txt | 1 +", "WHOLE-DIFF", false, null, impl());
     expect(p).toContain("## Changes since the revision you last reviewed (`" + since.from + "` → `" + snap + "`)");
     expect(p).toContain("SINCE-DIFF");
     expect(p).not.toContain("WHOLE-DIFF");
     expect(p).toContain("Judge the whole change all the same: run `git diff " + base + " " + snap + " -- .` for the full diff.");
     expect(p).toContain("## Diff stat (base → revision)");
     const internal = prompts.codeReviewer({ ...continued({ sinceReviewed: { ...since, truncated: true } }), internalSnapshots: true }, 2, planMd, base, snap, [], "", "WHOLE-DIFF",
-      false, [], impl(), "/runs/t1/diff.r2.patch");
+      false, null, impl(), "/runs/t1/diff.r2.patch");
     expect(internal).toContain("read the whole diff in `/runs/t1/diff.r2.patch`. This diff is TRUNCATED.");
   });
 

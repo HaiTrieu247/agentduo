@@ -4,8 +4,9 @@ import type { AgentRole, Backend, GateConfig } from "./config.js";
 import { MAX_NOTES_PER_TURN } from "./context.js";
 import { describeGates, type GateResult } from "./gates.js";
 import type { Change } from "./git.js";
-import type { Approval, Critique, Finding, Implementation, Plan, Review } from "./outputs.js";
-import { findingsMarkdown, issuesMarkdown } from "./render.js";
+import type { FindingItem, ReviewFindings } from "./findings.js";
+import type { Approval, Critique, Implementation, Plan } from "./outputs.js";
+import { issuesMarkdown } from "./render.js";
 import type { ConversationContext, EarlierTask, Exchange, HumanNote, RepoNote } from "./state.js";
 
 /** Where an attachment's copy is, as a prompt names it: its absolute path, or null when its reference is unusable. */
@@ -100,13 +101,17 @@ function continuedHeader(role: string, title: string, ctx: PromptContext): strin
     (ctx.internalSnapshots ? INTERNAL_SNAPSHOTS : "");
 }
 
+/** Changed files, a line each (at most MAX_CHANGED_LISTED). */
+function changeList(changed: Change[]): string {
+  const shown = changed.slice(0, MAX_CHANGED_LISTED).map(([status, path]) => `- ${status} ${inlineCode(path)}`).join("\n");
+  return shown + (changed.length > MAX_CHANGED_LISTED ? `\n- … and ${changed.length - MAX_CHANGED_LISTED} more` : "");
+}
+
 function changedSection(changed: Change[]): string {
   const title = "## Files changed since your last turn\n";
   if (!changed.length) return title + "None: the workspace is as your last turn left it.\n";
-  const shown = changed.slice(0, MAX_CHANGED_LISTED).map(([status, path]) => `- ${status} ${inlineCode(path)}`).join("\n");
-  const more = changed.length > MAX_CHANGED_LISTED ? `\n- … and ${changed.length - MAX_CHANGED_LISTED} more` : "";
   return title + "Another agent, a quality gate or the user changed these after your last turn ended (A added, M modified, D deleted); " +
-    "what you remember of them is out of date.\n" + shown + more + "\n";
+    "what you remember of them is out of date.\n" + changeList(changed) + "\n";
 }
 
 function repoNotesSection(list: RepoNote[] | undefined, continued: boolean): string {
@@ -423,8 +428,80 @@ export function planFinalizer(ctx: PromptContext, round: number, version: number
   ].join("\n");
 }
 
-export function implementer(ctx: PromptContext, round: number, planMd: string, findings: Finding[], review: Review | null,
-  failedGates: GateResult[], previousReport: { summary: string | null } | null): string {
+/** An earlier attempt of the round a prompt re-runs: how it ended, and what the round changed so far. */
+export interface EarlierAttempt {
+  /** "blocked" or "completed"; null when it gave no usable report or was stopped. */
+  status: string | null;
+  summary: string | null;
+  blockingReason: string | null;
+  /** Files changed in the round so far: by its attempts, or by the user since. */
+  changes: Change[];
+}
+
+const FILE_CHANGES: Record<string, string> = { D: "its file was deleted since that revision", A: "its file was added since that revision" };
+const fileChangeText = (c: string | null) => (c ? FILE_CHANGES[c] ?? "its file changed since that revision" : null);
+const short = (revision: string | null) => (revision ? "`" + revision.slice(0, 12) + "`" : "an earlier revision");
+
+function findingLine(item: FindingItem, extra: string[]): string {
+  const f = item.finding;
+  const loc = f.file ? f.file + (f.line ? `:${f.line}` : "") : "(general)";
+  return "- `" + f.id + "` [" + f.severity + "] `" + loc + "` — " + f.issue + (f.recommendation ? `  \n  Recommendation: ${f.recommendation}` : "") +
+    extra.filter(Boolean).map((x) => `  \n  ${x}`).join("");
+}
+
+const answerText = (item: FindingItem) => {
+  const a = item.answer;
+  return a ? `${a.resolution}${a.notes ? `: ${a.notes}` : ""} (round ${a.round}${a.status === "blocked" ? ", in an attempt that ended blocked" : ""})` : "no answer";
+};
+
+/** What changed since the revision the findings were raised on, and what that means for them. */
+function sinceRevision(f: ReviewFindings, who: string): string {
+  if (f.changedSince === null) return `agentduo cannot tell what changed since ${short(f.revision)}: check each finding against ${who} before relying on it.`;
+  if (!f.changedSince.length) return `No file changed since ${short(f.revision)}.`;
+  return `Since ${short(f.revision)} these files changed (A added, M modified, D deleted):\n` + changeList(f.changedSince) +
+    `\nA finding about one of them may be fixed already, or its line may have moved: check it against ${who}.`;
+}
+
+/**
+ * The last review's findings for the implementer: which still need an answer, and which it answered since (claims the
+ * next review verifies, so not to be worked on again), each saying when its file changed since the reviewed revision.
+ */
+function findingsToFix(f: ReviewFindings): string {
+  const open = f.items.filter((i) => !i.answer);
+  const answered = f.items.filter((i) => i.answer);
+  const out = ["### Code review findings (review round " + f.round + ", raised on revision " + short(f.revision) + ")",
+    (f.summary ? f.summary + "\n\n" : "") + sinceRevision(f, "the current code")];
+  if (open.length) out.push("#### Open: not answered since that review\n" + open.map((i) => findingLine(i, [fileChangeText(i.fileChange) ?? ""])).join("\n"));
+  if (answered.length) {
+    out.push("#### Answered since that review, not verified yet\nThe next review verifies these; leave them as they are unless the current code " +
+      "shows that your answer no longer holds.\n" + answered.map((i) => findingLine(i, [`Your answer: ${answerText(i)}`, fileChangeText(i.fileChange) ?? ""])).join("\n"));
+  }
+  out.push(open.length
+    ? "In `addressed_findings`, answer every open finding: `fixed`, `not_applicable`, or `disputed` with a concrete technical justification" +
+      (answered.length ? "; answer an already answered one again only if your answer changes." : ".")
+    : "Every finding is answered: add an entry to `addressed_findings` only for one whose answer changes.");
+  return out.join("\n\n") + "\n";
+}
+
+function earlierAttemptSection(e: EarlierAttempt, continued: boolean): string {
+  const how = e.status === "blocked" ? `It ended blocked: ${e.blockingReason ?? "(no reason given)"}.`
+    : e.status === "completed" ? "It completed, but the round did not go on from it."
+      : "It did not finish: it failed, or the run was stopped.";
+  const report = e.summary && !continued ? `\nIts report: ${e.summary}` : "";
+  const changes = e.changes.length
+    ? "\nFiles changed in this round so far, by it or by the user since (A added, M modified, D deleted):\n" + changeList(e.changes)
+    : "\nNo file changed in this round so far.";
+  return "\n## An earlier attempt of this round\n" + how + report + changes + "\n\nThese changes are in the working tree: continue from them. " +
+    "Keep what is right and finish what is missing; do not start over or undo them unless they are wrong.\n";
+}
+
+/**
+ * `findings`: the last review's open findings, null when there are none. `previous`: the last implementation's report
+ * (its summary), and the earlier attempt of this round when this one re-runs it.
+ */
+export function implementer(ctx: PromptContext, round: number, planMd: string, findings: ReviewFindings | null,
+  failedGates: GateResult[], previous: { summary: string | null; rerun?: EarlierAttempt | null } | null): string {
+  const rerun = previous?.rerun ?? null;
   const out = [
     ...opening("implementer", "Implementer", ctx, `- Implementation round: ${round}\n`),
     planSection("Final approved plan", planMd, ctx, "Unchanged: the final approved plan you were given earlier in this session."),
@@ -436,20 +513,16 @@ export function implementer(ctx: PromptContext, round: number, planMd: string, f
       "- If you cannot proceed (missing information, contradictory requirements, missing permissions), stop and return " +
       "`status: \"blocked\"` with a precise `blocking_reason`.\n",
   ];
-  if (round === 1 && !findings.length && !failedGates.length) {
-    out.push("\nImplement the plan now. `addressed_findings` should be an empty list.\n");
+  if (rerun) out.push(earlierAttemptSection(rerun, !!ctx.continued));
+  if (round === 1 && !findings?.items.length && !failedGates.length) {
+    out.push(`\n${rerun ? "Finish implementing the plan" : "Implement the plan now"}. \`addressed_findings\` should be an empty list.\n`);
   } else {
     out.push("\n## This is a fix round\nYour previous implementation is already in the working tree. " +
       "Address the problems below without redoing unrelated work.\n");
-    if (findings.length) {
-      const sha = review ? review.reviewed_commit.slice(0, 12) : "?";
-      out.push("### Code review findings (reviewed revision `" + sha + "`)\n" + (review ? review.summary + "\n\n" : "") +
-        findingsMarkdown(findings) + "\n\nFor every finding id, add an entry to `addressed_findings`: `fixed`, " +
-        "`not_applicable`, or `disputed` with a concrete technical justification.\n");
-    }
+    if (findings?.items.length) out.push(findingsToFix(findings));
     if (failedGates.length) out.push("### Failing quality gates (run by agentduo)\n" + describeGates(failedGates) + "\n");
-    // A continued session has its own previous report already.
-    if (previousReport?.summary && !ctx.continued) out.push("### Your previous report\n" + previousReport.summary + "\n");
+    // A continued session has its own previous report already; a re-run was given the earlier attempt's above.
+    if (previous?.summary && !ctx.continued && !rerun) out.push("### Your previous report\n" + previous.summary + "\n");
   }
   out.push(REPO_NOTES_ASK, "## Output\nYour final message must be a single JSON object matching the output schema: summary, files_changed, " +
     "tests_run (what you actually ran and whether it passed), addressed_findings and repo_notes.\n");
@@ -461,7 +534,7 @@ export function implementer(ctx: PromptContext, round: number, planMd: string, f
  * cut short (git in the workspace cannot reach those snapshots); a native run names the `git diff` to run instead.
  */
 export function codeReviewer(ctx: PromptContext, round: number, planMd: string, base: string, snapshot: string, gateResults: GateResult[],
-  diffStat: string, diff: string, truncated: boolean, previousFindings: Finding[], implReport: Implementation, fullDiff?: string): string {
+  diffStat: string, diff: string, truncated: boolean, previousFindings: ReviewFindings | null, implReport: Implementation, fullDiff?: string): string {
   const tests = implReport.tests_run.map((t) => "- `" + t.command + "` passed=" + t.passed + " " + t.notes).join("\n") || "_(none)_";
   const fence = fenceFor(diff);
   const stat = diffStat.trimEnd() || "(no changes)";
@@ -489,16 +562,16 @@ export function codeReviewer(ctx: PromptContext, round: number, planMd: string, 
   } else {
     out.push("## Diff" + (truncated ? " (TRUNCATED: " + whole + ")" : "") + "\n" + fence + "diff\n" + diff + "\n" + fence + "\n");
   }
-  if (previousFindings.length) {
-    const responses = new Map(implReport.addressed_findings.map((a) => [a.finding_id, a]));
-    const lines = previousFindings.map((f) => {
-      const r = responses.get(f.id);
-      const reply = r ? `${r.resolution}: ${r.notes}` : "no response";
-      return "- `" + f.id + "` [" + f.severity + "] " + f.file + " — " + f.issue + "  \n  Implementer: " + reply;
-    });
-    out.push("## Findings from the previous review and the implementer's responses\n" + lines.join("\n") +
-      "\n\nVerify each one against the new revision. List ids that are now resolved in `resolved_findings`; " +
-      "re-raise unresolved ones in `findings` with the same id. Accept a dispute only if the justification is technically sound.\n");
+  if (previousFindings?.items.length) {
+    const f = previousFindings;
+    // Whether a finding's file changed since it was raised: a `fixed` answer about a file that did not is worth a closer look.
+    const unchanged = f.changedSince ? "its file did not change since that revision" : "";
+    const lines = f.items.map((i) => findingLine(i, [`Implementer: ${answerText(i)}`, i.finding.file ? fileChangeText(i.fileChange) ?? unchanged : ""]));
+    out.push("## Findings from the previous review (round " + f.round + ", raised on revision " + short(f.revision) + ") and the implementer's answers\n" +
+      sinceRevision(f, "the revision under review") + "\n\n" + lines.join("\n") +
+      "\n\nThe answers are the implementer's claims. Verify each finding against the revision under review (`" + snapshot + "`), not the one it " +
+      "was raised on. List ids that are now resolved in `resolved_findings`; re-raise unresolved ones in `findings` with the same id. " +
+      "Accept a dispute only if the justification is technically sound.\n");
   }
   out.push(
     "## Your job\n" +

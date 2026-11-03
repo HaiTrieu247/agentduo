@@ -105,7 +105,14 @@ export function reportMarkdown(st: RunState, diffStat: string, lastReview: Revie
   if (diffStat.trim()) lines.push("\n## Diff stat\n```\n" + diffStat.trimEnd() + "\n```");
   const unresolved: string[] = [];
   if (lastReview) {
-    for (const f of lastReview.findings) unresolved.push(`[review ${f.severity}] \`${f.id}\` ${f.file} — ${f.issue}`);
+    // Each finding holds for the revision it was raised on; an answer since is the implementer's claim, not yet verified.
+    const current = st.findingsSource === undefined || st.findingsSource?.revision === lastReview.reviewed_commit;
+    const answers = new Map((current ? st.findingResponses ?? [] : []).map((r) => [r.id, r]));
+    for (const f of lastReview.findings) {
+      const a = answers.get(f.id);
+      const answer = a ? `; the implementer answered ${a.resolution} in round ${a.round}, not re-reviewed yet` : "";
+      unresolved.push(`[review ${f.severity}] \`${f.id}\` ${f.file} — ${f.issue} (raised on \`${lastReview.reviewed_commit.slice(0, 12)}\`${answer})`);
+    }
   } else if (lastCritique && st.phase !== "DONE") {
     for (const i of lastCritique.issues) unresolved.push(`[plan ${i.severity}] \`${i.id}\` ${i.description}`);
   }

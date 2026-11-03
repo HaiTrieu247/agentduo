@@ -1026,6 +1026,129 @@ describe("Workflow: a blocked implementer runs again only on something new", () 
   });
 });
 
+describe("Workflow: review findings kept in step with the code", () => {
+  const warnings = () => stateOf(h).warnings;
+  const record = (name: string) => JSON.parse(readRun(name));
+  const stopAfter = (wf: { requestStop(): void }, bus: EventBus, phase: string) => bus.on((e) => {
+    if (e.type === "step.completed" && e.entry.phase === phase) wf.requestStop();
+  });
+
+  it("keeps a blocked attempt's fixes and answers, and its re-run goes on from them with the open findings only", async () => {
+    const scenario = {
+      ...happy(),
+      implementer: [
+        { write: { "app.txt": "fixed\n" }, output: impl() },
+        { write: { "app.txt": "fixed safely\n" }, output: impl("blocked", ["F1"], "F2 needs the API key") },
+        { write: { "other.txt": "ok\n" }, output: impl("completed", ["F2"]) },
+      ],
+      code_reviewer: [{ output: review(false, [finding("F1"), finding("F2", "high", "other.txt")]) }, { output: review(true, [], ["F1", "F2"]) }],
+    };
+    expect(await start(scenario)).toBe(2);
+    let st = stateOf(h);
+    const revision = record("review.r1.json").snapshot as string;
+    expect(st.findingsSource).toEqual({ round: 1, revision });
+    expect(st.findingResponses).toEqual([{ id: "F1", resolution: "fixed", notes: "", round: 2, status: "blocked" }]);
+    expect(record("implementation.r2.json")).toMatchObject({ attempt_changes: [{ status: "M", path: "app.txt" }], unanswered_findings: ["F2"] });
+    // Blocked on F2, it could not answer it: no warning for that.
+    expect(warnings().some((w) => w.includes("did not respond"))).toBe(false);
+
+    expect(await resume(h, { decision: "resume", note: "the key is in .env.example" })).toBe(0);
+    const rerun = fake.calls("implementer")[2]!.prompt;
+    for (const s of ["## An earlier attempt of this round\nIt ended blocked: F2 needs the API key.", "- M `app.txt`", "continue from them",
+      `Since \`${revision.slice(0, 12)}\` these files changed`, "#### Open: not answered since that review\n- `F2` [high] `other.txt:1`",
+      "#### Answered since that review, not verified yet", "Your answer: fixed (round 2, in an attempt that ended blocked)"]) {
+      expect(rerun).toContain(s);
+    }
+    // F1's file changed since the review; F2's did not.
+    expect(rerun.slice(rerun.indexOf("`F1` [high]"))).toContain("its file changed since that revision");
+    expect(rerun.slice(rerun.indexOf("`F2` [high]"), rerun.indexOf("#### Answered"))).not.toContain("its file changed");
+    // The reviewer gets every answer since its review, the blocked attempt's too, and checks them against this revision.
+    const reviewPrompt = fake.calls("code_reviewer")[1]!.prompt;
+    expect(reviewPrompt).toContain("Implementer: fixed (round 2, in an attempt that ended blocked)");
+    expect(reviewPrompt).toMatch(/`F2` \[high\] `other\.txt:1` — bad {2}\n {2}Recommendation: fix {2}\n {2}Implementer: fixed \(round 2\)/);
+    // The round's record has both attempts.
+    const r2 = record("implementation.r2.json");
+    expect(r2.earlier_attempts).toEqual([{ snapshot: expect.any(String), status: "blocked", summary: "implementation blocked", blocking_reason: "F2 needs the API key",
+      addressed_findings: [{ finding_id: "F1", resolution: "fixed", notes: "" }], changes: [{ status: "M", path: "app.txt" }] }]);
+    expect([r2.attempt_changes, r2.changes, r2.unanswered_findings]).toEqual([[{ status: "A", path: "other.txt" }],
+      [{ status: "M", path: "app.txt" }, { status: "A", path: "other.txt" }], []]);
+    st = stateOf(h);
+    expect([st.phase, st.openFindings, st.findingsSource, st.findingResponses]).toEqual(["DONE", [], null, []]);
+    expect(warnings().some((w) => w.includes("did not respond"))).toBe(false);
+  });
+
+  it("does not ask again about findings answered in a round whose gates then failed", async () => {
+    const scenario = {
+      ...happy(),
+      implementer: [
+        { write: { "app.txt": "fixed\n" }, output: impl() },
+        { write: { "app.txt": "broken\n" }, output: impl("completed", ["F1"]) },
+        { write: { "app.txt": "fixed again\n" }, output: impl() },
+      ],
+      code_reviewer: [{ output: review(false, [finding("F1")]) }, { output: review(true, [], ["F1"]) }],
+    };
+    expect(await start(scenario)).toBe(0);
+    const round3 = fake.calls("implementer")[2]!.prompt;
+    for (const s of ["#### Answered since that review, not verified yet", "Your answer: fixed (round 2)", "Every finding is answered", "Failing quality gates"]) {
+      expect(round3).toContain(s);
+    }
+    expect(round3).not.toContain("#### Open");
+    expect(warnings().some((w) => w.includes("did not respond"))).toBe(false);
+    expect(fake.calls("code_reviewer")[1]!.prompt).toContain("Implementer: fixed (round 2)");
+    expect(readRun("report.md")).not.toContain("not re-reviewed yet");
+  });
+
+  it("gates and reviews the files as they are after changes made while the run was stopped", async () => {
+    fake.setScenario(happy());
+    const { wf, bus } = newWorkflow(h, "Make app.txt fixed");
+    stopAfter(wf, bus, "IMPLEMENT");
+    expect(await wf.run()).toBe(130);
+    writeFileSync(join(h.repo, "notes.txt"), "added by hand\n");
+    expect(await resume(h)).toBe(0);
+    expect(warnings()).toContain("1 file(s) changed after the last snapshot, not by the run's last step: A notes.txt; VERIFY takes the workspace as it is now");
+    expect(warnings().some((w) => w.startsWith("quality gates modified"))).toBe(false);
+    const st = stateOf(h);
+    expect([record("gates.r1.json").snapshot, record("review.r1.json").snapshot]).toEqual([st.lastSnapshot!.commit, st.lastSnapshot!.commit]);
+    expect(fake.calls("code_reviewer")[0]!.prompt).toContain("notes.txt");
+  });
+
+  it("runs the gates again before a review when the files changed after they ran, and reviews only gated code", async () => {
+    fake.setScenario({ ...happy(), implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }] });
+    const { wf, bus } = newWorkflow(h, "Make app.txt fixed");
+    stopAfter(wf, bus, "VERIFY");
+    expect(await wf.run()).toBe(130);
+    expect(stateOf(h).phase).toBe("CODE_REVIEW");
+    // Broken by hand while the run was stopped: the gates' pass was for the code before.
+    writeFileSync(join(h.repo, "app.txt"), "oops\n");
+    expect(await resume(h)).toBe(0);
+    const st = stateOf(h);
+    expect(warnings()).toContain("1 file(s) changed after the last snapshot, not by the run's last step: M app.txt; CODE_REVIEW takes the workspace as it is now");
+    expect(st.history.map((e) => `${e.phase} ${e.agent} ${e.status}`)).toEqual(expect.arrayContaining([
+      "CODE_REVIEW orchestrator gates out of date", "VERIFY gates failed", "IMPLEMENT Claude completed", "VERIFY gates passed", "CODE_REVIEW Codex approved",
+    ]));
+    // The failing revision never reached the reviewer; the one it reviewed is the one the gates passed.
+    expect(fake.calls("code_reviewer")).toHaveLength(1);
+    expect(fake.calls("implementer")[1]!.prompt).toContain("check failed: app.txt is not fixed");
+    expect(record("review.r2.json").snapshot).toBe(record("gates.r2.json").snapshot);
+    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "quality gates passed and the review approved" });
+  });
+
+  it("re-runs the gates once a round at most, when the files keep changing", async () => {
+    fake.setScenario(happy());
+    const { wf, bus } = newWorkflow(h, "Make app.txt fixed");
+    let n = 0;
+    // Something writes a file each time the gates finish: the review must still come.
+    bus.on((e) => {
+      if (e.type === "step.completed" && e.entry.phase === "VERIFY") writeFileSync(join(h.repo, "log.txt"), `${++n}\n`);
+    });
+    expect(await wf.run()).toBe(0);
+    expect(n).toBe(2);
+    expect(warnings()).toContain("the workspace changed again after the quality gates ran: the review gets the results of an earlier revision");
+    expect(fake.calls("code_reviewer")).toHaveLength(1);
+    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "quality gates passed on an earlier revision and the review approved" });
+  });
+});
+
 describe("Workflow: the run's budget", () => {
   const budgetWarnings = () => stateOf(h).warnings.filter((w) => w.startsWith("budget:"));
   const decisionItems = () => messages().filter((m) => m.kind === "decision").map((m) => m.items);

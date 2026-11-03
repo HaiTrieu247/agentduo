@@ -52,6 +52,17 @@ convention, the test command. Each note names its file or folder. Later roles ge
 is dropped once anything under its path changes. A role never gets the notes of the agent whose work it judges. The
 plan critic gets none of the planner's, and the code reviewer none of the implementer's.
 
+Review findings stay tied to the code they are about. Each one names the revision its review was of. Once the
+implementer answers a finding (`fixed`, `disputed`, `not_applicable`), it is not asked about it again until the next
+review checks the answer. That holds even when the attempt that answered it ended blocked, or the round's gates then
+failed. A finding whose file changed since its revision is marked as possibly out of date. When an attempt is re-run,
+it is told what the earlier attempt left in your files, so it goes on from there instead of starting over. Before the
+gates run, and before a review, agentduo takes the workspace as it is now, including edits you made while the run
+waited. If the gates passed on an earlier revision, they run once more first, so a review and `DONE` rest on gated code. If
+the files keep changing even after that, the run warns that the review gets an earlier revision's gate results.
+The design is in
+[docs/superpowers/specs/2026-11-03-agentduo-review-state-design.md](docs/superpowers/specs/2026-11-03-agentduo-review-state-design.md).
+
 If a CLI has lost a session, the call starts a fresh one with the full prompt, without spending a retry. Kept sessions
 show up in each CLI's own session list. To start every call afresh instead, put `--no-session-persistence` in
 `claude.args` or `--ephemeral` in `codex.args` (or in `role_args` for one role). The design is in
