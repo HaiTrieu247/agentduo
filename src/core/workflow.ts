@@ -9,11 +9,15 @@ import type { Decider, DuoEvent, EventBus, HistoryEntry, HumanReview, Message, P
 import { budgetView, costLeft, ensureBudget, exhaustedMessage, newWarnings, raiseReached, reachedLimits, usageOf } from "./budget.js";
 import type { AgentRole, Backend, ConfigData } from "./config.js";
 import { acceptRepoNotes, addRepoNotes, planTurn, rememberSession, type Turn } from "./context.js";
-import { GatesInterrupted, requiredPassed, runGates, type GateResult } from "./gates.js";
+import { GatesInterrupted, runGates, type GateResult } from "./gates.js";
 import type { Change, Git } from "./git.js";
 import type { Approval, Critique, Finding, Implementation, Issue, Plan, RepoNoteOutput, Review } from "./outputs.js";
 import * as prompts from "./prompts.js";
 import * as render from "./render.js";
+import {
+  acceptedIds, acceptedText, acceptPending, attributionErrors, baselineFailures, conflictReview, gateVerdicts, missingBaselineEntries, outOfScopeGates,
+  preexistingFailures, preexistingReview, requirementConflicts, splitFindings,
+} from "./acceptance.js";
 import { recordResponses, reviewFindings, setFindings, unanswered, type ReviewFindings } from "./findings.js";
 import { blockedReview, changedParts, findingsDigest, heldReview, implementerSettings, nextBlocker } from "./progress.js";
 import { internalNotice, openRunGit, prepareRunGit } from "./run-git.js";
@@ -304,8 +308,14 @@ export class Workflow {
     const st = this.state;
     // Gates of an earlier revision: the files kept changing after they ran (CODE_REVIEW re-runs them once a round).
     const earlier = st.gatesTree != null && st.lastSnapshot != null && st.gatesTree !== st.lastSnapshot.tree ? " on an earlier revision" : "";
-    const gates = requiredPassed(st.lastGates ?? []) ? `quality gates passed${earlier}` : `required gates failing${earlier} (require_tests_pass is off)`;
-    return `${gates} and ${review}`;
+    const failing = (st.lastGates ?? []).filter((g) => g.required && !g.passed);
+    const accepted = acceptedIds(st.accepted, "gate");
+    const gates = failing.some((g) => !accepted.has(g.name)) ? `required gates failing${earlier} (require_tests_pass is off)`
+      : failing.length ? `quality gates passed${earlier}, except ${failing.map((g) => `'${g.name}'`).join(", ")}, failing as before the task`
+        : `quality gates passed${earlier}`;
+    // Never a DONE that hides what you accepted.
+    const yours = acceptedText(st.accepted);
+    return `${gates} and ${review}${yours ? `; ${yours}` : ""}`;
   }
 
   // --------------------------------------------------------------- helpers
@@ -337,7 +347,7 @@ export class Workflow {
     return {
       repo: this.o.repo, taskId: st.taskId, task: st.task, agents: this.o.cfg.agents, gates: this.o.cfg.gates, notes: st.humanNotes, earlier: st.earlier,
       conversation: st.conversationContext, attachments: st.attachments, locate: (a) => attachmentFile(this.o.store.runsDir, a),
-      internalSnapshots: this.internal,
+      internalSnapshots: this.internal, baseline: st.baseline?.results ?? null,
     };
   }
 
@@ -387,11 +397,13 @@ export class Workflow {
 
   private emitPhaseStarted(phase: Phase): void {
     const st = this.state;
-    const info = PHASE_ROLES[phase];
+    // The first plan's step starts with the gates before any change, a step of their own.
+    const gates = phase === "VERIFY" || (phase === "PLAN" && this.baselinePending());
+    const info = gates ? undefined : PHASE_ROLES[phase];
     this.emit({
       type: "phase.started", step: st.step + 1, phase,
       round: IMPL_PHASES.includes(phase) ? Math.max(st.implRound, 1) : st.planningRound,
-      role: info?.role, agent: phase === "VERIFY" ? "gates" : info ? this.party(info.agentRole) : undefined,
+      role: info?.role, agent: gates ? "gates" : info ? this.party(info.agentRole) : undefined,
       planning: { round: st.planningRound, limit: st.limits.planningRounds },
       impl: { round: st.implRound, limit: st.limits.reviewRounds },
       ...(budgetView(st) ? { budget: budgetView(st)! } : {}),
@@ -558,6 +570,63 @@ export class Workflow {
   }
 
   // -------------------------------------------------------------- planning
+  /**
+   * The quality gates before any change, once, before the first plan: what fails then is not the task's doing, and a
+   * plan that leaves a required one failing is a contradiction to settle before any implementation.
+   */
+  private async runBaseline(round: number): Promise<void> {
+    const st = this.state;
+    const { cfg, store } = this.o;
+    if (!this.baselinePending()) {
+      // An older run, or one past its first plan, has none: its failures count as the task's, as they always did.
+      if (st.baseline === undefined && !cfg.gates.length && st.planVersion === 0) st.baseline = null;
+      return;
+    }
+    let results: GateResult[];
+    try {
+      results = await runGates({
+        gates: cfg.gates, repo: this.o.repo, logDir: store.path("gates"), label: "baseline", defaultTimeoutSec: cfg.limits.gate_timeout_sec,
+        maxOutputChars: cfg.limits.max_gate_output_chars, bus: this.o.bus, signal: this.abort.signal,
+      });
+    } catch (e) {
+      if (e instanceof GatesInterrupted) throw new Interrupted();
+      throw e;
+    }
+    const tree = await this.tree();
+    st.baseline = { tree, results };
+    store.writeJson("gates.baseline.json", { tree, timestamp: nowIso(), results });
+    const failing = baselineFailures(results);
+    this.message({
+      from: "gates", to: this.party("planner"), kind: "gates",
+      headline: `before any change: ${results.map((g) => `${g.name} ${g.passed ? "✓" : "✗"}`).join(" · ")}`,
+      items: failing.map((g) => `${g.name}: ${lastLine(g.outputTail)}`), artifact: "gates.baseline.json",
+    });
+    this.record("PLAN", round, "gates", failing.length ? "baseline failing" : "baseline passed",
+      `before any change: ${results.map((g) => `${g.name} ${g.passed ? "PASS" : "FAIL"}`).join(", ")}`, failing.length ? "warn" : "ok", "gates.baseline.json");
+    // A step of its own: its time is work done (the budget's minutes), and the planner's turn starts a step after it.
+    st.activeSec = (st.activeSec ?? 0) + (Date.now() - this.phaseStartedAt) / 1000;
+    this.phaseStartedAt = Date.now();
+    this.save();
+    this.emitPhaseStarted(st.phase);
+  }
+
+  /** The baseline gates are to run before the first plan: there are gates, and neither a plan nor a baseline yet. */
+  private baselinePending(): boolean {
+    const st = this.state;
+    return st.baseline === undefined && st.planVersion === 0 && st.base === null && this.o.cfg.gates.length > 0;
+  }
+
+  /** The final plan the run implements; null before there is one. */
+  private finalPlan(): Plan | null {
+    const v = this.state.finalPlanVersion;
+    return v ? this.o.store.readJson<{ output: Plan }>(`plan.v${v}.json`).output : null;
+  }
+
+  /** The required gates the final plan leaves failing, as they failed before any change. */
+  private outOfScope(): Set<string> {
+    return outOfScopeGates(this.finalPlan(), this.state.baseline?.results);
+  }
+
   private async stepPlan(): Promise<void> {
     const st = this.state;
     const { store } = this.o;
@@ -565,7 +634,11 @@ export class Workflow {
     const v = st.planVersion + 1;
     const previous = v > 1 ? store.readJson<{ output: Plan }>(`plan.v${v - 1}.json`).output : null;
     const feedback = st.planFeedback;
-    const check = (p: Plan) => (["goals", "scope_in", "steps", "acceptance_criteria"] as const).filter((k) => p[k].length === 0).map((k) => `'${k}' must not be empty`);
+    await this.runBaseline(r);
+    const check = (p: Plan) => [
+      ...(["goals", "scope_in", "steps", "acceptance_criteria"] as const).filter((k) => p[k].length === 0).map((k) => `'${k}' must not be empty`),
+      ...missingBaselineEntries(p, st.baseline?.results),
+    ];
     const res = await this.callReviewer<Plan>({
       role: "planner", agentRole: "planner", label: "plan", schemaName: "plan", round: r, check,
       build: (ctx) => prompts.planner(ctx, r, v, previous, feedback),
@@ -615,7 +688,18 @@ export class Workflow {
       items: issueItems(critique.issues), artifact: `critique.r${r}.json`,
     });
     this.record("PLAN_REVIEW", r, this.agentName("plan_reviewer"), approved ? "approved" : "changes requested",
-      `${critique.issues.length} issue(s), ${blocking.length} blocking`, approved ? "ok" : "warn", `critique.r${r}.json`, res);
+      `${critique.issues.length} issue(s), ${blocking.length} blocking${critique.conflicts.length ? `, ${critique.conflicts.length} conflict(s)` : ""}`,
+      approved ? "ok" : "warn", `critique.r${r}.json`, res);
+    // A contradiction only you can settle: another planning round could not, and implementing it could only loop.
+    const plan = store.readJson<{ output: Plan }>(`plan.v${v}.json`).output;
+    const conflicts = requirementConflicts({ plan, critique, baseline: st.baseline?.results, requireTestsPass: cfg.quality_gates.require_tests_pass && cfg.gates.length > 0 });
+    if (conflicts.length) {
+      st.planFeedback = { critique };
+      st.conflicts = conflicts;
+      const { message, details } = conflictReview(conflicts);
+      this.escalate("requirements_conflict", message, "IMPLEMENT", details);
+      return;
+    }
     if (!approved) {
       st.planFeedback = { critique };
       this.nextPlanningRound();
@@ -871,18 +955,24 @@ export class Workflow {
     store.writeJson(`gates.r${k}.json`, { round: k, snapshot: st.lastSnapshot!.commit, timestamp: nowIso(), results });
     st.lastGates = results;
     st.gatesTree = st.lastSnapshot!.tree;
-    const passed = requiredPassed(results);
-    st.consecutiveGateFailures = passed ? 0 : st.consecutiveGateFailures + 1;
+    // A required gate that failed before any change, and that the plan leaves out of scope, is not the implementer's to
+    // fix: it goes to the reviewer, who says whether the change made it worse. The task's own failures go back as before.
+    const verdicts = gateVerdicts({
+      results, baseline: st.baseline?.results, outOfScope: this.outOfScope(), attributions: null, accepted: acceptedIds(st.accepted, "gate"),
+    });
+    const fixable = verdicts.filter((v) => v.kind !== "pre_existing");
+    const passed = verdicts.length === 0;
+    st.consecutiveGateFailures = fixable.length ? st.consecutiveGateFailures + 1 : 0;
     const enforce = cfg.quality_gates.require_tests_pass;
-    const toReviewer = passed || !enforce || cfg.quality_gates.review_on_gate_failure;
+    const toReviewer = !fixable.length || !enforce || cfg.quality_gates.review_on_gate_failure;
     this.message({
       from: "gates", to: toReviewer ? this.party("code_reviewer") : this.party("implementer"), kind: "gates",
       headline: results.map((g) => (g.passed ? `${g.name} ✓` : `${g.name} ✗ (${g.timedOut ? "timeout" : `exit ${g.exitCode}`})`)).join(" · ") || "no gates",
       items: results.filter((g) => !g.passed).map((g) => `${g.name}: ${lastLine(g.outputTail)}`), artifact: `gates.r${k}.json`,
     });
-    this.record("VERIFY", k, "gates", passed ? "passed" : "failed", results.map((g) => `${g.name} ${g.passed ? "PASS" : "FAIL"}`).join(", ") || "no gates",
-      passed ? "ok" : "warn", `gates.r${k}.json`);
-    if (!passed && enforce) {
+    this.record("VERIFY", k, "gates", passed ? "passed" : fixable.length ? "failed" : "failing as before the task",
+      results.map((g) => `${g.name} ${g.passed ? "PASS" : "FAIL"}`).join(", ") || "no gates", passed ? "ok" : "warn", `gates.r${k}.json`);
+    if (fixable.length && enforce) {
       const limit = cfg.limits.max_consecutive_gate_failures;
       if (st.consecutiveGateFailures >= limit) {
         this.escalate("gates_failing", `required quality gates failed ${limit} round(s) in a row. Check the logs under gates/, then resume (optionally with a --note) or abort.`, "IMPLEMENT");
@@ -924,6 +1014,15 @@ export class Workflow {
     const gates = st.lastGates ?? [];
     // The previous findings with every answer since their review (from any attempt), and which files changed since their revision.
     const findings = await this.findingsAt(st.lastSnapshot!.tree);
+    // The required gates that fail as they did before any change, out of the plan's scope: the reviewer attributes them.
+    const enforceGates = cfg.gates.length > 0 && cfg.quality_gates.require_tests_pass;
+    const outOfScope = this.outOfScope();
+    const acceptedGates = acceptedIds(st.accepted, "gate");
+    const attribute = enforceGates
+      ? gateVerdicts({ results: gates, baseline: st.baseline?.results, outOfScope, attributions: null, accepted: acceptedGates })
+        .filter((v) => v.kind === "pre_existing").map((v) => v.gate.name)
+      : [];
+    const contract: prompts.ReviewContract = { attribute, accepted: st.accepted?.failures ?? [] };
     // What the reviewer's session last reviewed: a continued review gets the changes since then instead of the whole diff.
     const reviewed = st.sessions?.code_reviewer?.reviewed ?? null;
     const build = async (ctx: prompts.PromptContext): Promise<string> => {
@@ -936,12 +1035,12 @@ export class Workflow {
           // that revision is gone: the whole diff, as a fresh review gets it
         }
       }
-      return prompts.codeReviewer(ctx, k, planMd, base, snap, gates, diffStat, diff.slice(0, maxChars), diff.length > maxChars, findings, implReport, fullDiff);
+      return prompts.codeReviewer(ctx, k, planMd, base, snap, gates, diffStat, diff.slice(0, maxChars), diff.length > maxChars, findings, implReport, fullDiff, contract);
     };
     const check = (rv: Review) => {
       const errors = consistentStatus(rv);
       if (rv.reviewed_commit !== snap) errors.push(`reviewed_commit is '${rv.reviewed_commit}', expected '${snap}'`);
-      return errors;
+      return [...errors, ...attributionErrors(rv, cfg.quality_gates.blocking_severities, attribute)];
     };
     const res = await this.callReviewer<Review>({
       role: "code_reviewer", agentRole: "code_reviewer", label: "code_review", schemaName: "review", round: k, check, build,
@@ -954,23 +1053,39 @@ export class Workflow {
     store.writeJson("review.json", envelope);
     // Fresh evidence: the findings of this revision replace the open ones and every answer to them.
     setFindings(st, review.findings, { round: k, revision: snap });
+    // What still blocks: the task's to fix (its regressions, what its scope includes, what the reviewer cannot place), and
+    // what was there before outside its scope, which no fix round can settle. Nothing you did not accept is left out.
     const blocking = this.blocking(review.findings);
-    const critical = review.findings.filter((f) => f.severity === "critical");
-    const gatesOk = !cfg.gates.length || !cfg.quality_gates.require_tests_pass || requiredPassed(st.lastGates ?? []);
+    const { fixable, preexisting } = splitFindings(blocking, acceptedIds(st.accepted, "finding"));
+    const verdicts = enforceGates
+      ? gateVerdicts({ results: st.lastGates ?? [], baseline: st.baseline?.results, outOfScope, attributions: review.gate_failures, accepted: acceptedGates })
+      : [];
+    const fixableGates = verdicts.filter((v) => v.kind !== "pre_existing");
+    const pre = preexistingFailures(preexisting, verdicts.filter((v) => v.kind === "pre_existing"));
+    const gatesOk = verdicts.length === 0;
+    const critical = fixable.filter((f) => f.severity === "critical");
     const approved = review.approved || !cfg.quality_gates.require_codex_approval;
-    const done = approved && blocking.length === 0 && gatesOk;
-    if (review.approved && blocking.length) this.warn("the reviewer approved but reported blocking findings; continuing with a fix round");
+    const done = approved && !fixable.length && !pre.length && gatesOk;
+    if (review.approved && fixable.length) this.warn("the reviewer approved but reported blocking findings; continuing with a fix round");
+    const counts = `${fixable.length + preexisting.length} blocking${pre.length ? ` (${pre.length} pre-existing)` : ""}`;
     this.message({
       from: this.party("code_reviewer"), to: this.party("implementer"), kind: "review",
       headline: done
         ? `approved${review.findings.length ? ` · ${review.findings.length} non-blocking finding(s)` : ""}`
-        : `${review.findings.length} finding(s) · ${blocking.length} blocking${gatesOk ? "" : " · required gates failing"}`,
+        : `${review.findings.length} finding(s) · ${counts}${gatesOk ? "" : " · required gates failing"}`,
       items: findingItems(review.findings), artifact: `review.r${k}.json`,
     });
     this.record("CODE_REVIEW", k, this.agentName("code_reviewer"), done ? "approved" : "changes requested",
-      `${review.findings.length} finding(s), ${blocking.length} blocking${gatesOk ? "" : ", required gates failing"}`, done ? "ok" : "warn", `review.r${k}.json`, res);
+      `${review.findings.length} finding(s), ${counts}${gatesOk ? "" : ", required gates failing"}`, done ? "ok" : "warn", `review.r${k}.json`, res);
     if (done) {
       st.phase = "DONE";
+      return;
+    }
+    if (!fixable.length && !fixableGates.length && pre.length) {
+      // Nothing left the task can fix: another round would loop on an impossible contract. You decide.
+      st.preexisting = pre;
+      const { message, details } = preexistingReview(pre, approved);
+      this.escalate("preexisting_failures", message, approved ? "DONE" : "CODE_REVIEW", details);
       return;
     }
     if (critical.length && cfg.quality_gates.stop_on_critical_issue) {
@@ -994,11 +1109,17 @@ export class Workflow {
     const raised = hr.reason === "budget_exhausted" && decision !== "abort" ? raiseReached(st, this.o.cfg) : [];
     // A blocked implementer runs again only on something new; a resume with nothing new keeps the run waiting.
     const held = decision === "resume" && await this.blockerHolds(hr);
+    // Going on after a contradiction or pre-existing failures is your acceptance of them, which the run records and says.
+    const accepted = decision === "resume" ? acceptPending(st) : [];
     if (decision === "abort") {
       st.phase = "ABORTED";
     } else if (decision === "revise") {
       if (IMPL_PHASES.includes(hr.fromPhase)) st.planFeedback = null; // planning-era critique is stale; the note drives the revision
       st.blocker = null;
+      // Re-planning settles the contract anew: nothing accepted so far, and nothing pending, carries over.
+      st.conflicts = null;
+      st.preexisting = null;
+      delete st.accepted;
       st.finalPlanVersion = null;
       st.finalPlanHash = null;
       st.lastGates = null;
@@ -1020,7 +1141,7 @@ export class Workflow {
       st.phase = target;
     }
     st.humanReview = null;
-    this.message({ from: "human", to: "orchestrator", kind: "decision", headline: `${decision}${note ? ` · "${note}"` : ""}`, items: raised });
+    this.message({ from: "human", to: "orchestrator", kind: "decision", headline: `${decision}${note ? ` · "${note}"` : ""}`, items: [...raised, ...accepted] });
     this.record("HUMAN_REVIEW", st.implRound || st.planningRound, "human", decision, note || `after ${hr.reason}`);
     if (held) {
       // Nothing ran and nothing changed: the run waits again, now saying why.

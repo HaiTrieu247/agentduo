@@ -10,7 +10,8 @@
     "accepted",
     "disputed",
     "proposed_changes",
-    "repo_notes"
+    "repo_notes",
+    "conflicts"
   ],
   "properties": {
     "status": {
@@ -92,6 +93,32 @@
           },
           "note": {
             "type": "string"
+          }
+        }
+      }
+    },
+    "conflicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "description",
+          "between"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "between": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       }

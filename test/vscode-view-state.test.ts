@@ -185,6 +185,7 @@ describe("view state", () => {
     expect(decisionChoices(review).map((c) => c.key)).toEqual(["resume", "revise", "abort", "defer"]);
     expect(decisionChoices(review)[0]!.hint).toBe("start implementation");
     expect(decisionChoices({ ...review, reason: "implementer_blocked" }).map((c) => c.label)).toEqual(["Unblock and retry", "Revise", "Abort", "Decide later"]);
+    expect(decisionChoices({ ...review, reason: "requirements_conflict" })[0]).toMatchObject({ label: "Implement as planned", hint: "implement the plan as it is, accepting the contradiction" });
   });
 
   it("says what a message does in each state", () => {

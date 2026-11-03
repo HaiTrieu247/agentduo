@@ -33,7 +33,21 @@ A run reaches `DONE` when all of these hold:
 - no blocking finding is left;
 - if you configured gates, every required gate passes.
 
+The only way past one of these is your own decision to accept a pre-existing failure, and `DONE` then names what you
+accepted.
+
 When a limit is reached, an agent fails or blocks, or a critical finding appears, the run asks you what to do.
+
+**Requirements that cannot all hold.** Before the first plan, agentduo runs your gates once, to learn what already
+fails before any change. The plan must say, for each required gate that fails then, whether it fixes it. The critic
+checks the plan against the task, its scope and that baseline, and lists contradictions that only you can settle,
+such as a criterion that needs something the task puts out of scope. A contradiction, or a required gate that the plan
+leaves failing, stops the run before any implementation (`requirements_conflict`). After implementation, the
+reviewer gives, for every blocking problem, where it comes from and the evidence for it: the change caused it, or it
+was there before and lies outside the plan's scope. If all that still fails is pre-existing and outside the scope,
+another fix round could not settle it, so the run asks you (`preexisting_failures`) instead of looping. The task's
+requirements are never changed for you, and no failure is waived without your decision. The design is in
+[docs/superpowers/specs/2026-11-03-agentduo-acceptance-design.md](docs/superpowers/specs/2026-11-03-agentduo-acceptance-design.md).
 
 ### What each agent is given
 
@@ -331,6 +345,8 @@ In a terminal, agentduo shows the reason and a menu: Resume, Revise (with a note
 | `implementer_blocked`, `no_progress` | Re-runs the implementation round, but only with something new (see below) |
 | `agent_error`, `orchestrator_error` | Re-runs the failed step |
 | `budget_exhausted` | Raises each limit the run reached by one more allowance, then runs the step it stopped before |
+| `requirements_conflict` (shown as *Implement as planned*) | Implements the plan as it is, accepting the contradiction. `revise` with a note that settles it re-plans instead |
+| `preexisting_failures` (shown as *Accept as pre-existing*) | Accepts them for this run. The run ends `DONE`, naming them, or the reviewer reviews once more first if it had not approved |
 
 `revise` goes back to planning with your note (after `budget_exhausted` it raises the limits reached too). `abort` ends the run.
 

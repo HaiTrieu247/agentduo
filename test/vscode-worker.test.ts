@@ -396,7 +396,9 @@ describe("vscode worker", () => {
       const pid = Number(readFileSync(join(repo, "gate.pid"), "utf8"));
       expect(await within(h)).toBeLessThan(4000);
       await waitUntil(() => !pidAlive(pid), 3000, "the gate to die");
-      expect(latest().inProgress?.phase).toBe("VERIFY");
+      // The first gate to run is the baseline, before the first plan.
+      expect(latest().inProgress?.phase).toBe("PLAN");
+      expect(latest().baseline).toBeUndefined();
     });
 
     it("denies a permission prompt nobody answered", async () => {

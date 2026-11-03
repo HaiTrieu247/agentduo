@@ -93,7 +93,7 @@ paths:  { runs_dir: .agentduo/runs }
 ## 5. Vòng lặp, prompt và điều kiện DONE
 
 - **Pha:** PLAN → PLAN_REVIEW → PLAN_FINALIZE → IMPLEMENT → VERIFY (chỉ khi `gates` không rỗng) → CODE_REVIEW → DONE.
-- **Lý do escalate còn lại:** `max_planning_rounds`, `plan_ready`, `max_review_rounds`, `critical_finding`, `gates_failing` (chỉ khi có gate), `implementer_blocked`, `no_progress` (resume sau `implementer_blocked` mà không có gì mới; xem `2026-11-03-agentduo-no-progress-design.md`), `agent_error`, `orchestrator_error`.
+- **Lý do escalate còn lại:** `max_planning_rounds`, `plan_ready`, `max_review_rounds`, `critical_finding`, `gates_failing` (chỉ khi có gate), `implementer_blocked`, `no_progress` (resume sau `implementer_blocked` mà không có gì mới; xem `2026-11-03-agentduo-no-progress-design.md`), `requirements_conflict` và `preexisting_failures` (xem `2026-11-03-agentduo-acceptance-design.md`), `agent_error`, `orchestrator_error`.
 - **Lý do bị bỏ:** `readonly_violation`, `guard_violation`, `dirty_worktree`.
 - **DONE khi:**
   - (Codex approve hoặc `require_codex_approval: false`), và

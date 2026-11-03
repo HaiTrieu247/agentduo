@@ -22,6 +22,11 @@ export function planMarkdown(plan: Plan, version: number): string {
     "## Test strategy\n" + (plan.test_strategy || "_(none)_"),
     "## Open questions\n" + bullets(plan.open_questions),
   ];
+  if (plan.baseline_failures?.length) {
+    // Older plans have no such field.
+    parts.push("## Baseline failures\nRequired gates that fail before any change:\n" + plan.baseline_failures.map((b) =>
+      "- `" + b.gate + "`: " + (b.in_scope ? "**fixed by this plan**" : "**left out of scope**") + (b.rationale ? ` — ${b.rationale}` : "")).join("\n"));
+  }
   if (plan.feedback_resolution.length) {
     parts.push("## Response to feedback\n" + plan.feedback_resolution.map((f) => "- `" + f.issue_id + "` **" + f.decision + "** — " + f.rationale).join("\n"));
   }
@@ -38,6 +43,9 @@ export function critiqueMarkdown(c: Critique, round: number, planVersion: number
   if (c.accepted.length) parts.push("### Accepted planner responses\n" + bullets(c.accepted));
   if (c.disputed.length) parts.push("### Still disputed\n" + bullets(c.disputed));
   if (c.proposed_changes.length) parts.push("### Proposed changes\n" + bullets(c.proposed_changes));
+  if (c.conflicts?.length) {
+    parts.push("### Conflicts only the user can settle\n" + bullets(c.conflicts.map((k) => "`" + k.id + "` " + k.description + (k.between.length ? ` (between: ${k.between.join("; ")})` : ""))));
+  }
   return parts.join("\n\n") + "\n\n";
 }
 
@@ -102,6 +110,10 @@ export function reportMarkdown(st: RunState, diffStat: string, lastReview: Revie
   for (const h of st.history) lines.push(`${h.step}. \`${h.phase}\` r${h.round} **${h.agent}** — ${h.status}: ${h.summary}`);
   lines.push("\n## Quality gates (last run)");
   lines.push(st.lastGates?.length ? describeGates(st.lastGates, false) : "_(not run)_");
+  if (st.baseline?.results.length) lines.push("\n## Quality gates before any change (baseline)\n" + describeGates(st.baseline.results, false));
+  const accepted = [...(st.accepted?.conflicts ?? []).map((c) => `[conflict, implemented as planned] ${c}`),
+    ...(st.accepted?.failures ?? []).map((f) => `[pre-existing ${f.kind}] \`${f.id}\` ${f.text}${f.evidence ? ` — evidence: ${f.evidence}` : ""}`)];
+  if (accepted.length) lines.push("\n## Accepted by you\nThe run would have stopped on these; your decision let it go on.\n" + bullets(accepted));
   if (diffStat.trim()) lines.push("\n## Diff stat\n```\n" + diffStat.trimEnd() + "\n```");
   const unresolved: string[] = [];
   if (lastReview) {
@@ -111,7 +123,8 @@ export function reportMarkdown(st: RunState, diffStat: string, lastReview: Revie
     for (const f of lastReview.findings) {
       const a = answers.get(f.id);
       const answer = a ? `; the implementer answered ${a.resolution} in round ${a.round}, not re-reviewed yet` : "";
-      unresolved.push(`[review ${f.severity}] \`${f.id}\` ${f.file} — ${f.issue} (raised on \`${lastReview.reviewed_commit.slice(0, 12)}\`${answer})`);
+      const origin = f.origin === "pre_existing" ? "; pre-existing, outside the task's scope" : "";
+      unresolved.push(`[review ${f.severity}] \`${f.id}\` ${f.file} — ${f.issue} (raised on \`${lastReview.reviewed_commit.slice(0, 12)}\`${origin}${answer})`);
     }
   } else if (lastCritique && st.phase !== "DONE") {
     for (const i of lastCritique.issues) unresolved.push(`[plan ${i.severity}] \`${i.id}\` ${i.description}`);

@@ -151,7 +151,10 @@ describe("WorkspaceSession", () => {
     expect(st.session).toBe("active");
     expect(st.timeline.map((i) => i.kind)).toEqual(expect.arrayContaining(["user", "run", "step", "finish"]));
     const steps = st.timeline.flatMap((i) => (i.kind === "step" ? [i.step] : []));
-    expect(steps.map((x) => x.phase)).toEqual(["PLAN", "PLAN_REVIEW", "PLAN_FINALIZE", "IMPLEMENT", "VERIFY", "CODE_REVIEW"]);
+    // The first step runs the gates before any change (the baseline), then the planner's turn is a step of its own.
+    expect(steps.map((x) => x.phase)).toEqual(["PLAN", "PLAN", "PLAN_REVIEW", "PLAN_FINALIZE", "IMPLEMENT", "VERIFY", "CODE_REVIEW"]);
+    expect(steps[0]!.activities).toEqual([expect.objectContaining({ id: "gate-check", status: "error" })]);
+    expect(steps[1]!.entry?.status).toBe("plan created");
     expect(steps.find((x) => x.phase === "VERIFY")!.activities).toEqual([expect.objectContaining({ id: "gate-check", status: "ok" })]);
     expect(st.totals.tokens).toBeGreaterThan(0);
     expect(st.totals.costUsd).toBeGreaterThan(0);

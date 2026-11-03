@@ -128,6 +128,26 @@ export interface FindingResponse {
   status: "completed" | "blocked";
 }
 
+/**
+ * A failure that was there before the task and that the plan's scope leaves out, as the review gave its evidence: a
+ * required gate (`id` its name) or a blocking finding (`id` its id). The run asks you about these instead of looping.
+ */
+export interface PreexistingFailure {
+  kind: "gate" | "finding";
+  id: string;
+  text: string;
+  evidence: string;
+}
+
+/**
+ * What you accepted by a decision that the run would otherwise stop on: contradictions in the requirements (the plan
+ * was implemented as it was), and pre-existing failures outside the task's scope. DONE and the report say so.
+ */
+export interface Accepted {
+  conflicts: string[];
+  failures: PreexistingFailure[];
+}
+
 /** One question of the chat and the answer it got. */
 export interface Exchange {
   backend: "codex" | "claude";
@@ -175,6 +195,17 @@ export interface RunState {
   findingsSource?: FindingsSource | null;
   /** The implementer's answers to `openFindings` since that review; absent: none. */
   findingResponses?: FindingResponse[];
+  /**
+   * The quality gates as they were before any change (run before the first plan, with the tree they ran on): what failed
+   * then is not the task's doing. Absent in older runs; null when no gate is configured.
+   */
+  baseline?: { tree: string; results: GateResult[] } | null;
+  /** Contradictions waiting for your decision (`requirements_conflict`); absent or null: none. */
+  conflicts?: string[] | null;
+  /** Pre-existing failures waiting for your decision (`preexisting_failures`); absent or null: none. */
+  preexisting?: PreexistingFailure[] | null;
+  /** What you accepted; re-planning starts over. Absent: nothing. */
+  accepted?: Accepted;
   /** The tree the last quality gates ran on; absent in older runs, null while none ran. */
   gatesTree?: string | null;
   /** The round whose review sent the run back to its gates once, because they ran on an earlier revision. */

@@ -28,6 +28,8 @@ const RESUME_HINTS: Record<string, string> = {
   implementer_blocked: "re-run this round with your note or the files you changed; with nothing new it does not run",
   no_progress: "re-run this round with your note or the files you changed; with nothing new it does not run",
   budget_exhausted: "allow one more allowance of the budget reached and go on",
+  requirements_conflict: "implement the plan as it is, accepting the contradiction",
+  preexisting_failures: "accept them as pre-existing for this run, and finish",
   // Reasons only agentduo 0.1 runs can be waiting on; kept so those runs can still be resumed from the prompt.
   dirty_worktree: "re-run this implementation round",
   guard_violation: "accept the changes and run the gates",
@@ -36,8 +38,11 @@ const RESUME_HINTS: Record<string, string> = {
 /** What "resume" does for a run waiting with this reason. */
 export const resumeHint = (reason: string): string => RESUME_HINTS[reason] ?? "re-run the step that stopped";
 
-/** The resume choice's label: a blocker's says that it takes something from you. */
-export const resumeLabel = (reason: string): string => (needsInput(reason) ? "Unblock and retry" : "Resume");
+/** Reasons whose resume is a choice of its own, which the label names. */
+const RESUME_LABELS: Record<string, string> = { requirements_conflict: "Implement as planned", preexisting_failures: "Accept as pre-existing" };
+
+/** The resume choice's label: a blocker's says that it takes something from you; a conflict's names its choice. */
+export const resumeLabel = (reason: string): string => (needsInput(reason) ? "Unblock and retry" : RESUME_LABELS[reason] ?? "Resume");
 
 export const partyLabel = (p?: Party | string): string => (p ? PARTY_LABELS[p as Party] ?? p : "");
 export const roleLabel = (r?: Role): string => (r ? ROLE_LABELS[r] : "");

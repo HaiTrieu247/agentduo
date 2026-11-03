@@ -131,6 +131,34 @@ describe("prompts", () => {
     expect(stopped).not.toContain("ROUND-1");
   });
 
+  it("tells the planner and the critic what fails before any change, and to keep the task as it states it", () => {
+    const passing: GateResult = { ...failedGate, name: "lint", command: "npm run lint", required: false, passed: true, exitCode: 0 };
+    const withBaseline: prompts.PromptContext = { ...ctx, baseline: [failedGate, passing] };
+    const p = prompts.planner(withBaseline, 1, 1, null, null);
+    for (const s of ["## Quality gates before any change (baseline)", "- [FAIL] tests (required)", "check failed: boom", "- [PASS] lint (optional)",
+      "## Required gates that fail before any change\n- `tests`\n\nIn `baseline_failures`, give one entry for each", "Never drop, relax or reinterpret what the task asks"]) {
+      expect(p).toContain(s);
+    }
+    expect(prompts.planner(ctx, 1, 1, null, null)).toContain("No required gate fails before any change that agentduo knows of: `baseline_failures` is an empty list.");
+    const c = prompts.planReviewer(withBaseline, 1, 1, "# Plan", null);
+    for (const s of ["## Consistency check", "list it in `conflicts` (ids `K1`, `K2`, ...)", "never suggest settling one by bending the task", "## Quality gates before any change"]) {
+      expect(c).toContain(s);
+    }
+    // A continued session was given it already.
+    expect(prompts.planReviewer({ ...withBaseline, continued: { changed: [], knowsPlan: false } }, 2, 2, "# Plan", null)).not.toContain("## Quality gates before any change");
+  });
+
+  it("asks the reviewer where each problem comes from, which gates to attribute, and what the user accepted", () => {
+    const sha = "b".repeat(40);
+    const contract = { attribute: ["layout"], accepted: [{ kind: "finding" as const, id: "F2", text: "[high] a.css: bad", evidence: "e" }] };
+    const p = prompts.codeReviewer(ctx, 2, "# Plan", "a".repeat(40), sha, [], "", "", false, null, impl(), undefined, contract);
+    for (const s of ["## Where each problem comes from", "- `pre_existing`: it was there before the task", "never call a problem pre-existing without that evidence",
+      "## Required gates that failed before the task too\n- `layout`", "## Pre-existing failures the user accepted for this run\n- finding `F2`: [high] a.css: bad"]) {
+      expect(p).toContain(s);
+    }
+    expect(prompts.codeReviewer(ctx, 1, "# Plan", "a".repeat(40), sha, [], "", "", false, null, impl())).toContain("`gate_failures` is an empty list.");
+  });
+
   it("code reviewer sees the revision, gates, diff and previous findings, fenced safely", () => {
     const sha = "b".repeat(40);
     const diff = "+```js\n+code\n+```";

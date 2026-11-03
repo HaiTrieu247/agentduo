@@ -15,7 +15,8 @@
     "test_strategy",
     "open_questions",
     "feedback_resolution",
-    "repo_notes"
+    "repo_notes",
+    "baseline_failures"
   ],
   "properties": {
     "title": {
@@ -147,6 +148,29 @@
             "type": "string"
           },
           "note": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "baseline_failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "gate",
+          "in_scope",
+          "rationale"
+        ],
+        "properties": {
+          "gate": {
+            "type": "string"
+          },
+          "in_scope": {
+            "type": "boolean"
+          },
+          "rationale": {
             "type": "string"
           }
         }

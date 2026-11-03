@@ -7,7 +7,7 @@ import type { Change } from "./git.js";
 import type { FindingItem, ReviewFindings } from "./findings.js";
 import type { Approval, Critique, Implementation, Plan } from "./outputs.js";
 import { issuesMarkdown } from "./render.js";
-import type { ConversationContext, EarlierTask, Exchange, HumanNote, RepoNote } from "./state.js";
+import type { ConversationContext, EarlierTask, Exchange, HumanNote, PreexistingFailure, RepoNote } from "./state.js";
 
 /** Where an attachment's copy is, as a prompt names it: its absolute path, or null when its reference is unusable. */
 export type Locate = (a: Attachment) => string | null;
@@ -37,6 +37,16 @@ export interface PromptContext {
   continued?: ContinuedTurn;
   /** The file of the plan the prompt is about, which a continued session that already has the plan is pointed to. */
   planFile?: string;
+  /** The quality gates before any change (the baseline); null or absent when there is none. */
+  baseline?: GateResult[] | null;
+}
+
+/** What the code reviewer is asked about the acceptance contract (src/core/acceptance.ts). */
+export interface ReviewContract {
+  /** Required gates that fail as they did before any change, out of the plan's scope: it attributes each in `gate_failures`. */
+  attribute: string[];
+  /** Pre-existing failures the user accepted for this run. */
+  accepted: PreexistingFailure[];
 }
 
 export interface ContinuedTurn {
@@ -146,8 +156,24 @@ function opening(role: string, title: string, ctx: PromptContext, position: stri
       repoNotesSection(ctx.repoNotes, true),
     ].filter(Boolean);
   }
-  return [header(role, title, ctx), position, taskSection(ctx), earlier(ctx), notes(ctx.notes, ctx.locate), repoNotesSection(ctx.repoNotes, false)];
+  return [header(role, title, ctx), position, taskSection(ctx), earlier(ctx), notes(ctx.notes, ctx.locate), repoNotesSection(ctx.repoNotes, false),
+    baselineSection(ctx.baseline)];
 }
+
+/** The quality gates as they were before any change: what fails there is not the task's doing (fresh prompts only; it never changes). */
+function baselineSection(baseline: GateResult[] | null | undefined): string {
+  if (!baseline?.length) return "";
+  return "\n## Quality gates before any change (baseline)\nagentduo ran the quality gates on the workspace before the first plan, so that " +
+    "what already failed is told apart from what the task changes:\n" + describeGates(baseline) + "\n";
+}
+
+/** The required gates of a baseline that failed. */
+const baselineFailing = (baseline: GateResult[] | null | undefined) => (baseline ?? []).filter((g) => g.required && !g.passed);
+
+/** Never bend the task to make it consistent: the user settles a contradiction in it. */
+const KEEP_THE_TASK = "Never drop, relax or reinterpret what the task asks in order to make the plan consistent. A requirement that " +
+  "contradicts another one, or contradicts what is there before any change (the baseline above), stays as the task states it: the user " +
+  "settles that contradiction.";
 
 /** The plan section of a prompt about a plan the session may already have: a pointer then, and the whole plan otherwise. */
 function planSection(title: string, planMd: string, ctx: PromptContext, had: string): string {
@@ -361,7 +387,10 @@ export function planner(ctx: PromptContext, round: number, version: number, prev
       "- Acceptance criteria that are objective and testable.\n" +
       "- Risks with mitigations, and a test strategy (which tests to add or update).\n" +
       "- Open questions only for things that truly cannot be decided from the repository; state the assumption you made for each.\n" +
+      "- Acceptance criteria and scope that agree with each other and with the baseline: a criterion must be reachable within the scope. " +
+      KEEP_THE_TASK + " Name such a contradiction in `open_questions`; the critic checks it and agentduo asks the user.\n" +
       (ctx.gates.length ? "\nAfter implementation agentduo runs these commands and shows their results to the code reviewer:\n" + gateList(ctx.gates) + "\n" : ""),
+    baselineDuty(ctx),
   ];
   if (!previousPlan) {
     out.push("\nThis is the first version: return `feedback_resolution` as an empty list.\n");
@@ -383,6 +412,17 @@ export function planner(ctx: PromptContext, round: number, version: number, prev
   return out.join("\n");
 }
 
+/** The planner's `baseline_failures`: whether the plan fixes each required gate that fails before any change. */
+function baselineDuty(ctx: PromptContext): string {
+  const failing = baselineFailing(ctx.baseline);
+  if (!failing.length) return "\nNo required gate fails before any change" + (ctx.baseline?.length ? "" : " that agentduo knows of") + ": `baseline_failures` is an empty list.\n";
+  return "\n## Required gates that fail before any change\n" + failing.map((g) => "- `" + g.name + "`").join("\n") + "\n\n" +
+    "In `baseline_failures`, give one entry for each: `in_scope: true` when the plan makes it pass (the task needs it, or the change cannot " +
+    "be verified without it), `false` when fixing it stays out of the task's scope, and the `rationale`. Every required gate must pass for the " +
+    "run to finish, so leaving one out of scope is a contradiction that agentduo puts to the user before any implementation: choose it only " +
+    "when the task itself rules the fix out, and say so.\n";
+}
+
 export function planReviewer(ctx: PromptContext, round: number, version: number, planMd: string, previousCritique: Critique | null): string {
   const out = [
     ...opening("plan_reviewer", "Plan Critic", ctx, `- Planning round: ${round} · Plan under review: v${version}\n`),
@@ -402,6 +442,16 @@ export function planReviewer(ctx: PromptContext, round: number, version: number,
       "- `accepted`: planner responses (by issue id and short reason) you now agree with. `disputed`: planner responses you " +
       "still disagree with, with your reasoning; re-raise any still-blocking one in `issues`.\n" +
       "- `proposed_changes`: concrete edits to the plan you recommend.\n",
+    "## Consistency check\n" +
+      "Before approving, check that the plan can be finished as written: that its acceptance criteria, its scope (in and out), the task's " +
+      "own requirements and what fails before any change (the baseline" + (ctx.continued ? " you were given" : " above") + ", and the plan's " +
+      "'Baseline failures') do not contradict each other. A criterion that needs something the scope excludes, or a required gate the plan " +
+      "leaves failing, is such a contradiction.\n" +
+      "- If the plan can be changed to remove it without changing what the task asks, raise it as an issue.\n" +
+      "- If removing it would change what the task asks (drop or relax a requirement or criterion the task sets, or widen a scope the task " +
+      "limits), list it in `conflicts` (ids `K1`, `K2`, ...), naming in `between` the requirements, criteria, scope items or baseline " +
+      "failures that clash. Only the user can settle these: agentduo stops for their decision before any implementation, so never list a " +
+      "contradiction the plan can resolve on its own, and never suggest settling one by bending the task. Otherwise `conflicts` is empty.\n",
   ];
   if (previousCritique && ctx.continued) {
     out.push("\n## Your critique from the previous round\nYour last answer in this session. Check how the new plan version addressed each " +
@@ -449,6 +499,12 @@ function findingLine(item: FindingItem, extra: string[]): string {
     extra.filter(Boolean).map((x) => `  \n  ${x}`).join("");
 }
 
+/** A finding the reviewer found there before the task, outside the plan's scope: not the implementer's to fix. */
+const outOfScope = (item: FindingItem) => (item.finding.origin === "pre_existing"
+  ? `The reviewer found it there before the task, outside the plan's scope${item.finding.evidence ? ` (${item.finding.evidence})` : ""}: do not fix it ` +
+    "(that would go out of scope); answer it `not_applicable`. The user decides about it."
+  : "");
+
 const answerText = (item: FindingItem) => {
   const a = item.answer;
   return a ? `${a.resolution}${a.notes ? `: ${a.notes}` : ""} (round ${a.round}${a.status === "blocked" ? ", in an attempt that ended blocked" : ""})` : "no answer";
@@ -471,7 +527,7 @@ function findingsToFix(f: ReviewFindings): string {
   const answered = f.items.filter((i) => i.answer);
   const out = ["### Code review findings (review round " + f.round + ", raised on revision " + short(f.revision) + ")",
     (f.summary ? f.summary + "\n\n" : "") + sinceRevision(f, "the current code")];
-  if (open.length) out.push("#### Open: not answered since that review\n" + open.map((i) => findingLine(i, [fileChangeText(i.fileChange) ?? ""])).join("\n"));
+  if (open.length) out.push("#### Open: not answered since that review\n" + open.map((i) => findingLine(i, [fileChangeText(i.fileChange) ?? "", outOfScope(i)])).join("\n"));
   if (answered.length) {
     out.push("#### Answered since that review, not verified yet\nThe next review verifies these; leave them as they are unless the current code " +
       "shows that your answer no longer holds.\n" + answered.map((i) => findingLine(i, [`Your answer: ${answerText(i)}`, fileChangeText(i.fileChange) ?? ""])).join("\n"));
@@ -534,7 +590,8 @@ export function implementer(ctx: PromptContext, round: number, planMd: string, f
  * cut short (git in the workspace cannot reach those snapshots); a native run names the `git diff` to run instead.
  */
 export function codeReviewer(ctx: PromptContext, round: number, planMd: string, base: string, snapshot: string, gateResults: GateResult[],
-  diffStat: string, diff: string, truncated: boolean, previousFindings: ReviewFindings | null, implReport: Implementation, fullDiff?: string): string {
+  diffStat: string, diff: string, truncated: boolean, previousFindings: ReviewFindings | null, implReport: Implementation, fullDiff?: string,
+  contract: ReviewContract = { attribute: [], accepted: [] }): string {
   const tests = implReport.tests_run.map((t) => "- `" + t.command + "` passed=" + t.passed + " " + t.notes).join("\n") || "_(none)_";
   const fence = fenceFor(diff);
   const stat = diffStat.trimEnd() || "(no changes)";
@@ -580,11 +637,31 @@ export function codeReviewer(ctx: PromptContext, round: number, planMd: string, 
     "The workspace currently equals the revision under review, so you may read files directly.\n\n" +
     SEVERITY_GUIDE + "\n\n" +
     "Decision rules:\n" +
-    "- Approve (`approved: true`, `status: \"approved\"`) only if there is no critical or high finding and the acceptance " +
-    "criteria are met" + (ctx.gates.length ? ", and the required quality gates pass" : "") + ".\n" +
+    "- Approve (`approved: true`, `status: \"approved\"`) only if there is no critical or high finding that the task must fix and the " +
+    "acceptance criteria are met" + (ctx.gates.length ? ", and the required quality gates pass (or fail only as they did before the task, " +
+    "outside its scope)" : "") + ".\n" +
     "- `reviewed_commit` must be exactly `" + snapshot + "`.\n" +
     "- New finding ids continue the sequence `F1`, `F2`, ...; `file` is workspace-relative (empty string if " +
     "general) and `line` may be null.\n",
+    "## Where each problem comes from\n" +
+      "For every finding give its `origin` and the `evidence` for it (required for a critical or high one):\n" +
+      "- `regression`: the change under review causes it. Evidence: what in the diff does.\n" +
+      "- `in_scope`: it was there before the task, and the plan's scope includes fixing it. The task is not done until it is fixed.\n" +
+      "- `pre_existing`: it was there before the task (the base revision has it; the baseline gates show it), and the plan's scope leaves " +
+      "it out. Evidence: where it is at the base revision, and that the diff does not cause or worsen it. Such a finding does not weigh " +
+      "against your approval of the change: agentduo puts it to the user, and the implementer is not asked to go out of scope for it.\n" +
+      "- `unclear`: you cannot tell. It counts as the task's.\n" +
+      "Classify honestly: never call a problem pre-existing without that evidence, and never leave a real problem out to approve.\n",
+    contract.attribute.length
+      ? "## Required gates that failed before the task too\n" + contract.attribute.map((g) => "- `" + g + "`").join("\n") + "\n" +
+        "Each failed before any change (see the baseline), and the plan leaves fixing it out of scope. In `gate_failures`, give one entry for " +
+        "each, with its `origin` and `evidence`: `pre_existing` only when its output now shows the same failures as before the change and " +
+        "nothing the change caused; otherwise `regression` (the change adds or worsens a failure) or `unclear`. Leave other gates out.\n"
+      : "`gate_failures` is an empty list.\n",
+    contract.accepted.length
+      ? "## Pre-existing failures the user accepted for this run\n" + contract.accepted.map((f) => `- ${f.kind === "gate" ? `gate \`${f.id}\`` : `finding \`${f.id}\``}: ${f.text}`).join("\n") +
+        "\nThey no longer weigh against your approval. Re-raise one only if it got worse, under the same id.\n"
+      : "",
     REPO_NOTES_ASK,
     OUTPUT_RULES);
   return out.join("\n");

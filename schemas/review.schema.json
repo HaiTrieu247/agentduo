@@ -9,7 +9,8 @@
     "summary",
     "findings",
     "resolved_findings",
-    "repo_notes"
+    "repo_notes",
+    "gate_failures"
   ],
   "properties": {
     "status": {
@@ -39,7 +40,9 @@
           "file",
           "line",
           "issue",
-          "recommendation"
+          "recommendation",
+          "origin",
+          "evidence"
         ],
         "properties": {
           "id": {
@@ -68,6 +71,18 @@
           },
           "recommendation": {
             "type": "string"
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "regression",
+              "in_scope",
+              "pre_existing",
+              "unclear"
+            ]
+          },
+          "evidence": {
+            "type": "string"
           }
         }
       }
@@ -92,6 +107,35 @@
             "type": "string"
           },
           "note": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "gate_failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "gate",
+          "origin",
+          "evidence"
+        ],
+        "properties": {
+          "gate": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "regression",
+              "in_scope",
+              "pre_existing",
+              "unclear"
+            ]
+          },
+          "evidence": {
             "type": "string"
           }
         }

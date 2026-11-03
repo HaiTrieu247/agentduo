@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findingsMarkdown, planMarkdown, reportMarkdown } from "../src/core/render.js";
+import { critiqueMarkdown, findingsMarkdown, planMarkdown, reportMarkdown } from "../src/core/render.js";
 import { newState } from "../src/core/state.js";
 import { finding, issue, critique, plan, review } from "./helpers/builders.js";
 
@@ -9,6 +9,14 @@ describe("render", () => {
     for (const s of ["# Plan v2: Demo", "## Goals", "**Out of scope**", "1. **S1** write app.txt", "Files: `app.txt`", "## Acceptance criteria", "**none** — n/a", "## Response to feedback", "`C1` **accepted** — ok"]) {
       expect(md).toContain(s);
     }
+  });
+
+  it("renders what a plan does about each gate failing before any change, and the conflicts the critic leaves to the user", () => {
+    const md = planMarkdown(plan("Demo", { baseline_failures: [{ gate: "check", in_scope: true, rationale: "the task" }, { gate: "layout", in_scope: false, rationale: "not ours" }] }), 1);
+    expect(md).toContain("## Baseline failures\nRequired gates that fail before any change:\n- `check`: **fixed by this plan** — the task\n- `layout`: **left out of scope** — not ours");
+    expect(planMarkdown(plan("Demo", { baseline_failures: [] }), 1)).not.toContain("## Baseline failures");
+    const c = critiqueMarkdown({ ...critique(true), conflicts: [{ id: "K1", description: "AC2 vs scope", between: ["AC2", "scope_out"] }] }, 1, 1, "Claude");
+    expect(c).toContain("### Conflicts only the user can settle\n- `K1` AC2 vs scope (between: AC2; scope_out)");
   });
 
   it("renders finding locations", () => {

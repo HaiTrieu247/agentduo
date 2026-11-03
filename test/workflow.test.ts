@@ -8,7 +8,7 @@ import { EventBus, type Message } from "../src/events.js";
 import { approval, critique, finding, impl, issue, plan, review } from "./helpers/builders.js";
 import { GIT_MISSING, MARKER, RunGitError } from "../src/core/run-git.js";
 import type { RunGit } from "../src/core/state.js";
-import { testConfig, userDataEnv, type ConfigOverrides } from "./helpers/config.js";
+import { CHECK_GATE, testConfig, userDataEnv, type ConfigOverrides } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { makeHarness, newWorkflow, resume, resumedWorkflow, runDirOf, ScriptedDecider, stateOf, type Harness } from "./helpers/harness.js";
 import { png } from "./helpers/images.js";
@@ -79,7 +79,7 @@ describe("Workflow", () => {
     expect([st.planningRound, st.planVersion, st.finalPlanVersion, st.implRound]).toEqual([2, 2, 2, 3]);
     expect(st.openFindings).toEqual([]);
     expect(st.history.map((x) => `${x.phase}:${x.status}`)).toEqual([
-      "PLAN:plan created", "PLAN_REVIEW:changes requested", "PLAN:plan revised", "PLAN_REVIEW:approved", "PLAN_FINALIZE:plan finalized",
+      "PLAN:baseline failing", "PLAN:plan created", "PLAN_REVIEW:changes requested", "PLAN:plan revised", "PLAN_REVIEW:approved", "PLAN_FINALIZE:plan finalized",
       "IMPLEMENT:completed", "VERIFY:failed",
       "IMPLEMENT:completed", "VERIFY:passed", "CODE_REVIEW:changes requested",
       "IMPLEMENT:completed", "VERIFY:passed", "CODE_REVIEW:approved",
@@ -97,7 +97,7 @@ describe("Workflow", () => {
     expect(envelope.output.reviewed_commit).toBe(st.lastSnapshot!.commit);
     expect(readRun("report.md")).toContain("**Status:** DONE");
     expect(messages().map((m) => `${m.from}>${m.to}:${m.kind}`)).toEqual([
-      "codex>claude:plan", "claude>codex:critique", "codex>claude:plan", "claude>codex:critique", "codex>claude:approval",
+      "gates>codex:gates", "codex>claude:plan", "claude>codex:critique", "codex>claude:plan", "claude>codex:critique", "codex>claude:approval",
       "claude>codex:implementation", "gates>claude:gates",
       "claude>codex:implementation", "gates>codex:gates", "codex>claude:review",
       "claude>codex:implementation", "gates>codex:gates", "codex>claude:review",
@@ -422,7 +422,8 @@ describe("Workflow", () => {
     fake.setScenario({ ...happy(), planner: [{ sleep: 1500, output: plan() }] });
     const { wf, bus } = newWorkflow(h, "Make app.txt fixed");
     bus.on((e) => {
-      if (e.type === "phase.started" && e.phase === "PLAN") setTimeout(() => wf.addNote("keep app.txt short"), 300);
+      // The planner's step, after the baseline gates' one.
+      if (e.type === "phase.started" && e.phase === "PLAN" && e.role === "planner") setTimeout(() => wf.addNote("keep app.txt short"), 300);
     });
     expect(await wf.run()).toBe(0);
     expect(fake.calls("planner")[0]!.prompt).not.toContain("keep app.txt short");
@@ -1146,6 +1147,143 @@ describe("Workflow: review findings kept in step with the code", () => {
     expect(warnings()).toContain("the workspace changed again after the quality gates ran: the review gets the results of an earlier revision");
     expect(fake.calls("code_reviewer")).toHaveLength(1);
     expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "quality gates passed on an earlier revision and the review approved" });
+  });
+});
+
+describe("Workflow: contradictory requirements and pre-existing failures", () => {
+  // A required gate that fails before any change, unrelated to the task (the layout), next to the task's own check.
+  const LAYOUT = `import { existsSync } from "node:fs";
+const ok = existsSync("layout.ok");
+console.log(ok ? "layout ok" : "layout: 2 defects (header, footer)");
+process.exit(ok ? 0 : 1);
+`;
+  const layoutGate = { name: "layout", command: `"${process.execPath}" layout.mjs`, required: true };
+  const withLayout = (): ConfigOverrides => ({ gates: [CHECK_GATE, layoutGate] });
+  const outOfScopePlan = () => plan("Demo plan", { baseline_failures: [
+    { gate: "check", in_scope: true, rationale: "the task fixes app.txt" },
+    { gate: "layout", in_scope: false, rationale: "the task says not to touch the layout" },
+  ] });
+  const preexistingGate = { gate: "layout", origin: "pre_existing" as const, evidence: "the same 2 defects as before the change; the diff does not touch the layout" };
+  const record = (name: string) => JSON.parse(readRun(name));
+  beforeEach(() => writeFileSync(join(h.repo, "layout.mjs"), LAYOUT));
+
+  it("stops before any implementation when the plan leaves a required gate failing, and finishes only on what you accept", async () => {
+    const scenario = {
+      ...happy(),
+      planner: [{ output: outOfScopePlan() }],
+      code_reviewer: [{ output: { ...review(true), gate_failures: [preexistingGate] } }],
+    };
+    expect(await start(scenario, withLayout())).toBe(2);
+    let st = stateOf(h);
+    // The gates ran before the plan: both fail, and the planner was told so.
+    expect(record("gates.baseline.json").results.map((g: { name: string; passed: boolean }) => [g.name, g.passed])).toEqual([["check", false], ["layout", false]]);
+    expect(fake.calls("planner")[0]!.prompt).toContain("## Required gates that fail before any change\n- `check`\n- `layout`");
+    expect(st.humanReview).toMatchObject({ reason: "requirements_conflict", fromPhase: "PLAN_REVIEW", resumePhase: "IMPLEMENT" });
+    expect(st.humanReview!.details).toEqual(["the required gate 'layout' fails before any change and the plan leaves fixing it out of scope " +
+      "(the task says not to touch the layout), but DONE needs every required gate to pass (quality_gates.require_tests_pass)"]);
+    expect(fake.calls("implementer")).toHaveLength(0);
+    expect(fake.calls("plan_finalizer")).toHaveLength(0);
+
+    // "Implement as planned": the layout still fails after the change, as before it. It goes to the reviewer, not back
+    // to the implementer, and the reviewer shows it is not the change's doing: the run asks instead of looping.
+    expect(await resume(h, { decision: "resume" })).toBe(2);
+    st = stateOf(h);
+    expect(st.humanReview).toMatchObject({ reason: "preexisting_failures", resumePhase: "DONE" });
+    expect(st.humanReview!.details).toEqual(["required gate 'layout' fails, as it did before the task (evidence: " + preexistingGate.evidence + ")"]);
+    expect([fake.calls("implementer").length, fake.calls("code_reviewer").length, st.implRound]).toEqual([1, 1, 1]);
+    expect(st.history.map((e) => `${e.phase} ${e.status}`)).toContain("VERIFY failing as before the task");
+    expect(fake.calls("code_reviewer")[0]!.prompt).toContain("## Required gates that failed before the task too\n- `layout`");
+    expect(st.phase).toBe("HUMAN_REVIEW");
+
+    // Accepted by you, it ends DONE, saying so, and the report lists what you accepted.
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    st = stateOf(h);
+    expect(st.phase).toBe("DONE");
+    expect(h.events.at(-1)).toMatchObject({ type: "run.finished", summary: "quality gates passed, except 'layout', failing as before the task and the review " +
+      "approved; you accepted 1 pre-existing failure(s) outside the task's scope (gate 'layout')" });
+    expect([st.accepted!.conflicts.length, st.accepted!.failures.map((f) => f.id)]).toEqual([1, ["layout"]]);
+    const report = readRun("report.md");
+    expect(report).toContain("## Accepted by you\nThe run would have stopped on these; your decision let it go on.\n- [conflict, implemented as planned] the required gate 'layout'");
+    expect(report).toContain("- [pre-existing gate] `layout` required gate 'layout' fails, as it did before the task — evidence: the same 2 defects");
+    expect(report).toContain("## Quality gates before any change (baseline)");
+  });
+
+  it("asks before implementing when the critic finds a contradiction only you can settle, and re-plans with your settlement", async () => {
+    const conflict = { id: "K1", description: "AC2 needs a page with no layout defect, but the task keeps the existing layout defects out of scope",
+      between: ["AC2", "task: do not fix unrelated layout defects", "baseline: layout fails"] };
+    const scenario = { ...happy(), plan_reviewer: [{ output: { ...critique(true), conflicts: [conflict] } }, { output: critique(true) }] };
+    expect(await start(scenario)).toBe(2);
+    let st = stateOf(h);
+    expect(st.humanReview).toMatchObject({ reason: "requirements_conflict", details: [
+      "K1: AC2 needs a page with no layout defect, but the task keeps the existing layout defects out of scope (between: AC2; task: do not fix unrelated layout defects; baseline: layout fails)",
+    ] });
+    expect(st.humanReview!.message).toContain("so nothing is implemented yet");
+    expect(fake.calls("implementer")).toHaveLength(0);
+    expect(fake.calls("plan_reviewer")[0]!.prompt).toContain("## Consistency check");
+    expect(readRun("plan-feedback.md")).toContain("### Conflicts only the user can settle\n- `K1` AC2 needs");
+    // Your note settles it: the planner re-plans with it, the critic finds no contradiction, and the run goes on.
+    expect(await resume(h, { decision: "revise", note: "AC2 is about the new page only" })).toBe(0);
+    expect(fake.calls("planner")[1]!.prompt).toContain("AC2 is about the new page only");
+    st = stateOf(h);
+    expect([st.phase, st.conflicts, st.accepted]).toEqual(["DONE", null, undefined]);
+  });
+
+  it("does not take a required gate's failure for pre-existing without the reviewer's evidence, nor a gate that passed before", async () => {
+    const scenario = {
+      ...happy(),
+      planner: [{ output: outOfScopePlan() }],
+      implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }],
+      code_reviewer: [
+        // No attribution of the layout gate: rejected, and asked again.
+        { output: review(true) },
+        // The change made it worse: the implementer's to fix.
+        { output: { ...review(false), gate_failures: [{ gate: "layout", origin: "regression", evidence: "the diff moves the header" }] } },
+        { output: { ...review(true), gate_failures: [preexistingGate] } },
+      ],
+    };
+    expect(await start(scenario, withLayout())).toBe(2);
+    expect(await resume(h, { decision: "resume" })).toBe(2);
+    expect(fake.calls("code_reviewer")[1]!.prompt).toContain("'gate_failures' must attribute the failing required gate 'layout'");
+    expect(fake.calls("implementer")[1]!.prompt).toContain("layout: 2 defects (header, footer)");
+    const st = stateOf(h);
+    expect([st.humanReview?.reason, st.implRound, fake.calls("code_reviewer").length]).toEqual(["preexisting_failures", 2, 3]);
+    // Never DONE without your decision.
+    expect(st.phase).toBe("HUMAN_REVIEW");
+  });
+
+  it("stops on blocking review findings that were there before the task and outside its scope, instead of looping on them", async () => {
+    const preexisting = finding("F2", "high", "layout.css", "pre_existing");
+    const scenario = {
+      ...happy(),
+      implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed well\n" }, output: impl("completed", ["F1", "F2"]) }],
+      code_reviewer: [
+        { output: review(false, [finding("F1"), preexisting]) },
+        { output: review(false, [preexisting]) },
+        { output: review(true, [preexisting]) },
+      ],
+    };
+    expect(await start(scenario)).toBe(2);
+    // F1 is the task's: one fix round, told that F2 is not its to fix.
+    expect(fake.calls("implementer")[1]!.prompt).toContain("The reviewer found it there before the task, outside the plan's scope (the same at the base revision): do not fix it");
+    let st = stateOf(h);
+    expect(st.humanReview).toMatchObject({ reason: "preexisting_failures", resumePhase: "CODE_REVIEW" });
+    expect(st.humanReview!.message).toContain("and the reviewer reviews again, knowing that you did");
+    expect(st.humanReview!.details).toEqual(["finding F2 [high] layout.css: bad (evidence: the same at the base revision)"]);
+    expect(readRun("report.md")).toContain("(raised on `");
+    expect(readRun("report.md")).toContain("; pre-existing, outside the task's scope)");
+    // Accepted: the reviewer reviews again knowing it, and the run ends DONE with no further fix round.
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    expect(fake.calls("code_reviewer")[2]!.prompt).toContain("## Pre-existing failures the user accepted for this run\n- finding `F2`: [high] layout.css: bad");
+    expect(fake.calls("implementer")).toHaveLength(2);
+    st = stateOf(h);
+    expect(st.phase).toBe("DONE");
+    expect(h.events.at(-1)).toMatchObject({ summary: expect.stringContaining("; you accepted 1 pre-existing failure(s) outside the task's scope (finding F2)") });
+  });
+
+  it("asks the reviewer for evidence of every blocking finding", async () => {
+    const vague = { ...finding("F1"), evidence: " " };
+    expect(await start({ ...happy(), code_reviewer: [{ output: review(false, [vague]) }, { output: review(true) }] })).toBe(0);
+    expect(fake.calls("code_reviewer")[1]!.prompt).toContain("finding 'F1' is high, so its 'evidence' must say where it comes from");
   });
 });
 

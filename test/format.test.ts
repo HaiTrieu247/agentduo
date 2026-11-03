@@ -29,6 +29,9 @@ describe("format", () => {
     expect([resumeLabel("implementer_blocked"), resumeLabel("no_progress"), resumeLabel("agent_error")]).toEqual(["Unblock and retry", "Unblock and retry", "Resume"]);
     expect(resumeHint("no_progress")).toBe("re-run this round with your note or the files you changed; with nothing new it does not run");
     expect(resumeHint("agent_error")).toBe("re-run the step that stopped");
+    // A contradiction or pre-existing failures: resume is a choice of its own, which the label names.
+    expect([resumeLabel("requirements_conflict"), resumeLabel("preexisting_failures")]).toEqual(["Implement as planned", "Accept as pre-existing"]);
+    expect(resumeHint("preexisting_failures")).toBe("accept them as pre-existing for this run, and finish");
     expect(decisionCommand("duo", "r1", "implementer_blocked"))
       .toBe('duo resume r1 --decision resume --note "<what the implementer needs>" (or after changing the files), or --decision revise|abort');
     expect(decisionCommand("duo", "r1", "agent_error")).toBe('duo resume r1 --decision resume|revise|abort [--note "..."]');
