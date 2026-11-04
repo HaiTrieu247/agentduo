@@ -461,7 +461,7 @@ The design is in
 
 Settings are merged in this order, later sources winning: built-in defaults, then `~/.config/agentduo/config.yaml` (or `$XDG_CONFIG_HOME/agentduo/` or `%APPDATA%\agentduo\` on Windows), then `<workspace>/.agentduo/config.yaml` or `--config`. A misspelled key produces a warning. A value of the wrong type produces an error that names the file.
 
-- **Mappings** are merged key by key, and `role_args` role by role.
+- **Mappings** are merged key by key, and `role_args`, `role_models` and `role_efforts` role by role.
 - **Lists** (`args`, `gates`, `blocking_severities`) replace the earlier value. A workspace's `claude.args: [--strict-mcp-config]` therefore drops the flags your user config lists in `claude.args`, unless you list them too.
 
 ```yaml
@@ -472,11 +472,35 @@ gates:                       # optional
   - name: tests
     command: "npm test"
     required: true
-codex:  { model: null, args: [], role_args: {} }          # args: [--ephemeral] starts every call afresh
-claude: { model: null, max_budget_usd: null, permission_prompts: ask, args: [], role_args: {} }   # or [--no-session-persistence]
+codex:  { model: null, args: [], role_args: {}, role_models: {}, role_efforts: {} }          # args: [--ephemeral] starts every call afresh
+claude: { model: null, max_budget_usd: null, permission_prompts: ask, args: [], role_args: {}, role_models: {}, role_efforts: {} }   # or [--no-session-persistence]
 ```
 
 `agent_idle_timeout_sec` stops an agent that prints nothing for that long; set it to 0 to turn the check off.
+
+### A model and effort per step
+
+Each pipeline step (`planner`, `plan_reviewer`, `implementer`, `code_reviewer`) can run with its own model and effort,
+set on the CLI that plays it:
+
+```yaml
+claude:
+  model: sonnet                                    # every Claude call
+  role_models: { plan_reviewer: opus }             # the plan critique runs on Opus
+  role_efforts: { plan_reviewer: high, implementer: medium }
+codex:
+  role_efforts: { planner: high, code_reviewer: medium }   # Codex's model_reasoning_effort
+```
+
+- A step without a value of its own (absent, or `null`) uses the CLI's `model` and the effort in its `args`. A
+  workspace's `null` hides a value from your user config.
+- The values belong to the CLI: if Codex plays `plan_reviewer` instead, `claude.role_models.plan_reviewer` stays
+  saved but is not used, and `codex.role_models.plan_reviewer` applies.
+- A `--model`, `--effort` (Claude) or `-c model_reasoning_effort=…` (Codex) in the step's `role_args` still comes last
+  and wins.
+- They apply from a running pipeline's next call, as `model` does. Chat turns and `/discuss` keep the CLI's model
+  and effort.
+- `/config` lists the steps that have their own. The desktop's Settings set them under Configuration → Workflow roles.
 
 ### Budget per run
 

@@ -116,6 +116,17 @@ describe("settings", () => {
       "permissions: default", "planner: codex"]) expect(text).toContain(s);
   });
 
+  it("names the steps that run with a model or effort of their own, as the CLI that plays them has it", () => {
+    const cfg = defaultConfig();
+    expect(describeSettings(cfg)).not.toContain("Steps");
+    cfg.claude.role_models = { plan_reviewer: "opus", implementer: "sonnet" };
+    cfg.claude.role_efforts = { plan_reviewer: "high" };
+    cfg.codex.role_efforts = { planner: "xhigh", implementer: "low" };
+    const steps = describeSettings(cfg).split("\n").find((l) => l.startsWith("Steps"));
+    // Codex does not implement here, so its implementer effort is not in effect.
+    expect(steps).toBe("Steps   planner: effort xhigh · plan critic: opus, effort high · implementer: sonnet");
+  });
+
   it("saves only the keys a setting touches, and keeps the comments of the file", () => {
     const t = tempDir();
     dirs.push(t);
@@ -167,7 +178,8 @@ describe("settings", () => {
     expect(now.map((c) => c.live)).toEqual(Array(now.length).fill("next-call"));
     const live = Object.fromEntries(SETTING_KEYS.map((k) => [k.key, k.live]));
     for (const key of ["claude.bin", "codex.bin", "claude.model", "codex.args", "claude.role_args.implementer", "codex.role_args.code_reviewer", "claude.max_budget_usd",
-      "claude.permission_prompts"]) expect(live[key], key).toBe("next-call");
+      "claude.permission_prompts", "claude.role_models.plan_reviewer", "codex.role_models.planner", "claude.role_efforts.implementer", "codex.role_efforts.code_reviewer",
+    ]) expect(live[key], key).toBe("next-call");
     for (const key of ["agents.planner", "agents.implementer", "limits.max_retries", "limits.agent_timeout_sec", "limits.max_consecutive_gate_failures",
       "limits.max_discussion_rounds", "limits.max_planning_rounds"]) expect(live[key], key).toBe("next-run");
     // The workspace lock lives in the runs directory: Settings never moves it.
@@ -217,6 +229,26 @@ describe("settings", () => {
     }
     expect(checkSettingValue(settingKey("limits.max_run_tokens")!, 1.5)).toBe("limits.max_run_tokens must be a positive integer or null");
     expect(checkSettingValue(settingKey("limits.max_run_cost_usd")!, 1.5)).toBeNull();
+  });
+
+  it("sets a step's model and effort in place, each CLI's efforts checked as its own", () => {
+    const cfg = defaultConfig();
+    const models = cfg.claude.role_models;
+    settings.value("claude.role_models.plan_reviewer", "opus").apply(cfg);
+    settings.value("claude.role_efforts.plan_reviewer", "max").apply(cfg);
+    settings.value("codex.role_efforts.planner", "minimal").apply(cfg);
+    settings.value("codex.role_models.planner", null).apply(cfg);
+    // The backends hold cfg.claude and read its mappings at each call.
+    expect(cfg.claude.role_models).toBe(models);
+    expect(cfg.claude).toMatchObject({ role_models: { plan_reviewer: "opus" }, role_efforts: { plan_reviewer: "max" } });
+    expect(cfg.codex).toMatchObject({ role_models: { planner: null }, role_efforts: { planner: "minimal" } });
+    settings.value("claude.role_models.plan_reviewer", undefined).apply(cfg);
+    expect(cfg.claude.role_models).toEqual({});
+    expect(settingKey("claude.role_efforts.planner")).toMatchObject({ kind: "effort", removable: true });
+    expect(checkSettingValue(settingKey("claude.role_efforts.planner")!, null)).toBeNull();
+    expect(checkSettingValue(settingKey("claude.role_efforts.planner")!, "minimal")).toBe("claude.role_efforts.planner must be one of low, medium, high, xhigh, max, or null");
+    expect(checkSettingValue(settingKey("codex.role_efforts.planner")!, "minimal")).toBeNull();
+    expect(() => settings.value("claude.role_models.implementer", "two words")).toThrow(ConfigError);
   });
 
   it("drops an earlier change once a later one sets the same keys whole, so a replay never brings it back", () => {

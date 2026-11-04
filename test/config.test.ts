@@ -82,6 +82,29 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ dir: bad.dir, env: bad.env })).toThrow("claude.permission_prompts must be 'ask' or 'deny'");
   });
 
+  it("takes a model and an effort per role, merged role by role, and refuses unknown roles, efforts or values", () => {
+    const { dir, env } = setup("claude:\n  role_models:\n    plan_reviewer: opus\n    implementer: null\n  role_efforts:\n    plan_reviewer: high\n",
+      "claude:\n  role_models:\n    implementer: sonnet\n    code_reviewer: haiku\ncodex:\n  role_efforts:\n    planner: minimal\n");
+    const { data } = loadConfig({ dir, env });
+    // The project's null hides the user config's sonnet: that step runs with Claude's own model again.
+    expect(data.claude.role_models).toEqual({ plan_reviewer: "opus", implementer: null, code_reviewer: "haiku" });
+    expect(data.claude.role_efforts).toEqual({ plan_reviewer: "high" });
+    expect(data.codex).toMatchObject({ role_models: {}, role_efforts: { planner: "minimal" } });
+    expect(defaultConfig().claude).toMatchObject({ role_models: {}, role_efforts: {} });
+    expect(configFromSaved({ claude: { model: "opus" } }).claude).toMatchObject({ role_models: {}, role_efforts: {} });
+    for (const [yaml, error] of [
+      ["codex:\n  role_models:\n    hacker: o3\n", "codex.role_models: unknown role 'hacker'"],
+      ["claude:\n  role_models:\n    implementer: 5\n", "claude.role_models.implementer must be a model name or null"],
+      ["claude:\n  role_models:\n    implementer: two words\n", "claude.role_models.implementer must be a model name or null"],
+      ["claude:\n  role_models: opus\n", "claude.role_models must be a mapping of role to a model"],
+      ["claude:\n  role_efforts:\n    implementer: minimal\n", "claude.role_efforts.implementer must be one of low, medium, high, xhigh, max, or null"],
+      ["codex:\n  role_efforts:\n    planner: huge\n", "codex.role_efforts.planner must be one of minimal, low, medium, high, xhigh, max, or null"],
+    ] as const) {
+      const bad = setup(yaml);
+      expect(() => loadConfig({ dir: bad.dir, env: bad.env }), yaml).toThrow(error);
+    }
+  });
+
   it("merges role_args from several files role by role", () => {
     const { dir, env } = setup("claude:\n  role_args:\n    plan_reviewer: [--model, haiku]\n", "claude:\n  role_args:\n    implementer: [--permission-mode, acceptEdits]\n");
     expect(loadConfig({ dir, env }).data.claude.role_args).toEqual({
@@ -192,6 +215,24 @@ describe("configuration service (the desktop's Settings)", () => {
     expect(entry(v, "claude.max_budget_usd")).toMatchObject({ source: "session", effective: 4, session: { value: 4 } });
     expect(v.storage).toMatchObject({ runsDir: join(dir, ".agentduo", "runs"), value: ".agentduo/runs", source: "default" });
     expect(v.lockedBy).toBeNull();
+  });
+
+  it("shows and sets a role's model and effort by layer: null uses the CLI's own again, a clear inherits", () => {
+    const { dir, env } = setup(undefined, "claude:\n  role_models:\n    plan_reviewer: opus\n");
+    const o = { workspace: dir, env };
+    let v = read(o);
+    expect(entry(v, "claude.role_models.plan_reviewer")).toMatchObject({ kind: "model", live: "next-call", removable: true, effective: "opus", source: "global" });
+    expect(entry(v, "claude.role_models.implementer")).toMatchObject({ effective: null, source: "default", defaultValue: null });
+    expect(entry(v, "codex.role_efforts.planner")).toMatchObject({ kind: "effort", live: "next-call", removable: true, effective: null });
+    v = updateConfiguration(o, "project", "claude.role_models.plan_reviewer", null);
+    expect(entry(v, "claude.role_models.plan_reviewer")).toMatchObject({ effective: null, source: "project", projectOverridesGlobal: true });
+    v = clearConfiguration(o, "project", "claude.role_models.plan_reviewer");
+    expect(entry(v, "claude.role_models.plan_reviewer")).toMatchObject({ effective: "opus", source: "global" });
+    v = updateConfiguration(o, "project", "claude.role_efforts.implementer", "high");
+    expect(entry(v, "claude.role_efforts.implementer")).toMatchObject({ effective: "high", source: "project" });
+    expect(file(join(dir, ".agentduo", "config.yaml"))).toContain("implementer: high");
+    expect(() => updateConfiguration(o, "project", "claude.role_efforts.implementer", "minimal")).toThrow("claude.role_efforts.implementer must be one of");
+    expect(() => updateConfiguration(o, "project", "codex.role_models.planner", "two words")).toThrow(ConfigurationError);
   });
 
   it("clears a project key to inherit the user config again (never null), and tells null (the default) apart", () => {

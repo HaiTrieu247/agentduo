@@ -104,10 +104,11 @@ async function effective(key: string): Promise<unknown> {
   return view.entries.find((e) => e.key === key)?.effective;
 }
 
-/** Settings' tab of `key` in `scope`, and the row of that setting in it. */
+/** Settings' tab of `key` in `scope`, and the row of that setting in it (a step's model and effort sit with who plays it). */
 async function settingRow(scope: string, key: string) {
   await page.locator(".settings .seg", { hasText: scope }).click();
-  await page.locator(".settings .config-tab", { hasText: GROUP_TABS[key.split(".")[0]!]! }).click();
+  const group = /^(claude|codex)\.role_(models|efforts)\./.test(key) ? "agents" : key.split(".")[0]!;
+  await page.locator(".settings .config-tab", { hasText: GROUP_TABS[group]! }).click();
   return page.locator(`.settings .setting-row[data-key="${key}"]`);
 }
 
@@ -318,6 +319,8 @@ describe("agentduo desktop", () => {
     await page.locator(".sidebar .nav-head", { hasText: "Conversations" }).getByTitle("New conversation").click();
     await expect.poll(async () => (await activeConversation()).conversationId, { timeout: 10_000 }).not.toBe(a);
     expect(await page.locator(".chat-mount").count()).toBe(3);
+    // A conversation has no ✕ in the list: closing one only opened a new one in its place.
+    expect(await page.locator(".sidebar .nav-item.conversation button:not(.nav-main)").count()).toBe(0);
     await page.locator(".sidebar .nav-item.conversation .nav-main", { hasText: "Hello Codex" }).click();
     await seeInChat("Codex says hello", 10_000);
     await expect.poll(async () => (await activeConversation()).conversationId, { timeout: 10_000 }).toBe(a);
@@ -333,17 +336,23 @@ describe("agentduo desktop", () => {
   it("runs a pipeline: gate, review, a decision, Settings changed meanwhile, and its changes as a line diff", async () => {
     fake.setScenario({
       ...happyPlan(),
-      implementer: [{ sleep: 6000, write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed\nand tidy\n" }, output: impl() }],
+      implementer: [{ sleep: 9000, write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed\nand tidy\n" }, output: impl() }],
       code_reviewer: [{ output: review(false, [finding("F1")]) }, { output: review(true) }],
     });
     await send("/pipeline Make app.txt fixed");
     await waitUntil(() => fake.calls("implementer").length === 1, 45_000, "the implementer");
     await expect.poll(() => page.locator(".top-status").textContent(), { timeout: 10_000 }).toMatch(/implement/i);
 
-    // While Claude implements: a next-call setting (the reviewer's model) and a next-run one (who reviews).
+    // While Claude implements: next-call settings (the reviewer's model, the review step's effort and the implementer's
+    // model) and a next-run one (who reviews). The review step's rows are Codex's while Codex plays it.
     await openSettings("Configuration");
     await setEntry("This project", "codex.model", "e2e-model", "model");
+    await setEntry("This project", "codex.role_efforts.code_reviewer", "high", "select");
+    await setEntry("This project", "claude.role_models.implementer", "e2e-implementer", "model");
     await setEntry("This project", "agents.code_reviewer", "claude", "select");
+    // Claude plays the review step for new runs now: its rows are Claude's, and Codex's effort stays saved.
+    expect(await page.locator('.settings .setting-row[data-key="claude.role_efforts.code_reviewer"]').count()).toBe(1);
+    expect(await page.locator('.settings .setting-row[data-key="codex.role_efforts.code_reviewer"]').count()).toBe(0);
     await closeSettings();
 
     // max_review_rounds is 1 (the user config, set at first run): the rejected review asks for a decision.
@@ -357,6 +366,9 @@ describe("agentduo desktop", () => {
     const reviews = fake.calls("code_reviewer");
     expect(reviews.map((c) => c.backend)).toEqual(["codex", "codex"]);
     for (const r of reviews) expect(r.args.join(" ")).toContain("e2e-model");
+    for (const r of reviews) expect(r.args).toContain("model_reasoning_effort=high");
+    // The implementer's second round ran on the step's own model.
+    expect(fake.calls("implementer").at(-1)!.args.join(" ")).toContain("--model e2e-implementer");
     const run = runOf("Make app.txt fixed")!;
     const saved = JSON.parse(readFileSync(join(RunStore.open(runsDir, run.taskId).dir, "config.json"), "utf8"));
     expect(saved.agents.code_reviewer).toBe("codex");
@@ -380,10 +392,14 @@ describe("agentduo desktop", () => {
     await openSettings("Configuration");
     await resetEntry("This project", "codex.model");
     await resetEntry("This project", "agents.code_reviewer");
+    await resetEntry("This project", "codex.role_efforts.code_reviewer");
+    await resetEntry("This project", "claude.role_models.implementer");
     await closeSettings();
     const project = YAML.parse(readFileSync(join(repo, ".agentduo", "config.yaml"), "utf8"));
     expect(project.codex ?? {}).not.toHaveProperty("model");
     expect(project.agents ?? {}).not.toHaveProperty("code_reviewer");
+    expect(project.codex ?? {}).not.toHaveProperty("role_efforts");
+    expect(project.claude ?? {}).not.toHaveProperty("role_models");
   });
 
   it("stops an answer with the Stop button", async () => {

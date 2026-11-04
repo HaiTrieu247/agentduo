@@ -41,13 +41,21 @@ export const findingsDigest = (findings: Finding[]): string => digest(findings);
  */
 export function implementerSettings(cfg: ConfigData, workspace: string, env: NodeJS.ProcessEnv): string {
   const backend = cfg.agents.implementer;
+  const step = ownStep(cfg[backend]);
   if (backend === "claude") {
     const { bin, model, permission_prompts, args, role_args } = cfg.claude;
     const own = role_args.implementer ?? [];
-    return digest([backend, bin, model, permission_prompts, args, own, claudeSettingsSignature({ args: [...args, ...own], workspace, env })]);
+    return digest([backend, bin, model, permission_prompts, args, own, claudeSettingsSignature({ args: [...args, ...own], workspace, env }), ...step]);
   }
   const { bin, model, args, role_args } = cfg.codex;
-  return digest([backend, bin, model, args, role_args.implementer ?? [], codexLocalSignature(workspace, env)]);
+  return digest([backend, bin, model, args, role_args.implementer ?? [], codexLocalSignature(workspace, env), ...step]);
+}
+
+/** The implementer's own model and effort on its CLI; nothing when it has neither, so a mark taken before they existed holds. */
+function ownStep(cli: ConfigData["claude"] | ConfigData["codex"]): unknown[] {
+  const model = cli.role_models?.implementer ?? null;
+  const effort = cli.role_efforts?.implementer ?? null;
+  return model || effort ? [{ model, effort }] : [];
 }
 
 /** The parts of what the implementer is given that differ between two marks, in MARK_PARTS order. */

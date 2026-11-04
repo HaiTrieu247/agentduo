@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import YAML from "yaml";
 import { CLAUDE_EFFORTS, CODEX_EFFORTS, type CodexPermission, type PermissionMode, type SettingCommand } from "./commands.js";
-import { AGENT_ROLES, ConfigError, configFromFiles, PROFILES, type ConfigData } from "./config.js";
+import { AGENT_ROLES, ConfigError, configFromFiles, EFFORTS, isModelName, PROFILES, type AgentRole, type Backend, type ConfigData } from "./config.js";
 import { atomicWrite } from "./state.js";
 
 export { CLAUDE_EFFORTS, CODEX_EFFORTS, type CodexPermission, type PermissionMode };
@@ -224,7 +224,7 @@ export function withChange(changes: SettingChange[], change: SettingChange): Set
 }
 
 // ------------------------------------------------------------------ the keys the desktop's Settings change
-export type SettingKind = "bin" | "model" | "args" | "budget" | "prompts" | "backend" | "profile" | "positive" | "count" | "limit";
+export type SettingKind = "bin" | "model" | "effort" | "args" | "budget" | "prompts" | "backend" | "profile" | "positive" | "count" | "limit";
 
 /** A config key a Settings field sets: where it is, what it takes, and when work already going gets it. */
 export interface SettingKey {
@@ -232,7 +232,7 @@ export interface SettingKey {
   path: string[];
   kind: SettingKind;
   live: SettingLive;
-  /** It may be absent from a config (a role's args): removing it is a value of its own, not "inherit". */
+  /** It may be absent from a config (a role's args, model or effort): removing it is a value of its own, not "inherit". */
   removable: boolean;
 }
 
@@ -255,6 +255,9 @@ export const SETTING_KEYS: SettingKey[] = [
     { key: `${b}.model`, path: [b, "model"], kind: "model", live: "next-call", removable: false },
     { key: `${b}.args`, path: [b, "args"], kind: "args", live: "next-call", removable: false },
     ...AGENT_ROLES.map((role): SettingKey => ({ key: `${b}.role_args.${role}`, path: [b, "role_args", role], kind: "args", live: "next-call", removable: true })),
+    // A step's own model and effort on this CLI: like the model, they reach a running pipeline from its next call.
+    ...AGENT_ROLES.map((role): SettingKey => ({ key: `${b}.role_models.${role}`, path: [b, "role_models", role], kind: "model", live: "next-call", removable: true })),
+    ...AGENT_ROLES.map((role): SettingKey => ({ key: `${b}.role_efforts.${role}`, path: [b, "role_efforts", role], kind: "effort", live: "next-call", removable: true })),
   ]),
   { key: "claude.max_budget_usd", path: ["claude", "max_budget_usd"], kind: "budget", live: "next-call", removable: false },
   { key: "claude.permission_prompts", path: ["claude", "permission_prompts"], kind: "prompts", live: "next-call", removable: false },
@@ -277,7 +280,11 @@ export function checkSettingValue(k: SettingKey, value: unknown): string | null 
     case "bin":
       return typeof value === "string" && value.trim() && value.length <= MAX_ARG && !/[\u0000-\u001f]/.test(value) ? null : `${k.key} must be a non-empty string`;
     case "model":
-      return value === null || (typeof value === "string" && value.trim() && value.length <= 200 && !/[\s\u0000-\u001f]/.test(value)) ? null : `${k.key} must be a string or null`;
+      return value === null || isModelName(value) ? null : `${k.key} must be a string or null`;
+    case "effort": {
+      const efforts = EFFORTS[k.path[0] as Backend];
+      return value === null || efforts.includes(value as string) ? null : `${k.key} must be one of ${efforts.join(", ")}, or null`;
+    }
     case "args":
       return Array.isArray(value) && value.length <= MAX_ARGS && value.every((a) => typeof a === "string" && a.length <= MAX_ARG && !a.includes("\0"))
         ? null : `${k.key} must be a list of strings`;
@@ -354,7 +361,20 @@ export function describeSettings(cfg: ConfigData): string {
       `mode: ${v.claude.mode} · allow: ${list(v.claude.allow)} · deny: ${list(v.claude.deny)} · add-dir: ${list(v.claude.addDirs)}`,
     `Codex   model: ${v.codex.model ?? "default"} · effort: ${v.codex.effort ?? "default"} · permissions: ${v.codex.permissions}`,
     `Roles   planner: ${a.planner} · plan critic: ${a.plan_reviewer} · implementer: ${a.implementer} · code reviewer: ${a.code_reviewer}`,
+    ...stepsLine(cfg),
   ].join("\n");
+}
+
+const STEP_NAMES: Record<AgentRole, string> = { planner: "planner", plan_reviewer: "plan critic", implementer: "implementer", code_reviewer: "code reviewer" };
+
+/** The steps whose CLI gives them a model or effort of their own, as one line; none when no step has one. */
+function stepsLine(cfg: ConfigData): string[] {
+  const steps = AGENT_ROLES.flatMap((role) => {
+    const cli = cfg[cfg.agents[role]];
+    const own = [cli.role_models[role], cli.role_efforts[role] ? `effort ${cli.role_efforts[role]}` : null].filter(Boolean);
+    return own.length ? [`${STEP_NAMES[role]}: ${own.join(", ")}`] : [];
+  });
+  return steps.length ? [`Steps   ${steps.join(" · ")}`] : [];
 }
 
 /** A config file as a document that keeps its comments; a file that is not valid YAML throws (it is never overwritten). */

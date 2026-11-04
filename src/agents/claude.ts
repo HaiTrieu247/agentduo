@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import type { AgentRole, ConfigData } from "../core/config.js";
+import { roleEffort, roleModel, type AgentRole, type ConfigData } from "../core/config.js";
 import { implementerPermissionArgs } from "../core/settings.js";
 import type { Activity, PermissionAnswer } from "../events.js";
 import { resolveBinary } from "./resolve.js";
@@ -201,7 +201,10 @@ export class ClaudeBackend implements AgentBackend {
    */
   buildArgs(a: BuildArgs): string[] {
     const session = a.mode === "text" ? undefined : a.session;
-    const own = [...this.cfg.args, ...(a.mode === "text" ? implementerPermissionArgs(this.cfg) : this.cfg.role_args[a.role] ?? [])];
+    // A pipeline role's own model and effort; its effort goes after the args every call gets, so it wins over theirs.
+    const model = a.mode === "text" ? this.cfg.model : roleModel(this.cfg, a.role);
+    const effort = a.mode === "text" ? null : roleEffort(this.cfg, a.role);
+    const own = [...this.cfg.args, ...(effort ? ["--effort", effort] : []), ...(a.mode === "text" ? implementerPermissionArgs(this.cfg) : this.cfg.role_args[a.role] ?? [])];
     return [
       "-p",
       "--output-format", "stream-json",
@@ -213,7 +216,7 @@ export class ClaudeBackend implements AgentBackend {
       // Host mode sends permission prompts to agentduo (the user answers them); without a host, "none" denies
       // them automatically, since nobody could answer and the run would hang. Neither grants anything.
       ...(a.askPermissions ? ["--permission-prompts", "host", "--permission-prompt-tool", "stdio"] : ["--permission-prompts", "none"]),
-      ...(this.cfg.model ? ["--model", this.cfg.model] : []),
+      ...(model ? ["--model", model] : []),
       ...this.budgetArgs(a.mode === "text" ? undefined : a.costCap),
       ...(session?.keep || own.includes(CLAUDE_NO_PERSISTENCE) ? [] : [CLAUDE_NO_PERSISTENCE]),
       ...(session?.resume ? ["--resume", session.resume] : []),

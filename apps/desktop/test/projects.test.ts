@@ -90,9 +90,9 @@ describe("the selected conversation", () => {
     expect(harness().projects.active).toEqual({ projectId, conversationId: a });
     // A conversation the window does not show cannot be selected: it is opened (a view of its own) instead.
     expect(await d.handle(good, { method: "conversation.select", projectId, conversationId: "20261031-120000-tab-deadbeef" })).toMatchObject({ ok: false });
-    // Closed, it is not the one the next start comes back to.
-    await ok(d.handle(good, { method: "conversation.close", projectId, conversationId: a }));
-    expect(harness().projects.active.conversationId).not.toBe(a);
+    // A conversation is never closed from the window (the sidebar has no ✕ for one): there is no request for it.
+    expect(await d.handle(good, { method: "conversation.close", projectId, conversationId: a })).toMatchObject({ ok: false });
+    expect(harness().projects.active.conversationId).toBe(a);
   });
 });
 
@@ -316,10 +316,9 @@ describe("with real workers", () => {
     writeYaml(userConfig(), { claude: { bin: fake.path("claude") }, codex: { bin: fake.path("codex") } });
     const h = harness({ worker: worker.script, env: env() });
     const p = await project(h, "p", null);
-    // Saved with Codex (the default before the preference changed), then closed.
+    // Saved with Codex (the default before the preference changed).
     const saved = await chatting(h, p.id, "first");
     expect(fake.calls("chat_codex")).toHaveLength(1);
-    await ok(h.d.handle(good, { method: "conversation.close", projectId: p.id, conversationId: saved }));
 
     await ok(h.d.handle(good, { method: "prefs.set", patch: { defaultRecipient: "claude" } }));
     const { conversationId: fresh } = await ok<{ conversationId: string }>(h.d.handle(good, { method: "conversation.new", projectId: p.id }));

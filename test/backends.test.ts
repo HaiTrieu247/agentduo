@@ -26,6 +26,32 @@ describe("ClaudeBackend", () => {
     expect(impl.slice(-3)).toEqual(["--no-session-persistence", "--permission-mode", "acceptEdits"]);
   });
 
+  it("gives a pipeline role its own model and effort, under the role's args; other roles and conversation turns keep Claude's", () => {
+    const cfg = defaultConfig();
+    cfg.claude.model = "sonnet";
+    cfg.claude.args = ["--effort", "low"];
+    cfg.claude.role_models = { plan_reviewer: "opus", implementer: null };
+    cfg.claude.role_efforts = { plan_reviewer: "high" };
+    const backend = new ClaudeBackend(cfg.claude, "/ws");
+    const flag = (args: string[], name: string) => args.flatMap((a, i) => (a === name ? [args[i + 1]] : []));
+    const critic = backend.buildArgs({ schemaName: "plan_critique", lastMessageFile: "", role: "plan_reviewer" });
+    expect(flag(critic, "--model")).toEqual(["opus"]);
+    // The role's effort comes after the args every call gets, so it wins over theirs.
+    expect(critic.slice(-4)).toEqual(["--effort", "low", "--effort", "high"]);
+    // null: the implementer runs with Claude's model again.
+    const impl = backend.buildArgs({ schemaName: "implementation", lastMessageFile: "", role: "implementer" });
+    expect([flag(impl, "--model"), flag(impl, "--effort")]).toEqual([["sonnet"], ["low"]]);
+    const turn = backend.buildArgs({ mode: "text", lastMessageFile: "" });
+    expect([flag(turn, "--model"), flag(turn, "--effort")]).toEqual([["sonnet"], ["low"]]);
+    // The role's own flags come last: a --model or --effort there still wins, as it always did.
+    cfg.claude.role_args = { plan_reviewer: ["--model", "haiku", "--effort", "max"] };
+    const own = backend.buildArgs({ schemaName: "plan_critique", lastMessageFile: "", role: "plan_reviewer" });
+    expect([flag(own, "--model").at(-1), flag(own, "--effort").at(-1)]).toEqual(["haiku", "max"]);
+    // Read at each call: a change reaches the next one.
+    cfg.claude.role_models.plan_reviewer = "fable";
+    expect(flag(backend.buildArgs({ schemaName: "plan_critique", lastMessageFile: "", role: "plan_reviewer" }), "--model")[0]).toBe("fable");
+  });
+
   it("keeps a pipeline role's session and continues it with --resume; every other call keeps none, without repeating the user's flag", () => {
     const cfg = defaultConfig();
     const backend = new ClaudeBackend(cfg.claude, "/ws");
@@ -158,6 +184,25 @@ describe("CodexBackend", () => {
     const reviewer = backend.buildArgs({ schemaName: "review", lastMessageFile: "/tmp/last.json", role: "code_reviewer" });
     expect(reviewer.slice(-3)).toEqual(["--sandbox", "read-only", "-"]);
     expect([...planner, ...reviewer]).not.toContain("--skip-git-repo-check");
+  });
+
+  it("gives a pipeline role its own model and reasoning effort, under the role's args; conversation turns keep Codex's", () => {
+    const cfg = defaultConfig();
+    cfg.codex.model = "gpt-5.5";
+    cfg.codex.args = ["-c", "model_reasoning_effort=low"];
+    cfg.codex.role_models = { planner: "gpt-5.5-pro" };
+    cfg.codex.role_efforts = { planner: "high", code_reviewer: null };
+    cfg.codex.role_args = { code_reviewer: ["--sandbox", "read-only"] };
+    const backend = new CodexBackend(cfg.codex, "/ws");
+    const planner = backend.buildArgs({ schemaName: "plan", lastMessageFile: "/tmp/l.json", role: "planner" });
+    expect(planner).toEqual(["exec", "--json", "--color", "never", "--output-schema", schemaPath("plan"), "--output-last-message", "/tmp/l.json",
+      "--cd", "/ws", "--model", "gpt-5.5-pro", "--ephemeral", "-c", "model_reasoning_effort=low", "-c", "model_reasoning_effort=high", "-"]);
+    const reviewer = backend.buildArgs({ schemaName: "review", lastMessageFile: "/tmp/l.json", role: "code_reviewer" });
+    expect(reviewer.slice(-8)).toEqual(["--model", "gpt-5.5", "--ephemeral", "-c", "model_reasoning_effort=low", "--sandbox", "read-only", "-"]);
+    const turn = backend.buildArgs({ mode: "text", lastMessageFile: "/tmp/l.md" });
+    expect(turn).toContain("gpt-5.5");
+    expect(turn).not.toContain("gpt-5.5-pro");
+    expect(turn).not.toContain("model_reasoning_effort=high");
   });
 
   it("lets a run with agentduo's own snapshot repository start outside a git repository, and nothing else", () => {

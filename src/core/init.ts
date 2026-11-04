@@ -74,6 +74,8 @@ export function renderConfigYaml(gates: DetectedGate[]): string {
     "#   permission_prompts: ask   # ask you in the terminal before a tool Claude's settings do not allow; deny = never ask",
     "#   role_args:",
     "#     implementer: [--permission-mode, acceptEdits]",
+    "#   role_models: { plan_reviewer: opus, implementer: sonnet }   # a step's own model when this CLI plays it",
+    "#   role_efforts: { plan_reviewer: high }                       # and its own effort; unset steps use the CLI's",
     "# codex:",
     "#   args: [--ephemeral]   # start every Codex call fresh instead of continuing its role's session (claude: --no-session-persistence)",
     "",

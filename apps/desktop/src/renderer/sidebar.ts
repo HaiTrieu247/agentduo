@@ -37,7 +37,6 @@ export interface SidebarHandlers {
   restartProject(projectId: string): void;
   newConversation(): void;
   openConversation(conversationId: string): void;
-  closeConversation(conversationId: string): void;
   toggleRuns(): void;
   resume(runId: string): void;
   toggleAccount(): void;
@@ -150,9 +149,7 @@ export function renderSidebar(root: HTMLElement, m: SidebarModel, h: SidebarHand
           el("span", { class: "nav-sub", text: c.activity ?? relativeTime(c.updatedAt) })),
         status);
       main.addEventListener("click", () => h.openConversation(c.id));
-      const row = el("li", { class: `nav-item conversation${isActive ? " active" : ""}` }, main,
-        c.open ? el("span", { class: "nav-actions" }, button("", () => h.closeConversation(c.id), { class: "icon-btn", icon: "close", title: "Close (it stays in the list)" })) : null);
-      list.append(row);
+      list.append(el("li", { class: `nav-item conversation${isActive ? " active" : ""}` }, main));
     }
     if (!items.length) list.append(el("li", { class: "nav-empty", text: "No conversations yet." }));
     sections.push(

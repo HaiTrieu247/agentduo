@@ -182,19 +182,6 @@ export class ChatHost {
     this.active()?.ui?.focusComposer();
   }
 
-  /** A conversation's chat goes (closed): main is told, the mount is removed. */
-  async close(projectId: string, conversationId: string): Promise<void> {
-    const key = mountKey(projectId, conversationId);
-    const mount = this.mounts.get(key);
-    if (mount) {
-      if (mount.draftTimer) clearTimeout(mount.draftTimer);
-      mount.root.remove();
-      this.mounts.delete(key);
-    }
-    if (this.activeKey === key) this.activeKey = null;
-    await call({ method: "conversation.close", projectId, conversationId }).catch(() => undefined);
-  }
-
   /** Every chat of a project goes from the page (the project was forgotten); main closes them itself. */
   dropProject(projectId: string): void {
     for (const [key, mount] of this.mounts) {

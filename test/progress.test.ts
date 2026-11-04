@@ -137,7 +137,19 @@ describe("progress: the implementer's settings", () => {
     expect(changed((c) => { c.claude.role_args.implementer = ["--permission-mode", "acceptEdits"]; })).toBe(true);
     expect(changed((c) => { c.claude.args = ["--allowedTools", "Bash(npm test:*)"]; })).toBe(true);
     expect(changed((c) => { c.claude.model = "opus"; })).toBe(true);
+    expect(changed((c) => { c.claude.role_models.implementer = "opus"; })).toBe(true);
+    expect(changed((c) => { c.claude.role_efforts.implementer = "high"; })).toBe(true);
     expect(changed((c) => { c.agents.implementer = "codex"; })).toBe(true);
+    const codex = (edit: (c: ReturnType<typeof defaultConfig>) => void = () => undefined) => {
+      const c = defaultConfig();
+      c.agents.implementer = "codex";
+      edit(c);
+      return implementerSettings(c, workspace, env);
+    };
+    expect(codex((c) => { c.codex.role_efforts.implementer = "high"; })).not.toBe(codex());
+    expect(codex((c) => { c.codex.role_models.implementer = "gpt-5.5"; })).not.toBe(codex());
+    // Other roles' models and efforts are not the implementer's.
+    expect(changed((c) => { c.claude.role_models.plan_reviewer = "opus"; c.codex.role_efforts.implementer = "high"; })).toBe(false);
     // Not the implementer's: the cost cap, other roles' arguments, the other CLI.
     expect(changed((c) => { c.claude.max_budget_usd = 2; })).toBe(false);
     expect(changed((c) => { c.claude.role_args.plan_reviewer = ["--effort", "high"]; })).toBe(false);

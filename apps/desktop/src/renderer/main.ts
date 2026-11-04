@@ -243,13 +243,6 @@ function drawSidebar(): void {
     restartProject: (projectId) => void call({ method: "project.restart", projectId }).catch(showError),
     newConversation: () => void newConversation(),
     openConversation: (conversationId) => void openConversation(conversationId),
-    closeConversation: (conversationId) => {
-      const projectId = snapshot?.active.projectId;
-      if (!projectId) return;
-      void chats.close(projectId, conversationId).then(() => {
-        if (snapshot?.active.conversationId === conversationId) setSnapshot({ ...snapshot, active: { projectId, conversationId: null } });
-      });
-    },
     toggleRuns: () => {
       model.runsOpen = !model.runsOpen;
       if (model.runsOpen && snapshot?.active.projectId !== CONVERSATIONS_PROJECT_ID) void loadRuns();

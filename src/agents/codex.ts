@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import type { AgentRole, ConfigData } from "../core/config.js";
+import { roleEffort, roleModel, type AgentRole, type ConfigData } from "../core/config.js";
 import type { Activity } from "../events.js";
 import { resolveBinary } from "./resolve.js";
 import { schemaPath } from "./schema.js";
@@ -121,7 +121,7 @@ export class CodexBackend implements AgentBackend {
   }
 
   /**
-   * A conversation turn (text mode) gets no schema and no role_args: only the args every call gets. It may run outside
+   * A conversation turn (text mode) gets no schema and nothing of a role's (args, model, effort): only what every call gets. It may run outside
    * a git repository, where `codex exec` refuses to start without --skip-git-repo-check (inside one the flag changes
    * nothing); so may a workflow call of a run with agentduo's own snapshot repository, which says so.
    *
@@ -133,6 +133,9 @@ export class CodexBackend implements AgentBackend {
     const text = a.mode === "text";
     const session = text ? undefined : a.session;
     const roleArgs = text ? [] : this.cfg.role_args[a.role] ?? [];
+    // A pipeline role's own model and reasoning effort; the effort goes after the args every call gets, so it wins.
+    const model = text ? this.cfg.model : roleModel(this.cfg, a.role);
+    const effort = text ? null : roleEffort(this.cfg, a.role);
     const ephemeral = session?.keep || [...this.cfg.args, ...roleArgs].includes(CODEX_EPHEMERAL) ? [] : [CODEX_EPHEMERAL];
     return [
       "exec", "--json",
@@ -140,9 +143,10 @@ export class CodexBackend implements AgentBackend {
       ...(text ? ["--skip-git-repo-check"] : [...(a.skipGitRepoCheck ? ["--skip-git-repo-check"] : []), "--output-schema", schemaPath(a.schemaName)]),
       "--output-last-message", a.lastMessageFile,
       "--cd", this.repo,
-      ...(this.cfg.model ? ["--model", this.cfg.model] : []),
+      ...(model ? ["--model", model] : []),
       ...ephemeral,
       ...this.cfg.args,
+      ...(effort ? ["-c", `model_reasoning_effort=${effort}`] : []),
       ...roleArgs,
       ...(session?.resume ? ["resume", session.resume] : []),
       // One token per image: `--image` takes several values, so in `--image a.png -` the `-` could be read as one more.

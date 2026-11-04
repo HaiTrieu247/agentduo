@@ -114,9 +114,6 @@ export class Dispatcher {
       case "conversation.select":
         projects.selectConversation(r.projectId, r.conversationId);
         return { selected: true };
-      case "conversation.close":
-        await projects.closeConversation(r.projectId, r.conversationId);
-        return { closed: true };
       case "chat.message":
         return { accepted: projects.chatMessage(r.projectId, r.conversationId, r.view, r.message) };
       case "chat.draft":

@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { initialState } from "../../../extensions/vscode/webview/state.js";
 import { chatStatus } from "../src/renderer/chat.js";
 import { gateActivities } from "../src/renderer/inspector.js";
@@ -7,7 +10,10 @@ import { readConfiguration } from "../../../src/core/configuration.js";
 import { checkSettingValue, settingKey } from "../../../src/core/settings.js";
 import { CLAUDE_MODELS } from "../../../src/core/commands.js";
 import { addableOptions, argumentRows, argumentTokens } from "../src/renderer/argumentOptions.js";
-import { ABOUT_LINKS, aboutFacts, CHOICES, cliAccount, cliStateWord, editorKind, formatValue, groupOf, modelChoices, parseEditorValue, settingUnit, sourceText } from "../src/renderer/settings.js";
+import {
+  ABOUT_LINKS, aboutFacts, CHOICES, cliAccount, cliStateWord, editorKind, effortChoices, formatValue, groupOf, modelChoices, parseEditorValue, settingLabel, settingUnit, sourceText,
+  stepRows,
+} from "../src/renderer/settings.js";
 import { accountRefreshTitle, projectBusy } from "../src/renderer/sidebar.js";
 import { turnEnded, UsageStore } from "../src/renderer/usage.js";
 import type { AccountUsage } from "../../../extensions/vscode/src/protocol.js";
@@ -15,6 +21,23 @@ import { clampFontSize, resolveTheme } from "../src/renderer/theme.js";
 import { restartQuestion, updateAction, updateLine, updateNotice } from "../src/renderer/update.js";
 import { LINKS, type CliStatus, type ConversationItem } from "../src/shared/protocol.js";
 import type { UsageState } from "../../../src/core/usage.js";
+
+const temps: string[] = [];
+afterEach(() => {
+  while (temps.length) rmSync(temps.pop()!, { recursive: true, force: true });
+});
+
+/** A workspace whose config file says `yaml`, and a user config of its own (`userYaml`) on every OS. */
+function configDirs(yaml: string, userYaml = ""): { dir: string; env: NodeJS.ProcessEnv } {
+  const root = mkdtempSync(join(tmpdir(), "agentduo-desktop-renderer-"));
+  temps.push(root);
+  const dir = join(root, "ws");
+  mkdirSync(join(dir, ".agentduo"), { recursive: true });
+  mkdirSync(join(root, "config", "agentduo"), { recursive: true });
+  writeFileSync(join(dir, ".agentduo", "config.yaml"), yaml);
+  writeFileSync(join(root, "config", "agentduo", "config.yaml"), userYaml);
+  return { dir, env: { HOME: root, XDG_CONFIG_HOME: join(root, "config"), APPDATA: join(root, "config") } };
+}
 
 describe("theme", () => {
   it("resolves system to what the system says, and keeps an explicit choice", () => {
@@ -35,6 +58,7 @@ describe("settings editors", () => {
     expect(kinds).toMatchObject({
       "limits.max_review_rounds": "number", "claude.max_budget_usd": "number", "claude.permission_prompts": "choice", "agents.implementer": "choice",
       "codex.args": "list", "claude.role_args.implementer": "list", "claude.model": "text", "codex.bin": "text",
+      "claude.role_models.implementer": "text", "codex.role_efforts.planner": "choice",
     });
     expect(CHOICES.prompts).toEqual(["ask", "deny"]);
     // The pipeline profile: a choice of the values config validation allows, with the workflow's roles.
@@ -58,6 +82,10 @@ describe("settings editors", () => {
   });
   it("groups keys and shows values as words", () => {
     expect(groupOf("claude.model")).toBe("claude");
+    // A step's model and effort sit with who plays the step; its raw options stay under the CLI's advanced ones.
+    expect([groupOf("claude.role_models.implementer"), groupOf("codex.role_efforts.planner"), groupOf("claude.role_args.implementer")]).toEqual(["agents", "agents", "claude"]);
+    expect([settingLabel("claude.role_models.plan_reviewer"), settingLabel("claude.role_efforts.plan_reviewer"), settingLabel("codex.role_efforts.planner")])
+      .toEqual(["Model", "Effort", "Reasoning effort"]);
     expect(groupOf("paths.runs_dir")).toBe("other");
     expect(formatValue(null)).toBe("—");
     expect(formatValue(["a", "b"])).toBe("a b");
@@ -98,6 +126,24 @@ describe("configuration rows", () => {
     expect(modelChoices(CLAUDE_MODELS, null).at(-1)!.label).toBe("Other model…");
     expect(values("opus").filter((v) => v === "opus")).toHaveLength(1);
     expect(values("claude-custom-1")[1]).toBe("claude-custom-1");
+  });
+  it("names the CLI's own model as a step's default", () => {
+    expect(modelChoices(CLAUDE_MODELS, null, "Same as Claude Code (sonnet)")[0]).toEqual({ value: "", label: "Same as Claude Code (sonnet)" });
+  });
+  it("offers a step's efforts: the model's when the CLI listed them, else every one the CLI takes, and the one set now", () => {
+    expect(effortChoices("claude", null, null, "Default").map((c) => c.value)).toEqual(["", "low", "medium", "high", "xhigh", "max"]);
+    expect(effortChoices("codex", null, null, "Default").map((c) => c.value)).toEqual(["", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    expect(effortChoices("codex", ["low", "high"], "xhigh", "Same as Codex").map((c) => c.value)).toEqual(["", "xhigh", "low", "high"]);
+    expect(effortChoices("codex", [], null, "Same as Codex")[0]!.label).toBe("Same as Codex");
+  });
+  it("shows each step with who plays it, then that CLI's model and effort for it, as the scope being edited says", () => {
+    const { dir, env } = configDirs("agents:\n  plan_reviewer: claude\n", "agents:\n  plan_reviewer: codex\n");
+    const entries = readConfiguration({ workspace: dir, env }).entries;
+    expect(stepRows(entries, "plan_reviewer", "global")).toEqual(["agents.plan_reviewer", "codex.role_models.plan_reviewer", "codex.role_efforts.plan_reviewer"]);
+    expect(stepRows(entries, "plan_reviewer", "project")).toEqual(["agents.plan_reviewer", "claude.role_models.plan_reviewer", "claude.role_efforts.plan_reviewer"]);
+    // A scope that does not set who plays a step shows what new work gets, and that CLI's rows.
+    expect(stepRows(entries, "plan_reviewer", "session")).toEqual(["agents.plan_reviewer", "claude.role_models.plan_reviewer", "claude.role_efforts.plan_reviewer"]);
+    expect(stepRows(entries, "planner", "project")).toEqual(["agents.planner", "codex.role_models.planner", "codex.role_efforts.planner"]);
   });
   it("says where a value comes from, and when the project's own value wins over the one being edited", () => {
     expect(sourceText({ source: "default", projectOverridesGlobal: false }, "global")).toBeNull();
@@ -142,7 +188,7 @@ describe("onboarding", () => {
 });
 
 describe("sidebar", () => {
-  const item = (running: boolean): ConversationItem => ({ id: "c", title: "t", updatedAt: null, open: false, running, waiting: 0, activity: null });
+  const item = (running: boolean): ConversationItem => ({ id: "c", title: "t", updatedAt: null, running, waiting: 0, activity: null });
   it("marks a project busy only while an agent works in one of its conversations", () => {
     expect(projectBusy(undefined)).toBe(false);
     expect(projectBusy([item(false), item(false)])).toBe(false);

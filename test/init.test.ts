@@ -45,6 +45,7 @@ describe("initRepo", () => {
     expect(yaml).toContain('#     command: "npm run test"');
     expect(yaml).toContain("uncomment");
     expect(yaml).toContain("role_args");
+    expect(yaml).toContain("role_models");
     expect(loadConfig({ dir: repo, env: userConfigEnv(join(parent, "xdg")) }).data.gates).toEqual([]);
     expect(initRepo(repo)).toMatchObject({ created: false, ignoreCreated: false });
     expect(readFileSync(join(repo, ".agentduo", ".gitignore"), "utf8")).toBe("runs/\n");

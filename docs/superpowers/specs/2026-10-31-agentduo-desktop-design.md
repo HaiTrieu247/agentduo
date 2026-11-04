@@ -20,6 +20,7 @@ Ngoài phạm vi: tự cài CLI, quản lý credential, terminal nhúng, telemet
 ## 3. Kiến trúc
 
 - **Main** sở hữu cửa sổ, project/session, dialog, resource, diagnostics và bridge. Mỗi project (đường dẫn canonical, id là hash 16 hex) có một `WorkspaceSession` và một worker. Chuyển view không đóng conversation; quit/restart lưu view, giải quyết câu hỏi đang chờ theo broker, dừng cây tiến trình và nhả lock.
+- Sidebar không có nút đóng (✕) cho conversation, và protocol không có `conversation.close` (bỏ ngày 2026-11-04: người dùng tưởng đó là nút xoá, mà đóng conversation đang xem lại tự mở một conversation mới thay chỗ). Conversation không bị xoá từ app.
 - **Worker**: `WorkerClient` có launch mode tường minh. Extension giữ Node ngoài; desktop fork bằng `process.execPath` với `ELECTRON_RUN_AS_NODE=1`, kiểm tra Node đi kèm ≥ 22.12, không bao giờ tìm Node hệ thống. Sau khi IPC khởi động, worker bỏ các biến nội bộ của Electron/IPC khỏi môi trường của agent và gate.
 - **PATH khi mở từ launcher**: resolver async có timeout: binary đã cấu hình → PATH hiện có → PATH của login shell (POSIX, lệnh cố định, không nội suy dữ liệu người dùng) → thư mục cài phổ biến. Windows chuẩn hoá `PATH`/`Path`/`PATHEXT` và giữ nhánh `.cmd`/`.bat` hiện có.
 - **Renderer**: `contextIsolation`, `sandbox`, không `nodeIntegration`, CSP chặt, nạp từ `agentduo://app/`. Tái dùng `createUi`/`reduce`/`render`/`markdown`/`uploads` của webview VS Code qua một adapter `Actions` riêng (không giả lập `acquireVsCodeApi`). Theme ánh xạ token sáng/tối sang `--vscode-*`.
@@ -35,7 +36,7 @@ Ngoài phạm vi: tự cài CLI, quản lý credential, terminal nhúng, telemet
 Ba lớp engine: defaults ← global (`~/.agentduo/config.yaml`) ← project (`<project>/.agentduo/config.yaml`), cộng session override; preferences riêng của desktop (theme, cỡ chữ, recipient mặc định) ở `userData`.
 
 - `readConfiguration`/`updateConfiguration`/`clearConfiguration` (`src/core/configuration.ts`) là thao tác file: không cần conversation, không lấy workspace lock, không tạo Chat; worker trả lời chúng cả trước `initialize` (protocol 9). Không có project thì chỉ đọc/ghi global.
-- Ghi: candidate được merge và `validateConfig` trước, ghi atomic, giữ comment YAML. YAML không parse được: hiện lỗi và vị trí, mở đúng file, không ghi đè. Reset dùng `deleteIn` (không ghi `null` để kế thừa). `args` là mảng thay nguyên key; `role_args` theo từng role.
+- Ghi: candidate được merge và `validateConfig` trước, ghi atomic, giữ comment YAML. YAML không parse được: hiện lỗi và vị trí, mở đúng file, không ghi đè. Reset dùng `deleteIn` (không ghi `null` để kế thừa). `args` là mảng thay nguyên key; `role_args`, `role_models`, `role_efforts` theo từng role.
 - Thay đổi hiệu lực được áp **in-place** vào `cfg.claude`/`cfg.codex` (giữ identity backend) và idempotent khi replay.
 - Một lần ghi file đến được mọi worker đang chạy qua `syncConfiguration`: sau khi ghi user config (từ Settings của bất kỳ project nào, từ main khi không có project, hay từ bộ chọn CLI), main gửi nó tới worker của **mọi** project đang mở; ghi file project thì tới worker của project đó. Lệnh trong composer (`/codex model … --global`) hay menu settings của chat với Global ghi user config trong worker của project đó: worker gửi `configWritten`, main gửi `syncConfiguration` tới worker của các project còn lại. Một thay đổi setting trong chat (gõ lệnh, menu, Shift+Tab) đến các chat khác của cùng worker qua `ChatOptions.changed`; ghi file xong, worker cập nhật `seen` theo file mới. Worker so file với lần đọc trước (`seen`) và cho các chat theo từng key đã đổi, trừ key project tự đặt (giá trị merge không đổi) hoặc session có giá trị riêng.
 
@@ -43,10 +44,17 @@ Ba lớp engine: defaults ← global (`~/.agentduo/config.yaml`) ← project (`<
 
 | Key | live | Áp dụng |
 |---|---|---|
-| `model`, `effort`, permission mode, `rules`, `add_dirs`, `args`, `role_args.<role>`, `bin`, `max_budget_usd`, `permission_prompts` | `next-call` | từ lần gọi agent kế tiếp, cả run đang chạy (cập nhật `config.json`) và khi resume; subprocess đang chạy không đổi |
+| `model`, `effort`, permission mode, `rules`, `add_dirs`, `args`, `role_args.<role>`, `role_models.<role>`, `role_efforts.<role>`, `bin`, `max_budget_usd`, `permission_prompts` | `next-call` | từ lần gọi agent kế tiếp, cả run đang chạy (cập nhật `config.json`) và khi resume; subprocess đang chạy không đổi |
 | `agents.*`, mọi `limits.*` | `next-run` | chỉ công việc mới; run đang chạy, discussion đang diễn ra và run resume giữ giá trị đã lưu |
 
 Process khác đang giữ lock vẫn cho lưu file, nhưng chỉ đọc lại khi khởi động lại; Settings nói rõ điều đó.
+
+**Model và effort theo từng khâu** (bổ sung 2026-11-04, theo yêu cầu của người dùng trong chat; bỏ qua bước duyệt spec/plan riêng):
+
+- Config: `<cli>.role_models.<role>` (tên model) và `<cli>.role_efforts.<role>` (`CLAUDE_EFFORTS` / `CODEX_EFFORTS`), đặt theo CLI đóng vai khâu đó, để `opus` không bao giờ đến tay Codex. Vắng hoặc `null`: dùng `model` và effort trong `args` của CLI; `null` ở project che giá trị của user config. Đổi người đóng một khâu không xoá giá trị của CLI kia: nó được giữ, không dùng.
+- Argv của một lượt pipeline: `--model <của khâu ?? của CLI>`; effort (`--effort` của Claude, `-c model_reasoning_effort=` của Codex) đặt sau `args`, trước `role_args`, nên `role_args` của khâu vẫn thắng. Lượt chat và `/discuss` (chế độ text) giữ model và effort chung.
+- `implementerSettings` (`ProgressMark`) tính thêm model/effort riêng của implementer, chỉ khi có, để mark của run cũ vẫn đúng. `/config` có dòng `Steps` liệt kê các khâu có giá trị riêng.
+- Settings → Workflow roles: profile, rồi mỗi khâu một thẻ: ai làm, Model (Default là "Same as <CLI> (<model của CLI>)"), Effort (Codex: danh sách effort của model nếu CLI đã liệt kê). Các dòng đi theo CLI mà ô "ai làm" đang hiện trong scope đang sửa; đổi ai làm hay đổi model sẽ vẽ lại cả trang.
 
 **Storage chỉ đọc**: hiện `runsDir` hiệu lực và nguồn, `userData`, nút mở thư mục; đổi `paths.runs_dir` phải sửa file khi mọi host đã đóng (lock nằm trong đó).
 

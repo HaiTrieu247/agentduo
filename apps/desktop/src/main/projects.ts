@@ -303,20 +303,6 @@ export class ProjectManager {
     this.rememberConversation(p, conversationId);
   }
 
-  async closeConversation(projectId: string, conversationId: string): Promise<void> {
-    const p = this.project(projectId);
-    const view = p.views.get(conversationId);
-    p.views.delete(conversationId);
-    p.granted.delete(conversationId);
-    if (view !== undefined) this.o.tokens.revoke(`${p.id}/${conversationId}`, view);
-    if (this.activeConversation === conversationId) this.activeConversation = null;
-    // Not the one to come back to at the next start either.
-    if ((p.id === CONVERSATIONS_PROJECT_ID ? this.o.prefs.conversation : this.o.prefs.projects.find((k) => k.path === p.path)?.conversation) === conversationId) this.rememberConversation(p, null);
-    await p.session?.conversation(conversationId).close();
-    this.o.prefs.setDraft(p.path, conversationId, "");
-    this.publishList(p);
-  }
-
   /** What the chat of a view sent; false when that view is no longer the conversation's (a stale page). */
   chatMessage(projectId: string, conversationId: string, view: number, message: WebviewMessage): boolean {
     const p = this.project(projectId);
@@ -442,7 +428,7 @@ export class ProjectManager {
     const item = (id: string, title: string, updatedAt: string | null): ConversationItem => {
       const st = session && live.has(id) ? session.conversation(id).state : null;
       return {
-        id, title: st && st.timeline.length ? titleOf(st) : title || "New conversation", updatedAt, open: p.views.has(id),
+        id, title: st && st.timeline.length ? titleOf(st) : title || "New conversation", updatedAt,
         running: !!st && (st.status === "running" || st.status === "answering"), waiting: st ? (st.decision ? 1 : 0) + st.permissions.length : 0,
         activity: st ? activityOf(st) : null,
       };

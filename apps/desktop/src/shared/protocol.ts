@@ -54,8 +54,6 @@ export interface ConversationItem {
   id: string;
   title: string;
   updatedAt: string | null;
-  /** It has a view in this window now. */
-  open: boolean;
   running: boolean;
   /** Questions waiting for the user: decisions and permission prompts. */
   waiting: number;
@@ -185,7 +183,6 @@ export type DesktopRequest =
   | { method: "conversation.open"; projectId: string; conversationId: string }
   /** A conversation the window shows already becomes the selected one again (kept as it is: same view, same chat). */
   | { method: "conversation.select"; projectId: string; conversationId: string }
-  | { method: "conversation.close"; projectId: string; conversationId: string }
   /** What a conversation's chat sends, as the VS Code webview sends it (`view`: the attachment it was shown by). */
   | { method: "chat.message"; projectId: string; conversationId: string; view: number; message: WebviewMessage }
   | { method: "chat.draft"; projectId: string; conversationId: string; text: string }
@@ -225,7 +222,6 @@ export interface DesktopResults {
   "conversation.new": { conversationId: string };
   "conversation.open": { conversationId: string; draft: string };
   "conversation.select": { selected: true };
-  "conversation.close": { closed: true };
   "chat.message": { accepted: boolean };
   "chat.draft": { saved: true };
   "run.inspect": FocusedRun | null;
@@ -348,7 +344,7 @@ export function parsePreferences(v: unknown): Partial<Preferences> {
 
 const METHODS: readonly DesktopMethod[] = [
   "app.state", "prefs.set", "project.open", "project.select", "project.forget", "project.restart", "project.runs", "conversation.new", "conversation.open",
-  "conversation.select", "conversation.close", "chat.message", "chat.draft", "run.inspect", "artifact.read", "changes.list", "changes.file", "settings.read", "settings.update",
+  "conversation.select", "chat.message", "chat.draft", "run.inspect", "artifact.read", "changes.list", "changes.file", "settings.read", "settings.update",
   "settings.clear", "settings.openFile", "folder.open", "cli.status", "cli.pick", "doctor.run", "account.usage", "diagnostics.collect", "diagnostics.export",
   "link.open", "update.check", "update.install",
 ];
@@ -382,7 +378,6 @@ export function parseDesktopRequest(v: unknown): DesktopRequest {
       return { method, projectId: projectId(o.projectId) };
     case "conversation.open":
     case "conversation.select":
-    case "conversation.close":
       return { method, projectId: projectId(o.projectId), conversationId: conversationId(o.conversationId) };
     case "chat.message":
       return { method, projectId: projectId(o.projectId), conversationId: conversationId(o.conversationId), view: int(o.view, "view"), message: chatMessage(o.message) };

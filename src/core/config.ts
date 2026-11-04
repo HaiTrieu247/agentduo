@@ -2,11 +2,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import YAML from "yaml";
-import { PIPELINE_PROFILES, type PipelineProfile } from "./commands.js";
+import { CLAUDE_EFFORTS, CODEX_EFFORTS, PIPELINE_PROFILES, type PipelineProfile } from "./commands.js";
 
 export type Backend = "codex" | "claude";
 export type AgentRole = "planner" | "plan_reviewer" | "implementer" | "code_reviewer";
 export type RoleArgs = Partial<Record<AgentRole, string[]>>;
+/** A value of a pipeline role's own on one CLI (its model, its effort): null uses the CLI's own setting again. */
+export type RoleValues = Partial<Record<AgentRole, string | null>>;
 
 export const AGENT_ROLES: AgentRole[] = ["planner", "plan_reviewer", "implementer", "code_reviewer"];
 export const SEVERITIES = ["critical", "high", "medium", "low"] as const;
@@ -62,9 +64,16 @@ export interface ConfigData {
   /** profile: the pipeline profile new runs start with; a run keeps its own (state.profile). */
   pipeline: { profile: ProfileName };
   safety: { pause_before_implement: boolean };
-  codex: { bin: string; model: string | null; args: string[]; role_args: RoleArgs };
+  /**
+   * role_models / role_efforts: the model and effort a pipeline role runs with when this CLI plays it, over `model`
+   * and the effort in `args` (a role's own args still come last and win); absent or null: the CLI's.
+   */
+  codex: { bin: string; model: string | null; args: string[]; role_args: RoleArgs; role_models: RoleValues; role_efforts: RoleValues };
   /** permission_prompts: "ask" relays Claude's permission prompts to the user when someone can answer; "deny" never asks. */
-  claude: { bin: string; model: string | null; max_budget_usd: number | null; permission_prompts: "ask" | "deny"; args: string[]; role_args: RoleArgs };
+  claude: {
+    bin: string; model: string | null; max_budget_usd: number | null; permission_prompts: "ask" | "deny"; args: string[]; role_args: RoleArgs;
+    role_models: RoleValues; role_efforts: RoleValues;
+  };
   paths: { runs_dir: string };
 }
 
@@ -99,15 +108,31 @@ const DEFAULTS: ConfigData = {
   safety: { pause_before_implement: false },
   // No session flag here: agentduo keeps a pipeline role's sessions to continue them, and passes --ephemeral /
   // --no-session-persistence to every other call. Listing one in args turns the continuation off.
-  codex: { bin: "codex", model: null, args: [], role_args: {} },
-  claude: { bin: "claude", model: null, max_budget_usd: null, permission_prompts: "ask", args: [], role_args: {} },
+  codex: { bin: "codex", model: null, args: [], role_args: {}, role_models: {}, role_efforts: {} },
+  claude: { bin: "claude", model: null, max_budget_usd: null, permission_prompts: "ask", args: [], role_args: {}, role_models: {}, role_efforts: {} },
   paths: { runs_dir: ".agentduo/runs" },
 };
 
 /** Keys from agentduo v1 that kept their meaning under a new name. */
 const RENAMED: Record<string, string> = { "codex.extra_args": "codex.args", "claude.extra_args": "claude.args" };
 /** Mappings whose keys are user-chosen (validated later) rather than fixed by the defaults. */
-const OPEN_MAPPINGS = new Set(["codex.role_args", "claude.role_args"]);
+const OPEN_MAPPINGS = new Set(["codex.role_args", "claude.role_args", "codex.role_models", "claude.role_models", "codex.role_efforts", "claude.role_efforts"]);
+
+/** The efforts each CLI takes (Claude's --effort, Codex's model_reasoning_effort). */
+export const EFFORTS: Record<Backend, readonly string[]> = { claude: CLAUDE_EFFORTS, codex: CODEX_EFFORTS };
+
+/** A model name as a CLI takes it: one word, no control characters. */
+export const isModelName = (v: unknown): v is string => typeof v === "string" && !!v.trim() && v.length <= 200 && !/[\s\u0000-\u001f]/.test(v);
+
+/** The model a pipeline role runs with on this CLI: its own, else the CLI's (null: the CLI's own configuration says). */
+export function roleModel(cli: { model: string | null; role_models: RoleValues }, role: AgentRole): string | null {
+  return cli.role_models?.[role] ?? cli.model;
+}
+
+/** The effort a pipeline role runs with on this CLI over the args every call gets; null: theirs. */
+export function roleEffort(cli: { role_efforts: RoleValues }, role: AgentRole): string | null {
+  return cli.role_efforts?.[role] ?? null;
+}
 
 export class ConfigError extends Error {
   override name = "ConfigError";
@@ -301,6 +326,24 @@ export function configErrors(cfg: ConfigData): string[] {
     for (const [role, args] of Object.entries(roleArgs)) {
       if (!(AGENT_ROLES as string[]).includes(role)) errors.push(`${backend}.role_args: unknown role '${role}' (roles: ${AGENT_ROLES.join(", ")})`);
       else if (!isStringList(args)) errors.push(`${backend}.role_args.${role} must be a list of strings`);
+    }
+  }
+  for (const backend of ["codex", "claude"] as const) {
+    const efforts = EFFORTS[backend];
+    const mappings = [
+      ["role_models", "a model", (v: unknown) => isModelName(v), "a model name or null"],
+      ["role_efforts", "an effort", (v: unknown) => efforts.includes(v as string), `one of ${efforts.join(", ")}, or null`],
+    ] as const;
+    for (const [name, what, valid, expected] of mappings) {
+      const mapping = cfg[backend][name] as unknown;
+      if (!isPlainObject(mapping)) {
+        errors.push(`${backend}.${name} must be a mapping of role to ${what}`);
+        continue;
+      }
+      for (const [role, value] of Object.entries(mapping)) {
+        if (!(AGENT_ROLES as string[]).includes(role)) errors.push(`${backend}.${name}: unknown role '${role}' (roles: ${AGENT_ROLES.join(", ")})`);
+        else if (value !== null && !valid(value)) errors.push(`${backend}.${name}.${role} must be ${expected}`);
+      }
     }
   }
   return errors;

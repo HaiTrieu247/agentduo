@@ -4,7 +4,7 @@ import { CONVERSATIONS_PROJECT_ID } from "../shared/protocol.js";
 // a change applies, where data lives (read-only), diagnostics, and what the app is (About). Every change goes through main, which uses the
 // same configuration code as the CLI; nothing here writes a file.
 import type { ConfigEntry, ConfigurationView } from "../../../../src/core/configuration.js";
-import { CLAUDE_MODELS, type ModelChoice } from "../../../../src/core/commands.js";
+import { CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS, type ModelChoice } from "../../../../src/core/commands.js";
 import type { AppSnapshot, CliStatus, ConfigScope, LauncherInfo, LinkName, Preferences, UpdateState } from "../shared/protocol.js";
 import { busy, button, call, el, errorText, icon, meter } from "./bridge.js";
 import { FONT_RANGE } from "./theme.js";
@@ -174,6 +174,7 @@ export function editorKind(e: Pick<ConfigEntry, "kind">): EditorKind {
     case "prompts":
     case "backend":
     case "profile":
+    case "effort":
       return "choice";
     case "bin":
     case "model":
@@ -181,10 +182,13 @@ export function editorKind(e: Pick<ConfigEntry, "kind">): EditorKind {
   }
 }
 
+/** A step's own model or effort on a CLI (claude.role_models.implementer…), shown with who plays that step. */
+const isStepKey = (key: string) => /^(claude|codex)\.role_(models|efforts)\./.test(key);
+
 export function groupOf(key: string): string {
   const head = key.split(".")[0]!;
-  // The pipeline's profile sits with who plays each step: both shape the workflow of new runs.
-  if (head === "pipeline") return "agents";
+  // The pipeline's profile, and each step's model and effort, sit with who plays each step: they shape the workflow.
+  if (head === "pipeline" || isStepKey(key)) return "agents";
   return ["claude", "codex", "agents", "limits"].includes(head) ? head : "other";
 }
 
@@ -192,6 +196,8 @@ export function groupOf(key: string): string {
 export function settingLabel(key: string): string {
   const parts = key.split(".");
   if (parts[1] === "role_args") return `${words(parts[2]!)} options`;
+  if (parts[1] === "role_models") return "Model";
+  if (parts[1] === "role_efforts") return parts[0] === "codex" ? "Reasoning effort" : "Effort";
   if (parts[0] === "agents") return words(parts[1]!);
   const labels: Record<string, string> = {
     bin: "CLI executable", model: "Model", args: "Options", max_budget_usd: "Budget per call", permission_prompts: "Permission requests", profile: "Pipeline profile",
@@ -208,6 +214,8 @@ export function settingHelp(key: string): string {
   const [head, name, role] = key.split(".") as [string, string, string | undefined];
   const cli = head === "claude" ? "Claude Code" : "Codex";
   if (name === "role_args") return `Added after the options above when ${cli} is the ${words(role!).toLowerCase()}.`;
+  if (name === "role_models") return `${cli}'s model for this step.`;
+  if (name === "role_efforts") return `${cli}'s ${head === "codex" ? "reasoning effort" : "effort"} for this step.`;
   const help: Record<string, string> = {
     "claude.model": "Default leaves it to Claude Code's own setting.",
     "codex.model": "Default leaves it to Codex's own setting (~/.codex/config.toml).",
@@ -258,10 +266,13 @@ export function sourceText(e: Pick<ConfigEntry, "source" | "projectOverridesGlob
   return text ? { text, warn: false } : null;
 }
 
-/** A model picker's choices: Default, the models the CLI lists, and the model set now even when it is not among them. */
-export function modelChoices(listed: readonly ModelChoice[], current: string | null): Array<{ value: string; label: string }> {
+/**
+ * A model picker's choices: Default (`defaultLabel`: a step's says it is the CLI's model), the models the CLI lists,
+ * and the model set now even when it is not among them.
+ */
+export function modelChoices(listed: readonly ModelChoice[], current: string | null, defaultLabel = "Default"): Array<{ value: string; label: string }> {
   return [
-    { value: DEFAULT_MODEL, label: "Default" },
+    { value: DEFAULT_MODEL, label: defaultLabel },
     ...(current && !listed.some((m) => m.id === current) ? [{ value: current, label: current }] : []),
     ...listed.map((m) => ({ value: m.id, label: m.label })),
     { value: OTHER_MODEL, label: "Other model…" },
@@ -269,6 +280,35 @@ export function modelChoices(listed: readonly ModelChoice[], current: string | n
 }
 const DEFAULT_MODEL = "";
 const OTHER_MODEL = "\u0000other";
+
+/**
+ * A step's effort choices: Default (the effort every call of the CLI gets), then the efforts its model takes when the
+ * CLI listed them (`modelEfforts`), else every effort the CLI takes, and the one set now even when it is not among them.
+ */
+export function effortChoices(backend: "claude" | "codex", modelEfforts: readonly string[] | null, current: string | null, defaultLabel: string): Array<{ value: string; label: string }> {
+  const list: readonly string[] = modelEfforts?.length ? modelEfforts : backend === "claude" ? CLAUDE_EFFORTS : CODEX_EFFORTS;
+  return [
+    { value: DEFAULT_MODEL, label: defaultLabel },
+    ...(current && !list.includes(current) ? [{ value: current, label: current }] : []),
+    ...list.map((e) => ({ value: e, label: e })),
+  ];
+}
+
+/** What a row shows: the value of the scope being edited, else what new work gets. */
+const shownValue = (e: ConfigEntry, scope: ConfigScope): unknown => (e[scope] ? e[scope]!.value : e.effective);
+
+/**
+ * A pipeline step's rows in Workflow roles: who plays it, then that CLI's model and effort for it, the CLI being the
+ * one the "who" row shows in `scope` (the other CLI's values stay saved, unused while it does not play the step).
+ */
+export function stepRows(entries: readonly ConfigEntry[], role: string, scope: ConfigScope): string[] {
+  const who = entries.find((e) => e.key === `agents.${role}`);
+  if (!who) return [];
+  const backend = shownValue(who, scope) === "codex" ? "codex" : "claude";
+  return [who.key, `${backend}.role_models.${role}`, `${backend}.role_efforts.${role}`];
+}
+
+const CLI_NAMES = { claude: "Claude Code", codex: "Codex" } as const;
 
 function words(value: string): string {
   const text = value.replaceAll("_", " ");
@@ -287,8 +327,10 @@ const GROUPS: Array<{ id: string; title: string; description: string; cards: Arr
     cards: [{ title: null, keys: ["codex.model"] }, { title: null, keys: ["codex.args"] }],
   },
   {
-    id: "agents", title: "Workflow roles", description: "How deep a pipeline goes, and who handles each step. A change applies to new runs and discussions.",
-    cards: [{ title: null, keys: ["pipeline.profile"] }, { title: null, keys: [] }],
+    id: "agents", title: "Workflow roles",
+    description: "How deep a pipeline goes, who handles each step, and the model and effort it runs with. Who handles a step applies to new runs " +
+      "and discussions; a step's model and effort reach a running pipeline from its next call.",
+    cards: [{ title: null, keys: ["pipeline.profile"] }],
   },
   {
     id: "limits", title: "Rounds & limits", description: "How many rounds the agents take and how long they may work. A change applies to new work.",
@@ -549,15 +591,19 @@ export class SettingsPanel {
     const view = this.view!;
     const group = GROUPS.find((g) => g.id === this.configGroup)!;
     const entries = view.entries.filter((e) => groupOf(e.key) === group.id);
-    const placed = new Set(group.cards.flatMap((c) => c.keys));
+    // Workflow roles: a card per step, with who plays it, then that CLI's model and effort for it.
+    const steps = group.id === "agents" ? entries.filter((e) => e.key.startsWith("agents.")).map((e) => stepRows(entries, e.key.slice("agents.".length), this.scope)) : [];
+    const placed = new Set([...group.cards.flatMap((c) => c.keys), ...steps.flat()]);
     const advanced = entries.filter((e) => e.kind === "bin" || e.key.includes(".role_args."));
-    const rest = entries.filter((e) => !placed.has(e.key) && !advanced.includes(e));
+    // The step keys of the CLI that does not play a step stay out: they are not used while it does not.
+    const rest = entries.filter((e) => !placed.has(e.key) && !advanced.includes(e) && !isStepKey(e.key));
+    const rowsOf = (keys: string[]) => keys.map((k) => entries.find((e) => e.key === k)).filter((e): e is ConfigEntry => !!e).map((e) => this.settingRow(e));
     const cards = group.cards.map((c, i) => {
-      const keys = [...c.keys, ...(i === group.cards.length - 1 ? rest.map((e) => e.key) : [])];
-      const rows = keys.map((k) => entries.find((e) => e.key === k)).filter((e): e is ConfigEntry => !!e).map((e) => this.settingRow(e));
+      const rows = rowsOf([...c.keys, ...(i === group.cards.length - 1 ? rest.map((e) => e.key) : [])]);
       return rows.length ? [c.title ? el("h3", { text: c.title }) : null, card(rows)] : [];
     }).flat().filter((n): n is HTMLElement => !!n);
-    const nodes: Node[] = [el("p", { class: "muted small group-lead", text: group.description }), ...cards];
+    const stepCards = steps.map((keys) => card(rowsOf(keys)));
+    const nodes: Node[] = [el("p", { class: "muted small group-lead", text: group.description }), ...cards, ...(stepCards.length ? [el("h3", { text: "Steps" }), ...stepCards] : [])];
     if (advanced.length) {
       const details = el("details", { class: "advanced" }, el("summary", { text: "Advanced: executable and options by role" }), card(advanced.map((e) => this.settingRow(e))));
       details.open = this.advancedOpen;
@@ -606,6 +652,7 @@ export class SettingsPanel {
       status.classList.add("error");
     };
     if (e.kind === "model") return this.modelControl(e, id, typeof current === "string" ? current : null, save);
+    if (e.kind === "effort") return this.effortControl(e, id, typeof current === "string" ? current : null, save);
     if (kind === "choice") {
       const words: Record<string, string> = { ask: "Ask me", deny: "Deny automatically", claude: "Claude Code", codex: "Codex" };
       const select = el("select", { attrs: { id } }, ...(CHOICES[e.kind] ?? []).map((c) => el("option", { text: words[c] ?? c, attrs: { value: c } })));
@@ -632,9 +679,12 @@ export class SettingsPanel {
   }
 
   private modelControl(e: ConfigEntry, id: string, current: string | null, save: (value: unknown) => void): HTMLElement {
-    const backend = e.key.split(".")[0];
+    const backend = e.key.split(".")[0] as "claude" | "codex";
     const listed = backend === "claude" ? CLAUDE_MODELS : this.host.codexModels() ?? [];
-    const select = el("select", { attrs: { id } }, ...modelChoices(listed, current).map((c) => el("option", { text: c.label, attrs: { value: c.value } })));
+    // A step's Default is the CLI's model, as new work gets it.
+    const general = isStepKey(e.key) ? this.view?.entries.find((x) => x.key === `${backend}.model`)?.effective : undefined;
+    const defaultLabel = isStepKey(e.key) ? `Same as ${CLI_NAMES[backend]} (${typeof general === "string" ? general : "its default"})` : "Default";
+    const select = el("select", { attrs: { id } }, ...modelChoices(listed, current, defaultLabel).map((c) => el("option", { text: c.label, attrs: { value: c.value } })));
     select.value = current ?? DEFAULT_MODEL;
     const custom = el("input", { class: "text", attrs: { id: `${id}-custom`, type: "text", spellcheck: "false", placeholder: "Model name", "aria-label": "Model name" } });
     custom.hidden = true;
@@ -654,6 +704,22 @@ export class SettingsPanel {
     return el("span", { class: "model-picker" }, select, custom, note);
   }
 
+  /** A step's effort: the efforts its model takes when the CLI listed them (Codex's), else every one the CLI takes. */
+  private effortControl(e: ConfigEntry, id: string, current: string | null, save: (value: unknown) => void): HTMLElement {
+    const [backend, , role] = e.key.split(".") as ["claude" | "codex", string, string];
+    const entries = this.view?.entries ?? [];
+    const valueOf = (key: string) => {
+      const x = entries.find((entry) => entry.key === key);
+      return x ? shownValue(x, this.scope) : null;
+    };
+    const model = valueOf(`${backend}.role_models.${role}`) ?? valueOf(`${backend}.model`);
+    const efforts = backend === "codex" ? this.host.codexModels()?.find((m) => m.id === model)?.efforts ?? null : null;
+    const select = el("select", { attrs: { id } }, ...effortChoices(backend, efforts, current, `Same as ${CLI_NAMES[backend]}`).map((c) => el("option", { text: c.label, attrs: { value: c.value } })));
+    select.value = current ?? DEFAULT_MODEL;
+    select.addEventListener("change", () => save(select.value === DEFAULT_MODEL ? null : select.value));
+    return select;
+  }
+
   /** Saves a change, then draws that setting's row again from what was saved; focus stays where it was. */
   private async change(key: string, status: HTMLElement, work: () => Promise<ConfigurationView>): Promise<void> {
     status.textContent = "";
@@ -670,8 +736,16 @@ export class SettingsPanel {
     this.drawNotices();
     if (!old || !entry) return;
     const focused = old.contains(document.activeElement) ? document.activeElement?.id || null : null;
-    const next = this.settingRow(entry);
-    old.replaceWith(next);
+    let next: HTMLElement | null;
+    if (changesOtherRows(key)) {
+      // Who plays a step picks its model and effort rows; a model, the efforts offered and the default named.
+      this.redraw();
+      next = this.body.querySelector<HTMLElement>(`.setting-row[data-key="${CSS.escape(key)}"]`);
+      if (!next) return;
+    } else {
+      next = this.settingRow(entry);
+      old.replaceWith(next);
+    }
     const saved = next.querySelector<HTMLElement>(".setting-status")!;
     saved.textContent = "Saved";
     saved.classList.add("ok-text");
@@ -766,6 +840,9 @@ export class SettingsPanel {
     ];
   }
 }
+
+/** A change of `key` changes what other rows show: who plays a step, or a model (a step's default, its efforts). */
+const changesOtherRows = (key: string) => key.startsWith("agents.") || key.endsWith(".model") || key.includes(".role_models.");
 
 /** Settings rows in one bordered group. */
 function card(rows: HTMLElement[]): HTMLElement {
