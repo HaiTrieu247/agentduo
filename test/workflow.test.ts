@@ -441,11 +441,15 @@ describe("Workflow", () => {
   });
 
   it("hands a note given while a step runs to every later step", async () => {
-    fake.setScenario({ ...happy(), planner: [{ sleep: 1500, output: plan() }] });
+    fake.setScenario({ ...happy(), planner: [{ activities: [{ command: "cat app.txt" }], sleep: 300, output: plan() }] });
     const { wf, bus } = newWorkflow(h, "Make app.txt fixed");
+    let noted = false;
     bus.on((e) => {
-      // The planner's step, after the baseline gates' one.
-      if (e.type === "phase.started" && e.phase === "PLAN" && e.role === "planner") setTimeout(() => wf.addNote("keep app.txt short"), 300);
+      // Once the planner's CLI reports what it does, it has its prompt: on a slow machine a timer could come before that.
+      if (e.type === "agent.activity" && e.role === "planner" && !noted) {
+        noted = true;
+        wf.addNote("keep app.txt short");
+      }
     });
     expect(await wf.run()).toBe(0);
     expect(fake.calls("planner")[0]!.prompt).not.toContain("keep app.txt short");
