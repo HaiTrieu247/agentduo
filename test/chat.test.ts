@@ -125,7 +125,8 @@ describe("Chat: one of several conversations", () => {
     await chat.submit("And B?");
     await chat.idle();
     const prompt = fake.calls("chat_claude")[1]!.prompt;
-    expect(prompt).toContain("Claude says A.");
+    expect(prompt).not.toContain("Claude says A.");
+    expect(fake.calls("chat_claude")[1]!.resumed).toBe(fake.calls("chat_claude")[0]!.session);
     expect(prompt).toContain("Make app.txt fixed — done");
     expect(listConversations(runsDir)).toEqual([expect.objectContaining({ id: "conv-1", title: "What about A?" })]);
   });
@@ -152,6 +153,310 @@ describe("Chat: one of several conversations", () => {
   });
 });
 
+describe("Chat: conversation sessions", () => {
+  it("shares each backend's session across chat, discussions and reopening, then starts new ones for /new", async () => {
+    let chat = newChat({ conversationId: "shared" });
+    fake.setScenario({
+      chat_codex: [{ answer: "CODEX-INITIAL" }, { answer: "CODEX-FOLLOWUP" }, { answer: "NEW-CODEX" }],
+      chat_claude: [{ answer: "CLAUDE-INITIAL" }, { answer: "CLAUDE-FOLLOWUP" }, { answer: "NEW-CLAUDE" }],
+      discuss_answer: [{ answer: "DRAFT" }], discuss_critique: [{ answer: "AGREED\nVERDICT: AGREE" }],
+      discuss_synthesis: [{ answer: "FINAL" }],
+    });
+    for (const question of ["/codex first", "/claude second", "/codex", "/discuss choose"]) {
+      await chat.submit(question);
+      await chat.idle();
+    }
+    const codex = fake.calls("chat_codex")[0]!.session;
+    const claude = fake.calls("chat_claude")[0]!.session;
+    expect(codex).toBeTruthy();
+    expect(claude).toBeTruthy();
+    expect(codex).not.toBe(claude);
+    expect(fake.calls("discuss_answer")[0]).toMatchObject({ session: codex, resumed: codex });
+    expect(fake.calls("discuss_critique")[0]).toMatchObject({ session: claude, resumed: claude });
+    expect(fake.calls("discuss_synthesis")[0]).toMatchObject({ session: codex, resumed: codex });
+    expect(fake.calls("discuss_answer")[0]!.prompt).toContain("CLAUDE-INITIAL");
+    expect(fake.calls("discuss_answer")[0]!.prompt).not.toContain("CODEX-INITIAL");
+    await chat.stop();
+    chat = newChat({ conversationId: "shared" });
+    for (const question of ["/codex followup", "/claude followup", "/new", "/codex new", "/claude new"]) {
+      await chat.submit(question);
+      await chat.idle();
+    }
+    expect(fake.calls("chat_codex")[1]).toMatchObject({ session: codex, resumed: codex });
+    expect(fake.calls("chat_claude")[1]).toMatchObject({ session: claude, resumed: claude });
+    for (const backend of ["codex", "claude"]) {
+      const fresh = fake.calls(`chat_${backend}`)[2]!;
+      expect(fresh.resumed).toBeUndefined();
+      expect(fresh.session).not.toBe(backend === "codex" ? codex : claude);
+      expect(fresh.prompt).not.toContain("FINAL");
+    }
+  });
+
+  it("recovers lost text sessions using the full conversation and keeps the replacement", async () => {
+    const chat = newChat();
+    fake.setScenario({ sessions: { lost: true }, chat_codex: [{ answer: "FIRST" }, { answer: "SECOND" }] });
+    await chat.submit("/codex first");
+    await chat.idle();
+    fake.setScenario({ chat_codex: [{ answer: "FIRST" }, { answer: "SECOND" }, { answer: "THIRD" }] });
+    await chat.submit("/codex second");
+    await chat.idle();
+    const calls = fake.calls("chat_codex");
+    expect(calls[1]).toMatchObject({ lost: true, resumed: calls[0]!.session });
+    expect(calls[1]!.prompt).not.toContain("FIRST");
+    expect(calls[2]!.prompt).toContain("FIRST");
+    expect(calls[2]!.resumed).toBeUndefined();
+    await chat.submit("/codex third");
+    await chat.idle();
+    expect(fake.calls("chat_codex")[3]!.resumed).toBe(calls[2]!.session);
+  });
+
+  it("respects disabled persistence and never resumes a stale session after it is enabled again", async () => {
+    const cfg = testConfig(fake);
+    const chat = newChat({ cfg });
+    fake.setScenario({ chat_codex: [{ answer: "A" }], chat_claude: [{ answer: "B" }] });
+    for (const question of ["/codex one", "/claude two"]) { await chat.submit(question); await chat.idle(); }
+    chat.config.codex.args.push("--ephemeral");
+    chat.config.claude.args.push("--no-session-persistence");
+    for (const question of ["/codex three", "/claude four"]) { await chat.submit(question); await chat.idle(); }
+    chat.config.codex.args = [];
+    chat.config.claude.args = [];
+    for (const question of ["/codex five", "/claude six"]) { await chat.submit(question); await chat.idle(); }
+    for (const backend of ["codex", "claude"]) {
+      const calls = fake.calls(`chat_${backend}`);
+      expect(calls).toHaveLength(3);
+      expect(calls[1]!.resumed).toBeUndefined();
+      expect(calls[2]!.resumed).toBeUndefined();
+      expect(calls[1]!.args).toContain(backend === "codex" ? "--ephemeral" : "--no-session-persistence");
+    }
+  });
+
+  const say = async (chat: Chat, ...questions: string[]) => {
+    for (const question of questions) {
+      await chat.submit(question);
+      await chat.idle();
+    }
+  };
+  /** How many times `part` is in `text`: a continued prompt carries what its session has not seen exactly once. */
+  const count = (text: string, part: string) => text.split(part).length - 1;
+  const saved = (chat: Chat) => JSON.parse(readFileSync(join(runsDir, "conversations", chat.conversationId, "conversation.json"), "utf8"));
+
+  it("gives each continued prompt, in chat and in every step of a discussion, exactly what its session has not seen", async () => {
+    const chat = newChat();
+    fake.setScenario({
+      chat_codex: [{ answer: "ANS-ONE" }, { answer: "ANS-THREE" }, { answer: "ANS-SIX" }], chat_claude: [{ answer: "ANS-TWO" }, { answer: "ANS-FIVE" }],
+      discuss_answer: [{ answer: "DRAFT-V1" }], discuss_critique: [{ answer: "CRIT-OK\nVERDICT: AGREE" }], discuss_synthesis: [{ answer: "FINAL-SYN" }],
+    });
+    await say(chat, "/codex QQ-ONE", "/claude QQ-TWO", "/codex QQ-THREE", "/discuss QQ-FOUR", "/claude QQ-FIVE", "/codex QQ-SIX");
+    const [codex1, codex3, codex6] = fake.calls("chat_codex");
+    const [claude2, claude5] = fake.calls("chat_claude");
+    const answer = fake.calls("discuss_answer")[0]!;
+    const review = fake.calls("discuss_critique")[0]!;
+    const synthesis = fake.calls("discuss_synthesis")[0]!;
+    expect(claude2!.resumed).toBeUndefined();
+    expect(count(claude2!.prompt, "ANS-ONE")).toBe(1);
+    expect(codex3!.resumed).toBe(codex1!.session);
+    expect([count(codex3!.prompt, "QQ-TWO"), count(codex3!.prompt, "ANS-TWO"), count(codex3!.prompt, "ANS-ONE")]).toEqual([1, 1, 0]);
+    // Codex's session has seen the whole chat: its answer gets the question alone.
+    expect(answer.resumed).toBe(codex1!.session);
+    for (const seen of ["ANS-ONE", "ANS-TWO", "ANS-THREE"]) expect(answer.prompt).not.toContain(seen);
+    expect(review.resumed).toBe(claude2!.session);
+    expect([count(review.prompt, "ANS-THREE"), count(review.prompt, "DRAFT-V1"), count(review.prompt, "ANS-TWO")]).toEqual([1, 1, 0]);
+    expect(synthesis.resumed).toBe(codex1!.session);
+    expect([count(synthesis.prompt, "CRIT-OK"), count(synthesis.prompt, "DRAFT-V1")]).toEqual([1, 0]);
+    // After the discussion, the reviewer gets its final answer once, and nothing it took part in.
+    expect(claude5!.resumed).toBe(claude2!.session);
+    expect(count(claude5!.prompt, "FINAL-SYN")).toBe(1);
+    for (const seen of ["ANS-THREE", "DRAFT-V1", "CRIT-OK"]) expect(claude5!.prompt).not.toContain(seen);
+    expect(codex6!.resumed).toBe(codex1!.session);
+    expect(count(codex6!.prompt, "ANS-FIVE")).toBe(1);
+  });
+
+  it("starts a discussion after reopening with its whole history, also for sessions that were in an earlier one", async () => {
+    let chat = newChat({ conversationId: "again" });
+    fake.setScenario({
+      discuss_answer: [{ answer: "OLD-DRAFT" }, { answer: "NEW-DRAFT" }],
+      discuss_critique: [{ answer: "OLD-REVIEW\nVERDICT: AGREE" }, { answer: "NEW-REVIEW\nVERDICT: AGREE" }],
+      discuss_synthesis: [{ answer: "OLD-FINAL" }, { answer: "NEW-FINAL" }],
+    });
+    await say(chat, "/discuss OLD-Q");
+    await chat.stop();
+    chat = newChat({ conversationId: "again" });
+    await say(chat, "/discuss NEW-Q");
+    const review = fake.calls("discuss_critique")[1]!;
+    expect(review.resumed).toBe(fake.calls("discuss_critique")[0]!.session);
+    expect([count(review.prompt, "NEW-DRAFT"), count(review.prompt, "OLD-FINAL"), count(review.prompt, "OLD-DRAFT")]).toEqual([1, 1, 0]);
+    const synthesis = fake.calls("discuss_synthesis")[1]!;
+    expect(synthesis.resumed).toBe(fake.calls("discuss_synthesis")[0]!.session);
+    expect([count(synthesis.prompt, "NEW-REVIEW"), count(synthesis.prompt, "NEW-DRAFT")]).toEqual([1, 0]);
+  });
+
+  it("gives each session a pipeline task of the conversation once, and never gives a pipeline role a conversation session", async () => {
+    const chat = newChat();
+    fake.setScenario({ ...happy(), chat_codex: [{ answer: "c1" }, { answer: "c2" }, { answer: "c3" }], chat_claude: [{ answer: "k1" }, { answer: "k2" }] });
+    await say(chat, "/codex before", "/claude before", "/pipeline Make app.txt fixed", "/codex after", "/codex later", "/claude after");
+    const codex = fake.calls("chat_codex");
+    const claude = fake.calls("chat_claude");
+    expect(codex[1]!.resumed).toBe(codex[0]!.session);
+    expect(count(codex[1]!.prompt, "Make app.txt fixed")).toBe(1);
+    expect(codex[2]!.prompt).not.toContain("Make app.txt fixed");
+    expect(claude[1]!.resumed).toBe(claude[0]!.session);
+    expect(count(claude[1]!.prompt, "Make app.txt fixed")).toBe(1);
+    const conversation = new Set([codex[0]!.session, claude[0]!.session]);
+    for (const call of fake.calls().filter((c) => !c.role.startsWith("chat_"))) {
+      expect(conversation.has(call.session ?? ""), call.role).toBe(false);
+      expect(conversation.has(call.resumed ?? ""), call.role).toBe(false);
+    }
+  });
+
+  it("recovers a session lost in a discussion step with the whole prompt, and continues the replacement from there", async () => {
+    const chat = newChat();
+    fake.setScenario({
+      chat_codex: [{ answer: "ANS-ONE" }, { answer: "ANS-FOUR" }], chat_claude: [{ answer: "ANS-TWO" }],
+      discuss_answer: [{ answer: "DRAFT-V1" }], discuss_critique: [{ answer: "CRIT-OK\nVERDICT: AGREE" }], discuss_synthesis: [{ answer: "FINAL-SYN" }],
+    });
+    await say(chat, "/codex QQ-ONE", "/claude QQ-TWO");
+    fake.forget(fake.calls("chat_codex")[0]!.session!);
+    await say(chat, "/codex", "/discuss QQ-THREE");
+    const [lost, fresh] = fake.calls("discuss_answer");
+    expect(lost).toMatchObject({ lost: true, resumed: fake.calls("chat_codex")[0]!.session });
+    expect(fresh!.resumed).toBeUndefined();
+    expect([count(fresh!.prompt, "ANS-ONE"), count(fresh!.prompt, "ANS-TWO")]).toEqual([1, 1]);
+    const synthesis = fake.calls("discuss_synthesis")[0]!;
+    expect(synthesis.resumed).toBe(fresh!.session);
+    expect([count(synthesis.prompt, "CRIT-OK"), count(synthesis.prompt, "DRAFT-V1")]).toEqual([1, 0]);
+    await say(chat, "/codex QQ-FOUR");
+    const next = fake.calls("chat_codex")[1]!;
+    expect(next.resumed).toBe(fresh!.session);
+    expect(next.prompt).not.toContain("ANS-TWO");
+  });
+
+  it("drops a session whose continued and fresh attempts both failed: the next question starts a new one with the whole conversation", async () => {
+    const chat = newChat();
+    fake.setScenario({ chat_codex: [{ answer: "ANS-ONE" }, { answer: "", exit: 1 }, { answer: "", exit: 1 }, { answer: "ANS-THREE" }] });
+    await say(chat, "/codex QQ-ONE", "/codex QQ-TWO", "/codex QQ-THREE");
+    const [one, continued, fresh, three] = fake.calls("chat_codex");
+    expect(continued!.resumed).toBe(one!.session);
+    expect(fresh!.resumed).toBeUndefined();
+    expect(three!.resumed).toBeUndefined();
+    expect(count(three!.prompt, "ANS-ONE")).toBe(1);
+    expect(three!.prompt).not.toContain("QQ-TWO");
+    expect(events.filter((e) => e.type === "warning").map((e) => e.type === "warning" && e.text))
+      .toEqual([expect.stringMatching(/^Codex could not answer in this conversation's session \(codex exited with code 1.*\), so it is asked again in a new one, with the whole conversation\.$/)]);
+  });
+
+  it("forgets both agents' sessions when a stopped discussion ends without an answer", async () => {
+    const chat = newChat();
+    fake.setScenario({
+      chat_codex: [{ answer: "ANS-ONE" }, { answer: "next" }], chat_claude: [{ answer: "ANS-TWO" }, { answer: "next" }],
+      discuss_answer: [{ answer: "ABANDONED-DRAFT" }], discuss_critique: [{ pid: "agent.pid", sleep: 20_000, answer: "late\nVERDICT: AGREE" }],
+    });
+    await say(chat, "/codex QQ-ONE", "/claude QQ-TWO", "/codex");
+    await chat.submit("/discuss ABANDONED-Q");
+    await waitUntil(() => existsSync(join(repo, "agent.pid")), 10_000, "the reviewer to start");
+    expect(fake.calls("discuss_answer")[0]!.resumed).toBe(fake.calls("chat_codex")[0]!.session);
+    chat.escape();
+    await chat.idle();
+    expect(saved(chat).sessions).toEqual({});
+    await say(chat, "/codex after", "/claude after");
+    for (const backend of ["codex", "claude"]) {
+      const next = fake.calls(`chat_${backend}`)[1]!;
+      expect(next.resumed, backend).toBeUndefined();
+      expect([count(next.prompt, "ANS-ONE"), count(next.prompt, "ANS-TWO")], backend).toEqual([1, 1]);
+      expect(next.prompt, backend).not.toContain("ABANDONED");
+    }
+  });
+
+  it("forgets the answerer's session too when a review fails and the discussion ends without an answer", async () => {
+    const chat = newChat();
+    fake.setScenario({ discuss_answer: [{ answer: "DISCARDED-DRAFT" }], discuss_critique: [{ answer: "", exit: 1 }], chat_codex: [{ answer: "next" }] });
+    await say(chat, "/discuss DISCARDED-Q", "/codex after");
+    expect(discussions()).toEqual([expect.objectContaining({ status: "error", answer: null })]);
+    expect(fake.calls("chat_codex")[0]!.resumed).toBeUndefined();
+    expect(saved(chat).sessions).toEqual({ codex: expect.objectContaining({ id: fake.calls("chat_codex")[0]!.session }) });
+  });
+
+  it("keeps no session on disk while a call continues it, so a conversation reopened after a crash starts a new one", async () => {
+    const first = newChat({ conversationId: "crashed" });
+    fake.setScenario({ chat_codex: [{ answer: "ANS-ONE" }, { pid: "agent.pid", sleep: 20_000, answer: "never recorded" }, { answer: "ANS-THREE" }] });
+    await say(first, "/codex QQ-ONE");
+    expect(saved(first).sessions.codex.id).toBe(fake.calls("chat_codex")[0]!.session);
+    await first.submit("/codex QQ-TWO");
+    await waitUntil(() => existsSync(join(repo, "agent.pid")), 10_000, "the answer to start");
+    expect(saved(first).sessions.codex).toBeUndefined();
+    // Another process takes the conversation on as its record stands, as after the first one was killed mid-answer.
+    const second = newChat({ conversationId: "crashed" });
+    await say(second, "/codex QQ-THREE");
+    const three = fake.calls("chat_codex")[2]!;
+    expect(three.resumed).toBeUndefined();
+    expect(count(three.prompt, "ANS-ONE")).toBe(1);
+    expect(three.prompt).not.toContain("QQ-TWO");
+    first.escape();
+    await first.idle();
+  });
+
+  it("says how many exchanges it left out when those a session has not seen exceed what a prompt carries", async () => {
+    const chat = newChat();
+    const big = (tag: string) => `${tag} ${"x".repeat(50_000)}`;
+    fake.setScenario({ chat_claude: [{ answer: "k0" }, { answer: "k1" }], chat_codex: [{ answer: big("BIG-ONE") }, { answer: big("BIG-TWO") }, { answer: big("BIG-THREE") }] });
+    await say(chat, "/claude zero", "/codex one", "/codex two", "/codex three", "/claude four");
+    const next = fake.calls("chat_claude")[1]!;
+    expect(next.resumed).toBe(fake.calls("chat_claude")[0]!.session);
+    expect([next.prompt.includes("BIG-ONE"), next.prompt.includes("BIG-TWO"), next.prompt.includes("BIG-THREE")]).toEqual([false, true, true]);
+    // Of the 2 exchanges no prompt carries any more, the session saw the first: 1 it never saw is left out.
+    expect(next.prompt).toContain("(1 older exchange(s) are left out.)");
+  });
+
+  it("gives a continued call the settings changed since the session's last turn", async () => {
+    const chat = newChat();
+    fake.setScenario({ chat_codex: [{ answer: "a" }, { answer: "b" }], chat_claude: [{ answer: "c" }, { answer: "d" }] });
+    await say(chat, "/codex one", "/claude two", "/settings codex model gpt-changed", "/settings claude model opus-changed", "/mode acceptEdits", "/codex three", "/claude four");
+    const codex = fake.calls("chat_codex")[1]!;
+    expect(codex.resumed).toBe(fake.calls("chat_codex")[0]!.session);
+    expect(codex.args.slice(codex.args.indexOf("--model"), codex.args.indexOf("--model") + 2)).toEqual(["--model", "gpt-changed"]);
+    expect(codex.args.indexOf("--model")).toBeLessThan(codex.args.indexOf("resume"));
+    const claude = fake.calls("chat_claude")[1]!;
+    expect(claude.resumed).toBe(fake.calls("chat_claude")[0]!.session);
+    expect(after(claude.args, "--model")).toBe("opus-changed");
+    expect(after(claude.args, "--permission-mode")).toBe("acceptEdits");
+  });
+
+  it("passes a backend's own no-persistence flag once, resumes nothing and saves no session", async () => {
+    const cfg = testConfig(fake);
+    cfg.codex.args = ["--ephemeral"];
+    cfg.claude.args = ["--no-session-persistence"];
+    const chat = newChat({ cfg });
+    fake.setScenario({ chat_codex: [{ answer: "a" }, { answer: "b" }], chat_claude: [{ answer: "c" }, { answer: "d" }] });
+    await say(chat, "/codex one", "/codex two", "/claude three", "/claude four");
+    for (const call of fake.calls()) {
+      expect(call.resumed).toBeUndefined();
+      expect(call.args.filter((a) => a === "--ephemeral" || a === "--no-session-persistence")).toHaveLength(1);
+    }
+    expect(saved(chat).sessions).toEqual({});
+  });
+
+  it("sends the image of a continued question with the continued call, and with each continued step of a discussion", async () => {
+    const chat = newChat();
+    fake.setScenario({ chat_codex: [{ answer: "a" }, { answer: "b" }], chat_claude: [{ answer: "c" }], discuss_answer: [{ answer: "v1" }], discuss_critique: [{ answer: "ok\nVERDICT: AGREE" }] });
+    await say(chat, "/codex one", "/claude two");
+    const file = join(t.path, "shot.png");
+    writeFileSync(file, png(4, 4));
+    chat.attach(file);
+    await say(chat, "/codex look");
+    const look = fake.calls("chat_codex")[1]!;
+    expect(look.resumed).toBe(fake.calls("chat_codex")[0]!.session);
+    expect(look.images).toHaveLength(1);
+    chat.attach(file);
+    await chat.submitDiscuss("look again");
+    await chat.idle();
+    for (const step of ["discuss_answer", "discuss_critique"]) {
+      expect(fake.calls(step)[0]!.resumed, step).toBeTruthy();
+      expect(fake.calls(step)[0]!.images, step).toHaveLength(1);
+    }
+  });
+});
+
+const discussions = () => events.flatMap((e) => (e.type === "discussion.finished" ? [e] : []));
+
 describe("Chat: /discuss", () => {
   const discussions = () => events.flatMap((e) => (e.type === "discussion.finished" ? [e] : []));
   const steps = () => fake.calls().map((c) => `${c.role}:${c.backend}`);
@@ -170,7 +475,7 @@ describe("Chat: /discuss", () => {
     expect(fake.calls("discuss_critique")[0]!.prompt).toContain("Use Postgres with SKIP LOCKED.");
     const synthesis = fake.calls("discuss_synthesis")[0]!.prompt;
     expect(synthesis).toContain("[agentduo-discussion: synthesis, round 1 of 3]");
-    for (const part of ["You are Codex", "Use Postgres with SKIP LOCKED.", "Right, and it keeps one store.", "(verdict: AGREE)"]) expect(synthesis).toContain(part);
+    for (const part of ["You are Codex", "Right, and it keeps one store.", "(verdict: AGREE)"]) expect(synthesis).toContain(part);
     expect(discussions()).toEqual([expect.objectContaining({
       status: "agreed", answerer: "codex", critic: "claude", rounds: 1, answer: "SYNTHESIS: Postgres, one store for jobs and data.", answerBackend: "codex", error: null,
     })]);
@@ -210,14 +515,16 @@ describe("Chat: /discuss", () => {
     // Agreement after r reviews: 2r + 1 calls.
     expect(steps()).toEqual(["discuss_answer:claude", "discuss_critique:codex", "discuss_revise:claude", "discuss_critique:codex", "discuss_synthesis:codex"]);
     const revise = fake.calls("discuss_revise")[0]!.prompt;
-    expect(revise).toContain("v1: Redis.");
+    expect(revise).not.toContain("v1: Redis.");
+    expect(fake.calls("discuss_revise")[0]!.resumed).toBe(fake.calls("discuss_answer")[0]!.session);
     expect(revise).toContain("Redis loses jobs on a restart here.");
     expect(fake.calls("discuss_critique")[1]!.prompt).toContain("v2: Postgres.");
     const synthesis = fake.calls("discuss_synthesis")[0]!.prompt;
     expect(synthesis).toContain("[agentduo-discussion: synthesis, round 2 of 3]");
     expect(synthesis).toContain("You are Codex");
-    const order = ["v1: Redis.", "(verdict: REVISE)", "Redis loses jobs on a restart here.", "v2: Postgres.", "(verdict: AGREE)", "Good now."].map((x) => synthesis.indexOf(x));
-    expect(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1]!)), order.join(",")).toBe(true);
+    expect(fake.calls("discuss_synthesis")[0]!.resumed).toBe(fake.calls("discuss_critique")[0]!.session);
+    for (const old of ["v1: Redis.", "v2: Postgres.", "Good now."]) expect(synthesis).not.toContain(old);
+    expect(synthesis).toContain("agreed with version 2");
     expect(discussions()[0]).toMatchObject({
       status: "agreed", answerer: "claude", critic: "codex", rounds: 2, answer: "SYNTHESIS: Postgres, since Redis loses jobs on a restart.", answerBackend: "codex",
     });
@@ -262,8 +569,8 @@ describe("Chat: /discuss", () => {
     await chat.idle();
     expect(events.some((e) => e.type === "warning" && e.text.includes("no VERDICT"))).toBe(true);
     expect(answers()[1]!.discussion).toMatchObject({ step: "critique", verdict: null });
-    expect(fake.calls("discuss_synthesis")[0]!.prompt).toContain("Hmm, maybe.\n");
-    expect(fake.calls("discuss_synthesis")[0]!.prompt).toContain("(verdict: none given, taken as REVISE)");
+    expect(fake.calls("discuss_revise")[0]!.prompt).toContain("Hmm, maybe.\n");
+    expect(fake.calls("discuss_revise")[0]!.prompt).toContain("(verdict: none given, taken as REVISE)");
     expect(discussions()[0]).toMatchObject({ status: "agreed", rounds: 2, answer: "SYNTHESIS" });
   });
 
@@ -278,9 +585,13 @@ describe("Chat: /discuss", () => {
     });
     await chat.submit("/discuss Which queue?");
     await chat.idle();
-    expect(steps()).toEqual(["discuss_answer:claude", "discuss_critique:codex", "discuss_synthesis:codex"]);
+    expect(steps()).toEqual(["discuss_answer:claude", "discuss_critique:codex", "discuss_synthesis:codex", "discuss_synthesis:codex"]);
     expect(answers()[2]).toMatchObject({ status: "error", discussion: expect.objectContaining({ step: "synthesis" }) });
-    expect(events.filter((e) => e.type === "warning").map((e) => e.type === "warning" && e.text)).toEqual([expect.stringMatching(/^Codex could not synthesize the discussion \(.+\), so the response is Claude's version 1\.$/)]);
+    // Codex reviewed, so its synthesis continues that session first, then tries a new one.
+    expect(events.filter((e) => e.type === "warning").map((e) => e.type === "warning" && e.text)).toEqual([
+      expect.stringMatching(/^Codex could not answer in this conversation's session \(.+\), so it is asked again in a new one, with the whole conversation\.$/),
+      expect.stringMatching(/^Codex could not synthesize the discussion \(.+\), so the response is Claude's version 1\.$/),
+    ]);
     expect(discussions()[0]).toMatchObject({ status: "disputed", rounds: 1, answer: "v1 from Claude", answerBackend: "claude", error: null });
     expect(record(chat).exchanges).toEqual([{ backend: "claude", question: "Which queue?", answer: "v1 from Claude", discussedWith: "codex" }]);
     await chat.submit("/codex Next?");
@@ -288,6 +599,7 @@ describe("Chat: /discuss", () => {
     const next = fake.calls("chat_codex")[0]!.prompt;
     expect(next).toContain("**Claude Code, after discussing it with Codex:**\nv1 from Claude");
     expect(next).not.toContain("HALF-WRITTEN SYNTHESIS");
+    expect(fake.calls("chat_codex")[0]!.resumed).toBeUndefined();
   });
 
   it("stops at Esc keeping nothing, and turns other questions away meanwhile", async () => {
@@ -308,6 +620,8 @@ describe("Chat: /discuss", () => {
     await chat.idle();
     expect(fake.calls("chat_codex")).toHaveLength(1);
     expect(fake.calls("chat_codex")[0]!.prompt).not.toContain("A slow question?");
+    // Codex's session has the question and its version 1: it is not continued either.
+    expect(fake.calls("chat_codex")[0]!.resumed).toBeUndefined();
   });
 
   it("stops at Esc during the synthesis, keeping neither it nor the agreed version", async () => {
@@ -361,6 +675,8 @@ describe("Chat: /discuss", () => {
     const next = fake.calls("chat_codex")[0]!.prompt;
     expect(next).not.toContain("SYNTHESIS");
     expect(next).not.toContain("v1");
+    // The session that wrote the synthesis Esc threw away is not continued.
+    expect(fake.calls("chat_codex")[0]!.resumed).toBeUndefined();
   });
 
   it("ends with the error of a turn that failed, keeping nothing, and with no synthesis", async () => {
@@ -751,13 +1067,19 @@ describe("Chat: the pipeline", () => {
     await chat.idle();
     await chat.submit("/pipeline Now make it say fixed twice");
     await chat.idle();
-    for (const role of ["planner", "plan_reviewer", "implementer", "code_reviewer"]) {
+    for (const role of ["planner", "plan_reviewer", "code_reviewer"]) {
       const prompt = fake.calls(role).at(-1)!.prompt;
       expect(prompt, role).toContain("## Conversation before this task");
       expect(prompt, role).toContain("How should the second task be done?");
       expect(prompt, role).toContain("Use a constant for the word fixed.");
       expect(prompt.match(/Make app\.txt fixed — done/g), role).toHaveLength(1);
     }
+    // The second run's implementer goes on in that run's critic session (never the first run's), which has all of it already.
+    const implementer = fake.calls("implementer").at(-1)!;
+    expect(implementer.resumed).toBe(fake.calls("plan_reviewer").at(-1)!.session);
+    expect(implementer.resumed).not.toBe(fake.calls("plan_reviewer")[0]!.session);
+    expect(implementer.prompt).not.toContain("## Conversation before this task");
+    expect(implementer.prompt).not.toContain("Make app.txt fixed — done");
     // Plan sign-off continues the second run's planner session (never the first run's), which has all of it already.
     expect(fake.calls("plan_finalizer").at(-1)!.resumed).toBe(fake.calls("planner").at(-1)!.session);
     expect(fake.calls("plan_finalizer").at(-1)!.prompt).not.toContain("## Conversation before this task");
@@ -1063,7 +1385,8 @@ describe("Chat: attached files", () => {
     await chat.idle();
     const next = fake.calls("chat_codex")[1]!;
     expect(next.images).toBeUndefined();
-    expect(next.prompt).toContain("Files attached to that message (not attached again");
+    expect(next.prompt).not.toContain("Files attached to that message (not attached again");
+    expect(next.resumed).toBe(fake.calls("chat_codex")[0]!.session);
     const saved = JSON.parse(readFileSync(join(runsDir, "conversations", chat.conversationId, "conversation.json"), "utf8"));
     expect(saved.exchanges[0].attachments.map((a: Attachment) => a.name)).toEqual(["Ảnh chụp.png", "notes.md"]);
     expect(JSON.stringify(saved)).not.toContain(join(t.path, "home"));
@@ -1191,12 +1514,15 @@ describe("Chat: attached files", () => {
     await chat.idle();
     expect(latest().phase).toBe("DONE");
     const roles = fake.calls().map((c) => [c.role, c.images?.length ?? 0, c.images?.[0]?.sha256 === sha(shot)]);
-    // Plan sign-off continues the planner's session, which has the file already; the stopped implementer kept no session.
+    // Plan sign-off continues the planner's session, which has the file already. The implementer goes on in the critic's,
+    // which has it too; the stopped attempt recorded nothing, so the resumed run goes on from the critic's turn again.
     expect(roles).toEqual([
-      ["planner", 1, true], ["plan_reviewer", 1, true], ["plan_finalizer", 0, false], ["implementer", 1, true], ["implementer", 1, true], ["code_reviewer", 1, true],
+      ["planner", 1, true], ["plan_reviewer", 1, true], ["plan_finalizer", 0, false], ["implementer", 0, false], ["implementer", 0, false], ["code_reviewer", 1, true],
     ]);
-    for (const c of fake.calls()) expect(c.prompt.includes("### Files the user attached to the task"), c.role).toBe(c.role !== "plan_finalizer");
-    expect(fake.calls("implementer")[1]!.resumed).toBeUndefined();
+    for (const c of fake.calls()) expect(c.prompt.includes("### Files the user attached to the task"), c.role).toBe(!["plan_finalizer", "implementer"].includes(c.role));
+    const critic = fake.calls("plan_reviewer")[0]!.session;
+    expect(fake.calls("implementer").map((c) => c.resumed)).toEqual([critic, critic]);
+    expect(latest().sessions!["plan_reviewer+implementer"]).toMatchObject({ id: critic, role: "implementer" });
   });
 
   it("gives a note's files to the steps after it, never to a decision, which leaves them waiting", async () => {

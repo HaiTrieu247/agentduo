@@ -63,8 +63,16 @@ describe("ClaudeBackend", () => {
     expect(resumed[resumed.indexOf("--resume") + 1]).toBe("s-1");
     expect(resumed).not.toContain("--no-session-persistence");
     expect(call({ keep: false })).not.toContain("--resume");
-    // A conversation turn is never continued: its session is never kept.
+    // A conversation turn keeps its session only when the chat says so, and continues it by id.
     expect(backend.buildArgs({ mode: "text", lastMessageFile: "" })).toContain("--no-session-persistence");
+    expect(backend.buildArgs({ mode: "text", lastMessageFile: "", session: { keep: false } })).toContain("--no-session-persistence");
+    const kept = backend.buildArgs({ mode: "text", lastMessageFile: "", session: { keep: true } });
+    expect([kept.includes("--no-session-persistence"), kept.includes("--resume")]).toEqual([false, false]);
+    const continued = backend.buildArgs({ mode: "text", lastMessageFile: "", images: [{ file: "/ws/a.png", mediaType: "image/png" }], session: { keep: true, resume: "c-1" } });
+    expect(continued[continued.indexOf("--resume") + 1]).toBe("c-1");
+    expect(continued).not.toContain("--no-session-persistence");
+    expect(continued).toContain("--input-format");
+    expect(backend.keepsSessions()).toBe(true);
     expect(backend.keepsSessions("implementer")).toBe(true);
     // The user's own flag turns sessions off for every role it reaches, and is passed once.
     cfg.claude.role_args = { implementer: ["--no-session-persistence"] };
@@ -238,7 +246,19 @@ describe("CodexBackend", () => {
     expect(kept).not.toContain("resume");
     expect(backend.buildArgs({ schemaName: "plan", lastMessageFile: "/tmp/l.json", role: "planner" })).toContain("--ephemeral");
     expect(backend.buildArgs({ mode: "text", lastMessageFile: "/tmp/l.md" })).toContain("--ephemeral");
+    // A conversation turn the chat keeps: no --ephemeral; continued, the same order as a role's, with no role args.
+    expect(backend.buildArgs({ mode: "text", lastMessageFile: "/tmp/l.md", session: { keep: true } })).not.toContain("--ephemeral");
+    const turn = backend.buildArgs({ mode: "text", lastMessageFile: "/tmp/l.md", images, session: { keep: true, resume: "c-1" } });
+    expect(turn.slice(-4)).toEqual(["resume", "c-1", "--image=/ws/a.png", "-"]);
+    expect(turn.indexOf("--skip-git-repo-check")).toBeLessThan(turn.indexOf("resume"));
+    expect(turn).not.toContain("--ephemeral");
+    expect(turn).not.toContain("workspace-write");
+    expect(backend.keepsSessions()).toBe(true);
+    cfg.codex.role_args = { implementer: ["--ephemeral"] };
+    // Role args never reach a conversation turn, so they never turn its sessions off.
+    expect(backend.keepsSessions()).toBe(true);
     cfg.codex.args = ["--ephemeral"];
+    expect(backend.keepsSessions()).toBe(false);
     expect(backend.keepsSessions("planner")).toBe(false);
     expect(backend.buildArgs({ mode: "text", lastMessageFile: "/tmp/l.md" }).filter((a) => a === "--ephemeral")).toHaveLength(1);
   });

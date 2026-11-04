@@ -37,7 +37,8 @@ Code và Codex; pipeline đầy đủ chỉ chạy khi bạn yêu cầu:
   đứng vững từ cả hai agent, thêm các ý đúng trong phản biện mà phiên bản cuối còn thiếu, và bỏ những gì cuộc thảo luận
   đã chỉ ra là sai. Nếu lần phản biện cuối vẫn chưa đồng ý, câu trả lời kết bằng một mục ngắn "Còn bất đồng". Người
   tổng hợp luôn là Codex, nên khi Codex cũng là bên trả lời thì câu tổng hợp đến từ cùng một model, trong một lần gọi
-  mới được yêu cầu giữ trung lập. Mỗi cuộc thảo luận tốn từ 3 đến 2N+1 lần gọi agent, với N là số lần phản biện tối đa.
+  tiếp tục session cũ và được yêu cầu giữ trung lập. Mỗi cuộc thảo luận tốn từ 3 đến 2N+1 lần gọi agent, với N là số lần phản biện tối đa,
+  cộng thêm một lần cho mỗi bước phải hỏi lại trong session mới (xem phần session hội thoại bên dưới).
   Mỗi lượt hiện ra khi xong (ở terminal là vài dòng đầu; `--verbose` hiện đầy đủ), rồi tới câu trả lời cuối, đầy đủ.
   Chỉ câu trả lời đó được đưa vào cuộc trò chuyện, như câu trả lời của Codex đã thảo luận với Claude. Nếu bước tổng hợp
   bị lỗi, agentduo báo một warning và câu trả lời là phiên bản gần nhất, ghi tên agent đã viết nó.
@@ -91,6 +92,15 @@ Code và Codex; pipeline đầy đủ chỉ chạy khi bạn yêu cầu:
   `/attachments`, `/detach`, `/resume` (chạy tiếp run đang dừng hoặc đang chờ, kể cả từ phiên trước), `/new`,
   `/settings`, `/config`, `/help`, `/quit`. Bấm Ctrl-C hai lần cũng thoát; run đang chạy sẽ dừng ở bước hiện tại và vẫn
   resume được.
+
+Mỗi cuộc trò chuyện giữ một session Codex và một session Claude, dùng chung cho chat thường và mọi bước `/discuss`,
+kể cả tổng hợp. Mở lại cùng cuộc trò chuyện sẽ resume hai session đó; `/new` hoặc cuộc trò chuyện mới tạo session mới.
+Khi resume, agent chỉ nhận phần hội thoại mới (nếu phần đó vượt quá giới hạn của prompt, prompt ghi rõ bao nhiêu lượt bị
+bỏ). Lượt resume bị lỗi được hỏi lại một lần trong session mới với prompt đầy đủ, kèm một warning; lượt bị timeout hoặc
+im lặng quá lâu thì chỉ báo lỗi. Câu trả lời lỗi hoặc bị dừng không để lại session nào để tiếp tục, và một cuộc thảo
+luận kết thúc mà không có câu trả lời cũng vậy, với cả hai agent: không phần nào của nó được tiếp tục.
+Pipeline vẫn giữ session riêng theo role. Cờ `--ephemeral` hoặc `--no-session-persistence` trong `args` của backend
+sẽ tắt việc dùng lại session hội thoại cho backend đó.
 
 **Đổi cấu hình ngay trong chat.** Cú pháp chuẩn là `/settings claude …` và `/settings codex …`; sai cú pháp thì
 agentduo trả về usage. `/claude model …` và các lệnh tương tự là lối tắt, chỉ được hiểu là cấu hình khi đúng hình dạng
@@ -218,14 +228,19 @@ Gate là tuỳ chọn. Mặc định không có gate: Claude tự chạy test th
 
 ## Ngữ cảnh giữa các agent
 
-Mỗi vai trò (planner, plan critic, implementer, code reviewer) giữ một session CLI riêng suốt cả run.
+Mỗi vai trò (planner, plan critic, implementer, code reviewer) giữ một session CLI riêng suốt cả run. Khi cùng một CLI
+đảm nhận cả plan critic lẫn implementer (mặc định là Claude), hai vai trò này dùng chung một session.
 
 - **Lần gọi đầu:** nhận đủ bối cảnh, gồm task, đoạn chat trước task, các note của bạn và những gì agent trước đã ghi lại.
 - **Các lần gọi sau:** tiếp tục đúng session đó (`claude --resume`, `codex exec resume`) và chỉ nhận phần mới: các file
   đã đổi từ lượt trước của vai trò đó, note mới của bạn, và việc cần làm. Ví dụ, reviewer chỉ nhận diff kể từ revision nó
   đã review. Nhờ vậy vòng sửa không phải đọc lại repo từ đầu.
 - **Bước chốt plan** tiếp tục session của planner.
-- **Session không bao giờ chuyển từ vai trò này sang vai trò khác**, nên reviewer không thấy lập luận của implementer.
+- **Implementer tiếp tục session của plan critic**, nên bắt đầu từ những gì critic đã đọc và đánh giá. Lượt đầu của nó
+  được báo rằng giờ nó là implementer, và nhận bản plan cuối đã duyệt đầy đủ, cách plan được chốt, cùng những gì đã đổi
+  sau lượt cuối của critic. Nếu hai vai trò chạy trên hai CLI khác nhau, hoặc một trong hai tắt session trong
+  `role_args`, mỗi bên giữ session riêng (hoặc không giữ).
+- **Ngoài trường hợp đó, session không chuyển giữa các vai trò**, nên reviewer không thấy lập luận của implementer.
 
 Planner, critic, implementer và reviewer còn để lại các ghi chú ngắn về repo: file nào chứa gì, quy ước, lệnh chạy test.
 Mỗi ghi chú gắn với một file hoặc thư mục. Vai trò sau chỉ nhận những ghi chú còn đúng: chỉ cần có gì dưới đường dẫn đó

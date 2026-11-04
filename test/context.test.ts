@@ -2,7 +2,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  acceptRepoNotes, addRepoNotes, MAX_NOTE_CHARS, MAX_NOTES_PER_TURN, MAX_REPO_NOTES, planTurn, rememberSession, visibleRepoNotes, type TreeChanges,
+  acceptRepoNotes, addRepoNotes, MAX_NOTE_CHARS, MAX_NOTES_PER_TURN, MAX_REPO_NOTES, planTurn, rememberSession, sessionSlot, SHARED_SESSION, visibleRepoNotes,
+  type TreeChanges,
 } from "../src/core/context.js";
 import type { Change } from "../src/core/git.js";
 import { newState, type RunState } from "../src/core/state.js";
@@ -124,5 +125,114 @@ describe("planTurn", () => {
     expect(st.sessions?.planner).toBeUndefined();
     rememberSession(st, "planner", { sessionId: "th-2", backend: "codex" }, { ...turn, keep: false }, { tree: "T1c", planHash: "P1" });
     expect(st.sessions?.planner).toBeUndefined();
+  });
+});
+
+describe("the session the plan critic and the implementer share", () => {
+  const sameCli = { planner: "codex", plan_reviewer: "claude", implementer: "claude", code_reviewer: "codex" } as const;
+  const changes = changesOf({ "T1>T2": [["M", "app.txt"]], "T2>T3": [] });
+  /** A turn of `role` against tree `tree`, in the slot the configuration gives it. */
+  const turnOf = (st: RunState, role: "plan_reviewer" | "implementer", o: { tree?: string; planHash?: string | null; answer?: string | null; keeps?: boolean } = {}) =>
+    planTurn({
+      state: st, role, backend: "claude", keep: o.keeps ?? true, slot: sessionSlot(role, sameCli, o.keeps ?? true), tree: o.tree ?? "T2",
+      planHash: o.planHash ?? null, answer: o.answer ?? null, changes,
+    });
+
+  it("is the slot of both roles when one CLI plays them and each keeps sessions; every other role, or another CLI, keeps its own", () => {
+    expect([sessionSlot("plan_reviewer", sameCli, true), sessionSlot("implementer", sameCli, true)]).toEqual([SHARED_SESSION, SHARED_SESSION]);
+    expect([sessionSlot("planner", sameCli, true), sessionSlot("code_reviewer", sameCli, true)]).toEqual(["planner", "code_reviewer"]);
+    const apart = { ...sameCli, plan_reviewer: "codex" } as const;
+    expect([sessionSlot("plan_reviewer", apart, true), sessionSlot("implementer", apart, true)]).toEqual(["plan_reviewer", "implementer"]);
+    // A role whose sessions are off runs on its own: no slot at all.
+    expect([sessionSlot("implementer", sameCli, false), sessionSlot("planner", sameCli, false)]).toEqual([null, null]);
+  });
+
+  it("goes from the critic to the implementer with what is new since the session's last turn, the planner's notes the critic never saw included", async () => {
+    const st = state();
+    st.humanNotes = [{ at: "a", phase: "PLAN", note: "given to the critic" }];
+    addRepoNotes(st, { role: "planner", backend: "codex", round: 1, tree: "T2" }, [{ path: "package.json", note: "PLANNER-NOTE" }]);
+    const critic = await turnOf(st, "plan_reviewer", { tree: "T1" });
+    expect([critic.slot, critic.continuation, critic.repoNotes]).toEqual([SHARED_SESSION, null, []]);
+    addRepoNotes(st, { role: "plan_reviewer", backend: "claude", round: 1, tree: "T1" }, [{ path: "package.json", note: "CRITIC-NOTE" }]);
+    rememberSession(st, "plan_reviewer", { sessionId: "s-1", backend: "claude", resumed: false }, critic, { tree: "T1", planHash: "P1", answer: "CRITIQUE-1" });
+    expect(st.sessions).toEqual({
+      [SHARED_SESSION]: { backend: "claude", id: "s-1", tree: "T1", notes: 1, repoNotes: 2, planHash: "P1", reviewed: null, role: "plan_reviewer", answers: { plan_reviewer: "CRITIQUE-1" }, withheld: [1] },
+    });
+    addRepoNotes(st, { role: "planner", backend: "codex", round: 2, tree: "T2" }, [{ path: "src/core", note: "PLANNER-LATER" }]);
+    st.humanNotes.push({ at: "b", phase: "PLAN_FINALIZE", note: "new to the session" });
+    const impl = await turnOf(st, "implementer", { planHash: "P2", answer: null });
+    expect(impl.continuation).toMatchObject({ from: "plan_reviewer", knowsPlan: false, knowsAnswer: true, changed: [["M", "app.txt"]] });
+    expect(impl.continuation!.session.id).toBe("s-1");
+    expect(impl.continuation!.notes.map((n) => n.note)).toEqual(["new to the session"]);
+    // Both of the planner's notes (the critic could see neither), and not the critic's own.
+    expect(impl.continuation!.repoNotes.map((n) => n.note)).toEqual(["PLANNER-NOTE", "PLANNER-LATER"]);
+    rememberSession(st, "implementer", { sessionId: "s-1", backend: "claude", resumed: true }, impl, { tree: "T3", planHash: "P2", answer: "REPORT-1" });
+    expect(st.sessions![SHARED_SESSION]).toEqual({
+      backend: "claude", id: "s-1", tree: "T3", notes: 2, repoNotes: 3, planHash: "P2", reviewed: null, role: "implementer",
+      answers: { plan_reviewer: "CRITIQUE-1", implementer: "REPORT-1" },
+    });
+    // Back to the critic (a re-plan): the session still holds the critic's last critique, and knows when a later one is not it.
+    const again = await turnOf(st, "plan_reviewer", { tree: "T3", answer: "CRITIQUE-1" });
+    expect(again.continuation).toMatchObject({ from: "implementer", knowsAnswer: true, changed: [] });
+    expect((await turnOf(st, "plan_reviewer", { tree: "T3", answer: "CRITIQUE-OTHER" })).continuation!.knowsAnswer).toBe(false);
+    expect((await turnOf(st, "implementer", { tree: "T3", answer: "REPORT-1" })).continuation).toMatchObject({ knowsAnswer: true, knowsPlan: false });
+    expect((await turnOf(st, "implementer", { tree: "T3", answer: "REPORT-1" })).continuation!.from).toBeUndefined();
+  });
+
+  it("starts the shared record over after a fresh session (a lost one), with the cursors of that fresh turn", async () => {
+    const st = state();
+    addRepoNotes(st, { role: "planner", backend: "codex", round: 1, tree: "T2" }, [{ path: "package.json", note: "PLANNER-NOTE" }]);
+    st.sessions = { [SHARED_SESSION]: { backend: "claude", id: "gone", tree: "T1", notes: 0, repoNotes: 0, planHash: "P1", reviewed: null, role: "implementer", answers: { implementer: "R1" } } };
+    const critic = await turnOf(st, "plan_reviewer", { answer: "C0" });
+    expect(critic.continuation!.session.id).toBe("gone");
+    // The CLI lost it: the runner's fresh attempt answered, with the whole prompt.
+    rememberSession(st, "plan_reviewer", { sessionId: "fresh", backend: "claude", resumed: false }, critic, { tree: "T2", planHash: "P2", answer: "C1" });
+    expect(st.sessions![SHARED_SESSION]).toEqual({
+      backend: "claude", id: "fresh", tree: "T2", notes: 0, repoNotes: 1, planHash: "P2", reviewed: null, role: "plan_reviewer", answers: { plan_reviewer: "C1" }, withheld: [1],
+    });
+    // A CLI that named no session leaves nothing to continue.
+    rememberSession(st, "plan_reviewer", { sessionId: null, backend: "claude", resumed: false }, critic, { tree: "T2", planHash: "P2", answer: "C1" });
+    expect(st.sessions![SHARED_SESSION]).toBeUndefined();
+  });
+
+  it("leaves the shared session alone for a role whose sessions are off", async () => {
+    const st = state();
+    const shared = { backend: "claude" as const, id: "s-1", tree: "T1", notes: 0, repoNotes: 0, planHash: "P1", reviewed: null, role: "plan_reviewer" as const, answers: {} };
+    st.sessions = { [SHARED_SESSION]: shared };
+    const alone = await turnOf(st, "implementer", { keeps: false });
+    expect([alone.slot, alone.keep, alone.continuation]).toEqual([null, false, null]);
+    rememberSession(st, "implementer", { sessionId: "own", backend: "claude", resumed: false }, alone, { tree: "T2", planHash: "P1", answer: "R1" });
+    expect(st.sessions).toEqual({ [SHARED_SESSION]: shared });
+  });
+
+  it("continues, in a run from before sharing, only the role's own session with its own cursors, then keeps it as the shared one", async () => {
+    const st = state();
+    addRepoNotes(st, { role: "planner", backend: "codex", round: 1, tree: "T3" }, [{ path: "package.json", note: "PLANNER-NOTE" }]);
+    const legacy =(id: string, tree: string, notes: number) => ({ backend: "claude" as const, id, tree, notes, repoNotes: 1, planHash: "P1", reviewed: null });
+    st.humanNotes = [{ at: "a", phase: "PLAN", note: "one" }, { at: "b", phase: "IMPLEMENT", note: "two" }];
+    st.sessions = { plan_reviewer: legacy("critic-old", "T1", 0), implementer: legacy("impl-old", "T2", 2) };
+    const impl = await turnOf(st, "implementer", { tree: "T3", planHash: "P1", answer: "R1" });
+    expect(impl.continuation).toMatchObject({ changed: [], knowsPlan: true, knowsAnswer: true, notes: [] });
+    expect(impl.continuation!.session.id).toBe("impl-old");
+    expect(impl.continuation!.from).toBeUndefined();
+    // The implementer's own old session had the planner's note already.
+    expect(impl.continuation!.repoNotes).toEqual([]);
+    rememberSession(st, "implementer", { sessionId: "impl-old", backend: "claude", resumed: true }, impl, { tree: "T3", planHash: "P1", answer: "R2" });
+    expect(st.sessions).toEqual({
+      plan_reviewer: legacy("critic-old", "T1", 0),
+      [SHARED_SESSION]: { ...legacy("impl-old", "T3", 2), role: "implementer", answers: { implementer: "R2" } },
+    });
+    // The critic's old session, from the start of the run, never goes on: its next turn continues the shared one.
+    const critic = await turnOf(st, "plan_reviewer", { tree: "T3" });
+    expect(critic.continuation!.session.id).toBe("impl-old");
+    // A legacy critic session is continued by the critic alone, with the planner's notes withheld from it.
+    const old = state();
+    addRepoNotes(old, { role: "planner", backend: "codex", round: 1, tree: "T1" }, [{ path: "package.json", note: "PLANNER-NOTE" }]);
+    old.sessions = { plan_reviewer: legacy("critic-old", "T1", 0) };
+    expect((await turnOf(old, "implementer", { tree: "T1" })).continuation).toBeNull();
+    const c = await turnOf(old, "plan_reviewer", { tree: "T1" });
+    rememberSession(old, "plan_reviewer", { sessionId: "critic-old", backend: "claude", resumed: true }, c, { tree: "T1", planHash: "P1", answer: "C1" });
+    expect(old.sessions![SHARED_SESSION]).toMatchObject({ id: "critic-old", role: "plan_reviewer", withheld: [1] });
+    expect((await turnOf(old, "implementer", { tree: "T1" })).continuation!.repoNotes.map((n) => n.note)).toEqual(["PLANNER-NOTE"]);
   });
 });

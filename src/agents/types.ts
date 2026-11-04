@@ -56,10 +56,11 @@ interface CallArgs {
   askPermissions?: boolean;
   /** Images to attach to the prompt, in order. */
   images?: NativeImage[];
+  session?: SessionArgs;
 }
 
 /**
- * What a pipeline call does with its CLI session. keep: leave it on disk, so a later call of the same role can continue
+ * What a call does with its CLI session. keep: leave it on disk, so a later call of the same role or conversation can continue
  * it (otherwise agentduo passes the CLI's own flag for a session nobody resumes). resume: the session this call
  * continues, whose earlier turns the prompt does not repeat.
  */
@@ -76,8 +77,6 @@ export type BuildArgs =
     role: AgentRole;
     /** The workspace may be in no git repository (a run with agentduo's own snapshot repository). */
     skipGitRepoCheck?: boolean;
-    /** Absent: a session of its own that is not kept, as a conversation turn's. */
-    session?: SessionArgs;
     /** The most this call may cost, from the run's budget; a CLI that can cap a call itself (Claude) does. */
     costCap?: number;
   } & CallArgs)
@@ -94,10 +93,10 @@ export interface AgentBackend {
   binary(): string;
   buildArgs(args: BuildArgs): string[];
   /**
-   * Whether this role's sessions can be continued later: false when the user's args or role_args turn the CLI's session
-   * persistence off (Codex's --ephemeral, Claude's --no-session-persistence), which agentduo respects.
+   * Whether sessions can be continued later: without a role this checks conversation args only; with a role,
+   * its role_args count too. False when the user turns session persistence off (Codex's --ephemeral, Claude's --no-session-persistence), which agentduo respects.
    */
-  keepsSessions(role: AgentRole): boolean;
+  keepsSessions(role?: AgentRole): boolean;
   createParser(): StreamParser;
   /** Extract the final JSON (or, in text mode, the answer); throws AgentFailure (carrying whatever meta is known) when unusable. */
   finalize(parser: StreamParser, stdout: string, lastMessageFile: string, mode?: CallMode): FinalOutput;

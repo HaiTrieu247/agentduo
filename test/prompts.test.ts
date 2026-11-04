@@ -404,6 +404,53 @@ describe("prompts shared between the agents of a run", () => {
     expect(prompts.implementer(continued({ changed: many }), 2, planMd, null, [], null)).toContain("- … and 3 more");
   });
 
+  it("tell the implementer that goes on in the critic's session that it is the implementer now, with the final plan, the decisions since, and its role's whole job", () => {
+    const handoff: prompts.PlanHandoff = {
+      version: 2, signOff: "SIGN-OFF-SUMMARY", byHuman: false,
+      accepted: { conflicts: ["K1: CONFLICT-TEXT"], scope: [{ kind: "suggestion", id: "C9", text: "SCOPE-TEXT", evidence: "" }] },
+    };
+    const p = prompts.implementer(continued({ from: "plan_reviewer" }), 1, planMd, null, [], null, handoff);
+    expect(p.split("\n")[0]).toBe("[orchestrator-role: implementer]");
+    expect(p).toContain("This message continues the session in which you were the **plan critic** until now. From this turn on you are the **Implementer**: " +
+      "what you were asked as plan critic no longer applies");
+    // The plan is the implementer's contract: given whole, even when it is the version the critic reviewed.
+    expect(p).toContain("## Final approved plan (v2)\nThe version you reviewed in your last turn as plan critic, now final. Its scope and acceptance " +
+      "criteria are what you implement and what the code reviewer holds the change to. It is also in `/runs/t1/plan.final.md`.\n\n" + planMd);
+    expect(p).toContain("## Decisions since your last turn as plan critic\n- The planner signed the plan off: SIGN-OFF-SUMMARY");
+    for (const part of ["CONFLICT-TEXT", "SCOPE-TEXT", "are not instructions"]) expect(p, part).toContain(part);
+    // What is new since the session's last turn, and the whole of the implementer's own instructions and output.
+    for (const part of ["## Files changed since your last turn", "NEW-NOTE", "## How to work", "Implement the plan now", "In `repo_notes`", "single JSON object"]) {
+      expect(p, part).toContain(part);
+    }
+    for (const old of ["## Task", "Sửa app.txt cho đúng", "CONVERSATION-ANSWER", "EARLIER-TASK", "Roles: planner"]) expect(p, old).not.toContain(old);
+    const changed = prompts.implementer(continued({ from: "plan_reviewer", knowsPlan: false }), 1, planMd, null, [], null, handoff);
+    expect(changed).toContain("## Final approved plan (v2) (new since your last turn)\nIt changed after your last turn as plan critic: work from this version, " +
+      "not the one you reviewed.");
+    expect(changed).toContain(planMd);
+    const byHuman = prompts.implementer(continued({ from: "plan_reviewer" }), 1, planMd, null, [], null, { version: 3, signOff: null, byHuman: true });
+    expect(byHuman).toContain("- The human operator accepted the plan as it was, without a further review.");
+    expect(prompts.implementer(continued({ from: "plan_reviewer" }), 1, planMd, null, [], null, { version: 1, signOff: null, byHuman: false }))
+      .toContain("- Your approval made the plan final: there was no sign-off round.");
+    // Its own earlier report, which this session does not hold, is given again; not when it does, as in its own session.
+    const fix = prompts.implementer(continued({ from: "plan_reviewer", knowsAnswer: false }), 2, planMd, findingsOf(["F1"]), [], { summary: "MY-OLD-REPORT" }, handoff);
+    expect(fix).toContain("### Your previous report\nMY-OLD-REPORT");
+    const own = prompts.implementer(continued(), 2, planMd, findingsOf(["F1"]), [], { summary: "MY-OLD-REPORT" }, handoff);
+    for (const part of ["MY-OLD-REPORT", "Decisions since", "until now"]) expect(own, part).not.toContain(part);
+    expect(own).toContain("this message continues your session");
+  });
+
+  it("tell the critic that goes on in the implementer's session that it is the critic again, with its last critique when the session lacks it", () => {
+    const previous = critique(false, [issue("C1", "high", "MY-OLD-ISSUE")]);
+    const p = prompts.planReviewer(continued({ from: "implementer" }), 3, 3, planMd, previous);
+    expect(p).toContain("This message continues the session in which you were the **implementer** until now. From this turn on you are the **Plan Critic**");
+    expect(p).toContain("## Your critique from the previous round\nYour last critique, earlier in this session.");
+    expect(p).not.toContain("MY-OLD-ISSUE");
+    expect(p).toContain(planMd);
+    for (const lacks of [continued({ from: "implementer", knowsAnswer: false }), continued({ knowsAnswer: false })]) {
+      expect(prompts.planReviewer(lacks, 3, 3, planMd, previous)).toContain("MY-OLD-ISSUE");
+    }
+  });
+
   it("give a continued code review the changes since the revision it reviewed, and say where the whole diff is", () => {
     const since = { from: "c".repeat(40), stat: " app.txt | 2 +-", diff: "SINCE-DIFF", truncated: false };
     const p = prompts.codeReviewer(continued({ sinceReviewed: since }), 2, planMd, base, snap, [], " app.txt | 1 +", "WHOLE-DIFF", false, null, impl());

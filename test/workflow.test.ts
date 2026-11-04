@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Chat, type ChatUi } from "../src/chat.js";
 import { AttachmentStore } from "../src/core/attachments.js";
+import { SHARED_SESSION } from "../src/core/context.js";
 import { settings } from "../src/core/settings.js";
 import { EventBus, type Message } from "../src/events.js";
 import { approval, critique, finding, impl, issue, plan, review } from "./helpers/builders.js";
@@ -129,8 +130,12 @@ describe("Workflow", () => {
     });
     expect(await wf.run()).toBe(0);
     const calls = fake.calls().map((c) => [c.role, c.call, c.images?.length ?? 0]);
-    // Plan sign-off continues the planner's session, which has the task's image: it gets only the note's.
-    expect(calls).toEqual([["planner", 0, 1], ["planner", 1, 1], ["plan_reviewer", 0, 2], ["plan_finalizer", 0, 1], ["implementer", 0, 2], ["code_reviewer", 0, 2]]);
+    // Plan sign-off continues the planner's session, which has the task's image: it gets only the note's. The implementer
+    // goes on in the critic's session, which has both images already.
+    expect(calls).toEqual([["planner", 0, 1], ["planner", 1, 1], ["plan_reviewer", 0, 2], ["plan_finalizer", 0, 1], ["implementer", 0, 0], ["code_reviewer", 0, 2]]);
+    const implementer = fake.calls("implementer")[0]!;
+    expect(implementer.resumed).toBe(fake.calls("plan_reviewer")[0]!.session);
+    for (const given of ["### Files the user attached to the task", "and this detail"]) expect(implementer.prompt, given).not.toContain(given);
     expect(fake.calls("plan_finalizer")[0]!.prompt).toContain("## New notes from the human operator");
     expect(fake.calls("plan_finalizer")[0]!.prompt).toContain("notes.txt");
     expect(fake.calls("plan_finalizer")[0]!.prompt).not.toContain("mockup.png");
@@ -165,13 +170,20 @@ describe("Workflow", () => {
     expect(await wf.run()).toBe(2);
     expect(await resume(h, { decision: "resume", note: "go ahead" })).toBe(0);
     expect(stateOf(h).conversationContext).toEqual(context);
-    for (const role of ["planner", "plan_reviewer", "implementer", "code_reviewer"]) {
+    for (const role of ["planner", "plan_reviewer", "code_reviewer"]) {
       for (const call of fake.calls(role)) {
         expect(call.prompt, role).toContain("Yes, keep the old format readable.");
         expect(call.prompt.split("Should the fix keep the old format?").length - 1, role).toBe(1);
       }
       expect(fake.calls(role).length, role).toBeGreaterThan(0);
     }
+    // The implementer goes on in the critic's session, which was told it, also across the resume: not again. It is told
+    // the plan became final by the decision, and the decision's note.
+    const implementer = fake.calls("implementer")[0]!;
+    expect(implementer.resumed).toBe(fake.calls("plan_reviewer")[0]!.session);
+    expect(implementer.prompt).not.toContain("Should the fix keep the old format?");
+    expect(implementer.prompt).toContain("- The human operator accepted the plan as it was, without a further review.");
+    expect(implementer.prompt).toContain("go ahead");
   });
 
   it("revise re-plans with the operator's note", async () => {
@@ -437,7 +449,10 @@ describe("Workflow", () => {
     });
     expect(await wf.run()).toBe(0);
     expect(fake.calls("planner")[0]!.prompt).not.toContain("keep app.txt short");
-    for (const role of ["plan_reviewer", "implementer", "code_reviewer"]) expect(fake.calls(role)[0]!.prompt, role).toContain("keep app.txt short");
+    for (const role of ["plan_reviewer", "code_reviewer"]) expect(fake.calls(role)[0]!.prompt, role).toContain("keep app.txt short");
+    // The implementer goes on in the critic's session, which has the note: it is not given it twice.
+    expect(fake.calls("implementer")[0]!.resumed).toBe(fake.calls("plan_reviewer")[0]!.session);
+    expect(fake.calls("implementer")[0]!.prompt).not.toContain("keep app.txt short");
     expect(stateOf(h).humanNotes).toMatchObject([{ phase: "PLAN", note: "keep app.txt short" }]);
   });
 
@@ -671,9 +686,15 @@ describe("Workflow after a chat discussion", () => {
     ]);
     for (const role of ["planner", "plan_reviewer", "implementer", "code_reviewer"]) {
       const prompt = fake.calls(role)[0]!.prompt;
-      expect(prompt, role).toContain("**Codex, after discussing it with Claude Code:**\nSYNTHESIS: keep the old format readable for old readers.");
+      if (role !== "implementer") expect(prompt, role).toContain("**Codex, after discussing it with Claude Code:**\nSYNTHESIS: keep the old format readable for old readers.");
       for (const draft of ["DRAFT: keep it.", "DRAFT 2:", "REVIEW: say why."]) expect(prompt, role).not.toContain(draft);
     }
+    // The implementer goes on in the run's critic session, which was told it; never in the chat's Claude session.
+    const [critic, implementer] = [fake.calls("plan_reviewer")[0]!, fake.calls("implementer")[0]!];
+    expect([critic.resumed, implementer.resumed]).toEqual([undefined, critic.session]);
+    expect(implementer.prompt).not.toContain("SYNTHESIS:");
+    const chatSessions = fake.calls().filter((c) => c.role.startsWith("discuss_")).map((c) => c.session);
+    expect(chatSessions).not.toContain(critic.session);
     // Plan sign-off continues the planner's session, which was told the conversation already.
     const signOff = fake.calls("plan_finalizer")[0]!;
     expect(signOff.resumed).toBe(fake.calls("planner")[0]!.session);
@@ -823,35 +844,50 @@ describe("Workflow: context shared between the agents", () => {
   });
   const calls = (role: string) => fake.calls(role).filter((c) => !c.lost);
 
-  it("continues each role's own session with only what is new, and never passes a session from one role to another", async () => {
+  it("continues each role's session with only what is new; the plan critic's goes on as the implementer's, and no other passes between roles", async () => {
     expect(await start(twoRounds())).toBe(0);
     const [planner1, planner2] = calls("planner");
     const [critic1, critic2] = calls("plan_reviewer");
     const [impl1, impl2] = calls("implementer");
     const [review1, review2] = calls("code_reviewer");
     const signOff = calls("plan_finalizer")[0]!;
-    for (const first of [planner1, critic1, impl1, review1]) expect(first!.resumed).toBeUndefined();
+    for (const first of [planner1, critic1, review1]) expect(first!.resumed).toBeUndefined();
     expect(planner2!.resumed).toBe(planner1!.session);
     expect(signOff.resumed).toBe(planner1!.session);
     expect(critic2!.resumed).toBe(critic1!.session);
-    expect(impl2!.resumed).toBe(impl1!.session);
+    // Claude critiques the plan, implements it and fixes it in one session.
+    expect([impl1!.resumed, impl2!.resumed, impl1!.session, impl2!.session]).toEqual(Array(4).fill(critic1!.session));
     expect(review2!.resumed).toBe(review1!.session);
-    // Four sessions, one per role: plan sign-off is the planner's own.
-    expect(new Set(fake.calls().map((c) => c.session)).size).toBe(4);
-    expect(stateOf(h).sessions).toEqual({
-      planner: expect.objectContaining({ backend: "codex", id: planner1!.session }),
-      plan_reviewer: expect.objectContaining({ backend: "claude", id: critic1!.session }),
-      implementer: expect.objectContaining({ backend: "claude", id: impl1!.session, planHash: stateOf(h).finalPlanHash }),
-      code_reviewer: expect.objectContaining({ backend: "codex", id: review1!.session, reviewed: stateOf(h).lastSnapshot!.commit }),
+    // Three sessions: the planner's (with its sign-off), the critic's and implementer's, and the reviewer's.
+    expect(new Set(fake.calls().map((c) => c.session)).size).toBe(3);
+    const st = stateOf(h);
+    expect(st.sessions).toEqual({
+      planner: { backend: "codex", id: planner1!.session, tree: expect.any(String), notes: 0, repoNotes: 0, planHash: st.finalPlanHash, reviewed: null },
+      [SHARED_SESSION]: expect.objectContaining({ backend: "claude", id: critic1!.session, role: "implementer", planHash: st.finalPlanHash }),
+      code_reviewer: { backend: "codex", id: review1!.session, tree: expect.any(String), notes: 0, repoNotes: 0, planHash: st.finalPlanHash, reviewed: st.lastSnapshot!.commit },
     });
     for (const c of [planner2, critic2, signOff, impl2, review2]) {
       expect(c!.prompt, c!.role).toContain("this message continues your session");
       expect(c!.prompt, c!.role).not.toContain("Make app.txt fixed");
     }
-    for (const c of [planner1, critic1, impl1, review1]) expect(c!.prompt, c!.role).toContain("## Task\nMake app.txt fixed");
+    for (const c of [planner1, critic1, review1]) expect(c!.prompt, c!.role).toContain("## Task\nMake app.txt fixed");
+    // The critic's session becomes the implementer's: told so, given the whole job, the final plan and how it became final.
+    expect(impl1!.prompt).toContain("This message continues the session in which you were the **plan critic** until now. From this turn on you are the **Implementer**");
+    expect(impl1!.prompt).not.toContain("## Task\nMake app.txt fixed");
+    expect(impl1!.prompt).toContain("## Final approved plan (v2)\nThe version you reviewed in your last turn as plan critic, now final.");
+    for (const part of ["# Plan v2: v2", "## Acceptance criteria", "**AC1**", "- The planner signed the plan off: final decision", "## How to work", "Implement the plan now"]) {
+      expect(impl1!.prompt, part).toContain(part);
+    }
+    // The critique's first version was revised: the implementer works from v2, the one that was signed off.
+    expect(impl1!.prompt).not.toContain("# Plan v1");
+    expect(impl1!.args).toContain("--json-schema");
+    expect(impl1!.args[impl1!.args.indexOf("--json-schema") + 1]).toContain("files_changed");
     expect(planner2!.prompt).toContain("problem"); // the critique's issue
     expect(planner2!.prompt).not.toContain("as JSON");
     expect(critic2!.prompt).toContain("# Plan v2: v2");
+    // The shared session holds the critic's round-1 critique (its key matches the one critique.r1.json gives back): pointed to, not repeated.
+    expect(critic2!.prompt).toContain("## Your critique from the previous round\nYour last answer in this session.");
+    expect(critic2!.prompt).not.toContain("- `C1` [high] problem");
     // The implementer is told what changed after its turn (the reviewer's file), not its own edit.
     expect(impl2!.prompt).toContain("## Files changed since your last turn");
     expect(impl2!.prompt).toContain("- A `scratch.txt`");
@@ -871,7 +907,8 @@ describe("Workflow: context shared between the agents", () => {
   it("starts a fresh session with the whole prompt when the CLI lost the one to continue, without spending a retry", async () => {
     expect(await start({ ...twoRounds(), sessions: { lost: true } }, { limits: { max_retries: 0 } })).toBe(0);
     const lost = fake.calls().filter((c) => c.lost).map((c) => c.role);
-    expect(lost).toEqual(["planner", "plan_reviewer", "plan_finalizer", "implementer", "code_reviewer"]);
+    // The implementer's first turn tries the critic's session too.
+    expect(lost).toEqual(["planner", "plan_reviewer", "plan_finalizer", "implementer", "implementer", "code_reviewer"]);
     for (const role of ["planner", "plan_reviewer", "plan_finalizer", "implementer", "code_reviewer"]) {
       for (const c of calls(role)) {
         expect(c.resumed, role).toBeUndefined();
@@ -879,7 +916,7 @@ describe("Workflow: context shared between the agents", () => {
       }
     }
     expect(stateOf(h).history.map((x) => `${x.phase}:${x.status}`)).toContain("CODE_REVIEW:approved");
-    expect(h.events.filter((e) => e.type === "agent.retry")).toHaveLength(5);
+    expect(h.events.filter((e) => e.type === "agent.retry")).toHaveLength(6);
   });
 
   it("keeps no session when the user's args turn the CLI's sessions off, and passes their flag once", async () => {
@@ -898,7 +935,9 @@ describe("Workflow: context shared between the agents", () => {
     const saved = stateOf(h).sessions!;
     expect(await resume(h, { decision: "resume", note: "try the edge case" })).toBe(2);
     const impl2 = calls("implementer")[1]!;
-    expect(impl2.resumed).toBe(saved.implementer!.id);
+    expect(impl2.resumed).toBe(saved[SHARED_SESSION]!.id);
+    expect(impl2.resumed).toBe(calls("plan_reviewer")[0]!.session);
+    expect(impl2.prompt).toContain("this message continues your session");
     expect(impl2.prompt).toContain("## New notes from the human operator (highest priority)\n- (");
     expect(impl2.prompt).toContain("try the edge case");
     expect(calls("code_reviewer")[1]!.resumed).toBe(saved.code_reviewer!.id);
@@ -908,7 +947,134 @@ describe("Workflow: context shared between the agents", () => {
     const impl3 = calls("implementer")[2]!;
     expect([impl3.backend, impl3.resumed]).toEqual(["codex", undefined]);
     expect(impl3.prompt).toContain("## Task\nMake app.txt fixed");
+    // On another CLI than the critic's, the implementer keeps a session of its own; the Claude one is not passed to Codex.
     expect(stateOf(h).sessions!.implementer).toMatchObject({ backend: "codex", id: impl3.session });
+    expect(stateOf(h).sessions![SHARED_SESSION]).toMatchObject({ backend: "claude", id: saved[SHARED_SESSION]!.id });
+  });
+
+  /** The plan critic approves, the implementer runs once, and the reviewer's findings stop the run after each review. */
+  const stopsAfterReviews = (): Scenario => ({
+    ...happy(),
+    implementer: [{ write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed\nmore\n" }, output: impl("completed", ["F1"]) }, { output: impl("completed", ["F1"]) }],
+    code_reviewer: [{ output: review(false, [finding("F1")]) }, { output: review(false, [finding("F1")]) }, { output: review(true, [], ["F1"]) }],
+  });
+
+  it("keeps an implementer whose session was lost going in a fresh one with the whole prompt, and continues that one from there", async () => {
+    expect(await start(stopsAfterReviews(), { limits: { max_review_rounds: 1 } })).toBe(2);
+    const shared = stateOf(h).sessions![SHARED_SESSION]!.id;
+    fake.forget(shared);
+    h.events.length = 0;
+    expect(await resume(h, { decision: "resume", note: "NOTE-AFTER-LOSS" })).toBe(2);
+    const [lost] = fake.calls("implementer").filter((c) => c.lost);
+    expect(lost).toMatchObject({ resumed: shared });
+    const fresh = calls("implementer")[1]!;
+    expect(fresh.resumed).toBeUndefined();
+    for (const part of ["## Task\nMake app.txt fixed", "Roles: planner", "# Plan v1", "NOTE-AFTER-LOSS", "`F1`"]) expect(fresh.prompt, part).toContain(part);
+    expect(h.events.filter((e) => e.type === "agent.retry").map((e) => e.type === "agent.retry" && e.reason)).toEqual([
+      expect.stringContaining("the earlier session could not be continued"),
+    ]);
+    // The fresh session is the shared one now, as far as that turn went.
+    const st = stateOf(h);
+    expect(st.sessions![SHARED_SESSION]).toMatchObject({ id: fresh.session, role: "implementer", notes: st.humanNotes.length, tree: st.lastSnapshot!.tree });
+    expect(await resume(h, { decision: "resume" })).toBe(0);
+    const next = calls("implementer")[2]!;
+    expect(next.resumed).toBe(fresh.session);
+    expect(next.prompt).not.toContain("NOTE-AFTER-LOSS");
+    expect(next.prompt).toContain("this message continues your session");
+  });
+
+  it("continues, in a run that kept a session per role, only the implementer's own, then keeps it as the shared one", async () => {
+    expect(await start(stopsAfterReviews(), { limits: { max_review_rounds: 1 } })).toBe(2);
+    // As an older agentduo left the run: a session per role, the critic's being one this CLI no longer has.
+    const path = join(runDirOf(h), "state.json");
+    const older = JSON.parse(readFileSync(path, "utf8"));
+    const { role: _role, answers: _answers, withheld: _withheld, ...own } = older.sessions[SHARED_SESSION];
+    older.sessions = { ...older.sessions, implementer: own, plan_reviewer: { ...own, id: "critic-legacy", tree: older.baseline?.tree ?? own.tree, notes: 0 } };
+    delete older.sessions[SHARED_SESSION];
+    writeFileSync(path, JSON.stringify(older));
+    expect(await resume(h, { decision: "resume", note: "LEGACY-NOTE" })).toBe(2);
+    expect(fake.calls().filter((c) => c.lost)).toEqual([]);
+    const impl2 = calls("implementer")[1]!;
+    expect(impl2.resumed).toBe(own.id);
+    // Its own cursors: the note is new, and nothing it was told before is told again.
+    expect(impl2.prompt).toContain("this message continues your session");
+    expect(impl2.prompt).toContain("LEGACY-NOTE");
+    expect(impl2.prompt).not.toContain("# Plan v1");
+    const sessions = stateOf(h).sessions!;
+    expect(sessions[SHARED_SESSION]).toMatchObject({ id: own.id, role: "implementer" });
+    expect(sessions.implementer).toBeUndefined();
+    expect(sessions.plan_reviewer!.id).toBe("critic-legacy");
+  });
+
+  it("gives an implementer that goes on in the critic's session the plan revised after the critic's last turn there", async () => {
+    const scenario = {
+      ...happy(),
+      planner: [{ output: plan("v1") }, { output: plan("v2", { feedback_resolution: [{ issue_id: "C1", decision: "accepted", rationale: "ok" }] }) }],
+      plan_reviewer: [{ output: critique(false, [issue("C1")]) }, { output: critique(true) }],
+    };
+    expect(await start(scenario, { limits: { max_planning_rounds: 1 } })).toBe(2);
+    const critic1 = calls("plan_reviewer")[0]!;
+    // Its second round runs on its own: the user turned the critic's sessions off.
+    h.cfg = testConfig(fake, { claude: { role_args: { plan_reviewer: ["--no-session-persistence"] } } });
+    expect(await resume(h, { decision: "revise", note: "REVISE-NOTE" })).toBe(0);
+    const critic2 = calls("plan_reviewer")[1]!;
+    expect(critic2.resumed).toBeUndefined();
+    expect(critic2.args.filter((a) => a === "--no-session-persistence")).toHaveLength(1);
+    expect(critic2.prompt).toContain("## Task\nMake app.txt fixed");
+    const impl = calls("implementer")[0]!;
+    expect(impl.resumed).toBe(critic1.session);
+    // The session last saw v1, under review: the implementer gets v2, whole and marked new, and the note it was not given.
+    expect(impl.prompt).toContain("## Final approved plan (v2) (new since your last turn)\nIt changed after your last turn as plan critic");
+    expect(impl.prompt).toContain("# Plan v2: v2");
+    expect(impl.prompt).toContain("REVISE-NOTE");
+    expect(impl.prompt).toContain("- The planner signed the plan off: final decision");
+  });
+
+  it("keeps the critic's and the implementer's sessions apart on two CLIs, and passes no session id between them", async () => {
+    expect(await start(twoRounds(), { agents: { planner: "codex", plan_reviewer: "codex", implementer: "claude", code_reviewer: "codex" } })).toBe(0);
+    const [critic1, critic2] = calls("plan_reviewer");
+    const [impl1, impl2] = calls("implementer");
+    expect([critic1!.backend, impl1!.backend, critic2!.resumed, impl1!.resumed, impl2!.resumed]).toEqual(["codex", "claude", critic1!.session, undefined, impl1!.session]);
+    expect(impl1!.prompt).toContain("## Task\nMake app.txt fixed");
+    const sessions = stateOf(h).sessions!;
+    expect(sessions[SHARED_SESSION]).toBeUndefined();
+    expect([sessions.plan_reviewer!.backend, sessions.plan_reviewer!.id, sessions.implementer!.backend, sessions.implementer!.id])
+      .toEqual(["codex", critic1!.session, "claude", impl1!.session]);
+  });
+
+  it("shares the session of a critic and an implementer with models, efforts and flags of their own, each call with its role's", async () => {
+    expect(await start(twoRounds(), {
+      claude: {
+        role_models: { plan_reviewer: "opus-critic", implementer: "sonnet-impl" }, role_efforts: { plan_reviewer: "high" },
+        role_args: { implementer: ["--permission-mode", "acceptEdits"], plan_reviewer: ["--permission-mode", "plan"] },
+      },
+    })).toBe(0);
+    const critic = calls("plan_reviewer");
+    const impl = calls("implementer");
+    expect([impl[0]!.resumed, impl[1]!.resumed]).toEqual([critic[0]!.session, critic[0]!.session]);
+    const flag = (args: string[], name: string) => args.flatMap((a, i) => (a === name ? [args[i + 1]] : []));
+    for (const c of critic) {
+      expect([flag(c.args, "--model"), flag(c.args, "--effort"), flag(c.args, "--permission-mode")]).toEqual([["opus-critic"], ["high"], ["plan"]]);
+      expect(flag(c.args, "--json-schema")[0]).toContain("conflicts");
+    }
+    for (const c of impl) {
+      expect([flag(c.args, "--model"), flag(c.args, "--effort"), flag(c.args, "--permission-mode")]).toEqual([["sonnet-impl"], [], ["acceptEdits"]]);
+      expect(flag(c.args, "--json-schema")[0]).toContain("files_changed");
+    }
+  });
+
+  it("runs an implementer whose sessions are off on its own, leaving the critic's session as the critic left it", async () => {
+    expect(await start(twoRounds(), { claude: { role_args: { implementer: ["--no-session-persistence"] } } })).toBe(0);
+    const [critic1, critic2] = calls("plan_reviewer");
+    expect(critic2!.resumed).toBe(critic1!.session);
+    for (const c of calls("implementer")) {
+      expect(c.resumed).toBeUndefined();
+      expect(c.args.filter((a) => a === "--no-session-persistence")).toHaveLength(1);
+      expect(c.prompt).toContain("## Task\nMake app.txt fixed");
+    }
+    const sessions = stateOf(h).sessions!;
+    expect(sessions[SHARED_SESSION]).toMatchObject({ id: critic1!.session, role: "plan_reviewer" });
+    expect(sessions.implementer).toBeUndefined();
   });
 
   it("passes on what agents recorded about the repository while it holds, never to the role that judges its author", async () => {
@@ -930,7 +1096,11 @@ describe("Workflow: context shared between the agents", () => {
     expect(prompt("plan_finalizer")).toContain("## New repository notes");
     expect(prompt("plan_finalizer")).toContain("- `README.md`: CRITIC-NOTE (Claude Code, plan critic)");
     expect(prompt("plan_finalizer")).not.toContain("CHECK-NOTE");
-    for (const note of ["- `check.mjs`: CHECK-NOTE (Codex, planner)", "README-NOTE", "CRITIC-NOTE"]) expect(prompt("implementer"), note).toContain(note);
+    // The implementer goes on in the critic's session: it gets the planner's notes the critic was never given, not the critic's own.
+    expect(calls("implementer")[0]!.resumed).toBe(calls("plan_reviewer")[0]!.session);
+    expect(prompt("implementer")).toContain("## New repository notes");
+    for (const note of ["- `check.mjs`: CHECK-NOTE (Codex, planner)", "- `README.md`: README-NOTE (Codex, planner)"]) expect(prompt("implementer"), note).toContain(note);
+    expect(prompt("implementer")).not.toContain("CRITIC-NOTE");
     expect(prompt("implementer")).not.toContain("MISSING-NOTE");
     // README.md changed in the implementation: its notes no longer hold. The implementer's own never reach its reviewer.
     expect(prompt("code_reviewer")).toContain("CHECK-NOTE");

@@ -109,7 +109,8 @@ The design is in
 
 ### What each agent is given
 
-Each role (planner, plan critic, implementer, code reviewer) keeps one CLI session for the whole run.
+Each role (planner, plan critic, implementer, code reviewer) keeps one CLI session for the whole run. When one CLI
+plays both the plan critic and the implementer (the default: Claude), they keep one session between them.
 
 - **First call:** the full picture. That is the task, the chat before it, your notes and what earlier agents
   recorded.
@@ -117,7 +118,11 @@ Each role (planner, plan critic, implementer, code reviewer) keeps one CLI sessi
   is the files changed since the role's last turn, your new notes, and the work to act on. The reviewer, for example,
   gets the diff since the revision it last reviewed. So a fix round does not re-read the repository from scratch.
 - **Plan sign-off** continues the planner's session.
-- **No session ever passes from one role to another**, so the reviewer never sees the implementer's reasoning.
+- **The implementer goes on in the plan critic's session**, so it starts from what the critic read and judged. Its
+  first turn is told it is the implementer now, and gets the final approved plan whole, how it became final, and what
+  changed since the critic's last turn. On two different CLIs, or when one of the two has sessions turned off in its
+  `role_args`, each keeps its own (or none).
+- **No other session passes from one role to another**, so the reviewer never sees the implementer's reasoning.
 
 The planner, critic, implementer and reviewer also leave short notes about the repository: what a file holds, a
 convention, the test command. Each note names its file or folder. Later roles get the notes that still hold: a note
@@ -195,7 +200,8 @@ agentduo 0.5.0 · chat
   agents, adds the points of the reviews the last version still misses, and leaves out what the discussion showed to
   be wrong. If the last review still asked for changes, the answer ends with a short section on what is still
   disputed. Codex always writes the synthesis, so when Codex also answered, the synthesis comes from the same model, in
-  a fresh call asked to be neutral. A discussion makes 3 to 2N+1 agent calls, N being the review limit. Each turn is
+  a resumed session asked to be neutral. A discussion makes 3 to 2N+1 agent calls, N being the review limit, plus one
+  for each step asked again in a new session (see conversation sessions below). Each turn is
   shown as it ends (in the terminal by its first lines; `--verbose` shows them whole), then the final answer, whole.
   Only that answer joins the conversation, as Codex's answer discussed with Claude. If the synthesis fails, a warning
   says so and the latest version is the answer, from the agent that wrote it.
@@ -204,6 +210,14 @@ agentduo 0.5.0 · chat
 - **Esc** stops what runs. A stopped answer or discussion just ends, and nothing of it joins the conversation. A stopped pipeline step stays resumable: `/resume [note]`
   re-runs it (Enter on an empty line only reminds you). `/pipeline` while a run is stopped starts a new one; the stopped
   one keeps its id and stays resumable. `/new` forgets the conversation and starts over.
+- **Conversation sessions.** Each conversation keeps one Codex session and one Claude session, shared by ordinary
+  messages and every `/discuss` step, including synthesis. Reopening the same conversation resumes them; `/new` or a
+  new conversation starts new sessions. Continued calls receive new exchanges and discussion messages (when those no
+  longer fit what a prompt carries, the prompt says how many it leaves out). A continued call that fails is asked again
+  once in a new session with the whole conversation, and a warning says so; one that timed out or went silent just
+  fails. A failed or stopped answer leaves no session to continue, nor does a discussion that ends without an answer,
+  for either agent: nothing of it is continued. Pipeline sessions remain separate by role. Explicit `--ephemeral` or
+  `--no-session-persistence` in the backend's `args` disables conversation session reuse for that backend.
 - **Models.** The input shows both agents' models. Before the first answer agentduo looks them up locally, without a
   model call: Codex's with `codex doctor --json` (with your `-c`/`--enable`/`--disable` overrides; a `--profile` is not
   something doctor takes, so the model then shows as unresolved, with the reason), Claude's from `--model`,
@@ -535,7 +549,7 @@ limits:
 
 Everything about a run lives in `.agentduo/runs/<run-id>/`:
 
-- `state.json`: makes the run resumable; it also keeps each role's session id, the agents' notes about the repository, and the run's budget and usage;
+- `state.json`: makes the run resumable; it also keeps the sessions' ids (one per role, the plan critic and the implementer sharing one on the same CLI), the agents' notes about the repository, and the run's budget and usage;
 - `config.json`: the config the run started with;
 - `report.md`: timeline, gates, diff stat, unresolved issues, warnings, usage (tokens, reported cost, unpriced calls, agent calls, minutes), the budget, and the profile with its metrics;
 - `metrics.json`: the run's profile and escalations, agent calls, tokens and cost by role, rounds, steps, decisions, minutes and outcome, to compare profiles;

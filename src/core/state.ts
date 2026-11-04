@@ -34,9 +34,15 @@ export type RunGit =
   | { mode: "internal"; repositoryId: string; workspace: string; gitDir: string };
 
 /**
- * A pipeline role's CLI session, which the role's next call continues, and how far it has been told about the run:
- * that call's prompt gives only what came after. Keyed by config role, so plan sign-off continues the planner's
- * session and no session ever passes from one role to another.
+ * Where a pipeline session is kept (src/core/context.ts, sessionSlot): a config role's own, so plan sign-off continues
+ * the planner's; or the one the plan critic and the implementer share when one CLI plays both.
+ */
+export type SessionSlot = AgentRole | "plan_reviewer+implementer";
+
+/**
+ * A pipeline role's CLI session, which the next call of its slot continues, and how far it has been told about the
+ * run: that call's prompt gives only what came after. The shared slot's record also says which role took its last
+ * turn, which answers of each role it holds, and which notes it was not given (a role's own record needs none).
  */
 export interface RoleSession {
   backend: Backend;
@@ -51,6 +57,12 @@ export interface RoleSession {
   planHash: string | null;
   /** Code reviewer: the revision it last reviewed, which its next diff starts from. */
   reviewed: string | null;
+  /** Shared slot: the role of its last turn; the next turn of the other role switches roles. */
+  role?: AgentRole;
+  /** Shared slot: a key of each role's latest answer this session holds, so a later prompt points to it rather than repeat it. */
+  answers?: Partial<Record<AgentRole, string>>;
+  /** Shared slot: repository notes up to `repoNotes` it was not given, because a turn's role may not see their author's. */
+  withheld?: number[];
 }
 
 /**
@@ -438,8 +450,8 @@ export interface RunState {
   conversationContext?: ConversationContext;
   /** Files attached to the task, copied into the run (so a resume needs neither the originals nor the chat); absent: none. */
   attachments?: Attachment[];
-  /** Each role's session that its next call continues; absent in older runs and while none is kept. */
-  sessions?: Partial<Record<AgentRole, RoleSession>>;
+  /** The sessions the next calls continue, by slot; absent in older runs and while none is kept. Older runs have one per role. */
+  sessions?: Partial<Record<SessionSlot, RoleSession>>;
   /** What the agents recorded about the repository, oldest first, at most MAX_REPO_NOTES; absent: none yet. */
   repoNotes?: RepoNote[];
   /** The cost the CLIs reported (Claude's); calls that reported none are counted in `unpricedCalls`. */

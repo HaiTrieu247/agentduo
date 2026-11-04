@@ -164,7 +164,8 @@ describe("vscode worker: one conversation per tab", () => {
     ({ h } = await open({ generation: 2 }));
     await say(h, "tab-a", "Are you sure?");
     await h.waitFor(isEvent("turn.finished"));
-    expect(fake.calls("chat_codex")[1]!.prompt).toContain("The answer is 42.");
+    expect(fake.calls("chat_codex")[1]!.prompt).not.toContain("The answer is 42.");
+    expect(fake.calls("chat_codex")[1]!.resumed).toBe(fake.calls("chat_codex")[0]!.session);
   });
 });
 

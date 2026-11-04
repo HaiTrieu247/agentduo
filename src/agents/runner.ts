@@ -55,7 +55,11 @@ export interface CallSession {
   resume?: { id: string; prompt: string; attachments?: Attachment[] };
 }
 
-/** A conversation turn: `backend` answers in prose; no schema, no role, one attempt (the user asks again if it fails). */
+/**
+ * A conversation turn: `backend` answers in prose; no schema, no role, one attempt (the user asks again if it fails).
+ * A continued session that fails is asked again once in a new one, with the whole prompt, which a warning says; not
+ * after a timeout or silence: a CLI that hangs has not lost its session, and a new one would make the user wait again.
+ */
 export interface TextCall extends WithAttachments {
   mode: "text";
   backend: Backend;
@@ -63,6 +67,7 @@ export interface TextCall extends WithAttachments {
   logPrefix: string;
   conversationId: string;
   turnId: string;
+  session?: CallSession;
   signal?: AbortSignal;
 }
 
@@ -121,6 +126,12 @@ export function rejectionNote(errors: string[], answer: unknown, unseen: boolean
     "Correct exactly these points. Keep the rest of the answer as it was, unless a correction needs a change elsewhere: there is no need to redo " +
     "the work. Return the whole corrected answer as a single JSON object that matches the required schema.\n" + shown;
 }
+
+/** An error's first line, short enough for a warning. */
+const brief = (error: string) => {
+  const line = error.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+  return line.length > 300 ? `${line.slice(0, 299)}…` : line;
+};
 
 const sameErrors = (a: string[], b: string[]) => a.length === b.length && [...a].sort().every((e, i) => e === [...b].sort()[i]);
 
@@ -233,7 +244,7 @@ export class AgentRunner {
     const backend = this.backends[o.mode === "text" ? o.backend : this.cfg.agents[o.agentRole]];
     const agent: Party = backend.name;
     const channel = this.channel(o, agent);
-    const resume = o.mode === "text" ? undefined : o.session?.resume;
+    const resume = o.session?.resume;
     // A resumed first attempt comes on top of the fresh attempts, so a lost session never costs a retry.
     const attemptsAllowed = (text ? 1 : this.cfg.limits.max_retries + 1) + (resume ? 1 : 0);
     const timeoutMs = this.cfg.limits.agent_timeout_sec * 1000;
@@ -273,6 +284,14 @@ export class AgentRunner {
       // agentduo rejected does, or the new session would repeat it.
       const fellBack = attempt === 2 && !!resume;
       if (fellBack) {
+        // A conversation turn shows no retries: the second call, and why, would go unseen.
+        if (text) {
+          this.bus.emit({
+            type: "warning",
+            text: `${backend.name === "codex" ? "Codex" : "Claude"} could not answer in this conversation's session (${brief(lastError ?? "no answer")}), so it is ` +
+              "asked again in a new one, with the whole conversation.",
+          });
+        }
         lastError = rejected
           ? `the continued session's answer was rejected (${lastError}); starting a new one, told why`
           : `the earlier session could not be continued (${lastError ?? "no answer"}); starting a new one`;
@@ -301,7 +320,9 @@ export class AgentRunner {
       try {
         binary = backend.binary();
         args = o.mode === "text"
-          ? backend.buildArgs({ mode: "text", lastMessageFile, askPermissions: host, images })
+          ? backend.buildArgs({ mode: "text", lastMessageFile, askPermissions: host, images,
+            ...(o.session ? { session: { keep: o.session.keep, ...(resuming ? { resume: resuming.id } : {}) } } : {}),
+          })
           : backend.buildArgs({
             schemaName: o.schemaName, lastMessageFile, role: o.agentRole, askPermissions: host, images, skipGitRepoCheck: o.skipGitRepoCheck,
             ...(o.session ? { session: { keep: o.session.keep, ...(resuming ? { resume: resuming.id } : {}) } } : {}),
@@ -374,12 +395,15 @@ export class AgentRunner {
         }
       }
       if (run.aborted) return finish(false, attempt, null, "interrupted", true);
+      // A conversation turn that hung ends here, also in a continued session (see TextCall).
       if (run.timedOut) {
         lastError = `${backend.name} timed out after ${this.cfg.limits.agent_timeout_sec}s`;
+        if (text) return finish(false, attempt, null, lastError);
         continue;
       }
       if (run.idle) {
         lastError = `${backend.name} produced no output for ${this.cfg.limits.agent_idle_timeout_sec}s`;
+        if (text) return finish(false, attempt, null, lastError);
         continue;
       }
       let data: unknown = null;

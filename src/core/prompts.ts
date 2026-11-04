@@ -66,6 +66,28 @@ export interface ContinuedTurn {
   knowsPlan: boolean;
   /** Code reviewer: the changes since the revision it last reviewed, given instead of the whole diff. */
   sinceReviewed?: { from: string; stat: string; diff: string; truncated: boolean };
+  /**
+   * The role of the session's last turn, when it was another one (the plan critic and the implementer share a
+   * session): this turn switches roles, and the session's last answer is that role's.
+   */
+  from?: AgentRole;
+  /** The role's own latest answer, which the prompt refers to, is in the session; false: it is given again. Absent: it is. */
+  knowsAnswer?: boolean;
+}
+
+/**
+ * How the plan the implementer works from became final, for an implementer that goes on in the plan critic's
+ * session: what came after the critic's last turn there.
+ */
+export interface PlanHandoff {
+  /** The final plan's version; null when unknown. */
+  version: number | null;
+  /** The sign-off's summary, when the planner signed the plan off. */
+  signOff: string | null;
+  /** The human operator accepted the plan as it was (after the planning rounds ran out). */
+  byHuman: boolean;
+  /** What the user accepted about the plan's contract: contradictions in the requirements, and the scope. */
+  accepted?: { conflicts: string[]; scope?: ScopeItem[] };
 }
 
 const INTERNAL_SNAPSHOTS = "- Snapshots: agentduo keeps this run's snapshots in a Git repository of its own, outside the workspace. The workspace " +
@@ -112,14 +134,25 @@ function header(role: string, title: string, ctx: PromptContext): string {
     (ctx.internalSnapshots ? INTERNAL_SNAPSHOTS : "");
 }
 
-/** The opening of a turn that continues the role's session, which holds everything the first turn of it was given. */
+/**
+ * The opening of a turn that continues a session, which holds everything the first turn of it was given. A turn that
+ * switches roles in it says so first: the earlier role's instructions no longer apply.
+ */
 function continuedHeader(role: string, title: string, ctx: PromptContext): string {
-  return "[orchestrator-role: " + role + "]\n" +
-    "You are the **" + title + "** of task `" + ctx.taskId + "` in the same two-agent workflow, and this message continues your session. " +
+  const from = ctx.continued?.from;
+  const opening = from
+    ? "You are the **" + title + "** of task `" + ctx.taskId + "` in the same two-agent workflow. This message continues the session in which you " +
+      "were the **" + ROLE_TITLES[from] + "** until now. From this turn on you are the **" + title + "**: what you were asked as " + ROLE_TITLES[from] +
+      " no longer applies, so follow only this message's instructions and give your answer in this role's output format. "
+    : "You are the **" + title + "** of task `" + ctx.taskId + "` in the same two-agent workflow, and this message continues your session. ";
+  return "[orchestrator-role: " + role + "]\n" + opening +
     "Your earlier turns hold the task, the conversation, the earlier notes, the roles and what you read in the repository; this message " +
     "gives only what is new since your last turn. Read a file again before you rely on what you remember of it, above all a file listed below.\n" +
     (ctx.internalSnapshots ? INTERNAL_SNAPSHOTS : "");
 }
+
+/** Whether a continued session holds the role's own latest answer, which the prompt may then point to instead of repeating. */
+const holdsOwnAnswer = (ctx: PromptContext) => !!ctx.continued && ctx.continued.knowsAnswer !== false;
 
 /** Changed files, a line each (at most MAX_CHANGED_LISTED). */
 function changeList(changed: Change[]): string {
@@ -360,7 +393,7 @@ function discussionHistory(history: DiscussionMessage[]): string {
  */
 export function discussion(o: {
   workspace: string; context: ConversationContext; earlier: EarlierTask[]; question: string; answerer: Backend; critic: Backend; maxRounds: number;
-  step: DiscussionStep; round: number; history: DiscussionMessage[]; attachments?: Attachment[]; locate?: Locate;
+  step: DiscussionStep; round: number; history: DiscussionMessage[]; historyStart?: number; attachments?: Attachment[]; locate?: Locate;
 }): string {
   const answerer = NAMES[o.answerer];
   const critic = NAMES[o.critic];
@@ -391,7 +424,7 @@ export function discussion(o: {
     "Follow your own configuration and the repository's instructions (AGENTS.md / CLAUDE.md).",
     earlierTasks(o.earlier, false) + conversationSection(o.context, "Conversation so far", "Oldest first.", o.locate),
     `## The user's question\n${o.question}\n` + filesSection("Files the user attached to the question", o.attachments, o.locate),
-    discussionHistory(o.history),
+    discussionHistory(o.history.slice(o.historyStart ?? 0)),
     asks[o.step],
   ].filter(Boolean).join("\n");
 }
@@ -519,9 +552,10 @@ export function planReviewer(ctx: PromptContext, round: number, version: number,
     out.push("## Scope the user approved\n" + approvedScope.map((i) => `- ${i.kind} \`${i.id}\`: ${i.text}`).join("\n") +
       "\nThe user approved widening the task's scope for these: the plan may include them, and they are not unnecessary scope.\n");
   }
-  if (previousCritique && ctx.continued) {
-    out.push("\n## Your critique from the previous round\nYour last answer in this session. Check how the new plan version addressed each " +
-      "of its issues (see its 'Response to feedback' section).\n");
+  if (previousCritique && holdsOwnAnswer(ctx)) {
+    // After turns of another role in this session, its last answer is not the critique, which came before them.
+    out.push("\n## Your critique from the previous round\n" + (ctx.continued?.from ? "Your last critique, earlier in this session." : "Your last answer in this session.") +
+      " Check how the new plan version addressed each of its issues (see its 'Response to feedback' section).\n");
   } else if (previousCritique) {
     out.push("\n## Your critique from the previous round\n" + issuesMarkdown(previousCritique.issues) +
       "\n\nCheck how the new plan version addressed each of these (see its 'Response to feedback' section).\n");
@@ -627,15 +661,42 @@ function earlierAttemptSection(e: EarlierAttempt, continued: boolean): string {
 }
 
 /**
+ * For an implementer that goes on in the plan critic's session: the final plan, whole (it is the implementer's
+ * contract, which the critic's turns only reviewed), and what was decided about it after the critic's last turn.
+ */
+function planHandoff(planMd: string, ctx: PromptContext, h: PlanHandoff | null): string[] {
+  const known = !!ctx.continued?.knowsPlan;
+  const plan = `## Final approved plan${h?.version != null ? ` (v${h.version})` : ""}${known ? "" : " (new since your last turn)"}\n` +
+    (known ? "The version you reviewed in your last turn as plan critic, now final. "
+      : "It changed after your last turn as plan critic: work from this version, not the one you reviewed. ") +
+    "Its scope and acceptance criteria are what you implement and what the code reviewer holds the change to." +
+    (ctx.planFile ? ` It is also in \`${ctx.planFile}\`.` : "") + "\n\n" + planMd + "\n";
+  const decided: string[] = [];
+  if (h) {
+    decided.push(h.byHuman ? "- The human operator accepted the plan as it was, without a further review."
+      : h.signOff ? `- The planner signed the plan off: ${h.signOff}` : "- Your approval made the plan final: there was no sign-off round.");
+  }
+  if (h?.accepted?.conflicts.length) {
+    decided.push("- The user accepted these contradictions in the requirements, so the plan is implemented as it is:\n" + h.accepted.conflicts.map((c) => `  - ${c}`).join("\n"));
+  }
+  const widened = (h?.accepted?.scope ?? []).filter((i) => i.kind === "suggestion");
+  if (widened.length) decided.push("- The user approved widening the task's scope for:\n" + widened.map((i) => `  - ${inlineCode(i.id)}: ${i.text}`).join("\n"));
+  decided.push("- Your critiques' remaining suggestions and proposed changes are not instructions: implement the final plan as it is written.");
+  return [plan, "## Decisions since your last turn as plan critic\n" + decided.join("\n") + "\n"];
+}
+
+/**
  * `findings`: the last review's open findings, null when there are none. `previous`: the last implementation's report
  * (its summary), and the earlier attempt of this round when this one re-runs it.
  */
 export function implementer(ctx: PromptContext, round: number, planMd: string, findings: ReviewFindings | null,
-  failedGates: GateResult[], previous: { summary: string | null; rerun?: EarlierAttempt | null } | null): string {
+  failedGates: GateResult[], previous: { summary: string | null; rerun?: EarlierAttempt | null } | null, handoff: PlanHandoff | null = null): string {
   const rerun = previous?.rerun ?? null;
   const out = [
     ...opening("implementer", "Implementer", ctx, `- Implementation round: ${round}\n`),
-    planSection("Final approved plan", planMd, ctx, "Unchanged: the final approved plan you were given earlier in this session."),
+    ...(ctx.continued?.from === "plan_reviewer"
+      ? planHandoff(planMd, ctx, handoff)
+      : [planSection("Final approved plan", planMd, ctx, "Unchanged: the final approved plan you were given earlier in this session.")]),
     "## How to work\n" +
       "- Implement the plan and stay within its scope.\n" +
       (ctx.gates.length
@@ -644,7 +705,7 @@ export function implementer(ctx: PromptContext, round: number, planMd: string, f
       "- If you cannot proceed (missing information, contradictory requirements, missing permissions), stop and return " +
       "`status: \"blocked\"` with a precise `blocking_reason`.\n",
   ];
-  if (rerun) out.push(earlierAttemptSection(rerun, !!ctx.continued));
+  if (rerun) out.push(earlierAttemptSection(rerun, holdsOwnAnswer(ctx)));
   if (round === 1 && !findings?.items.length && !failedGates.length) {
     out.push(`\n${rerun ? "Finish implementing the plan" : "Implement the plan now"}. \`addressed_findings\` should be an empty list.\n`);
   } else {
@@ -652,8 +713,8 @@ export function implementer(ctx: PromptContext, round: number, planMd: string, f
       "Address the problems below without redoing unrelated work.\n");
     if (findings?.items.length) out.push(findingsToFix(findings));
     if (failedGates.length) out.push("### Failing quality gates (run by agentduo)\n" + describeGates(failedGates) + "\n");
-    // A continued session has its own previous report already; a re-run was given the earlier attempt's above.
-    if (previous?.summary && !ctx.continued && !rerun) out.push("### Your previous report\n" + previous.summary + "\n");
+    // A session that holds its own previous report has it already; a re-run was given the earlier attempt's above.
+    if (previous?.summary && !holdsOwnAnswer(ctx) && !rerun) out.push("### Your previous report\n" + previous.summary + "\n");
   }
   out.push(REPO_NOTES_ASK, "## Output\nYour final message must be a single JSON object matching the output schema: summary, files_changed, " +
     "tests_run (what you actually ran and whether it passed), addressed_findings and repo_notes.\n");

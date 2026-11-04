@@ -604,6 +604,11 @@ export class Chat {
   private callTurn(turn: Turn, prompt: string, signal: AbortSignal, place?: DiscussionPlace, runner = this.directRunner()): Promise<TurnOutcome> {
     const conversation = this.conversation;
     const backend = turn.backend;
+    const keep = runner.backends[backend].keepsSessions();
+    // Off the record until the call ends; with sessions turned off it is not continued, and the call's own is not kept.
+    const sessionId = conversation.takeSession(backend);
+    const resume = keep && sessionId && turn.continuation ? { id: sessionId, prompt: turn.continuation, attachments: turn.attachments } : undefined;
+    const earlierCount = conversation.earlier.length;
     // The CLI's own settings may have changed since the last look.
     this.models.refresh();
     const model = this.models.identity(backend);
@@ -617,6 +622,7 @@ export class Chat {
       try {
         r = await runner.call({
           mode: "text", backend, prompt, logPrefix: turn.logPrefix, conversationId: conversation.id, turnId: turn.id, signal, attachments: turn.attachments,
+          session: { keep, ...(resume ? { resume } : {}) },
         });
       } catch (e) {
         failure = (e as Error).message;
@@ -627,6 +633,7 @@ export class Chat {
       if (answer !== null && place?.step === "critique") ({ verdict, text: answer } = parseVerdict(answer));
       if (r?.model) this.models.observe(backend, r.model, signature);
       conversation.finish(turn.id, status, answer, verdict);
+      conversation.keepSession(turn, keep && status === "success" ? r?.sessionId ?? null : null, earlierCount);
       // A lookup still going when the call started may have ended since, for this same config.
       const looked = model.status === "resolving" && this.models.signature(backend) === signature ? this.models.identity(backend) : model;
       const error = status === "error" ? r?.error ?? failure ?? "the call failed" : null;

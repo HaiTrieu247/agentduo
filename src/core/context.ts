@@ -5,7 +5,7 @@ import type { Attachment } from "./attachment-types.js";
 import type { AgentRole, Backend } from "./config.js";
 import type { Change } from "./git.js";
 import type { RepoNoteOutput } from "./outputs.js";
-import type { HumanNote, RepoNote, RoleSession, RunState } from "./state.js";
+import type { HumanNote, RepoNote, RoleSession, RunState, SessionSlot } from "./state.js";
 
 /**
  * What the agents of a run share besides the artifacts they hand on (plan, critique, report, diff, review): the
@@ -116,9 +116,42 @@ export async function visibleRepoNotes(state: RunState, role: AgentRole, tree: s
   });
 }
 
+/** The slot of the session the plan critic and the implementer share (sessionSlot). */
+export const SHARED_SESSION = "plan_reviewer+implementer" satisfies SessionSlot;
+const SHARING: readonly AgentRole[] = ["plan_reviewer", "implementer"];
+
+/**
+ * Where `role`'s session is kept. None when the user's args turn its sessions off (`keeps`): it runs on its own, and
+ * continues and records no session. The plan critic and the implementer share one when one CLI plays both, so that
+ * the implementer goes on from what the critic read and judged. Every other role, or either of them on its own CLI,
+ * keeps its own.
+ */
+export function sessionSlot(role: AgentRole, agents: Record<AgentRole, Backend>, keeps: boolean): SessionSlot | null {
+  if (!keeps) return null;
+  return SHARING.includes(role) && agents.plan_reviewer === agents.implementer ? SHARED_SESSION : role;
+}
+
+/**
+ * The session `role` continues in `slot`. The shared slot's record, or, in a run from before sharing, the role's own
+ * session with its own cursors (never the other role's). A role's own session was never given its judge's notes.
+ */
+function sessionIn(state: RunState, slot: SessionSlot, role: AgentRole): RoleSession | undefined {
+  const kept = state.sessions?.[slot];
+  if (kept || slot !== SHARED_SESSION) return kept;
+  const own = state.sessions?.[role];
+  if (!own) return undefined;
+  const judge = JUDGES[role];
+  const withheld = judge ? (state.repoNotes ?? []).filter((n) => n.role === judge && n.seq <= own.repoNotes).map((n) => n.seq) : [];
+  return { ...own, role, withheld };
+}
+
 /** What a continued session is told about the run since its last turn. */
 export interface Continuation {
   session: RoleSession;
+  /** The role of the session's last turn, when it was the other role of the shared slot: this turn switches roles. */
+  from?: AgentRole;
+  /** The role's latest answer, which the prompt refers to, is in the session (always so in a role's own session). */
+  knowsAnswer: boolean;
   /** Files of the workspace that changed since its last turn ended. */
   changed: Change[];
   /** Human notes it has not been given, and their files. */
@@ -135,24 +168,30 @@ export interface Turn {
   repoNotes: RepoNote[];
   /** Keep the session for the role's next turn: the user's args leave the CLI's sessions on. */
   keep: boolean;
+  /** Where the session is kept; null when it is not. Absent (older callers): the role's own when kept. */
+  slot?: SessionSlot | null;
   continuation: Continuation | null;
   /** How many human notes this turn's prompt has, for the session it leaves. */
   notesGiven: number;
 }
 
 /**
- * Plans `role`'s next turn against the workspace `tree`. It continues the role's session when the user's args keep
- * sessions, the role still runs on the same CLI, and git can tell what changed since the session's last turn;
- * otherwise it starts a fresh one. `planHash`: the plan the turn is about (null when it writes a new one).
+ * Plans `role`'s next turn against the workspace `tree`. It continues the session of its slot (sessionSlot; absent:
+ * the role's own when `keep`) when the user's args keep sessions, it still runs on that session's CLI, and git can
+ * tell what changed since the session's last turn, whichever role took it; otherwise it starts a fresh one.
+ * `planHash`: the plan the turn is about (null when it writes a new one). `answer`: the key of the role's latest
+ * answer, which its prompt refers to (null: none).
  */
 export async function planTurn(o: {
-  state: RunState; role: AgentRole; backend: Backend; keep: boolean; tree: string; planHash: string | null; changes: TreeChanges;
+  state: RunState; role: AgentRole; backend: Backend; keep: boolean; slot?: SessionSlot | null; tree: string; planHash: string | null;
+  answer?: string | null; changes: TreeChanges;
 }): Promise<Turn> {
   const { state } = o;
+  const slot = o.slot !== undefined ? o.slot : o.keep ? o.role : null;
   const repoNotes = await visibleRepoNotes(state, o.role, o.tree, o.changes);
-  const turn: Turn = { repoNotes, keep: o.keep, continuation: null, notesGiven: state.humanNotes.length };
-  const session = state.sessions?.[o.role];
-  if (!o.keep || !session || session.backend !== o.backend) return turn;
+  const turn: Turn = { repoNotes, keep: slot !== null, slot, continuation: null, notesGiven: state.humanNotes.length };
+  const session = slot === null ? undefined : sessionIn(state, slot, o.role);
+  if (!session || session.backend !== o.backend) return turn;
   let changed: Change[];
   try {
     changed = session.tree === o.tree ? [] : await o.changes(session.tree, o.tree);
@@ -161,30 +200,53 @@ export async function planTurn(o: {
   }
   const notes = state.humanNotes.slice(session.notes);
   const files = notes.flatMap((n) => n.attachments ?? []);
+  const withheld = new Set(session.withheld ?? []);
   turn.continuation = {
     session, changed, notes,
     attachments: files.filter((a, i) => files.findIndex((b) => b.id === a.id) === i),
-    repoNotes: repoNotes.filter((n) => n.seq > session.repoNotes),
+    // The notes it was not given: the newer ones, and those an earlier turn's role could not see (the critic's, the planner's).
+    repoNotes: repoNotes.filter((n) => n.seq > session.repoNotes || withheld.has(n.seq)),
     knowsPlan: o.planHash !== null && session.planHash === o.planHash,
+    ...(session.role && session.role !== o.role ? { from: session.role } : {}),
+    knowsAnswer: !session.answers || o.answer == null || session.answers[o.role] === o.answer,
   };
   return turn;
 }
 
 /**
  * Records the session a turn of `role` ran in, once it succeeded, with what it now knows. A call whose CLI named no
- * session, or whose sessions are not kept, leaves none: the role's next turn starts fresh.
+ * session leaves none in its slot: the slot's next turn starts fresh. A role whose sessions are not kept leaves no
+ * session of its own, and the shared one as it was. In the shared slot, a turn that went on in the session it
+ * continued (`resumed`) adds to what that session holds; a fresh one starts the record over.
  */
-export function rememberSession(state: RunState, role: AgentRole, r: { sessionId: string | null; backend: Backend }, turn: Turn,
-  at: { tree: string; planHash: string | null; reviewed?: string | null }): void {
-  if (!turn.keep || !r.sessionId) {
-    if (state.sessions) delete state.sessions[role];
+export function rememberSession(state: RunState, role: AgentRole, r: { sessionId: string | null; backend: Backend; resumed?: boolean }, turn: Turn,
+  at: { tree: string; planHash: string | null; reviewed?: string | null; answer?: string | null }): void {
+  const slot = !turn.keep ? null : turn.slot !== undefined ? turn.slot : role;
+  if (slot === null || !r.sessionId) {
+    if (state.sessions) {
+      delete state.sessions[role];
+      if (slot === SHARED_SESSION) delete state.sessions[SHARED_SESSION];
+    }
     return;
   }
-  state.sessions = {
-    ...state.sessions,
-    [role]: {
-      backend: r.backend, id: r.sessionId, tree: at.tree, notes: turn.notesGiven, repoNotes: latestRepoNote(state),
-      planHash: at.planHash, reviewed: at.reviewed ?? null,
-    },
+  const record: RoleSession = {
+    backend: r.backend, id: r.sessionId, tree: at.tree, notes: turn.notesGiven, repoNotes: latestRepoNote(state),
+    planHash: at.planHash, reviewed: at.reviewed ?? null,
   };
+  if (slot !== SHARED_SESSION) {
+    state.sessions = { ...state.sessions, [slot]: record };
+    return;
+  }
+  const went = r.resumed ? turn.continuation?.session : undefined;
+  const before = new Set(went?.withheld ?? []);
+  const judge = JUDGES[role];
+  // The notes of its judge this session has still not been given: those this role could not see, now or before.
+  const withheld = judge
+    ? (state.repoNotes ?? []).filter((n) => n.role === judge && (!went || n.seq > went.repoNotes || before.has(n.seq))).map((n) => n.seq)
+    : [];
+  const answers = { ...(went?.answers ?? {}), ...(at.answer ? { [role]: at.answer } : {}) };
+  const sessions: Partial<Record<SessionSlot, RoleSession>> = { ...state.sessions, [SHARED_SESSION]: { ...record, role, answers, ...(withheld.length ? { withheld } : {}) } };
+  // A run from before sharing: the role's own session is the shared one now, or was replaced by it.
+  delete sessions[role];
+  state.sessions = sessions;
 }

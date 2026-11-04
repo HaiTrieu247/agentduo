@@ -181,8 +181,8 @@ export class ClaudeBackend implements AgentBackend {
     return found;
   }
 
-  keepsSessions(role: AgentRole): boolean {
-    return ![...this.cfg.args, ...(this.cfg.role_args[role] ?? [])].includes(CLAUDE_NO_PERSISTENCE);
+  keepsSessions(role?: AgentRole): boolean {
+    return ![...this.cfg.args, ...(role ? this.cfg.role_args[role] ?? [] : [])].includes(CLAUDE_NO_PERSISTENCE);
   }
 
   /** --max-budget-usd: the lower of the per-call budget and what the run's budget has left, when either is set. */
@@ -200,7 +200,7 @@ export class ClaudeBackend implements AgentBackend {
    * off disk; a kept one does not, and a resumed call names its session with --resume.
    */
   buildArgs(a: BuildArgs): string[] {
-    const session = a.mode === "text" ? undefined : a.session;
+    const session = a.session;
     // A pipeline role's own model and effort; its effort goes after the args every call gets, so it wins over theirs.
     const model = a.mode === "text" ? this.cfg.model : roleModel(this.cfg, a.role);
     const effort = a.mode === "text" ? null : roleEffort(this.cfg, a.role);

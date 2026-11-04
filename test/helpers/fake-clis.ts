@@ -80,6 +80,15 @@ export class FakeClis {
     writeFileSync(this.files.FAKE_SCENARIO, JSON.stringify(scenario));
   }
 
+  /** The CLI's storage loses `session` (as when its files are cleaned up): a later resume of it fails, as a lost one does. */
+  forget(session: string): void {
+    const file = `${this.files.FAKE_COUNTS}.sessions.json`;
+    if (!existsSync(file)) return;
+    const sessions = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    delete sessions[session];
+    writeFileSync(file, JSON.stringify(sessions));
+  }
+
   install(): this {
     for (const [key, value] of Object.entries(this.files)) {
       this.saved[key] = process.env[key];

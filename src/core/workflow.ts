@@ -8,7 +8,7 @@ import { attachmentFile } from "./attachments.js";
 import type { Decider, DuoEvent, EventBus, HistoryEntry, HumanReview, Message, Party, PermissionDecider, Phase, Role } from "../events.js";
 import { budgetView, costLeft, ensureBudget, exhaustedMessage, newWarnings, raiseReached, reachedLimits, usageOf } from "./budget.js";
 import type { AgentRole, Backend, ConfigData } from "./config.js";
-import { acceptRepoNotes, addRepoNotes, planTurn, rememberSession, type Turn } from "./context.js";
+import { acceptRepoNotes, addRepoNotes, planTurn, rememberSession, sessionSlot, type Turn } from "./context.js";
 import { GatesInterrupted, runGates, type GateResult } from "./gates.js";
 import type { Change, Git } from "./git.js";
 import type { Approval, Critique, Finding, Implementation, Issue, Plan, RepoNoteOutput, Review } from "./outputs.js";
@@ -95,7 +95,15 @@ interface AgentTurn<T> {
   plan: { about: string | null; after: (data: T) => string | null; file?: string };
   /** Code reviewer: the revision it reviews, which its next turn's diff starts from. */
   reviewed?: string;
+  /**
+   * The role's own answers, by key (answerKey), for a session the plan critic and the implementer share: previous, the
+   * one its prompt refers to (null: none); of, this turn's. A session that does not hold `previous` is given it again.
+   */
+  answer?: { previous: string | null; of: (data: T) => string };
 }
+
+/** A short key of an answer, to tell whether a shared session holds it. */
+const answerKey = (value: unknown) => createHash("sha256").update(stableStringify(value)).digest("hex").slice(0, 16);
 
 class Interrupted extends Error {}
 
@@ -613,10 +621,12 @@ export class Workflow {
    * the files of the notes it has not seen). The runner falls back to the fresh prompt if that session is gone.
    */
   private async callAgent<T>(o: AgentTurn<T>, tree: string): Promise<{ res: AgentResult; turn: Turn }> {
-    const backend = this.o.cfg.agents[o.agentRole];
+    const { agents } = this.o.cfg;
+    const backend = agents[o.agentRole];
+    const keep = this.runner.backends[backend].keepsSessions(o.agentRole);
     const turn = await planTurn({
-      state: this.state, role: o.agentRole, backend, keep: this.runner.backends[backend].keepsSessions(o.agentRole), tree,
-      planHash: o.plan.about, changes: (a, b) => this.git.nameStatus(a, b),
+      state: this.state, role: o.agentRole, backend, keep, slot: sessionSlot(o.agentRole, agents, keep), tree, planHash: o.plan.about,
+      answer: o.answer?.previous ?? null, changes: (a, b) => this.git.nameStatus(a, b),
     });
     const ctx: prompts.PromptContext = { ...this.ctx(), planFile: o.plan.file };
     const prompt = await o.build({ ...ctx, repoNotes: turn.repoNotes });
@@ -624,7 +634,10 @@ export class Workflow {
     const resume = c
       ? {
         id: c.session.id, attachments: c.attachments,
-        prompt: await o.build({ ...ctx, notes: c.notes, repoNotes: c.repoNotes, continued: { changed: c.changed, knowsPlan: c.knowsPlan } }),
+        prompt: await o.build({
+          ...ctx, notes: c.notes, repoNotes: c.repoNotes,
+          continued: { changed: c.changed, knowsPlan: c.knowsPlan, knowsAnswer: c.knowsAnswer, ...(c.from ? { from: c.from } : {}) },
+        }),
       }
       : undefined;
     const res = await this.runner.call({
@@ -639,7 +652,9 @@ export class Workflow {
   private afterTurn<T>(o: AgentTurn<T>, res: AgentResult, turn: Turn, tree: string): void {
     const notes = acceptRepoNotes((res.data as { repo_notes?: RepoNoteOutput[] }).repo_notes, this.o.repo);
     addRepoNotes(this.state, { role: o.agentRole, backend: res.backend, round: o.round, tree }, notes);
-    rememberSession(this.state, o.agentRole, res, turn, { tree, planHash: o.plan.after(res.data as T), reviewed: o.reviewed });
+    rememberSession(this.state, o.agentRole, res, turn, {
+      tree, planHash: o.plan.after(res.data as T), reviewed: o.reviewed, answer: o.answer?.of(res.data as T) ?? null,
+    });
   }
 
   /** Planner, plan critic, plan sign-off and code reviewer. Files they change are reported, never blocked. */
@@ -788,6 +803,7 @@ export class Workflow {
       check: (c) => [...consistentStatus(c), ...issueRefusalErrors(c)],
       build: (ctx) => prompts.planReviewer(ctx, r, v, planMd, previous, (st.accepted?.scope ?? []).filter((i) => i.kind === "suggestion")),
       plan: { about: null, after: () => st.planHash },
+      answer: { previous: previous ? answerKey(previous) : null, of: (c) => answerKey(c) },
     });
     if (!res) return;
     const critique = res.data as Critique;
@@ -869,6 +885,23 @@ export class Workflow {
       st.planFeedback = { critique, approval };
       this.nextPlanningRound();
     }
+  }
+
+  /**
+   * How the final plan became final, for an implementer that goes on in the plan critic's session: the sign-off of
+   * the round it was frozen in, or the human operator's acceptance (freezePlan's header says so), and what the user
+   * accepted about its contract.
+   */
+  private planHandoff(finalMd: string): prompts.PlanHandoff {
+    const st = this.state;
+    const { store } = this.o;
+    const name = `approval.r${st.planningRound}.json`;
+    const approval = store.exists(name) ? store.readJson<{ output: Approval | null }>(name).output : null;
+    const byHuman = /^<!-- final plan [^\n]*accepted by the human operator/.test(finalMd);
+    return {
+      version: st.finalPlanVersion, byHuman, signOff: !byHuman && approval?.approved ? approval.summary : null,
+      ...(st.accepted ? { accepted: { conflicts: st.accepted.conflicts, scope: st.accepted.scope ?? [] } } : {}),
+    };
   }
 
   private nextPlanningRound(): void {
@@ -1101,10 +1134,16 @@ export class Workflow {
     const planMd = store.readText("plan.final.md");
     const check = (rep: Implementation) =>
       rep.status === "blocked" && !(rep.blocking_reason ?? "").trim() ? ["status is 'blocked' but blocking_reason is empty"] : [];
+    const lastReport = st.lastImplementation;
     const turnSpec: AgentTurn<Implementation> = {
       role: "implementer", agentRole: "implementer", label: "implement", schemaName: "implementation", round: k, check,
-      build: (ctx) => prompts.implementer(ctx, k, planMd, findings, failed, { summary: st.lastImplementation?.summary ?? null, rerun }),
+      build: (ctx) => prompts.implementer(ctx, k, planMd, findings, failed, { summary: lastReport?.summary ?? null, rerun },
+        ctx.continued?.from === "plan_reviewer" ? this.planHandoff(planMd) : null),
       plan: { about: st.finalPlanHash, after: () => st.finalPlanHash, file: store.path("plan.final.md") },
+      answer: {
+        previous: lastReport?.summary ? answerKey({ round: lastReport.round, summary: lastReport.summary }) : null,
+        of: (rep) => answerKey({ round: k, summary: rep.summary }),
+      },
     };
     // The notes this attempt is given: one added while it runs reaches only the next.
     const notesGiven = st.humanNotes.length;

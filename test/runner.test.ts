@@ -333,6 +333,64 @@ describe("AgentRunner sessions", () => {
     expect(retry).toMatchObject({ attempt: 2, reason: expect.stringContaining("the continued session's answer was rejected (output failed validation:\n- acceptance criterion 'AC1'") });
   });
 
+  const turn = (r: AgentRunner, backend: "codex" | "claude", logPrefix: string, o: { attachments?: Attachment[]; session?: CallSession } = {}) =>
+    r.call({ mode: "text", backend, prompt: "[agentduo-conversation]\nWHOLE", logPrefix, conversationId: "c1", turnId: `c1-${logPrefix}`, ...o });
+
+  it("keeps a conversation turn's session and continues it with only the new prompt and its files", async () => {
+    fake.setScenario({ chat: [{ answer: "first" }, { answer: "second" }] });
+    const r = runner();
+    const { shot } = attached();
+    for (const backend of ["codex", "claude"] as const) {
+      const first = await turn(r, backend, `001-${backend}`, { session: { keep: true } });
+      expect(first, backend).toMatchObject({ ok: true, resumed: false, sessionId: fake.calls(`chat_${backend}`)[0]!.session });
+      expect(fake.calls(`chat_${backend}`)[0]!.args, backend).not.toContain(backend === "codex" ? "--ephemeral" : "--no-session-persistence");
+      const second = await turn(r, backend, `002-${backend}`, {
+        attachments: [shot], session: { keep: true, resume: { id: first.sessionId!, prompt: "[agentduo-conversation]\nNEW ONLY", attachments: [shot] } },
+      });
+      expect(second, backend).toMatchObject({ ok: true, resumed: true, attempts: 1, calls: 1, sessionId: first.sessionId });
+      const continued = fake.calls(`chat_${backend}`)[1]!;
+      expect([continued.resumed, continued.prompt, continued.images?.length], backend).toEqual([first.sessionId, "[agentduo-conversation]\nNEW ONLY", 1]);
+    }
+    expect(events.filter((e) => e.type === "warning")).toEqual([]);
+  });
+
+  it("asks a conversation turn whose session is lost again in a new one, with the whole prompt and its files, and says so", async () => {
+    fake.setScenario({ sessions: { lost: true }, chat: [{ answer: "fresh" }] });
+    const r = runner();
+    const { shot } = attached();
+    for (const backend of ["codex", "claude"] as const) {
+      const res = await turn(r, backend, `001-${backend}`, {
+        attachments: [shot], session: { keep: true, resume: { id: `gone-${backend}`, prompt: "[agentduo-conversation]\nNEW ONLY", attachments: [] } },
+      });
+      expect(res, backend).toMatchObject({ ok: true, resumed: false, attempts: 2, data: "fresh" });
+      const [lost, fresh] = fake.calls(`chat_${backend}`);
+      expect([lost!.resumed, lost!.lost], backend).toEqual([`gone-${backend}`, true]);
+      expect([fresh!.resumed, fresh!.prompt, fresh!.images?.length], backend).toEqual([undefined, "[agentduo-conversation]\nWHOLE", 1]);
+      expect(res.sessionId, backend).toBe(fresh!.session);
+    }
+    // A conversation turn has no retries to show: a warning says why it takes a second call.
+    expect(events.filter((e) => e.type === "agent.retry")).toEqual([]);
+    expect(events.flatMap((e) => (e.type === "warning" ? [e.text] : []))).toEqual([
+      expect.stringMatching(/^Codex could not answer in this conversation's session \(codex exited with code 1: Error: thread\/resume.*\), so it is asked again in a new one, with the whole conversation\.$/),
+      expect.stringMatching(/^Claude could not answer in this conversation's session \(.*No conversation found with session ID: gone-claude.*\), so it is asked again in a new one, with the whole conversation\.$/),
+    ]);
+  });
+
+  it("ends a continued conversation turn that timed out or went silent: a CLI that hangs is no lost session, and a new one would wait again", async () => {
+    for (const limit of ["agent_timeout_sec", "agent_idle_timeout_sec"] as const) {
+      fake.restore();
+      fake = new FakeClis(join(t.path, limit)).install();
+      fake.setScenario({ chat_codex: [{ answer: "one" }, { sleep: 5_000, answer: "slow" }] });
+      const r = runner({ limits: { [limit]: 1 } });
+      const first = await turn(r, "codex", `001-${limit}`, { session: { keep: true } });
+      const started = Date.now();
+      const res = await turn(r, "codex", `002-${limit}`, { session: { keep: true, resume: { id: first.sessionId!, prompt: "[agentduo-conversation]\nNEW ONLY" } } });
+      expect(res, limit).toMatchObject({ ok: false, attempts: 1, calls: 1, error: expect.stringMatching(/timed out|no output/) });
+      expect(Date.now() - started, limit).toBeLessThan(4_000);
+      expect(fake.calls("chat_codex"), limit).toHaveLength(2);
+    }
+  });
+
   it("keeps each conversation turn's session off disk", async () => {
     const r = runner();
     for (const backend of ["codex", "claude"] as const) {

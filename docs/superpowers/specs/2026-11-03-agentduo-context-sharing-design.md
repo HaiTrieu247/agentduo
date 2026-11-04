@@ -25,7 +25,8 @@ Every pipeline call was a CLI process with a session of its own that was never k
 - Stay accurate when files change: tell an agent what changed, and drop shared facts about changed files.
 - Stay compatible. Same phases, artifacts and decisions; older runs and saved configs keep working. A lost session
   costs one cheap failed call, never a failed step.
-- Not in scope: chat and `/discuss` turns (they still start fresh), and sharing a session between roles.
+- Sessions shared between roles: only the plan critic's and the implementer's, when one CLI plays both (amendment
+  below). Chat and `/discuss` continuation is described in its own amendment.
 
 ## Two mechanisms
 
@@ -44,7 +45,8 @@ that session has been told about the run:
 | `reviewed` | code reviewer: the revision it last reviewed |
 
 The key is the config role, so plan sign-off (config role `planner`) continues the planner's session. It is the planner
-signing off its own plan. No session ever goes from one role to another.
+signing off its own plan. The one exception is the plan critic and the implementer on one CLI, who share a slot (see
+the amendment "the plan critic's and the implementer's session"); no other session goes from one role to another.
 
 A role's next call (`planTurn` in `src/core/context.ts`) continues that session when all of these hold:
 
@@ -178,3 +180,102 @@ cursor is set after the turn's own notes are added, so an agent is never sent ba
   - sessions turned off by args;
   - `duo resume` continuing saved sessions, and starting fresh on a new CLI;
   - notes across roles, with independence and invalidation.
+
+## Amendment: the plan critic's and the implementer's session (2026-11-04)
+
+**What.** When one CLI plays both the plan critic and the implementer (the default: Claude), they continue one session
+through the run: the critic's rounds, then every implementation round, fix rounds included. The implementer starts from
+what the critic read in the repository and judged about the plan, instead of exploring it again. This is wanted: the
+judging roles that must stay independent are the code reviewer (of the implementer's work) and the plan critic (of the
+planner's notes), and both still are. The planner (with its sign-off) and the code reviewer keep their own sessions,
+exactly as before, and chat and `/discuss` keep theirs.
+
+**Slot.** `sessionSlot(role, agents, keeps)` (`src/core/context.ts`) gives a call its slot in `state.sessions`:
+
+- none, when the user's args or the role's `role_args` turn its sessions off: the role runs on its own, continues no
+  session and records none, and leaves the shared one as it was for the other role;
+- `plan_reviewer+implementer` (`SHARED_SESSION`), for those two roles when `agents.plan_reviewer` and
+  `agents.implementer` are the same CLI;
+- otherwise the role itself. On two CLIs each keeps its own, and no session id ever goes to the other CLI.
+
+The slot is decided per call from the configuration as it is then, so `--reload-config` can move a run between them.
+
+**Record.** The shared slot's `RoleSession` has three more fields; a role's own record has none of them, so planner and
+code reviewer records are unchanged:
+
+| Field | Meaning |
+|---|---|
+| `role` | the role of its last turn: the other role's next turn switches roles |
+| `answers` | a key (sha256 of the answer, cut short) of each role's latest answer the session holds |
+| `withheld` | repository notes up to its `repoNotes` cursor that it was not given, because a turn's role may not see their author's (the critic never gets the planner's) |
+
+A turn that went on in the session it continued (`AgentResult.resumed`) adds to that record: its answer key, and the
+notes it still was not given. A fresh session (the first turn, or the runner's fallback after a lost one) starts the
+record over with the cursors of that fresh turn. A call whose CLI named no session removes the shared record. Only a
+successful turn records anything, as before.
+
+**Switching roles.** Every cursor counts from the session's last turn, whichever role took it: the files changed since
+its tree, the human notes since its `notes`, the repository notes newer than its cursor plus the `withheld` ones the
+new role may see (so the implementer gets the planner's notes the critic was never given, and not the critic's own),
+and the plan by `planHash`. The prompt keeps the role's whole instructions and output rules (the CLI also gets the
+role's schema, model, effort and `role_args` on every call), and opens by saying the session's earlier turns were as
+the other role and that its instructions no longer apply. An implementer that goes on in the critic's session also
+gets:
+
+- the final approved plan, whole, even when it is the version the critic reviewed last: it is the implementer's
+  contract, with its scope and acceptance criteria. When it changed after the critic's last turn there (a revision the
+  critic saw elsewhere, or not at all), it is marked "new since your last turn";
+- what was decided since: the planner's sign-off (its summary), or the human operator's acceptance of the plan as it
+  was (the header `freezePlan` writes), or the critic's own approval when there was no sign-off round; the
+  contradictions and scope suggestions the user accepted; and that the critiques' remaining suggestions are not
+  instructions.
+
+A role's own previous answer (the critic's last critique, the implementer's last report or earlier attempt) is pointed
+to only when `answers` says the session holds it, and given in full otherwise, for example after that role ran on its
+own for a while. A role's own record, or one from an older run, always holds it, as before.
+
+**Older runs.** A run saved with a session per role keeps working. With no shared record, a role of the pair continues
+only its own old session, with that session's own cursors; the other role's id is never taken with this role's cursors,
+or the reverse. Its notes withheld are derived from the rule the old session followed (the critic's never had the
+planner's). Once a turn of it succeeds, it becomes the shared record and the role's own key goes; the other role's old
+key stays unused until a configuration on two CLIs needs it again.
+
+**Fallback and checks.** A lost session falls back to a fresh call with the whole prompt, outside the retry budget, as
+for every role. Scope, acceptance, budget, findings, convergence and final verification read the run's state and
+artifacts, never the session, so they work as before.
+
+**Not verified with the real CLIs.** The tests run the fake CLIs. Continuing one session under another schema, model,
+effort or permission flags is what each call already does on resume (2026-11-03 table above), but a session that changes
+role, schema and model between turns has not been run against real Claude Code or Codex.
+
+**Tests.** `test/context.test.ts` (slot, switch cursors, withheld notes, fresh records, roles on their own, older runs),
+`test/prompts.test.ts` (the switch header, the handoff, own answers given again only when missing), and
+`test/workflow.test.ts` through `fake-agent.mjs`: critique, implementation and fix rounds in one session; a plan revised
+after the critic's last turn there; a resumed run, an older run with a session per role, a lost session; two CLIs;
+roles with models, efforts and flags of their own; an implementer with sessions off; the planner and the code reviewer as
+before.
+
+## Amendment: conversation sessions (2026-11-04)
+
+A conversation keeps one CLI session per backend, shared by ordinary chat and all `/discuss` steps (including
+Codex synthesis). `conversation.json` stores each session id and its cursors for completed exchanges, earlier pipeline
+tasks, and messages in the active discussion. Older records without sessions start fresh. Reopening the same
+conversation restores its sessions; `/new` and separate tabs use separate conversations and sessions.
+
+A continued call carries its current instructions and question, plus only exchanges, tasks and discussion messages
+not yet seen by that session. When those unseen exchanges do not fit the context budget, the oldest go first and the
+prompt says how many of them it leaves out (exchanges the session saw are not counted). The synthesis instructions
+still derive their verdict and version from the complete discussion. The full prompt stays available as fallback; an
+unsuccessful continued call gets one fresh attempt, without structured-output instructions, and a warning says so,
+since a text turn shows no retries. A continued call that timed out or went silent gets none: a hung CLI has not lost
+its session, and a second attempt would double the wait. A finalized discussion is relayed as a summary exchange on
+the next call. Attachments of the current question are still passed to each discussion step.
+
+Only successful calls commit a session and its cursors. A call takes its backend's session off the record while it
+runs, so a process killed mid-call leaves no session that holds a turn the conversation never recorded. Failure or
+interruption clears that backend's session so partial work is not resumed as completed conversation context. A
+discussion that ends without an answer (stopped, or a step failed) also clears the session of every agent whose last
+turn was in it: none of it joins the conversation, so no session holding its steps is continued. Explicit
+non-persistence flags in backend `args` disable reuse and clear the old session after the call. Model, effort and
+permission settings continue to be read on every invocation. Pipeline session ownership and isolation remain
+unchanged.

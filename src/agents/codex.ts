@@ -116,8 +116,8 @@ export class CodexBackend implements AgentBackend {
     return found;
   }
 
-  keepsSessions(role: AgentRole): boolean {
-    return ![...this.cfg.args, ...(this.cfg.role_args[role] ?? [])].includes(CODEX_EPHEMERAL);
+  keepsSessions(role?: AgentRole): boolean {
+    return ![...this.cfg.args, ...(role ? this.cfg.role_args[role] ?? [] : [])].includes(CODEX_EPHEMERAL);
   }
 
   /**
@@ -131,7 +131,7 @@ export class CodexBackend implements AgentBackend {
    */
   buildArgs(a: BuildArgs): string[] {
     const text = a.mode === "text";
-    const session = text ? undefined : a.session;
+    const session = a.session;
     const roleArgs = text ? [] : this.cfg.role_args[a.role] ?? [];
     // A pipeline role's own model and reasoning effort; the effort goes after the args every call gets, so it wins.
     const model = text ? this.cfg.model : roleModel(this.cfg, a.role);

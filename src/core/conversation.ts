@@ -22,6 +22,8 @@ export interface Turn {
   discussion?: DiscussionPlace;
   /** The files the question came with; every step of a discussion gets its question's. */
   attachments?: Attachment[];
+  /** Prompt containing only context not already in this backend's session. */
+  continuation?: string;
 }
 
 /** A /discuss under way: who answers and who reviews, the conversation as it stood when it began, and what was said. */
@@ -34,6 +36,13 @@ export interface Discussion {
   context: ConversationContext;
   messages: prompts.DiscussionMessage[];
   attachments: Attachment[];
+}
+
+interface ConversationSession {
+  id: string;
+  exchanges: number;
+  earlier: number;
+  discussion?: { id: string; messages: number };
 }
 
 /** What a conversation keeps on disk to go on after a restart: what later prompts carry, and how to show it in a list. */
@@ -49,6 +58,7 @@ export interface ConversationRecord {
   turns: number;
   exchanges: Exchange[];
   earlier: EarlierTask[];
+  sessions?: Partial<Record<Backend, ConversationSession>>;
 }
 
 export type ConversationSummary = Pick<ConversationRecord, "id" | "title" | "createdAt" | "updatedAt">;
@@ -92,6 +102,7 @@ export class Conversation {
   private readonly exchanges: Exchange[] = [];
   private readonly discussions = new Map<string, Discussion>();
   private discussed = 0;
+  private sessions: Partial<Record<Backend, ConversationSession>> = {};
   /** Turns started before this process: the logs of a reopened conversation number on from them. */
   private before = 0;
   private name = "";
@@ -127,6 +138,7 @@ export class Conversation {
     c.createdAt = r.createdAt;
     c.exchanges.push(...r.exchanges);
     c.done.push(...r.earlier);
+    c.sessions = r.sessions ?? {};
     return c;
   }
 
@@ -164,11 +176,43 @@ export class Conversation {
     if (!this.name && !this.exchanges.length && !this.done.length) return;
     const record: ConversationRecord = {
       version: 1, id: this.id, title: this.name, createdAt: this.createdAt, updatedAt: this.clock().toISOString(), recipient: this.to,
-      turns: this.before + this.turns.length, exchanges: this.exchanges, earlier: this.done,
+      turns: this.before + this.turns.length, exchanges: this.exchanges, earlier: this.done, sessions: this.sessions,
     };
     ensureRunsDir(this.runsDir);
     mkdirSync(this.dir, { recursive: true });
     atomicWrite(join(this.dir, RECORD), `${JSON.stringify(record, null, 2)}\n`);
+  }
+
+  /**
+   * The session `backend`'s call continues, taken off the record until keepSession says what the call ended with: a
+   * process killed meanwhile leaves no session behind that holds a turn the conversation never recorded.
+   */
+  takeSession(backend: Backend): string | undefined {
+    const id = this.sessions[backend]?.id;
+    if (id) {
+      delete this.sessions[backend];
+      this.save();
+    }
+    return id;
+  }
+
+  /** Commit only successful calls; failed or interrupted sessions may contain unseen partial work. */
+  keepSession(turn: Turn, id: string | null, earlier: number): void {
+    if (!id) delete this.sessions[turn.backend];
+    else {
+      const d = turn.discussion && this.discussions.get(turn.discussion.id);
+      this.sessions[turn.backend] = {
+        id, exchanges: this.exchanges.length, earlier,
+        ...(d ? { discussion: { id: d.id, messages: d.messages.length } } : {}),
+      };
+    }
+    this.save();
+  }
+
+  /** The exchanges `session` has not seen, within the budget; omitted counts those it never saw that do not fit. */
+  private newContext(session: ConversationSession): ConversationContext {
+    const context = this.context();
+    return { exchanges: this.exchanges.slice(Math.max(session.exchanges, context.omitted)), omitted: Math.max(0, context.omitted - session.exchanges) };
   }
 
   get logDir(): string {
@@ -269,6 +313,10 @@ export class Conversation {
     mkdirSync(this.logDir, { recursive: true });
     this.save();
     const prompt = prompts.conversation({ workspace, backend, context, earlier, question, attachments, locate: this.locate });
+    const session = this.sessions[backend];
+    if (session) turn.continuation = prompts.conversation({
+      workspace, backend, context: this.newContext(session), earlier: earlier.slice(session.earlier), question, attachments, locate: this.locate,
+    });
     return { turn, prompt, omitted: context.omitted };
   }
 
@@ -288,7 +336,7 @@ export class Conversation {
 
   /** Starts a /discuss: every step sees the conversation as it is now, within the budget. */
   beginDiscussion(answerer: Backend, critic: Backend, question: string, maxRounds: number, attachments: Attachment[] = []): Discussion {
-    const d: Discussion = { id: `${this.id}-d${++this.discussed}`, answerer, critic, question, maxRounds, context: this.context(), messages: [], attachments };
+    const d: Discussion = { id: `${this.id}-d${this.before + this.turns.length}-${++this.discussed}`, answerer, critic, question, maxRounds, context: this.context(), messages: [], attachments };
     this.discussions.set(d.id, d);
     return d;
   }
@@ -312,6 +360,13 @@ export class Conversation {
       workspace, context: d.context, earlier, question: d.question, answerer: d.answerer, critic: d.critic, maxRounds: d.maxRounds, step, round, history: d.messages,
       attachments: d.attachments, locate: this.locate,
     });
+    const session = this.sessions[backend];
+    if (session) turn.continuation = prompts.discussion({
+      workspace, context: this.newContext(session), earlier: earlier.slice(session.earlier), question: d.question,
+      answerer: d.answerer, critic: d.critic, maxRounds: d.maxRounds, step, round, history: d.messages,
+      historyStart: session.discussion?.id === d.id ? session.discussion.messages : 0,
+      attachments: d.attachments, locate: this.locate,
+    });
     return { turn, prompt };
   }
 
@@ -323,7 +378,12 @@ export class Conversation {
     const d = this.discussions.get(id);
     if (!d) return;
     this.discussions.delete(id);
-    if (answer === null) return;
+    if (answer === null) {
+      // Nothing of it joins the conversation, so no session that took part in it is continued.
+      for (const party of [d.answerer, d.critic]) if (this.sessions[party]?.discussion?.id === id) delete this.sessions[party];
+      this.save();
+      return;
+    }
     const by = backend ?? d.answerer;
     this.exchanges.push({
       backend: by, question: d.question, answer, discussedWith: by === d.answerer ? d.critic : d.answerer, ...(d.attachments.length ? { attachments: d.attachments } : {}),
