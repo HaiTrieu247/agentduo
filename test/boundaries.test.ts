@@ -1,6 +1,7 @@
 // The repository's layout as a contract: which package may import which, and how. A package names another by its
 // package name (@agentduo/engine/…), never by a relative path out of its own folder; the engine imports no other
 // package; the host no webview; the CLI only the engine; and no app imports another app.
+import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -41,6 +42,15 @@ describe("the repository's packages", () => {
   it("are the root's workspaces, apart from the desktop app, which has its own lockfile", () => {
     expect(json("package.json").workspaces).toEqual(PACKAGES.filter((p) => p.dir !== "apps/desktop").map((p) => p.dir));
     for (const p of PACKAGES) expect(json(`${p.dir}/package.json`).name, p.dir).toBe(p.name);
+  });
+
+  it("refuse `npm publish` at the root, naming the command that publishes the CLI", () => {
+    const pkg = json("package.json");
+    expect(pkg.private).toBe(true);
+    expect(pkg.scripts.prepublishOnly).toBe("node scripts/publish-guard.mjs");
+    const guard = spawnSync(process.execPath, [join(root, "scripts", "publish-guard.mjs")], { encoding: "utf8" });
+    expect(guard.status).toBe(1);
+    expect(guard.stderr).toContain("npm publish -w agentduo");
   });
 
   for (const p of PACKAGES) {

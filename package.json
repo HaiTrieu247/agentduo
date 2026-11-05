@@ -33,6 +33,7 @@
     "test:pack:vscode": "npm run test:pack -w agentduo-vscode",
     "smoke:real": "npm run smoke:real -w agentduo",
     "demo:ui": "npm run demo:ui -w agentduo",
+    "prepublishOnly": "node scripts/publish-guard.mjs",
     "version": "node scripts/sync-versions.mjs && git add package-lock.json apps/cli/package.json apps/vscode/package.json apps/desktop/package.json apps/desktop/package-lock.json packages/engine/package.json packages/host/package.json packages/webview/package.json"
   },
   "devDependencies": {

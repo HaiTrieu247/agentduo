@@ -46,7 +46,9 @@ extension's tests lost their `vscode-` prefix in their new packages.
   dependencies; `@agentduo/*` are devDependencies bundled by tsup (`noExternal`). The build copies the schemas beside
   `package.json`; `prepack` copies the repository's README (its links are relative to the repository root, so the
   package's `repository` names no directory), `docs/README.vi.md` and the licence. These copies are ignored by git.
-  `npm run test:pack` checks the tarball as before; publish with `npm publish -w agentduo`.
+  `npm run test:pack` checks the tarball as before; publish with `npm publish -w agentduo`. A plain `npm publish` at
+  the root would publish the whole repository; the root is private, and its `prepublishOnly`
+  (`scripts/publish-guard.mjs`) stops first and names each package's way to publish.
 - **`packageRoot()`** accepts `@agentduo/engine` as well as `agentduo`: from the engine's sources (the tests) the
   nearest package is the engine's, whose `schemas/` sits beside its `package.json`. Bundles still find the
   `agentduo` package.json their build writes (the CLI's, the extension's and the desktop's `runtime/`).
