@@ -298,15 +298,15 @@ Outside the chat, `duo --accept-edits "<task>"` does what `/mode acceptEdits` do
 
 ## VS Code extension
 
-`extensions/vscode` holds the same chat as a VS Code sidebar. It has a timeline of both agents, the HUMAN_REVIEW and
+`apps/vscode` holds the same chat as a VS Code sidebar. It has a timeline of both agents, the HUMAN_REVIEW and
 permission prompts above the composer, and buttons that open the plan, review and report, plus the run's changes in
 the diff editor. Its Activity Bar view shows both agents' accounts and limits (**Account & Usage**) above the
 workspace's conversations. It runs this package's engine with your Node (≥ 22.12) and shares the configuration, runs and lock with
 `duo`, so a run started in one can be resumed in the other. With no folder open, it works in your home folder, as `duo`
 started there does. Install it from the Marketplace
 (`HaiTrieuThinh.agentduo-vscode`), or build a VSIX with `npm run package:vscode` and install it with
-`code --install-extension extensions/vscode/agentduo-vscode-*.vsix`.
-See [extensions/vscode/README.md](extensions/vscode/README.md) for requirements, usage and current limits.
+`code --install-extension apps/vscode/agentduo-vscode-*.vsix`.
+See [apps/vscode/README.md](apps/vscode/README.md) for requirements, usage and current limits.
 
 ## Desktop app
 
@@ -632,21 +632,34 @@ The runs directory carries its own `.gitignore`, so run data stays out of `git s
 
 ## Development
 
+The repository is an npm workspace:
+
+| Folder | What it is |
+| --- | --- |
+| `apps/cli` | `duo`, published to npm as `agentduo` |
+| `apps/vscode` | the VS Code extension |
+| `apps/desktop` | the desktop app (its own lockfile, outside the workspace) |
+| `packages/engine` | the engine every app runs: pipeline, agents, chat, config (`@agentduo/engine`) |
+| `packages/host` | what the extension and the desktop app share: the worker, its protocol and the view state (`@agentduo/host`) |
+| `packages/webview` | the chat's page, drawn by the extension's webviews and the desktop window (`@agentduo/webview`) |
+| `website` | the website |
+
 ```bash
 npm install
-npm test             # unit + end-to-end (fake agents) + UI tests
-npm run typecheck
+npm test             # unit + end-to-end (fake agents) + UI tests, every package
+npm run typecheck    # every package
 npm run test:pack    # build, pack, install into a temp prefix, run the binaries
 npm run demo:ui      # watch the live UI with scripted fake agents (free)
 npm run smoke:real   # REAL agents on a demo repo — costs money
 
 npm run typecheck:vscode   # the VS Code extension (F5 in VS Code runs it in a development host)
-npm run build:vscode       # extensions/vscode/dist (host, webview) and runtime/ (engine worker + schemas)
+npm run build:vscode       # apps/vscode/dist (host, webview) and runtime/ (engine worker + schemas)
 npm run test:vscode        # smoke test in a downloaded VS Code; on Linux run it under xvfb-run
-npm run package:vscode     # extensions/vscode/agentduo-vscode-<version>.vsix (local, not published)
+npm run package:vscode     # apps/vscode/agentduo-vscode-<version>.vsix (local, not published)
 npm run test:pack:vscode   # package, check the VSIX contents, run its worker outside the checkout
 
-npm version patch          # bump the root, extension and desktop versions, commit and tag (publishes nothing)
+npm version patch          # bump every package's version, commit and tag (publishes nothing)
+npm publish -w agentduo    # publish the CLI (its README is this one, copied in by prepack)
 ```
 
 The extension's design notes are in `docs/superpowers/specs/2026-10-28-agentduo-vscode-design.md`.

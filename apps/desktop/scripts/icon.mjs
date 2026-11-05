@@ -1,6 +1,6 @@
 // Renders the app icon's source (resources/icon.svg) into resources/icon.png, 1024×1024, from which electron-builder
 // makes every platform's icon (icns, ico, Linux PNGs), and into the VS Code extension's Marketplace icon
-// (extensions/vscode/media/icon.png, 256×256). It draws with the Chromium of apps/desktop's Electron, so it needs no
+// (apps/vscode/media/icon.png, 256×256). It draws with the Chromium of apps/desktop's Electron, so it needs no
 // image tool. Run it after changing icon.svg, and commit the SVG and both PNGs.
 //   node scripts/icon.mjs [<svg> <png> [<size>]]
 import { spawnSync } from "node:child_process";
@@ -15,7 +15,7 @@ const args = process.argv.slice(2);
 /** [svg, png, size] triples: the one asked for, or both icons made from the app's SVG. */
 const jobs = args.length
   ? [[args[0], args[1], args[2] ?? "1024"]]
-  : [[source, join(desktop, "resources", "icon.png"), "1024"], [source, join(desktop, "..", "..", "extensions", "vscode", "media", "icon.png"), "256"]];
+  : [[source, join(desktop, "resources", "icon.png"), "1024"], [source, join(desktop, "..", "vscode", "media", "icon.png"), "256"]];
 
 if (!process.versions.electron) {
   const electron = createRequire(join(desktop, "package.json"))("electron");

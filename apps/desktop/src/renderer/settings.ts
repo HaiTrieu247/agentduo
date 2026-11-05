@@ -3,15 +3,15 @@ import { CONVERSATIONS_PROJECT_ID } from "../shared/protocol.js";
 // configuration by layer (user config, the project's file, this session) with where each value comes from and when
 // a change applies, where data lives (read-only), diagnostics, and what the app is (About). Every change goes through main, which uses the
 // same configuration code as the CLI; nothing here writes a file.
-import type { ConfigEntry, ConfigurationView } from "../../../../src/core/configuration.js";
-import { CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS, type ModelChoice } from "../../../../src/core/commands.js";
+import type { ConfigEntry, ConfigurationView } from "@agentduo/engine/config/configuration";
+import { CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS, type ModelChoice } from "@agentduo/engine/chat/commands";
 import type { AppSnapshot, CliStatus, ConfigScope, LauncherInfo, LinkName, Preferences, UpdateState } from "../shared/protocol.js";
 import { busy, button, call, el, errorText, icon, meter } from "./bridge.js";
 import { FONT_RANGE } from "./theme.js";
 import { commitOnChange, optionsEditor } from "./argumentOptions.js";
-import { limitRows, updatedText, type AccountRow } from "../../../../extensions/vscode/webview/account.js";
-import { providerMark } from "../../../../extensions/vscode/webview/dom.js";
-import type { UsageState } from "../../../../src/core/usage.js";
+import { limitRows, updatedText, type AccountRow } from "@agentduo/webview/account";
+import { providerMark } from "@agentduo/webview/dom";
+import type { UsageState } from "@agentduo/engine/system/usage";
 import { updateAction, updateLine } from "./update.js";
 import { USAGE_PERIOD_MS, USAGE_STALE_MS, type UsageStore } from "./usage.js";
 

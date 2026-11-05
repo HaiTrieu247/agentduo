@@ -19,7 +19,7 @@ works without JavaScript.
 
 ## Identity
 
-- The AgentDuo loop logo and app icon, taken from `extensions/vscode/media` and `apps/desktop/resources`.
+- The AgentDuo loop logo and app icon, taken from `apps/vscode/media` and `apps/desktop/resources`.
 - Two accents, one per agent: teal for Codex, orange for Claude Code, used in the workflow figure, role tables and the
   focus ring. Text and links use darker or lighter variants chosen for contrast (≥ 4.5:1 for body text in both themes).
 - Cool ink neutrals, so the two agent colours are the only hues. Light: background `#f3f5f8`, surface `#ffffff`, text

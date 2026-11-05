@@ -1,7 +1,7 @@
 // The right column: the active conversation's run, read through main by name (never a path). Plan and Report are
 // its artifacts; Changes lists what the run changed and shows one file's line diff between the two snapshots that
 // list named (so it keeps showing those after the run takes a newer one); Checks shows the run and its gates.
-import type { ViewState } from "../../../../extensions/vscode/webview/state.js";
+import type { ViewState } from "@agentduo/host/viewState";
 import type { ArtifactName, ChangeFile, ChangeListView } from "../shared/protocol.js";
 import { button, call, el, errorText, icon } from "./bridge.js";
 import { diffStats, lineDiff } from "./diff.js";

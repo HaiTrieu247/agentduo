@@ -1,4 +1,4 @@
-import { CLAUDE_EFFORTS, CODEX_EFFORTS, MODE_INFO, PERMISSION_MODES } from "../../../../src/core/commands.js";
+import { CLAUDE_EFFORTS, CODEX_EFFORTS, MODE_INFO, PERMISSION_MODES } from "@agentduo/engine/chat/commands";
 import { button, el, errorText, icon } from "./bridge.js";
 
 /** A CLI option Settings offers by name: the flags it is written with, and what its value takes. */

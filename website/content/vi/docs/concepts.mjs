@@ -25,7 +25,7 @@ ${p("Với mỗi lần gọi, AgentDuo chỉ truyền các cờ mà giao thức 
           ["Code reviewer", c("agents.code_reviewer"), "Codex", "một bản review: chấp thuận, hoặc các phát hiện theo mức độ"],
         ],
       })}
-${p("Mỗi câu trả lời là JSON phải khớp một schema nghiêm ngặt (thư mục " + c("schemas/") + " của repository). Lần gọi thất bại, hoặc có câu trả lời không khớp, sẽ được thử lại kèm lý do, tối đa thêm " + c("limits.max_retries") + " lần (mặc định là 1).")}`,
+${p("Mỗi câu trả lời là JSON phải khớp một schema nghiêm ngặt (thư mục " + c("packages/engine/schemas/") + " của repository). Lần gọi thất bại, hoặc có câu trả lời không khớp, sẽ được thử lại kèm lý do, tối đa thêm " + c("limits.max_retries") + " lần (mặc định là 1).")}`,
     },
     {
       id: "workspace",

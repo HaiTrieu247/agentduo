@@ -3,7 +3,7 @@
 // the ASAR archive (resources/runtime), where packageRoot() finds them as in the npm package and the VSIX.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { MIN_NODE, nodeVersionOk, type NodeLookup } from "../../../../extensions/vscode/src/workerClient.js";
+import { MIN_NODE, nodeVersionOk, type NodeLookup } from "@agentduo/host/workerClient";
 
 export function runtimeDir(o: { packaged: boolean; resourcesPath: string; appPath: string }): string {
   return o.packaged ? join(o.resourcesPath, "runtime") : join(o.appPath, "dist", "runtime");

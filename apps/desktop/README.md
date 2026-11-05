@@ -2,7 +2,7 @@
 
 AgentDuo is agentduo in a window of its own, on macOS, Windows and Linux: Codex plans and reviews, Claude Code
 critiques and implements, and you talk to both. It is the same engine as the `duo` CLI and the VS Code extension (the
-worker, `RuntimeSession`, the protocol and the chat UI), hosted by Electron.
+worker, `RuntimeSession` and the protocol from `packages/host`, the chat's page from `packages/webview`), hosted by Electron.
 
 - **Sidebar**: Conversations for chats without a project, your projects and each project's conversations (open, waiting for you), plus runs you can resume. A project or conversation where an agent is working (a chat answer, a discussion, a pipeline) has a slowly pulsing dot; the others have none. At the bottom, above Settings, a compact **Account & Usage** box shows each agent's email and its limits (a percent and a thin meter each; the plan and when a limit resets are in tooltips). Click its title to fold it; it stays folded. Above it, a button appears when a new version of the app needs you: *Restart to update*, or *Get AgentDuo x.y.z* where this build cannot install it ([Updates](#updates)). Drag its right edge to make it wider or narrower (180–480 px; the chat keeps at least 360 px), or focus the edge and use ←/→ (Shift for bigger steps), Home and End; double-click it to go back to 248 px. The width is saved with the app's preferences.
 - **Chat**: the three-way conversation User–Claude–Codex, with who is working, in which role and round, and what tools run.
@@ -49,7 +49,7 @@ on the package instead of the build output.
 The app icon's source is `resources/icon.svg`, drawn on the macOS icon grid (an 824 px rounded square in a 1024 px
 canvas). `node scripts/icon.mjs` renders it into `resources/icon.png` (1024 px) with the desktop's own Electron, so it
 needs no image tool, and electron-builder makes the icns, ico and Linux icons from that PNG. The same run renders the
-VS Code extension's Marketplace icon (`extensions/vscode/media/icon.png`, 256 px); the extension's small marks
+VS Code extension's Marketplace icon (`apps/vscode/media/icon.png`, 256 px); the extension's small marks
 (`media/agentduo.svg` in one colour for the activity bar, `media/agentduo-color.svg` for its tab and button) and the
 README's logo are the same mark. After changing the SVG, render it again and commit the SVG and both PNGs. The build
 copies the app's PNG to `dist/main` for the window on Windows and Linux and the Dock of `npm run dev` on a Mac.

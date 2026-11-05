@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
-import { envValue } from "../../../../src/agents/resolve.js";
+import { envValue } from "@agentduo/engine/agents/resolve";
 import type { LauncherInfo } from "../shared/protocol.js";
 
 export const SHELL_TIMEOUT_MS = 5000;

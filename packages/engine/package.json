@@ -1,0 +1,19 @@
+{
+  "name": "@agentduo/engine",
+  "version": "0.12.1",
+  "private": true,
+  "description": "agentduo's engine: the pipeline and its checks, the agents' runner, the chat, settings and config. Shared by the CLI, the VS Code extension and the desktop app.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./testing/*": "./test/helpers/*.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "yaml": "^2.9.1"
+  }
+}

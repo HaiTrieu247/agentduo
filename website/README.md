@@ -43,7 +43,7 @@ npm run preview
 | `content/en/`, `content/vi/` | One module per page and language (`pages/`, `learn/`, `docs/`), plus `index.mjs` with the language's interface words. |
 | `examples/` | Files shown on the pages and run by the tests: the first-task project (`first-task/initial`, `first-task/solution`) and complete `config/*.yaml` examples. |
 | `lib/` | The generator: helpers given to content modules (`content.mjs`), page shells (`layout.mjs`), URLs and origin rules (`urls.mjs`), release data (`release-data.mjs`), the download table, search index, workflow figure. |
-| `assets/` | CSS, the small scripts (theme, menu, copy, search page, search dialog, download filter), logos and icons (from `extensions/vscode/media` and `apps/desktop/resources`), and the Be Vietnam Pro fonts (`fonts/`, from `@fontsource/be-vietnam-pro` 5.3.0, with their license). |
+| `assets/` | CSS, the small scripts (theme, menu, copy, search page, search dialog, download filter), logos and icons (from `apps/vscode/media` and `apps/desktop/resources`), and the Be Vietnam Pro fonts (`fonts/`, from `@fontsource/be-vietnam-pro` 5.3.0, with their license). |
 | `data/` | `releases.json` (public GitHub Releases and assets), `channels.json` (version per channel), `signing.json` (signing evidence, by hand). |
 | `scripts/` | `build`, `preview`, `check`, `check-page`, `update-releases`, `browser-check`. |
 | `SOURCES.md`, `DESIGN.md`, `VERIFICATION.md` | Where each fact comes from, the design decisions, and what was tested. |

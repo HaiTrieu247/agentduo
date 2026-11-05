@@ -25,7 +25,7 @@ ${p("For each call AgentDuo passes only the flags its protocol needs: streaming 
           ["Code reviewer", c("agents.code_reviewer"), "Codex", "a review: approved, or findings by severity"],
         ],
       })}
-${p("Each answer is JSON that must match a strict schema (the repository’s " + c("schemas/") + " folder). A call that fails, or whose answer does not match, is tried again with the reason, up to " + c("limits.max_retries") + " more times (1 by default).")}`,
+${p("Each answer is JSON that must match a strict schema (the repository’s " + c("packages/engine/schemas/") + " folder). A call that fails, or whose answer does not match, is tried again with the reason, up to " + c("limits.max_retries") + " more times (1 by default).")}`,
     },
     {
       id: "workspace",

@@ -7,10 +7,7 @@ on:
   pull_request:
     paths:
       - "apps/desktop/**"
-      - "src/**"
-      - "extensions/vscode/src/**"
-      - "extensions/vscode/webview/**"
-      - "schemas/**"
+      - "packages/**"
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/desktop.yml"

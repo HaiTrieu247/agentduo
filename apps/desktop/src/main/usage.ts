@@ -1,10 +1,10 @@
 // Both agents' accounts and limits with no project open: the user config's CLIs, asked from the home folder, as
 // /usage asks them (no model call).
 import { homedir } from "node:os";
-import { readConfiguration } from "../../../../src/core/configuration.js";
-import { configFromLayers, defaultConfig, type ConfigData } from "../../../../src/core/config.js";
-import { readClaudeUsage, readCodexUsage } from "../../../../src/core/usage.js";
-import type { AccountUsage } from "../../../../extensions/vscode/src/protocol.js";
+import { readConfiguration } from "@agentduo/engine/config/configuration";
+import { configFromLayers, defaultConfig, type ConfigData } from "@agentduo/engine/config/config";
+import { readClaudeUsage, readCodexUsage } from "@agentduo/engine/system/usage";
+import type { AccountUsage } from "@agentduo/host/protocol";
 
 /** The user config's CLI settings over the defaults; the defaults when it cannot be read. */
 function userConfig(env: NodeJS.ProcessEnv): ConfigData {

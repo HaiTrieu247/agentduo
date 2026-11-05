@@ -1,0 +1,77 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { contentSecurityPolicy, makeNonce, webviewHtml } from "../src/webviewHtml.js";
+
+// The page's code is VS Code's two entries (apps/vscode/webview), the shared page (packages/webview) and its view state
+// (packages/host): paths from the repository root.
+const root = join(import.meta.dirname, "..", "..", "..");
+const source = (path: string) => readFileSync(join(root, path), "utf8");
+const STYLES = "packages/webview/src/styles.css";
+const SIDEBAR_CSS = "apps/vscode/webview/sidebar.css";
+
+describe("webview page", () => {
+  it("allows only the bundled script by nonce and the bundled stylesheet", () => {
+    const nonce = makeNonce();
+    expect(nonce).toMatch(/^[A-Za-z0-9]{24,}$/);
+    expect(makeNonce()).not.toBe(nonce);
+    const csp = contentSecurityPolicy("https://file+.vscode-resource.vscode-cdn.net", nonce);
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain(`script-src 'nonce-${nonce}'`);
+    expect(csp).not.toMatch(/unsafe-inline|unsafe-eval|https?:\/\/(?!file\+)/);
+    const html = webviewHtml({ cspSource: "vscode-resource:", scriptUri: "vscode-resource:/main.js", styleUri: "vscode-resource:/styles.css", iconsUri: "vscode-resource:/codicon.css", nonce });
+    expect(html.match(/<script/g)).toHaveLength(1);
+    expect(html).toContain(`<script nonce="${nonce}" src="vscode-resource:/main.js"></script>`);
+    expect(html).not.toMatch(/<script[^>]*>[^<]+<\/script>/); // no inline code
+    expect(html).not.toMatch(/https?:\/\//);
+    // The icon font's stylesheet comes first, so the sidebar's own rules win.
+    expect(html.indexOf('href="vscode-resource:/codicon.css"')).toBeGreaterThan(0);
+    expect(html.indexOf('href="vscode-resource:/codicon.css"')).toBeLessThan(html.indexOf('href="vscode-resource:/styles.css"'));
+  });
+
+  it("escapes what it puts in attributes", () => {
+    const html = webviewHtml({ cspSource: "x", scriptUri: 'a"><script>alert(1)</script>', styleUri: "s", iconsUri: "i", nonce: "n" });
+    expect(html).not.toContain("<script>alert(1)");
+  });
+});
+
+describe("webview sources", () => {
+  const files = [
+    "apps/vscode/webview/main.ts", "apps/vscode/webview/sidebar.ts", "packages/host/src/viewState.ts",
+    ...["render", "dom", "markdown", "uploads", "account"].map((f) => `packages/webview/src/${f}.ts`),
+  ];
+
+  it("never turns text into markup or code", () => {
+    for (const file of files) {
+      const text = source(file);
+      for (const sink of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function", "setAttribute(\"on", "javascript:"]) {
+        expect(text.includes(sink), `${file} uses ${sink}`).toBe(false);
+      }
+    }
+    expect(source("packages/webview/src/dom.ts")).toContain("document.createTextNode");
+  });
+
+  it("loads nothing from the network", () => {
+    for (const file of [...files, STYLES, SIDEBAR_CSS]) expect(source(file).replaceAll('"http://www.w3.org/2000/svg"', ""), file).not.toMatch(/https?:\/\/|@import|url\(/);
+  });
+
+  it("takes its colours from the theme and covers high contrast and reduced motion", () => {
+    for (const file of [STYLES, SIDEBAR_CSS]) {
+      const css = source(file);
+      expect(css, file).toContain("vscode-high-contrast");
+      expect(css, file).toContain("prefers-reduced-motion");
+      // Colour literals only as fallbacks inside var(…).
+      for (const line of css.split("\n").filter((l) => /#[0-9a-f]{3,6}\b|rgba?\(/i.test(l))) expect(line, `${file}: ${line}`).toMatch(/var\(--vscode-[^,]+,[^)]*(#|rgba?\()/i);
+    }
+    const css = source(STYLES);
+    for (const token of ["--vscode-foreground", "--vscode-focusBorder", "--vscode-textLink-foreground", "--vscode-testing-iconPassed", "--vscode-editorError-foreground",
+      "--vscode-sideBar-background", "--vscode-button-background", "--vscode-input-background"]) {
+      expect(css, token).toContain(token);
+    }
+  });
+
+  it("keeps the composer usable with a keyboard and an IME", () => {
+    const render = source("packages/webview/src/render.ts");
+    for (const s of ["compositionstart", "compositionend", "isComposing", "e.shiftKey", '"Escape"', "aria-label", "aria-live"]) expect(render, s).toContain(s);
+  });
+});

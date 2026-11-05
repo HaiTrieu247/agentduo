@@ -1,7 +1,8 @@
 // Builds the desktop app into apps/desktop/dist with the checkout's own toolchain (esbuild from the root's
 // node_modules): main and preload (CJS, Electron), the renderer (a browser bundle, no Node), and the engine worker
-// (ESM, every dependency bundled) beside a package.json named agentduo and the schemas, in dist/runtime, which the
-// package keeps outside the ASAR archive so packageRoot() finds them.
+// (ESM, every dependency bundled: packages/host/src/worker.ts, as in the VS Code extension) beside a package.json named
+// agentduo and the schemas, in dist/runtime, which the package keeps outside the ASAR archive so packageRoot() finds
+// them.
 //   node scripts/build.mjs [--only main,preload,renderer,runtime]
 import { copyFileSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -32,7 +33,7 @@ const builds = {
   preload: { entryPoints: [join(desktop, "src", "preload", "index.ts")], outfile: join(out, "preload", "index.cjs"), format: "cjs", platform: "node", target: "node22", external: ["electron"] },
   renderer: { entryPoints: [join(desktop, "src", "renderer", "main.ts")], outfile: join(out, "renderer", "main.js"), format: "iife", platform: "browser", target: "es2022" },
   runtime: {
-    entryPoints: [join(root, "extensions", "vscode", "src", "worker.ts")], outfile: join(out, "runtime", "worker.js"), format: "esm", platform: "node", target: "node22",
+    entryPoints: [join(root, "packages", "host", "src", "worker.ts")], outfile: join(out, "runtime", "worker.js"), format: "esm", platform: "node", target: "node22",
     // CommonJS dependencies (ajv) call require() for Node built-ins, which an ES module does not have by itself.
     banner: { js: "import { createRequire as __agentduoCreateRequire } from 'node:module'; const require = __agentduoCreateRequire(import.meta.url);" },
   },
@@ -55,7 +56,7 @@ if (only.includes("renderer")) {
   copyFileSync(join(desktop, "src", "renderer", "styles.css"), join(dir, "styles.css"));
   // The app icon for Settings → About (an image only: the page's policy runs no script, and an <img> SVG runs none).
   copyFileSync(join(desktop, "resources", "icon.svg"), join(dir, "icon.svg"));
-  copyFileSync(join(root, "extensions", "vscode", "webview", "styles.css"), join(dir, "webview.css"));
+  copyFileSync(join(root, "packages", "webview", "src", "styles.css"), join(dir, "webview.css"));
   // VS Code's icon font, which the reused chat UI draws its icons with. The font is CC BY 4.0: its licence goes along.
   const codicons = join(root, "node_modules", "@vscode", "codicons");
   for (const file of ["codicon.css", "codicon.ttf"]) copyFileSync(join(codicons, "dist", file), join(dir, file));
@@ -65,7 +66,7 @@ if (only.includes("runtime")) {
   writeFileSync(join(out, "runtime", "package.json"), `${JSON.stringify({
     name: "agentduo", version: pkg.version, private: true, type: "module", description: "agentduo's engine, bundled for the desktop app", license: pkg.license,
   }, null, 2)}\n`);
-  cpSync(join(root, "schemas"), join(out, "runtime", "schemas"), { recursive: true });
+  cpSync(join(root, "packages", "engine", "schemas"), join(out, "runtime", "schemas"), { recursive: true });
   mkdirSync(join(out, "runtime"), { recursive: true });
 }
 console.log(`built ${only.join(", ")} into ${out}`);

@@ -3,12 +3,12 @@
 // The CLI check asks each CLI for its version and its sign-in, never the model. No Electron import.
 import { closeSync, openSync, readSync } from "node:fs";
 import { extname } from "node:path";
-import { clearConfiguration, readConfiguration, updateConfiguration, type ConfigScope, type ConfigurationView } from "../../../../src/core/configuration.js";
-import { resolveBinary } from "../../../../src/agents/resolve.js";
-import { runProcess } from "../../../../src/agents/process.js";
-import { claudeAccount } from "../../../../src/core/usage.js";
-import type { WorkspaceSession } from "../../../../extensions/vscode/src/workspaceSession.js";
-import type { Backend } from "../../../../src/core/commands.js";
+import { clearConfiguration, readConfiguration, updateConfiguration, type ConfigScope, type ConfigurationView } from "@agentduo/engine/config/configuration";
+import { resolveBinary } from "@agentduo/engine/agents/resolve";
+import { runProcess } from "@agentduo/engine/agents/process";
+import { claudeAccount } from "@agentduo/engine/system/usage";
+import type { WorkspaceSession } from "@agentduo/host/workspaceSession";
+import type { Backend } from "@agentduo/engine/chat/commands";
 import type { CliAuth, CliState, CliStatus } from "../shared/protocol.js";
 
 export const PROBE_TIMEOUT_MS = 8000;

@@ -5,7 +5,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, Noti
 import { AppImageUpdater, autoUpdater, type AppUpdater } from "electron-updater";
 import { readFileSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { setPackageRoot } from "../../../../src/paths.js";
+import { setPackageRoot } from "@agentduo/engine/paths";
 import { EVENT_CHANNEL, INVOKE_CHANNEL, LINKS, type AppSnapshot, type DesktopEvent, type LauncherInfo, type MenuCommand } from "../shared/protocol.js";
 import { LogBuffer } from "./diagnostics.js";
 import { launcherEnvironment } from "./environment.js";

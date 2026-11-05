@@ -1,6 +1,6 @@
 // The first run: both CLIs found and signed in (checked without a model call), how to install or sign in to the one
 // that is not, then a project. Finishing (or skipping) it once is a desktop preference; Settings has the same checks.
-import type { AccountUsage } from "../../../../extensions/vscode/src/protocol.js";
+import type { AccountUsage } from "@agentduo/host/protocol";
 import type { CliStatus, LauncherInfo } from "../shared/protocol.js";
 import { busy, button, call, el, errorText } from "./bridge.js";
 import { cliCard, launcherNote } from "./settings.js";

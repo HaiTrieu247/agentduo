@@ -25,7 +25,7 @@ jobs:
         run: |
           node -e '
             const tag = process.env.GITHUB_REF_NAME;
-            const versions = ["package.json", "apps/desktop/package.json"].map((f) => require(`./${f}`).version);
+            const versions = ["package.json", "apps/cli/package.json", "apps/desktop/package.json"].map((f) => require(`./${f}`).version);
             if (versions.some((v) => `v${v}` !== tag)) throw new Error(`tag ${tag} but versions ${versions.join(", ")}: run npm version`);
           '
       - name: Draft the release (once, should the workflow run again)
