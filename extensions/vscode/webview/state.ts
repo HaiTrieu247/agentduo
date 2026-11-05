@@ -2,6 +2,7 @@
 // snapshot) and the webview another, both driven by the same actions through `reduce`. No DOM here.
 import type { ChatStatus } from "../../../src/chat.js";
 import type { Attachment } from "../../../src/core/attachment-types.js";
+import type { ClarificationAnswer, ClarificationEntry, ClarificationQuestion, ClarificationRequest, ClarificationStatus } from "../../../src/core/clarification.js";
 import { AGENT_NAMES, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS, type Backend, type PipelineProfile } from "../../../src/core/commands.js";
 import type { CodexCatalog } from "../../../src/core/models.js";
 import type { SettingsView } from "../../../src/core/settings.js";
@@ -94,6 +95,8 @@ export type TimelineItem = { id: string } & (
   | { kind: "warning"; text: string }
   | { kind: "permission"; agent: Party; role?: Role; label: string; rules: string[]; answer: PermissionAnswer }
   | { kind: "review"; review: HumanReview }
+  /** A question an agent asked the user, once over: the questions, and what was answered (or how it ended). */
+  | { kind: "question"; requestId: string; agent: Party; role?: Role; questions: ClarificationQuestion[]; answers?: ClarificationAnswer[]; status: ClarificationStatus | "deferred" }
   | { kind: "finish"; phase: string; runId: string; summary?: string }
 );
 
@@ -164,6 +167,8 @@ export interface ViewState {
   live: { costUsd: number; tokens: number };
   decision: PendingDecision | null;
   permissions: PendingPermission[];
+  /** The agents' questions waiting for an answer, oldest first. Absent in a view saved before questions (none were waiting). */
+  questions: ClarificationRequest[];
   /** The composer's files: the worker's waiting ones, those being stored, and those that failed. */
   attachments: AttachmentChip[];
   timeline: TimelineItem[];
@@ -196,7 +201,7 @@ export function initialState(session: SessionState = "starting", workspace: stri
     generation, session, workspace, version: null, pipeline: [], status: "idle", mode: "manual", recipient: "codex", models: null, settings: null, catalog: null, usage: null, problem: null,
     run: null, ended: null, current: null, turn: null, discussion: null, logs: null, reached: [], stopped: null,
     planning: { round: 1, limit: 0 }, impl: { round: 0, limit: 0 }, totals: { costUsd: 0, tokens: 0 }, live: { costUsd: 0, tokens: 0 },
-    decision: null, permissions: [], attachments: [], timeline: [], dropped: 0, seq: 0,
+    decision: null, permissions: [], questions: [], attachments: [], timeline: [], dropped: 0, seq: 0,
   };
 }
 
@@ -433,18 +438,55 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
       const rest = { ...s, permissions: s.permissions.filter((p) => p.request.id !== e.id) };
       return ask ? push(rest, { kind: "permission", agent: ask.agent, role: ask.role, label: ask.request.label, rules: ask.request.rules, answer: e.answer }) : rest;
     }
+    case "clarification.requested":
+      // One request waits once, whatever shows it twice (a resumed run shows its saved question again).
+      if ((s.questions ?? []).some((q) => q.id === e.request.id)) return s;
+      return { ...s, questions: [...(s.questions ?? []), e.request] };
+    case "clarification.answered":
+      return endQuestion(s, e.id, "answered", e.answers);
+    case "clarification.closed":
+      return endQuestion(s, e.id, e.status);
     case "run.finished": {
       // A deferred decision keeps its reason in the timeline.
       const review = e.phase === "HUMAN_REVIEW" && s.decision ? push(s, { kind: "review", review: s.decision.review }) : s;
       return {
         ...push(review, { kind: "finish", phase: e.phase, runId: e.runId, summary: e.summary }),
-        current: null, stopped: e.phase === "INTERRUPTED" ? s.current?.phase ?? null : null, permissions: [], decision: null, live: { costUsd: 0, tokens: 0 },
+        current: null, stopped: e.phase === "INTERRUPTED" ? s.current?.phase ?? null : null, permissions: [], questions: [], decision: null, live: { costUsd: 0, tokens: 0 },
         ended: e.phase,
       };
     }
     default:
       return s;
   }
+}
+
+/** The question `id` is over: it leaves the waiting list and stays in the timeline with its outcome. One not waiting changes nothing. */
+function endQuestion(s: ViewState, id: string, status: ClarificationStatus | "deferred", answers?: ClarificationAnswer[]): ViewState {
+  const request = (s.questions ?? []).find((q) => q.id === id);
+  if (!request) return s;
+  const rest = { ...s, questions: s.questions.filter((q) => q.id !== id) };
+  return push(rest, {
+    kind: "question", requestId: id, agent: request.agent, ...(request.role ? { role: request.role } : {}), questions: request.questions,
+    ...(answers ? { answers } : {}), status,
+  });
+}
+
+/**
+ * A tab reopened: the questions of its conversation's ledger (src/core/clarification.ts) that its timeline does not show
+ * yet are added, as they ended. A question still open belonged to a process that is gone: it is shown interrupted, never
+ * as a form to answer.
+ */
+export function withLedger(s: ViewState, entries: readonly ClarificationEntry[]): ViewState {
+  const shown = new Set(s.timeline.flatMap((t) => (t.kind === "question" ? [t.requestId] : [])));
+  let next = s;
+  for (const e of entries) {
+    if (shown.has(e.id)) continue;
+    next = push(next, {
+      kind: "question", requestId: e.id, agent: e.agent, ...(e.role ? { role: e.role } : {}), questions: e.questions, ...(e.answers ? { answers: e.answers } : {}),
+      status: e.status === "pending" ? "interrupted" : e.status,
+    });
+  }
+  return next;
 }
 
 function onUi(s: ViewState, u: UiUpdate): ViewState {
@@ -490,7 +532,7 @@ export function reduce(s: ViewState, a: ViewAction): ViewState {
       // A new worker: whatever the old one was asking or answering is gone, and it says again what it knows.
       // Its files waiting to be sent went with it; a file still on its way goes to the new one.
       const attachments = a.generation === s.generation ? s.attachments : s.attachments.filter((c) => c.status === "uploading");
-      const next = { ...s, session: a.session, generation: a.generation, decision: null, permissions: [], current: null, turn: null, discussion: null, models: null, attachments };
+      const next = { ...s, session: a.session, generation: a.generation, decision: null, permissions: [], questions: [], current: null, turn: null, discussion: null, models: null, attachments };
       if (a.workspace === s.workspace) return a.session === "stopped" ? { ...next, status: "idle" } : next;
       return initialState(a.session, a.workspace, a.generation);
     }
@@ -690,5 +732,5 @@ export function effortOptions(s: ViewState, backend: Backend): { value: string; 
 }
 
 export function hasPending(s: ViewState): boolean {
-  return !!s.decision || s.permissions.length > 0;
+  return !!s.decision || s.permissions.length > 0 || (s.questions ?? []).length > 0;
 }

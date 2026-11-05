@@ -5,13 +5,13 @@ import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { PROTOCOL_VERSION, type HostMessage } from "../extensions/vscode/src/protocol.js";
+import { PROTOCOL_VERSION, type ClarificationReplyPayload, type HostMessage } from "../extensions/vscode/src/protocol.js";
 import { SHUTDOWN_GRACE_MS, WorkerClient } from "../extensions/vscode/src/workerClient.js";
 import { emptyState, pickWorkspace, WorkspaceSession } from "../extensions/vscode/src/workspaceSession.js";
 import { reduce, type ViewState } from "../extensions/vscode/webview/state.js";
 import { NOT_REPO_NOTE } from "../src/chat.js";
 import { RunStore } from "../src/core/state.js";
-import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
+import { approval, critique, finding, impl, plan, plannerAsk, review } from "./helpers/builders.js";
 import { type ConfigOverrides, userConfigEnv } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
 import { png } from "./helpers/images.js";
@@ -210,6 +210,38 @@ describe("WorkspaceSession", () => {
     await s.conversation(C).answerPermission(s.conversation(C).state.generation, s.conversation(C).state.permissions[0]!.request.id, { decision: "once" });
     await until(s, (st) => finishes(st).includes("DONE"), "DONE");
     expect(s.conversation(C).state.timeline.some((i) => i.kind === "permission" && i.answer.decision === "once")).toBe(true);
+  });
+
+  it("shows a planner's question as a form that survives hiding the view, refuses a stale or wrong answer, and plans on the reply", async () => {
+    const s = session();
+    fake.setScenario({ ...happy(), planner: [{ output: plannerAsk() }, { output: plan() }] });
+    await s.conversation(C).submit("Make app.txt fixed", "pipeline");
+    await until(s, (st) => st.questions.length === 1, "the question");
+    // Before the critic, the sign-off or the implementer.
+    expect(fake.calls("plan_reviewer")).toHaveLength(0);
+    s.conversation(C).detach();
+    const reopened = new FakeView();
+    s.conversation(C).attach(reopened.post);
+    const asked = reopened.state!.questions[0]!;
+    expect(asked.questions[0]).toMatchObject({ header: "Database", multiSelect: false, options: [{ label: "SQLite", description: "one file, no server" }, { label: "Postgres" }] });
+    const generation = s.conversation(C).state.generation;
+    const pick: ClarificationReplyPayload = { kind: "answered", answers: [{ questionId: asked.questions[0]!.id, optionIds: [asked.questions[0]!.options[1]!.id], otherText: null }] };
+    // Another generation, another call and an answer that fits no option change nothing: the question keeps waiting.
+    await s.conversation(C).answerQuestion(generation - 1, asked.id, asked.callId, pick);
+    await s.conversation(C).answerQuestion(generation, asked.id, "call-of-an-earlier-attempt", pick);
+    await s.conversation(C).answerQuestion(generation, asked.id, asked.callId, { kind: "answered", answers: [{ questionId: asked.questions[0]!.id, optionIds: ["q1o9"], otherText: null }] });
+    expect(s.conversation(C).state.questions.map((q) => q.id)).toEqual([asked.id]);
+    expect(fake.calls("planner")).toHaveLength(1);
+    // The reply: sent twice, applied once.
+    await Promise.all([s.conversation(C).answerQuestion(generation, asked.id, asked.callId, pick), s.conversation(C).answerQuestion(generation, asked.id, asked.callId, pick)]);
+    await until(s, (st) => finishes(st).includes("DONE"), "DONE");
+    expect(fake.calls("planner")).toHaveLength(2);
+    expect(fake.calls("planner")[1]!.prompt).toContain("Postgres");
+    const st = s.conversation(C).state;
+    expect(st.questions).toEqual([]);
+    expect(st.timeline.filter((i) => i.kind === "question")).toMatchObject([{ status: "answered", answers: [{ optionIds: [asked.questions[0]!.options[1]!.id] }] }]);
+    await s.conversation(C).answerQuestion(generation, asked.id, asked.callId, pick);
+    expect(s.conversation(C).state.timeline.at(-1)).toMatchObject({ tone: "error", text: expect.stringContaining("no longer pending") });
   });
 
   it("survives a dead worker: says so, forgets its questions, and starts a new one that resumes the run", async () => {

@@ -276,7 +276,7 @@ function drawTop(): void {
   const m = chats.active();
   const s = m?.state ?? null;
   const busy = s ? s.status === "running" || s.status === "answering" : false;
-  topStatus.className = `top-status${busy ? " running" : s?.decision || s?.permissions.length ? " waiting" : ""}`;
+  topStatus.className = `top-status${busy ? " running" : s?.decision || s?.permissions.length || s?.questions?.length ? " waiting" : ""}`;
   topStatus.textContent = project ? chatStatus(s) : "";
   inspectorToggle.setAttribute("aria-pressed", String(inspectorShown()));
 }

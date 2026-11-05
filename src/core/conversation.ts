@@ -2,6 +2,10 @@ import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ATTACHMENT_LIMITS, formatBytes, type Attachment } from "./attachment-types.js";
 import { AttachmentError, attachmentFile, AttachmentStore } from "./attachments.js";
+import {
+  clarifiedPairs, ledgerAnswer, ledgerClose, ledgerOpen, type ClarificationAnswer, type ClarificationEntry, type ClarificationRequest, type ClarificationStatus,
+  type ClarifiedPair,
+} from "./clarification.js";
 import type { Backend } from "./config.js";
 import { taggedPaths } from "./mentions.js";
 import * as prompts from "./prompts.js";
@@ -43,7 +47,8 @@ interface ConversationSession {
   id: string;
   exchanges: number;
   earlier: number;
-  discussion?: { id: string; messages: number };
+  /** `clarified`: how many of the discussion's answered questions its prompts (or its own asking) gave it. */
+  discussion?: { id: string; messages: number; clarified?: number };
 }
 
 /** What a conversation keeps on disk to go on after a restart: what later prompts carry, and how to show it in a list. */
@@ -60,11 +65,18 @@ export interface ConversationRecord {
   exchanges: Exchange[];
   earlier: EarlierTask[];
   sessions?: Partial<Record<Backend, ConversationSession>>;
+  /**
+   * The questions the agents asked the user in this conversation, and their answers, in the order asked (saved when asked
+   * and when answered). Absent in a conversation from before questions: none were asked.
+   */
+  clarifications?: ClarificationEntry[];
 }
 
 export type ConversationSummary = Pick<ConversationRecord, "id" | "title" | "createdAt" | "updatedAt">;
 
 const RECORD = "conversation.json";
+/** What an exchange recovered from a turn that never ended says its question was (the turn itself was not saved). */
+const UNFINISHED_QUESTION = "(the message of a turn that did not finish; it was not kept)";
 const conversationsDir = (runsDir: string) => join(runsDir, "conversations");
 
 function readRecord(file: string): ConversationRecord | null {
@@ -109,6 +121,8 @@ export class Conversation {
   private name = "";
   private to: Backend | null = null;
   private readonly done: EarlierTask[] = [];
+  /** What the agents asked the user in this conversation, and the answers. */
+  private readonly asked: ClarificationEntry[] = [];
   private createdAt: string;
   private readonly clock: () => Date;
   /** The copies of the files attached in this conversation. */
@@ -140,6 +154,9 @@ export class Conversation {
     c.exchanges.push(...r.exchanges);
     c.done.push(...r.earlier);
     c.sessions = r.sessions ?? {};
+    // A question still open was asked by a process that is gone: its call ended, and nobody can answer it now.
+    c.asked.push(...(r.clarifications ?? []).map((e): ClarificationEntry => (e.status === "pending" ? { ...e, status: "interrupted", closedAt: e.at } : e)));
+    c.recoverAnswers();
     return c;
   }
 
@@ -178,6 +195,7 @@ export class Conversation {
     const record: ConversationRecord = {
       version: 1, id: this.id, title: this.name, createdAt: this.createdAt, updatedAt: this.clock().toISOString(), recipient: this.to,
       turns: this.before + this.turns.length, exchanges: this.exchanges, earlier: this.done, sessions: this.sessions,
+      ...(this.asked.length ? { clarifications: this.asked } : {}),
     };
     ensureRunsDir(this.runsDir);
     mkdirSync(this.dir, { recursive: true });
@@ -202,9 +220,11 @@ export class Conversation {
     if (!id) delete this.sessions[turn.backend];
     else {
       const d = turn.discussion && this.discussions.get(turn.discussion.id);
+      const clarified = d ? this.discussionPairs(d.id).length : 0;
       this.sessions[turn.backend] = {
         id, exchanges: this.exchanges.length, earlier,
-        ...(d ? { discussion: { id: d.id, messages: d.messages.length } } : {}),
+        // What the user answered during the discussion is in this session: in a prompt it was given, or in a question it asked itself.
+        ...(d ? { discussion: { id: d.id, messages: d.messages.length, ...(clarified ? { clarified } : {}) } } : {}),
       };
     }
     this.save();
@@ -218,6 +238,71 @@ export class Conversation {
 
   get logDir(): string {
     return join(this.dir, "logs");
+  }
+
+  // ------------------------------------------------------------------ questions the agents asked the user
+  /** The questions asked in this conversation, with their answers, oldest first. */
+  get clarifications(): readonly ClarificationEntry[] {
+    return this.asked;
+  }
+
+  /** The entry still waiting for the user for this request id and call, if any. */
+  pendingClarification(id: string): ClarificationEntry | null {
+    return this.asked.find((e) => e.id === id && e.status === "pending") ?? null;
+  }
+
+  /** The answered questions of discussion `id`, as pairs, in the order asked. */
+  private discussionPairs(id: string) {
+    return clarifiedPairs(this.asked.filter((e) => e.discussionId === id));
+  }
+
+  /**
+   * An agent of one of this conversation's turns asks the user: saved now, before anyone can answer. Null when the request
+   * is not for a turn of this conversation (another chat's, or a pipeline's), so a shared event bus never mixes them.
+   */
+  clarificationAsked(request: ClarificationRequest): ClarificationEntry | null {
+    const turn = request.turnId ? this.turns.find((t) => t.id === request.turnId) : undefined;
+    if (!turn) return null;
+    const entry = ledgerOpen(this.asked, { ...request, ...(turn.discussion ? { discussionId: turn.discussion.id } : {}) });
+    this.save();
+    return entry;
+  }
+
+  /** The user's answers to request `id`, saved the moment they are given; false (nothing changes) for an old, duplicate or foreign one. */
+  clarificationAnswered(id: string, callId: string | undefined, answers: ClarificationAnswer[]): boolean {
+    if (!ledgerAnswer(this.asked, id, callId, answers, this.clock().toISOString())) return false;
+    this.save();
+    return true;
+  }
+
+  /** Request `id` ended without an answer (dismissed, or its call ended first). False when it is not waiting. */
+  clarificationClosed(id: string, callId: string | undefined, status: Exclude<ClarificationStatus, "pending" | "answered">): boolean {
+    if (!ledgerClose(this.asked, id, status, this.clock().toISOString(), callId)) return false;
+    this.save();
+    return true;
+  }
+
+  /**
+   * The answered, not yet carried entries that `match`, as pairs; they are marked carried. An exchange takes them from here
+   * when its turn (or discussion) ends, so each answer is passed on once, however the turn ended.
+   */
+  private settle(match: (e: ClarificationEntry) => boolean): ClarifiedPair[] {
+    const mine = this.asked.filter((e) => e.status === "answered" && !e.settled && match(e));
+    for (const e of mine) e.settled = true;
+    return clarifiedPairs(mine);
+  }
+
+  /**
+   * A conversation reopened: answers given in a turn whose process went before the turn ended are in no exchange. They become
+   * one each (the turn's question is not kept), so later prompts, and the other agent, still have what the user answered.
+   */
+  private recoverAnswers(): void {
+    const groups = new Map<string, ClarificationEntry>();
+    for (const e of this.asked) if (e.status === "answered" && !e.settled) groups.set(e.discussionId ?? e.turnId ?? e.id, groups.get(e.discussionId ?? e.turnId ?? e.id) ?? e);
+    for (const [key, first] of groups) {
+      const clarified = this.settle((e) => (e.discussionId ?? e.turnId ?? e.id) === key);
+      this.exchanges.push({ backend: first.agent, question: UNFINISHED_QUESTION, answer: "", unfinished: true, clarified });
+    }
   }
 
   // ------------------------------------------------------------------ attachments
@@ -291,8 +376,9 @@ export class Conversation {
     let keep = answered.length;
     while (keep > 0) {
       const e = answered[keep - 1]!;
-      if (size + e.question.length + e.answer.length > limit) break;
-      size += e.question.length + e.answer.length;
+      const length = e.question.length + e.answer.length + (e.clarified ?? []).reduce((n, p) => n + p.question.length + p.answer.length, 0);
+      if (size + length > limit) break;
+      size += length;
       keep--;
     }
     return { exchanges: answered.slice(keep), omitted: keep };
@@ -302,7 +388,7 @@ export class Conversation {
    * Starts a turn: the prompt for `backend` carries the conversation so far within the budget and the pipeline tasks
    * of the chat; the question itself is never cut, however long it is.
    */
-  begin(backend: Backend, question: string, earlier: EarlierTask[], workspace: string, attachments: Attachment[] = []): { turn: Turn; prompt: string; omitted: number } {
+  begin(backend: Backend, question: string, earlier: EarlierTask[], workspace: string, attachments: Attachment[] = [], canAsk = false): { turn: Turn; prompt: string; omitted: number } {
     const context = this.context();
     const n = this.before + this.turns.length + 1;
     const turn: Turn = {
@@ -314,7 +400,7 @@ export class Conversation {
     mkdirSync(this.logDir, { recursive: true });
     this.save();
     const tagged = (text: string) => taggedPaths(text, workspace);
-    const prompt = prompts.conversation({ workspace, backend, context, earlier, question, attachments, locate: this.locate, tagged });
+    const prompt = prompts.conversation({ workspace, backend, context, earlier, question, attachments, locate: this.locate, tagged, canAsk });
     const session = this.sessions[backend];
     if (session) turn.continuation = prompts.conversation({
       workspace, backend, context: this.newContext(session), earlier: earlier.slice(session.earlier), question, attachments, locate: this.locate, tagged,
@@ -328,12 +414,28 @@ export class Conversation {
     if (!turn) return;
     turn.status = status;
     turn.answer = status === "success" ? answer : null;
-    if (turn.answer === null) return;
     const place = turn.discussion;
-    if (!place) {
-      this.exchanges.push({ backend: turn.backend, question: turn.question, answer: turn.answer, ...(turn.attachments ? { attachments: turn.attachments } : {}) });
+    if (place) {
+      // A step of a discussion: what the user answered in it is carried when the discussion ends (finishDiscussion).
+      if (turn.answer !== null) this.discussions.get(place.id)?.messages.push({ backend: turn.backend, step: place.step, round: place.round, text: turn.answer, verdict });
+      return;
+    }
+    // What the answer's author asked the user on the way goes with the exchange, so every later prompt carries it. The user's
+    // answers outlive the turn: one that failed or was stopped after they answered keeps them (and nothing else of it).
+    const clarified = this.settle((e) => e.turnId === turn.id);
+    if (turn.answer === null) {
+      if (!clarified.length) return;
+      this.exchanges.push({
+        backend: turn.backend, question: turn.question, answer: "", unfinished: true, ...(turn.attachments ? { attachments: turn.attachments } : {}), clarified,
+      });
       this.save();
-    } else this.discussions.get(place.id)?.messages.push({ backend: turn.backend, step: place.step, round: place.round, text: turn.answer, verdict });
+      return;
+    }
+    this.exchanges.push({
+      backend: turn.backend, question: turn.question, answer: turn.answer, ...(turn.attachments ? { attachments: turn.attachments } : {}),
+      ...(clarified.length ? { clarified } : {}),
+    });
+    this.save();
   }
 
   /** Starts a /discuss: every step sees the conversation as it is now, within the budget. */
@@ -344,7 +446,7 @@ export class Conversation {
   }
 
   /** A step of discussion `id`: the reviewer writes the critiques, the answerer every version, and Codex the synthesis. */
-  discussionTurn(id: string, step: DiscussionStep, round: number, earlier: EarlierTask[], workspace: string): { turn: Turn; prompt: string } {
+  discussionTurn(id: string, step: DiscussionStep, round: number, earlier: EarlierTask[], workspace: string, canAsk = false): { turn: Turn; prompt: string } {
     const d = this.discussions.get(id);
     if (!d) throw new Error(`no discussion ${id}`);
     const backend: Backend = step === "critique" ? d.critic : step === "synthesis" ? "codex" : d.answerer;
@@ -359,17 +461,24 @@ export class Conversation {
     this.save();
     // Every step is a call of its own, so each gets the question's files again (the images as images too).
     const tagged = (text: string) => taggedPaths(text, workspace);
+    // What the user answered during this discussion, read now: a step sees the answers given to the steps before it, not only
+    // those of the conversation as it stood when the discussion began.
+    const pairs = this.discussionPairs(id);
     const prompt = prompts.discussion({
       workspace, context: d.context, earlier, question: d.question, answerer: d.answerer, critic: d.critic, maxRounds: d.maxRounds, step, round, history: d.messages,
-      attachments: d.attachments, locate: this.locate, tagged,
+      attachments: d.attachments, locate: this.locate, tagged, clarified: pairs, canAsk,
     });
     const session = this.sessions[backend];
-    if (session) turn.continuation = prompts.discussion({
-      workspace, context: this.newContext(session), earlier: earlier.slice(session.earlier), question: d.question,
-      answerer: d.answerer, critic: d.critic, maxRounds: d.maxRounds, step, round, history: d.messages,
-      historyStart: session.discussion?.id === d.id ? session.discussion.messages : 0,
-      attachments: d.attachments, locate: this.locate, tagged,
-    });
+    if (session) {
+      const same = session.discussion?.id === d.id;
+      turn.continuation = prompts.discussion({
+        workspace, context: this.newContext(session), earlier: earlier.slice(session.earlier), question: d.question,
+        answerer: d.answerer, critic: d.critic, maxRounds: d.maxRounds, step, round, history: d.messages,
+        historyStart: same ? session.discussion!.messages : 0,
+        attachments: d.attachments, locate: this.locate, tagged,
+        clarified: pairs.slice(same ? session.discussion!.clarified ?? 0 : 0), clarifiedNew: same,
+      });
+    }
     return { turn, prompt };
   }
 
@@ -381,15 +490,23 @@ export class Conversation {
     const d = this.discussions.get(id);
     if (!d) return;
     this.discussions.delete(id);
+    // The user's answers during the discussion are carried whether or not it reached an answer.
+    const clarified = this.settle((e) => e.discussionId === id);
     if (answer === null) {
       // Nothing of it joins the conversation, so no session that took part in it is continued.
       for (const party of [d.answerer, d.critic]) if (this.sessions[party]?.discussion?.id === id) delete this.sessions[party];
+      if (clarified.length) {
+        this.exchanges.push({
+          backend: d.answerer, question: d.question, answer: "", unfinished: true, discussedWith: d.critic, ...(d.attachments.length ? { attachments: d.attachments } : {}), clarified,
+        });
+      }
       this.save();
       return;
     }
     const by = backend ?? d.answerer;
     this.exchanges.push({
       backend: by, question: d.question, answer, discussedWith: by === d.answerer ? d.critic : d.answerer, ...(d.attachments.length ? { attachments: d.attachments } : {}),
+      ...(clarified.length ? { clarified } : {}),
     });
     this.save();
   }

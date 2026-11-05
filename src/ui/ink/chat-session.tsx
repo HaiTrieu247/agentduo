@@ -2,10 +2,10 @@ import { render, type RenderOptions } from "ink";
 import type { ChatStatus, ChatUi } from "../../chat.js";
 import { attachmentsText } from "../../core/attachment-types.js";
 import type { PathEntry } from "../../core/mention-text.js";
-import type { Decider, Decision, EventBus, PermissionDecider } from "../../events.js";
+import type { ClarificationDecider, Decider, Decision, EventBus, PermissionDecider } from "../../events.js";
 import { ChatApp, ChatChannel } from "./ChatApp.js";
 import type { ViewKind } from "./HumanReviewPrompt.js";
-import { permissionBroker } from "./session.js";
+import { clarificationDesk, permissionBroker } from "./session.js";
 
 export interface ChatInkOptions {
   bus: EventBus;
@@ -30,6 +30,8 @@ export interface ChatInkOptions {
 export interface ChatInkSession {
   decider: Decider;
   permissions: PermissionDecider;
+  /** Answers the agents' structured questions on this screen. */
+  clarifier: ClarificationDecider;
   ui: ChatUi;
   /** Resolves when the user leaves: /quit, or Ctrl-C twice. */
   exited: Promise<void>;
@@ -55,6 +57,7 @@ export function startChatInk(o: ChatInkOptions): ChatInkSession {
     resolve?.(d);
   };
   const broker = permissionBroker(true);
+  const desk = clarificationDesk(true);
   const ui: ChatUi = {
     info: (text, tone) => channel.info(tone === "error" ? `error: ${text}` : text),
     setStatus: (next) => {
@@ -71,7 +74,12 @@ export function startChatInk(o: ChatInkOptions): ChatInkSession {
   };
   let lastCtrlC = 0;
   const onCtrlC = () => {
-    // At a decision nothing is running, so Ctrl-C means "decide later", as in a single run.
+    // At a question or a decision nothing is running, so Ctrl-C means "later", as in a single run.
+    const waiting = desk.clarifier.pending()[0];
+    if (waiting) {
+      desk.reply(waiting.id, { kind: "defer" });
+      return;
+    }
     if (pendingDecision) {
       onDecision("defer");
       return;
@@ -94,16 +102,18 @@ export function startChatInk(o: ChatInkOptions): ChatInkSession {
   if (o.stdin) options.stdin = o.stdin;
   const instance = render(
     <ChatApp bus={o.bus} channel={channel} version={o.version} workspace={o.workspace} verbose={o.verbose} onSubmit={onSubmit}
-      onEscape={o.onEscape} onCtrlC={onCtrlC} onCycleMode={o.onCycleMode} onUsageRefresh={o.onUsageRefresh} onDecision={onDecision} onPermission={broker.answer} views={o.views} readView={o.readView}
+      onEscape={o.onEscape} onCtrlC={onCtrlC} onCycleMode={o.onCycleMode} onUsageRefresh={o.onUsageRefresh} onDecision={onDecision} onPermission={broker.answer} onQuestion={desk.reply} views={o.views} readView={o.readView}
       findFiles={o.findFiles} />,
     options,
   );
   return {
     decider,
     permissions: broker.permissions,
+    clarifier: desk.clarifier,
     ui,
     exited,
     close: async () => {
+      desk.clarifier.deferAll(true);
       instance.unmount();
       await instance.waitUntilExit().catch(() => undefined);
     },

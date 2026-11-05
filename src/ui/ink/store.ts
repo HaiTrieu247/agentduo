@@ -2,6 +2,7 @@ import type {
   Activity, Agent, BudgetView, DiscussionPlace, DiscussionStatus, DuoEvent, HistoryEntry, HumanReview, Message, ModelIdentity, Party, PermissionAnswer, Phase, Role, RoundInfo, TurnStatus,
   Verdict,
 } from "../../events.js";
+import { answerSummary, type ClarificationAnswer, type ClarificationRequest, type ClarificationStatus } from "../../core/clarification.js";
 import type { PipelineProfile } from "../../core/commands.js";
 import { answerActivities, PROVIDERS, withObserved } from "../format.js";
 import type { PermissionAsk } from "./PermissionPrompt.js";
@@ -68,7 +69,9 @@ type StaticContent =
   | { kind: "review"; review: HumanReview }
   | { kind: "answer"; turn: TurnView }
   | { kind: "discussion"; discussion: DiscussionView }
-  | { kind: "permission"; agent: Party; role?: Role; label: string; rules: string[]; answer: PermissionAnswer };
+  | { kind: "permission"; agent: Party; role?: Role; label: string; rules: string[]; answer: PermissionAnswer }
+  /** A question an agent asked the user, once it is over: what was answered, or how it ended. */
+  | { kind: "question"; agent: Party; role?: Role; header: string; text: string; status: ClarificationStatus | "deferred" };
 export type StaticItem = { id: string } & StaticContent;
 
 export interface ViewState {
@@ -91,6 +94,8 @@ export interface ViewState {
   humanReview: HumanReview | null;
   /** Permission prompts waiting for an answer, oldest first (an agent may ask for several tools at once). */
   permissions: PermissionAsk[];
+  /** Questions of the agents waiting for an answer, oldest first. */
+  questions: ClarificationRequest[];
   finished: { phase: string; reportPath: string; exitCode: number } | null;
   verbose: boolean;
   stopping: boolean;
@@ -109,7 +114,7 @@ export type ViewAction =
 export function initialView(version: string, verbose = false, chat?: { workspace: string }): ViewState {
   const s: ViewState = {
     version, items: [], current: null, turn: null, discussion: null, planning: { round: 1, limit: 0 }, impl: { round: 0, limit: 0 }, budget: null, reached: [],
-    totals: { costUsd: 0, tokens: 0 }, live: { costUsd: 0, tokens: 0 }, humanReview: null, permissions: [], finished: null, verbose, stopping: false, seq: 0,
+    totals: { costUsd: 0, tokens: 0 }, live: { costUsd: 0, tokens: 0 }, humanReview: null, permissions: [], questions: [], finished: null, verbose, stopping: false, seq: 0,
     chat: !!chat,
   };
   return chat ? push(s, { kind: "header", runId: "", repo: chat.workspace, version, chat: true }) : s;
@@ -133,6 +138,15 @@ function upsert(list: Activity[], activity: Activity): Activity[] {
 
 function withActivity(s: ViewState, activity: Activity): ViewState {
   return s.current ? { ...s, current: { ...s.current, activities: upsert(s.current.activities, activity) } } : s;
+}
+
+/** The question `id` is over: it leaves the waiting list and its outcome stays in the scrollback. A late event for one not waiting changes nothing. */
+function endQuestion(s: ViewState, id: string, status: ClarificationStatus | "deferred", answers?: ClarificationAnswer[]): ViewState {
+  const request = s.questions.find((r) => r.id === id);
+  if (!request) return s;
+  const rest = { ...s, questions: s.questions.filter((r) => r.id !== id) };
+  const text = status === "deferred" ? "answer later" : answerSummary({ questions: request.questions, answers, status: status as ClarificationStatus });
+  return push(rest, { kind: "question", agent: request.agent, role: request.role, header: request.questions.length === 1 ? request.questions[0]!.header : "", text, status });
 }
 
 export function reduce(s: ViewState, action: ViewAction): ViewState {
@@ -229,6 +243,13 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
       const rest = { ...s, permissions: s.permissions.filter((p) => p.request.id !== e.id) };
       return ask ? push(rest, { kind: "permission", agent: ask.agent, role: ask.role, label: ask.request.label, rules: ask.request.rules, answer: e.answer }) : rest;
     }
+    case "clarification.requested":
+      // One request waits once, whatever asks twice (a resumed run shows its saved question again).
+      return s.questions.some((r) => r.id === e.request.id) ? s : { ...s, questions: [...s.questions, e.request] };
+    case "clarification.answered":
+      return endQuestion(s, e.id, "answered", e.answers);
+    case "clarification.closed":
+      return endQuestion(s, e.id, e.status);
     case "run.finished": {
       // A deferred decision (non-interactive, or "Decide later") keeps the reason in scrollback.
       const withReview = e.phase === "HUMAN_REVIEW" && s.humanReview ? push(s, { kind: "review", review: s.humanReview }) : s;
@@ -237,7 +258,7 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
           kind: "finish", phase: e.phase, runId: e.runId, reportPath: e.reportPath, summary: e.summary, chat: s.chat,
           ...(e.phase === "HUMAN_REVIEW" && s.humanReview ? { reason: s.humanReview.reason } : {}),
         }),
-        finished: { phase: e.phase, reportPath: e.reportPath, exitCode: e.exitCode }, current: null, humanReview: null, permissions: [],
+        finished: { phase: e.phase, reportPath: e.reportPath, exitCode: e.exitCode }, current: null, humanReview: null, permissions: [], questions: [],
       };
     }
     default:

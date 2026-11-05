@@ -21,7 +21,7 @@ const PROTOCOL_FLAGS = {
   codex: { args: ["exec", "--help"], flags: ["--json", "--output-schema", "--output-last-message", "--cd", "--skip-git-repo-check", "--ephemeral", "resume"] },
   claude: { args: ["--help"], flags: ["--output-format", "--verbose", "--json-schema", "--permission-prompts", "--no-session-persistence", "--resume"] },
 } as const;
-/** Relaying permission prompts (claude.permission_prompts: ask) needs Claude's host protocol. */
+/** Relaying permission prompts (claude.permission_prompts: ask) or Claude's questions (clarification.enabled) needs Claude's host protocol. */
 const CLAUDE_HOST_FLAGS = ["--input-format", "--permission-prompt-tool"];
 const EDIT_PERMISSION_FLAGS = ["--permission-mode", "--allowedTools", "--allowed-tools", "--dangerously-skip-permissions"];
 const CODEX_WRITE_FLAGS = ["--sandbox", "-s", "--full-auto", "--dangerously-bypass-approvals-and-sandbox"];
@@ -78,7 +78,7 @@ export async function runDoctor(o: { dir: string; cfg: ConfigData; sources: stri
     const version = await probe(bin, ["--version"], o.dir);
     add(version.ok, `${backend} CLI: ${bin} (${version.out.trim().split("\n")[0] || "?"})`);
     const spec = PROTOCOL_FLAGS[backend];
-    const flags = [...spec.flags, ...(backend === "claude" && o.cfg.claude.permission_prompts === "ask" ? CLAUDE_HOST_FLAGS : [])];
+    const flags = [...spec.flags, ...(backend === "claude" && (o.cfg.claude.permission_prompts === "ask" || o.cfg.clarification?.enabled !== false) ? CLAUDE_HOST_FLAGS : [])];
     const help = await probe(bin, spec.args, o.dir);
     const missing = flags.filter((f) => !help.out.includes(f));
     add(help.ok && !missing.length, `${backend} supports ${flags.join(", ")}${missing.length ? ` — missing: ${missing.join(", ")}` : ""}`);

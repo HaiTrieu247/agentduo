@@ -122,3 +122,19 @@ export interface Review {
   gate_failures: Array<{ gate: string; origin: GateOrigin; evidence: string }>;
   repo_notes: RepoNoteOutput[];
 }
+
+/** A question the planner asks the user instead of planning (schemas/planner.schema.json). Ids are agentduo's. */
+export interface PlannerQuestion {
+  header: string;
+  question: string;
+  multi_select: boolean;
+  options: Array<{ label: string; description: string }>;
+}
+
+/**
+ * What a planner call returns: either the questions only the user can answer (and nothing else: no plan is asked for),
+ * or the plan itself, which is the artifact everything after it works from.
+ */
+export interface PlannerOutput {
+  result: { kind: "needs_clarification"; questions: PlannerQuestion[] } | { kind: "plan"; plan: Plan };
+}

@@ -6,13 +6,16 @@ import { AttachmentStore } from "../src/core/attachments.js";
 import { SHARED_SESSION } from "../src/core/context.js";
 import { settings } from "../src/core/settings.js";
 import { EventBus, type Message } from "../src/events.js";
-import { approval, critique, finding, impl, issue, plan, review } from "./helpers/builders.js";
+import { ClarificationBroker } from "../src/core/clarification-broker.js";
+import { answersTemplate, MAX_PLANNER_ASKS } from "../src/core/clarification.js";
+import { approval, critique, finding, impl, issue, plan, plannerAsk, plannerQuestion, review } from "./helpers/builders.js";
 import { runMetrics, type RunMetrics } from "../src/core/render.js";
 import { GIT_MISSING, MARKER, RunGitError } from "../src/core/run-git.js";
-import type { RunGit } from "../src/core/state.js";
+import { DecisionError, EXIT } from "../src/core/workflow.js";
+import { RunStore, type RunGit } from "../src/core/state.js";
 import { CHECK_GATE, testConfig, userDataEnv, type ConfigOverrides } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
-import { makeHarness, newWorkflow, resume, resumedWorkflow, runDirOf, ScriptedDecider, stateOf, type Harness } from "./helpers/harness.js";
+import { makeHarness, newWorkflow, pickFirst, resume, resumedWorkflow, runDirOf, ScriptedClarifier, ScriptedDecider, stateOf, type Harness } from "./helpers/harness.js";
 import { png } from "./helpers/images.js";
 import { CHECK_SCRIPT, git, makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
@@ -1149,7 +1152,7 @@ describe("Workflow: a blocked implementer runs again only on something new", () 
       expect(st.humanReview).toMatchObject({ reason: "no_progress", fromPhase: "IMPLEMENT", resumePhase: "IMPLEMENT" });
       expect(st.humanReview!.message).toContain("so it was not run again (that would repeat the same call): API key needed. Give it what it needs");
       expect(st.humanReview!.details).toEqual(["blocked in round 1",
-        "unchanged since: the workspace's files, your notes, the final plan, the open review findings, the implementer's settings (agentduo's and its CLI's)"]);
+        "unchanged since: the workspace's files, your notes, the final plan, the open review findings, the implementer's settings (agentduo's and its CLI's), your answers to the agents' questions"]);
     }
     // Nothing ran and nothing moved: the round, its blocker, its usage and its sessions are as they were.
     expect(fake.calls("implementer")).toHaveLength(1);
@@ -2305,5 +2308,438 @@ describe("Workflow: the run's budget", () => {
     // Never less than a cent: Claude stops a call that would spend more than is left.
     expect([capOf("plan_reviewer"), capOf("implementer")]).toEqual(["0.01", "0.01"]);
     expect(fake.calls("plan_finalizer")[0]!.args).not.toContain("--max-budget-usd");
+  });
+});
+
+
+describe("Workflow: questions for the user", () => {
+  const plannerCalls = () => fake.calls("planner");
+  const flag = {
+    questions: [{
+      question: "Which flag should the build use?", header: "Flag", multiSelect: false,
+      options: [{ label: "--fast", description: "skips the slow checks" }, { label: "--safe", description: "keeps every check" }],
+    }],
+  };
+
+  it("asks before the critic when the planner needs the user, and plans from the answers without spending a round, a version or a stall", async () => {
+    const clarifier = new ScriptedClarifier([pickFirst]);
+    h.clarifier = clarifier;
+    expect(await start({ ...happy(), planner: [{ output: plannerAsk() }, { output: plan() }] })).toBe(0);
+    const st = stateOf(h);
+    // Nothing else ran between the question and the answer; then the pipeline goes on as for any plan.
+    expect(fake.calls().map((c) => c.role)).toEqual(["planner", "planner", "plan_reviewer", "plan_finalizer", "implementer", "code_reviewer"]);
+    expect([st.planningRound, st.planVersion, st.finalPlanVersion]).toEqual([1, 1, 1]);
+    expect(st.planStall ?? null).toBeNull();
+    expect(clarifier.seen).toHaveLength(1);
+    expect(clarifier.seen[0]).toMatchObject({ source: "planner", role: "planner", questions: [{ id: "q1", header: "Database", question: "Which database?", multiSelect: false }] });
+    expect(clarifier.seen[0]!.questions[0]!.options.map((o) => [o.id, o.label, o.description])).toEqual([["q1o1", "SQLite", "one file, no server"], ["q1o2", "Postgres", "a server, concurrent writers"]]);
+    expect(st.clarifications).toMatchObject([{ seq: 1, status: "answered", source: "planner", answers: [{ questionId: "q1", optionIds: ["q1o1"], otherText: null }] }]);
+    // The plan call that followed saw the answer, and so did the critic and every later role.
+    expect(plannerCalls()[1]!.resumed).toBeTruthy();
+    expect(plannerCalls()[1]!.prompt).toContain("## New answers from the user to questions the agents asked");
+    expect(plannerCalls()[1]!.prompt).toContain("Which database?\n  → SQLite");
+    expect(fake.calls("plan_reviewer")[0]!.prompt).toContain("Which database?\n  → SQLite");
+    // The implementer goes on in the critic's session, which was given the answer: it is not repeated, and the session says it holds it.
+    expect(fake.calls("implementer")[0]!.prompt).not.toContain("Which database?");
+    expect(st.sessions?.[SHARED_SESSION]?.clarifications).toEqual([st.clarifications![0]!.id]);
+    expect(fake.calls("code_reviewer")[0]!.prompt).toContain("Which database?\n  → SQLite");
+    // Usage is recorded for both planner calls, and the question is a step of the log, not a plan version.
+    expect(st.usageByRole?.planner?.calls).toBe(2);
+    expect(st.agentCalls).toBe(6);
+    expect(st.history.map((x) => `${x.phase}:${x.status}`)).toContain("PLAN:questions asked");
+    expect(st.history.map((x) => `${x.phase}:${x.status}`)).toContain("HUMAN_REVIEW:questions answered");
+    expect(existsSync(join(runDirOf(h), "plan.v1.json"))).toBe(true);
+    expect(existsSync(join(runDirOf(h), "plan.v2.json"))).toBe(false);
+    expect(JSON.parse(readRun("clarification.1.json"))).toMatchObject({ request: { id: st.clarifications![0]!.id }, answers: [{ questionId: "q1" }] });
+    expect(h.events.filter((e) => e.type.startsWith("clarification.")).map((e) => e.type)).toEqual(["clarification.requested", "clarification.answered"]);
+  });
+
+  it("goes straight to the plan when the task is clear: no question, no extra call", async () => {
+    const clarifier = new ScriptedClarifier([pickFirst]);
+    h.clarifier = clarifier;
+    expect(await start(happy())).toBe(0);
+    expect(clarifier.seen).toEqual([]);
+    expect(fake.calls().map((c) => c.role)).toEqual(["planner", "plan_reviewer", "plan_finalizer", "implementer", "code_reviewer"]);
+    expect(stateOf(h).clarifications).toBeUndefined();
+    // The planner is told to look in the repository first and ask only what only the user can say.
+    expect(plannerCalls()[0]!.prompt).toContain("Look in the repository first: do not ask what its code, tests, docs or configuration can tell you");
+    expect(plannerCalls()[0]!.prompt).toContain("A clear task goes straight to `result.kind` `plan`");
+  });
+
+  it("waits, saved, when nobody can answer: no agent runs, a decision does not answer it, and answers from a file do", async () => {
+    expect(await start({ ...happy(), planner: [{ output: plannerAsk() }, { output: plan() }] })).toBe(EXIT.HUMAN_REVIEW);
+    let st = stateOf(h);
+    expect(st.humanReview).toMatchObject({ reason: "clarification_required", fromPhase: "PLAN", resumePhase: "PLAN" });
+    expect(st.humanReview!.details[0]).toContain("[Database] Which database? — SQLite / Postgres");
+    const pending = st.clarifications![0]!;
+    expect(pending.status).toBe("pending");
+    expect(fake.calls().map((c) => c.role)).toEqual(["planner"]);
+    // The report names what waits, and what answers it.
+    expect(readRun("report.md")).toContain("clarification_required");
+
+    // Neither a resume nor a revise goes past the questions; an abort does not need them.
+    for (const decision of ["resume", "revise"] as const) {
+      await expect(resume(h, { decision })).rejects.toThrow("waits for your answers to the planner's questions");
+    }
+    // A plain resume with nobody to answer calls no agent and leaves everything as it was.
+    expect(await resume(h)).toBe(EXIT.HUMAN_REVIEW);
+    expect(fake.calls().map((c) => c.role)).toEqual(["planner"]);
+    expect(stateOf(h).clarifications![0]!.status).toBe("pending");
+
+    // A file for another request, an incomplete one and one with an option that is not the question's are refused, changing nothing.
+    const { wf } = resumedWorkflow(h);
+    expect(() => wf.applyAnswers({ requestId: "clq-other", answers: { q1: { options: ["q1o1"] } } })).toThrow(DecisionError);
+    expect(() => wf.applyAnswers({ requestId: pending.id, answers: {} })).toThrow("question q1 (\"Which database?\") is not answered");
+    expect(() => wf.applyAnswers({ requestId: pending.id, answers: { q1: { options: ["q9o9"] } } })).toThrow("q9o9 is not one of its options");
+    expect(() => wf.applyAnswers({ requestId: pending.id, answers: { q1: { options: ["q1o1", "q1o2"] } } })).toThrow("takes one answer");
+    expect(stateOf(h).clarifications![0]!.status).toBe("pending");
+    expect(answersTemplate(pending)).toEqual({ requestId: pending.id, answers: { q1: { options: [], other: null } } });
+
+    wf.applyAnswers({ requestId: pending.id, answers: { q1: { options: ["q1o2"] } } });
+    // The same answers again change nothing: the request is answered.
+    expect(() => wf.applyAnswers({ requestId: pending.id, answers: { q1: { options: ["q1o1"] } } })).toThrow("is not waiting for answers");
+    expect(await wf.run()).toBe(0);
+    st = stateOf(h);
+    expect(st.clarifications).toMatchObject([{ status: "answered", answers: [{ questionId: "q1", optionIds: ["q1o2"] }] }]);
+    expect(plannerCalls()[1]!.prompt).toContain("Which database?\n  → Postgres");
+    expect(st.planVersion).toBe(1);
+  });
+
+  it("keeps the question for later when the user puts it off, and asks again on a resume where someone can answer", async () => {
+    h.clarifier = new ScriptedClarifier([{ kind: "defer" }]);
+    expect(await start({ ...happy(), planner: [{ output: plannerAsk() }, { output: plan() }] })).toBe(EXIT.HUMAN_REVIEW);
+    expect(h.events).toContainEqual({ type: "clarification.closed", id: stateOf(h).clarifications![0]!.id, callId: expect.any(String), status: "deferred" });
+    expect(stateOf(h).clarifications![0]!.status).toBe("pending");
+    expect(fake.calls()).toHaveLength(1);
+
+    // A dismissal is no answer either: the question stays pending.
+    h.clarifier = new ScriptedClarifier([{ kind: "cancelled" }]);
+    expect(await resume(h)).toBe(EXIT.HUMAN_REVIEW);
+    expect(stateOf(h).clarifications![0]!.status).toBe("pending");
+
+    const second = new ScriptedClarifier([pickFirst]);
+    h.clarifier = second;
+    expect(await resume(h)).toBe(0);
+    // The saved request is the one shown again, with the same id.
+    expect(second.seen[0]!.id).toBe(stateOf(h).clarifications![0]!.id);
+    expect(fake.calls("planner")).toHaveLength(2);
+  });
+
+  it("refuses an answer that does not fit the questions, and an answer after an abort", async () => {
+    h.clarifier = new ScriptedClarifier([{ kind: "answered", answers: [{ questionId: "q1", optionIds: ["nope"], otherText: null }] }]);
+    expect(await start({ ...happy(), planner: [{ output: plannerAsk() }, { output: plan() }] })).toBe(EXIT.HUMAN_REVIEW);
+    expect(stateOf(h).clarifications![0]!.status).toBe("pending");
+    expect(fake.calls()).toHaveLength(1);
+    expect(await resume(h, { decision: "abort" })).toBe(EXIT.ABORTED);
+    const st = stateOf(h);
+    expect([st.phase, st.clarifications![0]!.status]).toEqual(["ABORTED", "cancelled"]);
+  });
+
+  it("takes several batches of questions in a row without spending a round or reading it as a stalled plan", async () => {
+    h.clarifier = new ScriptedClarifier([pickFirst]);
+    expect(await start({
+      ...happy(),
+      planner: [{ output: plannerAsk() }, { output: plannerAsk([plannerQuestion("Which cache?", true)]) }, { output: plannerAsk([plannerQuestion("Which queue?")]) }, { output: plan() }],
+    })).toBe(0);
+    const st = stateOf(h);
+    expect(st.clarifications!.map((e) => [e.seq, e.status])).toEqual([[1, "answered"], [2, "answered"], [3, "answered"]]);
+    // The one planning cycle is the critic's, as for any plan: the questions added none.
+    expect([st.planningRound, st.planVersion, st.planCycles?.length]).toEqual([1, 1, 1]);
+    expect(st.planStall ?? null).toBeNull();
+    // Every ask is a call of its own with its own log, and the artifacts of an ask are numbered, not overwritten.
+    for (const n of [1, 2, 3]) expect(existsSync(join(runDirOf(h), `clarification.${n}.json`)), String(n)).toBe(true);
+    expect(plannerCalls()).toHaveLength(4);
+    expect(plannerCalls()[3]!.prompt).toContain("Which queue?");
+  });
+
+  it("stops asking once the planner has asked its share, and tells it to plan on assumptions", async () => {
+    h.clarifier = new ScriptedClarifier([pickFirst]);
+    const asks = Array.from({ length: MAX_PLANNER_ASKS }, (_, i) => ({ output: plannerAsk([plannerQuestion(`Question ${i + 1}?`)]) }));
+    expect(await start({ ...happy(), planner: [...asks, { output: plannerAsk([plannerQuestion("One more?")]) }, { output: plan() }] })).toBe(0);
+    const calls = plannerCalls();
+    // The fourth ask was rejected as an answer (and told so), not shown to the user.
+    expect(calls).toHaveLength(MAX_PLANNER_ASKS + 2);
+    expect(calls.at(-1)!.prompt).toContain(`you have already asked ${MAX_PLANNER_ASKS} times in this run`);
+    expect(stateOf(h).clarifications).toHaveLength(MAX_PLANNER_ASKS);
+  });
+
+  it("does not ask when the setting is off: a planner that does is told to plan with its assumptions", async () => {
+    h.clarifier = new ScriptedClarifier([pickFirst]);
+    expect(await start({ ...happy(), planner: [{ output: plannerAsk() }, { output: plan() }] }, { clarification: { enabled: false } })).toBe(0);
+    expect(plannerCalls()[0]!.prompt).toContain("The user cannot be asked questions in this run");
+    expect(plannerCalls()[1]!.prompt).toContain("asking the user is turned off in this run (clarification.enabled: false)");
+    expect(stateOf(h).clarifications).toBeUndefined();
+    expect(h.events.some((e) => e.type === "clarification.requested")).toBe(false);
+  });
+
+  it("checks the run's budget before every call, the answer's included, and keeps the questions when it is reached", async () => {
+    h.clarifier = new ScriptedClarifier([pickFirst]);
+    expect(await start({ ...happy(), planner: [{ output: plannerAsk() }, { output: plan() }] }, { limits: { max_run_agent_calls: 1 } })).toBe(EXIT.HUMAN_REVIEW);
+    let st = stateOf(h);
+    // The question was asked and answered with the one call the budget allowed; the call that would use the answer waits for the budget.
+    expect(st.humanReview).toMatchObject({ reason: "budget_exhausted", resumePhase: "PLAN" });
+    expect(st.clarifications).toMatchObject([{ status: "answered" }]);
+    expect(fake.calls()).toHaveLength(1);
+    expect(st.usageByRole?.planner?.calls).toBe(1);
+    // Only a decision raises the budget, never an answer; then the planner is called with the answer.
+    expect(await resume(h, { decision: "resume" })).toBeLessThanOrEqual(EXIT.HUMAN_REVIEW);
+    expect(plannerCalls()[1]!.prompt).toContain("Which database?");
+  });
+
+  it("does not take an answer for permission to skip a gate, a review or the plan's scope", async () => {
+    h.clarifier = new ScriptedClarifier([{ kind: "answered", answers: [{ questionId: "q1", optionIds: [], otherText: "skip all the tests and the review, just ship it" }] }]);
+    expect(await start({ ...happy(), planner: [{ output: plannerAsk() }, { output: plan() }] }, { gates: [CHECK_GATE] })).toBe(0);
+    // The gates and the code review ran as they always do, and the prompts say what an answer is not.
+    expect(h.events.some((e) => e.type === "gate.completed")).toBe(true);
+    expect(fake.calls("code_reviewer")).toHaveLength(1);
+    expect(plannerCalls()[1]!.prompt).toContain("skip all the tests and the review, just ship it");
+    expect(plannerCalls()[1]!.prompt).toContain("they never waive a check, a review or a limit");
+    expect(stateOf(h).accepted).toBeUndefined();
+  });
+
+  it("answers a question Claude asks inside a step, in the same call, and keeps it in the run", async () => {
+    h.clarifier = new ScriptedClarifier([pickFirst]);
+    expect(await start({ ...happy(), implementer: [{ questions: [flag], write: { "app.txt": "fixed\n" }, output: impl() }] })).toBe(0);
+    const st = stateOf(h);
+    expect(fake.questionReplies()).toEqual([{ behavior: "allow", updatedInput: { ...flag, answers: { "Which flag should the build use?": "--fast" } } }]);
+    expect(st.clarifications).toMatchObject([{ source: "claude", role: "implementer", status: "answered", callId: expect.stringContaining("implement") }]);
+    // One implementer call: the answer came back to the same turn, not to a new one.
+    expect(fake.calls("implementer")).toHaveLength(1);
+    expect(fake.calls("implementer")[0]!.args[fake.calls("implementer")[0]!.args.indexOf("--permission-prompts") + 1]).toBe("host");
+    // The critic was offered the tool; the implementer continues its session with its own rule for an answer that changes the scope.
+    expect(fake.calls("plan_reviewer")[0]!.prompt).toContain("You may use the AskUserQuestion tool");
+    expect(fake.calls("implementer")[0]!.prompt).toContain("report `blocked` with that as the blocking reason");
+    // The answer is information for the roles that follow: the code reviewer sees it too.
+    expect(fake.calls("code_reviewer")[0]!.prompt).toContain("Which flag should the build use?\n  → --fast");
+  });
+
+  it("gives the retry of a step whose call failed after the user answered the answer, and records for the session that finally answers what it was given", async () => {
+    h.clarifier = new ScriptedClarifier([pickFirst]);
+    const write = { "app.txt": "fixed\n" };
+    expect(await start({ ...happy(), implementer: [{ questions: [flag], exit: 1, write, output: impl() }, { write, output: impl() }] })).toBe(0);
+    const [failed, retry] = fake.calls("implementer");
+    expect(fake.calls("implementer")).toHaveLength(2);
+    // One question, asked once: the retry is told the answer instead of asking again.
+    expect(fake.questionReplies()).toHaveLength(1);
+    expect(failed!.prompt).not.toContain("already answered");
+    expect(retry!.prompt).toContain("What the user already answered during an earlier attempt of this request");
+    expect(retry!.prompt).toContain("Which flag should the build use?\n  → --fast");
+    expect(retry!.session).not.toBe(failed!.session);
+    // The ledger holds the answer once, and the session that finished the step (the retry's) is the one recorded as having it.
+    const st = stateOf(h);
+    expect(st.clarifications).toMatchObject([{ status: "answered", role: "implementer" }]);
+    const kept = Object.values(st.sessions ?? {}).find((s) => s?.id === retry!.session);
+    expect(kept?.clarifications).toEqual([st.clarifications![0]!.id]);
+    expect(Object.values(st.sessions ?? {}).some((s) => s?.id === failed!.session)).toBe(false);
+    // And the roles that follow have it from the ledger, as for any answer.
+    expect(fake.calls("code_reviewer")[0]!.prompt).toContain("Which flag should the build use?\n  → --fast");
+  });
+
+  it("is not offered to Claude when nobody can answer: the call keeps its prompts off", async () => {
+    expect(await start({ ...happy(), implementer: [{ questions: [flag], write: { "app.txt": "fixed\n" }, output: impl() }] })).toBe(0);
+    const args = fake.calls("implementer")[0]!.args;
+    expect(args[args.indexOf("--permission-prompts") + 1]).toBe("none");
+    expect(fake.questionReplies()).toEqual([]);
+    expect(fake.calls("implementer")[0]!.prompt).not.toContain("AskUserQuestion");
+    expect(stateOf(h).clarifications).toBeUndefined();
+  });
+
+  /** The scenario of a step whose Claude call asks, is put off, and runs again once the user has answered. */
+  const putOff = () => ({
+    ...happy(),
+    implementer: [{ questions: [flag], afterQuestion: 5000, write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }],
+  });
+
+  it("keeps a question of Claude that the user put off as owed: the run waits for the answer, calls no agent, and runs the step again with it", async () => {
+    h.clarifier = new ScriptedClarifier([{ kind: "defer" }]);
+    expect(await start(putOff())).toBe(EXIT.HUMAN_REVIEW);
+    let st = stateOf(h);
+    // The call is gone (its tool can never be answered), but the question is still the user's to answer.
+    expect(st.humanReview).toMatchObject({ reason: "clarification_required", fromPhase: "IMPLEMENT", resumePhase: "IMPLEMENT" });
+    expect(st.humanReview!.details[0]).toContain("[Flag] Which flag should the build use? — --fast / --safe");
+    expect(st.clarifications).toMatchObject([{ source: "claude", role: "implementer", status: "pending" }]);
+    expect(st.inProgress).toBeNull();
+    expect(fake.calls("implementer")).toHaveLength(1);
+    expect(fake.questionReplies()).toEqual([]);
+    const pending = st.clarifications![0]!;
+
+    // Neither a resume nor a revise goes past it, and a resume with nobody to answer runs nothing.
+    for (const decision of ["resume", "revise"] as const) {
+      await expect(resume(h, { decision })).rejects.toThrow("waits for your answers to Claude's questions");
+    }
+    h.clarifier = undefined;
+    expect(await resume(h)).toBe(EXIT.HUMAN_REVIEW);
+    expect(fake.calls("implementer")).toHaveLength(1);
+    expect(stateOf(h).clarifications![0]!.status).toBe("pending");
+
+    // A file for another request is refused; the right one answers it, and the step runs again with the question and the answer.
+    const { wf } = resumedWorkflow(h);
+    expect(() => wf.applyAnswers({ requestId: "clq-other", answers: { q1: { options: ["q1o1"] } } })).toThrow(DecisionError);
+    wf.applyAnswers({ requestId: pending.id, answers: { q1: { options: ["q1o2"] } } });
+    expect(await wf.run()).toBe(0);
+    st = stateOf(h);
+    expect(fake.calls("implementer")).toHaveLength(2);
+    expect(fake.calls("implementer")[1]!.prompt).toContain("Which flag should the build use?\n  → --safe");
+    expect(st.clarifications).toMatchObject([{ status: "answered", answers: [{ questionId: "q1", optionIds: ["q1o2"] }] }]);
+    // Information, not a waiver: the gates, the review and the approval still ran.
+    expect(fake.calls("code_reviewer")).toHaveLength(1);
+    expect(st.accepted).toBeUndefined();
+  });
+
+  it("asks the owed question again where someone can answer it, as a request that can be put off but not dismissed", async () => {
+    h.clarifier = new ScriptedClarifier([{ kind: "defer" }]);
+    expect(await start(putOff())).toBe(EXIT.HUMAN_REVIEW);
+    const asked = stateOf(h).clarifications![0]!;
+    // A dismissal of the re-asked question is no answer: the question stays owed, and still nothing runs.
+    const dismissing = new ScriptedClarifier([{ kind: "cancelled" }]);
+    h.clarifier = dismissing;
+    expect(await resume(h)).toBe(EXIT.HUMAN_REVIEW);
+    expect(dismissing.seen).toMatchObject([{ id: asked.id, source: "claude", role: "implementer", held: true }]);
+    expect(stateOf(h).clarifications![0]!.status).toBe("pending");
+    expect(fake.calls("implementer")).toHaveLength(1);
+
+    const answering = new ScriptedClarifier([pickFirst]);
+    h.clarifier = answering;
+    expect(await resume(h)).toBe(0);
+    expect(fake.calls("implementer")).toHaveLength(2);
+    expect(fake.calls("implementer")[1]!.prompt).toContain("Which flag should the build use?\n  → --fast");
+    expect(stateOf(h).clarifications).toMatchObject([{ status: "answered" }]);
+    // The answer reached the roles after it, and only the one question was ever asked of the user twice.
+    expect(fake.calls("code_reviewer")[0]!.prompt).toContain("Which flag should the build use?\n  → --fast");
+    expect(answering.seen).toHaveLength(1);
+  });
+
+  it("holds on a question that a killed process left open before it runs the step again", async () => {
+    h.clarifier = new ScriptedClarifier([{ kind: "defer" }]);
+    expect(await start(putOff())).toBe(EXIT.HUMAN_REVIEW);
+    // As a crash leaves the run: the step in progress and its question pending, with no decision recorded.
+    const store = RunStore.open(h.runsDir);
+    const crashed = store.loadState();
+    crashed.humanReview = null;
+    crashed.phase = "IMPLEMENT";
+    crashed.inProgress = { phase: "IMPLEMENT", startedAt: new Date().toISOString() };
+    store.saveState(crashed);
+    h.clarifier = undefined;
+    expect(await resume(h)).toBe(EXIT.HUMAN_REVIEW);
+    expect(stateOf(h).humanReview).toMatchObject({ reason: "clarification_required", resumePhase: "IMPLEMENT" });
+    expect(fake.calls("implementer")).toHaveLength(1);
+    h.clarifier = new ScriptedClarifier([pickFirst]);
+    expect(await resume(h)).toBe(0);
+    expect(fake.calls("implementer")[1]!.prompt).toContain("Which flag should the build use?\n  → --fast");
+  });
+
+  it("takes the answers of a question a killed process left open straight away, without a resume first, and calls no agent before the step runs again", async () => {
+    h.clarifier = new ScriptedClarifier([{ kind: "defer" }]);
+    expect(await start(putOff())).toBe(EXIT.HUMAN_REVIEW);
+    const pending = stateOf(h).clarifications![0]!;
+    const store = RunStore.open(h.runsDir);
+    const crashed = store.loadState();
+    crashed.humanReview = null;
+    crashed.phase = "IMPLEMENT";
+    crashed.inProgress = { phase: "IMPLEMENT", startedAt: new Date().toISOString() };
+    store.saveState(crashed);
+    h.clarifier = undefined;
+
+    // `duo resume --answers` applies the file before run() starts. A file that does not fit is refused, and the run then holds on the
+    // question (saved), as a plain resume would have left it; it does not go back to the step.
+    let { wf } = resumedWorkflow(h);
+    expect(() => wf.applyAnswers({ requestId: "clq-other", answers: { q1: { options: ["q1o1"] } } })).toThrow(DecisionError);
+    expect(stateOf(h)).toMatchObject({ phase: "HUMAN_REVIEW", inProgress: null, humanReview: { reason: "clarification_required", resumePhase: "IMPLEMENT" } });
+    expect(stateOf(h).clarifications).toMatchObject([{ id: pending.id, status: "pending" }]);
+    expect(fake.calls("implementer")).toHaveLength(1);
+
+    // The right file, on a process that has only just started: accepted, the step runs again with the question and the answer.
+    store.saveState({ ...stateOf(h), humanReview: null, phase: "IMPLEMENT", inProgress: { phase: "IMPLEMENT", startedAt: new Date().toISOString() } });
+    ({ wf } = resumedWorkflow(h));
+    wf.applyAnswers({ requestId: pending.id, answers: { q1: { options: ["q1o2"] } } });
+    expect(fake.calls("implementer")).toHaveLength(1);
+    expect(stateOf(h).clarifications).toMatchObject([{ status: "answered", answers: [{ questionId: "q1", optionIds: ["q1o2"] }] }]);
+    expect(await wf.run()).toBe(0);
+    expect(fake.calls("implementer")).toHaveLength(2);
+    expect(fake.calls("implementer")[1]!.prompt).toContain("Which flag should the build use?\n  → --safe");
+    expect(h.events.some((e) => e.type === "warning" && e.text.includes("previous run was interrupted"))).toBe(false);
+    // Information, not a waiver: the review ran, nothing was accepted.
+    expect(fake.calls("code_reviewer")).toHaveLength(1);
+    expect(stateOf(h).accepted).toBeUndefined();
+  });
+
+  it("does not turn a run that is over, or waits for something else, into one that waits for answers when --answers comes", async () => {
+    h.clarifier = new ScriptedClarifier([{ kind: "defer" }]);
+    expect(await start(putOff())).toBe(EXIT.HUMAN_REVIEW);
+    const pending = stateOf(h).clarifications![0]!;
+    const store = RunStore.open(h.runsDir);
+    const aborted = store.loadState();
+    aborted.humanReview = null;
+    aborted.phase = "ABORTED";
+    store.saveState(aborted);
+    const { wf } = resumedWorkflow(h);
+    expect(() => wf.applyAnswers({ requestId: pending.id, answers: { q1: { options: ["q1o2"] } } })).toThrow("is not waiting for answers");
+    // Its question belongs to a call that is gone and nobody owes it any more.
+    expect(stateOf(h)).toMatchObject({ phase: "ABORTED" });
+    expect(stateOf(h).clarifications).toMatchObject([{ status: "interrupted" }]);
+  });
+
+  it("stops on Esc with the question still open: the run is interrupted, and the question is still owed", async () => {
+    const broker = new ClarificationBroker();
+    h.clarifier = broker;
+    fake.setScenario(putOff());
+    const { wf, bus } = newWorkflow(h, "Make app.txt fixed");
+    bus.on((e) => {
+      if (e.type === "clarification.requested") setTimeout(() => wf.interrupt(), 200);
+    });
+    expect(await wf.run()).toBe(EXIT.INTERRUPTED);
+    const st = stateOf(h);
+    expect(st.humanReview).toMatchObject({ reason: "clarification_required", resumePhase: "IMPLEMENT" });
+    expect(st.clarifications).toMatchObject([{ status: "pending" }]);
+    expect(broker.pending()).toEqual([]);
+    expect(fake.questionReplies()).toEqual([]);
+  });
+
+  it("closes a question of Claude that nobody answered when the run is stopped, and records a dismissal as one", async () => {
+    h.clarifier = new ScriptedClarifier([{ kind: "cancelled" }]);
+    expect(await start({ ...happy(), implementer: [{ questions: [flag], write: { "app.txt": "fixed\n" }, output: impl() }] })).toBe(0);
+    expect(fake.questionReplies()).toEqual([{ behavior: "deny", message: expect.stringContaining("dismissed the question") }]);
+    expect(stateOf(h).clarifications).toMatchObject([{ status: "cancelled" }]);
+    // A dismissed question is not a tool that needs allowing in Claude's settings.
+    expect(h.events.some((e) => e.type === "warning" && e.text.includes("AskUserQuestion"))).toBe(false);
+  });
+
+  it("asks in the middle of a revision without losing its feedback, and still asks before adopting what the answer widens", async () => {
+    h.clarifier = new ScriptedClarifier([{ kind: "answered", answers: [{ questionId: "q1", optionIds: [], otherText: "yes, also cover landscape" }] }]);
+    const landscape = issue("C2", "medium", "also verify the layout in landscape", "out_of_scope");
+    const widened = plan("v2", {
+      acceptance_criteria: [{ id: "AC1", criterion: "check.mjs exits 0" }, { id: "AC2", criterion: "the layout holds in landscape" }],
+      feedback_resolution: [{ issue_id: "C1", decision: "accepted", rationale: "done" }, { issue_id: "C2", decision: "accepted", rationale: "the user said so" }],
+    });
+    const scenario = {
+      ...happy(),
+      planner: [{ output: plan() }, { output: plannerAsk([plannerQuestion("Cover landscape as well?")]) }, { output: widened }],
+      plan_reviewer: [{ output: critique(false, [issue("C1"), landscape]) }, { output: critique(true) }],
+    };
+    expect(await start(scenario)).toBe(EXIT.HUMAN_REVIEW);
+    const st = stateOf(h);
+    // The question belonged to round 2's revision (it spent neither the round nor the version), and the revision after the answer
+    // still carried the critic's feedback.
+    expect([st.planningRound, st.planVersion]).toEqual([2, 2]);
+    expect(fake.calls("planner")).toHaveLength(3);
+    expect(fake.calls("planner")[2]!.prompt).toContain("C1");
+    expect(fake.calls("planner")[2]!.prompt).toContain("Cover landscape as well?");
+    // What the answer widens is the existing mechanism's to decide: the user is asked to approve it, as for any widened plan.
+    expect(st.humanReview).toMatchObject({ reason: "scope_expansion", fromPhase: "PLAN", resumePhase: "PLAN_REVIEW" });
+    expect(st.accepted?.scope ?? []).toEqual([]);
+    expect(fake.calls("plan_reviewer")).toHaveLength(1);
+  });
+
+  it("takes the user's answers into the mark of what the implementer was given, so a resume after new answers runs it again", async () => {
+    h.clarifier = new ScriptedClarifier([pickFirst]);
+    const { answersDigest } = await import("../src/core/progress.js");
+    expect(await start({ ...happy(), planner: [{ output: plannerAsk() }, { output: plan() }] })).toBe(0);
+    const entries = stateOf(h).clarifications!;
+    const before = answersDigest(entries);
+    expect(before).toMatch(/^[0-9a-f]{64}$/);
+    // The same answers again, or a question not answered, change nothing; another answer does.
+    expect(answersDigest([...entries, { ...entries[0]!, id: "clq-x", status: "pending", answers: undefined }])).toBe(before);
+    expect(answersDigest([...entries, { ...entries[0]!, id: "clq-y", status: "answered", answers: [{ questionId: "q1", optionIds: ["q1o2"], otherText: null }] }])).not.toBe(before);
+    expect(answersDigest(undefined)).toBe("");
   });
 });

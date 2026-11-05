@@ -6,7 +6,8 @@ import { AgentRunner, type CallBudget, type CallSession } from "../src/agents/ru
 import type { Attachment } from "../src/core/attachment-types.js";
 import { AttachmentStore, existingAttachmentFile } from "../src/core/attachments.js";
 import { png } from "./helpers/images.js";
-import { EventBus, type DuoEvent, type PermissionAnswer, type PermissionDecider } from "../src/events.js";
+import type { ClarificationRequest, ClarificationResponse } from "../src/core/clarification.js";
+import { EventBus, type ClarificationDecider, type DuoEvent, type PermissionAnswer, type PermissionDecider } from "../src/events.js";
 import { critique, impl, plan } from "./helpers/builders.js";
 import { testConfig, type ConfigOverrides } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
@@ -412,7 +413,7 @@ describe("AgentRunner and the run's budget", () => {
     const seen: Array<{ tokens: number; costUsd: number; calls: number }> = [];
     const res = await plannerCall(r, { stop: (call) => (seen.push(call), call.calls >= 1 ? "the run reached its budget" : null), costCap: () => null });
     expect(res).toMatchObject({ ok: false, budgetStop: "the run reached its budget", error: "the run reached its budget", attempts: 1, calls: 1, unpricedCalls: 1 });
-    expect(seen).toEqual([{ tokens: 0, costUsd: 0, calls: 0 }, { tokens: 1234, costUsd: 0, calls: 1 }]);
+    expect(seen).toEqual([{ tokens: 0, costUsd: 0, calls: 0, waitedSec: 0 }, { tokens: 1234, costUsd: 0, calls: 1, waitedSec: 0 }]);
     expect(fake.calls("planner")).toHaveLength(1);
     const before = await plannerCall(r, { stop: () => "no budget left", costCap: () => null }, "002-plan-r1");
     expect(before).toMatchObject({ ok: false, attempts: 0, calls: 0, budgetStop: "no budget left" });
@@ -432,3 +433,265 @@ describe("AgentRunner and the run's budget", () => {
     expect(fake.calls("planner")[0]!.args).not.toContain("--max-budget-usd");
   });
 });
+
+
+describe("AgentRunner and the questions Claude asks", () => {
+  const flag = {
+    questions: [
+      { question: "Which flag should the build use?", header: "Flag", multiSelect: false, options: [{ label: "--fast", description: "skips the slow checks" }, { label: "--safe", description: "keeps every check" }] },
+      { question: "Which targets?", header: "Targets", multiSelect: true, options: [{ label: "web", description: "browser" }, { label: "cli", description: "terminal" }, { label: "api", description: "server" }] },
+    ],
+  };
+  const withUser = (o: ConfigOverrides, o2: { permissions?: PermissionDecider; clarifications?: ClarificationDecider }) =>
+    new AgentRunner(testConfig(fake, o), t.path, join(t.path, "logs"), bus, { ...o2, runsDir: join(t.path, "runs") });
+  /** A decider that answers `respond` after `delayMs`, and records the requests and the abort signals it was given. */
+  const user = (respond: (r: ClarificationRequest) => ClarificationResponse, delayMs = 0) => {
+    const seen: ClarificationRequest[] = [];
+    const signals: Array<AbortSignal | undefined> = [];
+    const decider: ClarificationDecider = {
+      askClarification: async ({ request }, signal) => {
+        seen.push(request);
+        signals.push(signal);
+        await new Promise((r) => setTimeout(r, delayMs));
+        return respond(request);
+      },
+    };
+    return { decider, seen, signals };
+  };
+  const choose = (labels: Record<string, string[]>, other: Record<string, string> = {}) => (r: ClarificationRequest): ClarificationResponse => ({
+    kind: "answered",
+    answers: r.questions.map((q) => ({
+      questionId: q.id, optionIds: q.options.filter((o) => (labels[q.id] ?? []).includes(o.label)).map((o) => o.id), otherText: other[q.id] ?? null,
+    })),
+  });
+  const closed = () => events.flatMap((e) => (e.type === "clarification.closed" ? [e.status] : []));
+
+  it("sends the question to the user whole, apart from permissions, and answers it in the same call with the labels chosen", async () => {
+    fake.setScenario({ implementer: [{ questions: [flag], output: impl() }] });
+    const { decider, seen } = user(choose({ q1: ["--safe"], q2: ["web", "api"] }));
+    const r = await implement(withUser({}, { clarifications: decider }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ source: "claude", agent: "claude", role: "implementer", callId: "020-implement-r1.a1" });
+    expect(seen[0]!.questions.map((q) => [q.id, q.header, q.question, q.multiSelect, q.options.map((o) => [o.id, o.label, o.description])])).toEqual([
+      ["q1", "Flag", "Which flag should the build use?", false, [["q1o1", "--fast", "skips the slow checks"], ["q1o2", "--safe", "keeps every check"]]],
+      ["q2", "Targets", "Which targets?", true, [["q2o1", "web", "browser"], ["q2o2", "cli", "terminal"], ["q2o3", "api", "server"]]],
+    ]);
+    // Claude's own protocol (verified on 2.1.318): its input back, with `answers` keyed by the question's text, a multiple choice comma-separated.
+    expect(fake.questionReplies()).toEqual([{ behavior: "allow", updatedInput: { ...flag, answers: { "Which flag should the build use?": "--safe", "Which targets?": "web, api" } } }]);
+    // It is a question, never a permission: no permission event and no "always allow" to offer.
+    expect(events.some((e) => e.type.startsWith("permission."))).toBe(false);
+    expect(events.map((e) => e.type).filter((x) => x.startsWith("clarification."))).toEqual(["clarification.requested", "clarification.answered"]);
+    expect(fake.calls("implementer")).toHaveLength(1);
+    expect(r.meta.permissionDenials).toEqual([]);
+  });
+
+  it("gives the user's own words, alone or with options, as the answer's text", async () => {
+    fake.setScenario({ implementer: [{ questions: [flag], output: impl() }] });
+    const { decider } = user(choose({ q2: ["cli"] }, { q1: "neither: use --profile ci", q2: "and the docs site" }));
+    await implement(withUser({}, { clarifications: decider }));
+    expect(fake.questionReplies()[0]!.updatedInput!.answers).toEqual({ "Which flag should the build use?": "neither: use --profile ci", "Which targets?": "cli, and the docs site" });
+  });
+
+  it("uses host mode for the questions alone, keeps denying every other tool request, and offers nothing when neither is on", async () => {
+    fake.setScenario({ implementer: [{ questions: [flag], permissions: [bashAsk("rm -rf build")], output: impl() }] });
+    const { decider } = user(choose({ q1: ["--fast"], q2: ["cli"] }));
+    // permission_prompts: deny, no permission decider: the questions still reach the user; the tool request does not.
+    const r = await implement(withUser({ claude: { permission_prompts: "deny" } }, { clarifications: decider }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    const args = fake.calls("implementer")[0]!.args;
+    expect(args[args.indexOf("--permission-prompts") + 1]).toBe("host");
+    expect(args).toEqual(expect.arrayContaining(["--input-format", "stream-json", "--permission-prompt-tool", "stdio"]));
+    expect(fake.permissionAnswers().map((a) => [a.behavior, a.message ?? ""])).toEqual([["deny", expect.stringContaining("permission prompts are off")]]);
+    expect(events.some((e) => e.type === "permission.requested")).toBe(false);
+    // No rule, mode or flag was added on the way.
+    expect(args.filter((a) => /allowedTools|permission-mode|dangerously/.test(a))).toEqual(args.filter((a) => /permission-mode/.test(a)));
+
+    // The setting off: back to the host mode of the permission setting alone.
+    fake.setScenario({ implementer: [{ output: impl() }] });
+    await implement(withUser({ clarification: { enabled: false } }, { clarifications: decider }));
+    const off = fake.calls("implementer")[1]!.args;
+    expect(off[off.indexOf("--permission-prompts") + 1]).toBe("none");
+    // Both on, with both deciders: the permission prompt still goes to the permission decider, the question to the clarification one.
+    fake.setScenario({ implementer: [{ questions: [flag], permissions: [bashAsk("npm test")], output: impl() }] });
+    const asked = scripted([{ decision: "once" }]);
+    await implement(withUser({ claude: { permission_prompts: "ask" } }, { clarifications: decider, permissions: asked.decider }));
+    expect(asked.asked).toEqual(["Bash  npm test"]);
+    expect(fake.questionReplies()).toHaveLength(2);
+  });
+
+  it("does not offer the tool to Codex, nor to a Claude call nobody can answer", async () => {
+    fake.setScenario({ planner: [{ output: plan() }], implementer: [{ output: impl() }] });
+    const { decider } = user(choose({}));
+    await runner({ agents: { planner: "codex" } }).call({ role: "planner", agentRole: "planner", prompt: prompt("planner"), schemaName: "plan", logPrefix: "001-plan-r1" });
+    await implement(runner());
+    for (const call of fake.calls()) expect(call.args).not.toContain("--input-format");
+    expect(decider).toBeDefined();
+  });
+
+  it("stops the clocks while the user thinks: neither the whole-call nor the idle limit ends a call that waits for an answer", async () => {
+    fake.setScenario({ implementer: [{ questions: [flag], output: impl() }] });
+    const { decider } = user(choose({ q1: ["--fast"], q2: ["cli"] }), 2500);
+    const r = await implement(withUser({ limits: { max_retries: 0, agent_idle_timeout_sec: 1, agent_timeout_sec: 2 } }, { clarifications: decider }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    // The wait is told, not counted: what the call reports as waited is about what the user took.
+    expect(r.waitedSec).toBeGreaterThan(2.3);
+    expect(r.waitedSec).toBeLessThan(5);
+  });
+
+  it("counts a wait over several questions once, and the same wait twice never", async () => {
+    fake.setScenario({ implementer: [{ questions: [flag, flag], output: impl() }] });
+    const { decider } = user(choose({ q1: ["--fast"], q2: ["cli"] }), 300);
+    const r = await implement(withUser({}, { clarifications: decider }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(fake.questionReplies()).toHaveLength(2);
+    expect(r.waitedSec).toBeGreaterThan(0.55);
+    expect(r.waitedSec).toBeLessThan(2);
+  });
+
+  it("ends the call and records the question interrupted when the user would answer later; nothing is written to a process that goes away", async () => {
+    fake.setScenario({ implementer: [{ questions: [flag], afterQuestion: 10_000, output: impl() }] });
+    const { decider } = user(() => ({ kind: "defer" }));
+    const r = await implement(withUser({}, { clarifications: decider }));
+    expect(r).toMatchObject({ ok: false, interrupted: true });
+    expect(closed()).toEqual(["interrupted"]);
+    expect(fake.questionReplies()).toEqual([]);
+    // The process is gone, and no retry ran for a question nobody answered.
+    expect(fake.calls("implementer")).toHaveLength(1);
+    expect(events.some((e) => e.type === "clarification.answered")).toBe(false);
+  });
+
+  it("releases the waiting user and the process when the call is aborted while it waits, and no late answer is written", async () => {
+    fake.setScenario({ implementer: [{ questions: [flag], output: impl() }] });
+    const controller = new AbortController();
+    let release: (r: ClarificationResponse) => void = () => undefined;
+    const signals: Array<AbortSignal | undefined> = [];
+    const decider: ClarificationDecider = {
+      askClarification: ({ request: _r }, signal) => {
+        signals.push(signal);
+        return new Promise((resolve) => { release = resolve; setTimeout(() => controller.abort(), 150); });
+      },
+    };
+    const r = await implement2(withUser({}, { clarifications: decider }), controller.signal);
+    expect(r).toMatchObject({ ok: false, interrupted: true });
+    expect(signals[0]!.aborted).toBe(true);
+    expect(closed()).toEqual(["interrupted"]);
+    // The user answers after all, too late: nothing is written, nothing is recorded as answered.
+    release(choose({ q1: ["--fast"], q2: ["cli"] })({ questions: flag.questions.map((q, i) => ({ id: `q${i + 1}`, header: q.header, question: q.question, multiSelect: q.multiSelect, options: q.options.map((o, j) => ({ id: `q${i + 1}o${j + 1}`, ...o })) })) } as ClarificationRequest));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(fake.questionReplies()).toEqual([]);
+    expect(events.some((e) => e.type === "clarification.answered")).toBe(false);
+  });
+
+  it("tells Claude, not the user, when a question cannot be shown, and when the answers do not fit", async () => {
+    fake.setScenario({ implementer: [{ questions: [{ questions: [{ question: "One option only?", header: "x", multiSelect: false, options: [{ label: "yes", description: "" }] }] }], output: impl() }] });
+    const { decider, seen } = user(choose({}));
+    await implement(withUser({}, { clarifications: decider }));
+    expect(seen).toEqual([]);
+    expect(fake.questionReplies()).toEqual([{ behavior: "deny", message: expect.stringContaining("could not show this question to the user (question 1: needs 2 to 6 options)") }]);
+
+    const wrong = user(() => ({ kind: "answered", answers: [{ questionId: "q1", optionIds: ["q9o9"], otherText: null }] }));
+    fake.setScenario({ implementer: [{ questions: [flag], output: impl() }] });
+    await implement(withUser({}, { clarifications: wrong.decider }));
+    expect(fake.questionReplies().at(-1)).toMatchObject({ behavior: "deny", message: expect.stringContaining("did not match the questions") });
+    expect(closed()).toContain("cancelled");
+  });
+
+  it("treats a decider that fails as a question put off, and a dismissal as a refusal Claude is told about", async () => {
+    fake.setScenario({ implementer: [{ questions: [flag], afterQuestion: 10_000, output: impl() }] });
+    const failing: ClarificationDecider = { askClarification: async () => { throw new Error("the window closed"); } };
+    expect(await implement(withUser({}, { clarifications: failing }))).toMatchObject({ interrupted: true });
+    expect(closed()).toEqual(["interrupted"]);
+
+    events.length = 0;
+    fake.setScenario({ implementer: [{ questions: [flag], output: impl() }] });
+    const dismiss = user(() => ({ kind: "cancelled" }));
+    const r = await implement(withUser({}, { clarifications: dismiss.decider }));
+    expect(r.ok, r.error ?? "").toBe(true);
+    expect(fake.questionReplies().at(-1)).toMatchObject({ behavior: "deny", message: expect.stringContaining("dismissed the question") });
+    expect(closed()).toEqual(["cancelled"]);
+    expect(r.meta.permissionDenials).toEqual([]);
+  });
+
+  it("asks a chat turn's question for the turn, and numbers nothing to a run", async () => {
+    fake.setScenario({ chat_claude: [{ questions: [flag], answer: "the build uses --fast" }] });
+    const { decider, seen } = user(choose({ q1: ["--fast"], q2: ["web"] }));
+    const r = await withUser({}, { clarifications: decider }).call({
+      mode: "text", backend: "claude", prompt: "[agentduo-conversation]\nhow?", logPrefix: "001-claude", conversationId: "c1", turnId: "c1-t1",
+    });
+    expect(r).toMatchObject({ ok: true, data: "the build uses --fast" });
+    expect(seen[0]).toMatchObject({ source: "claude", turnId: "c1-t1", callId: "001-claude.a1" });
+    expect(seen[0]!.role).toBeUndefined();
+  });
+
+  describe("an attempt that failed after the user answered it", () => {
+    const pairs = "- [Flag] Which flag should the build use?\n  → --safe\n- [Targets] Which targets?\n  → web, api";
+    const seenBefore = "this session did not see the answers";
+    const roles = { callOf: (n: number) => fake.calls("implementer")[n]! };
+
+    it("gives the retry's new session the answers, so it does not ask again or go without them", async () => {
+      fake.setScenario({ implementer: [{ questions: [flag], exit: 1, output: impl() }, { output: impl() }] });
+      const { decider, seen } = user(choose({ q1: ["--safe"], q2: ["web", "api"] }));
+      const r = await implement(withUser({}, { clarifications: decider }));
+      expect(r, r.error ?? "").toMatchObject({ ok: true, attempts: 2, calls: 2 });
+      expect(seen).toHaveLength(1);
+      expect(roles.callOf(0).prompt).not.toContain("already answered");
+      const retry = roles.callOf(1).prompt;
+      expect(retry).toContain("What the user already answered during an earlier attempt of this request");
+      expect(retry).toContain(seenBefore);
+      expect(retry).toContain(pairs);
+      // Information, not permission: the guard that goes with every answer goes with these.
+      expect(retry).toContain("never waive a check, a review or a limit");
+      // The prompt of the attempt as the agent got it is logged with them.
+      expect(readFileSync(join(t.path, "logs", "020-implement-r1.a2.prompt.md"), "utf8")).toContain(pairs);
+    });
+
+    it("gives them also to the retry of an answer agentduo rejected, next to what to correct", async () => {
+      fake.setScenario({ implementer: [{ questions: [flag], output: { status: "not a status" } }, { output: impl() }] });
+      const { decider } = user(choose({ q1: ["--safe"], q2: ["web", "api"] }));
+      const r = await implement(withUser({}, { clarifications: decider }));
+      expect(r, r.error ?? "").toMatchObject({ ok: true, attempts: 2 });
+      const retry = roles.callOf(1).prompt;
+      expect(retry).toContain("## Your previous answer was rejected");
+      expect(retry).toContain(pairs);
+    });
+
+    it("gives them to every later attempt, also the ones that are asked nothing themselves", async () => {
+      fake.setScenario({ implementer: [{ questions: [flag], exit: 1, output: impl() }, { exit: 1, output: impl() }, { output: impl() }] });
+      const { decider } = user(choose({ q1: ["--safe"], q2: ["web", "api"] }));
+      const r = await implement(withUser({ limits: { max_retries: 2 } }, { clarifications: decider }));
+      expect(r, r.error ?? "").toMatchObject({ ok: true, attempts: 3 });
+      expect(roles.callOf(1).prompt).toContain(pairs);
+      expect(roles.callOf(2).prompt).toContain(pairs);
+      expect(roles.callOf(2).prompt.split("What the user already answered").length - 1).toBe(1);
+    });
+
+    it("gives the fresh session after a continued one that was answered and then failed the whole prompt with the answers, not the new-only one", async () => {
+      fake.setScenario({ chat_claude: [{ answer: "first" }, { questions: [flag], exit: 1 }, { answer: "fresh" }] });
+      const { decider } = user(choose({ q1: ["--safe"], q2: ["web", "api"] }));
+      const r = withUser({}, { clarifications: decider });
+      const call = (logPrefix: string, session: CallSession) =>
+        r.call({ mode: "text", backend: "claude", prompt: "[agentduo-conversation]\nWHOLE", logPrefix, conversationId: "c1", turnId: `c1-${logPrefix}`, session });
+      const first = await call("001-claude", { keep: true });
+      const second = await call("002-claude", { keep: true, resume: { id: first.sessionId!, prompt: "[agentduo-conversation]\nNEW ONLY" } });
+      expect(second).toMatchObject({ ok: true, resumed: false, attempts: 2, data: "fresh" });
+      const [, continued, fresh] = fake.calls("chat_claude");
+      expect(continued!.resumed).toBe(first.sessionId);
+      expect(continued!.prompt).toBe("[agentduo-conversation]\nNEW ONLY");
+      expect(fresh!.resumed).toBeUndefined();
+      expect(fresh!.prompt).toContain("[agentduo-conversation]\nWHOLE");
+      expect(fresh!.prompt).toContain(pairs);
+    });
+
+    it("adds nothing to a call that was not answered anything, or whose question was dismissed", async () => {
+      fake.setScenario({ implementer: [{ questions: [flag], exit: 1, output: impl() }, { output: impl() }] });
+      const dismiss = user(() => ({ kind: "cancelled" }));
+      const r = await implement(withUser({}, { clarifications: dismiss.decider }));
+      expect(r.ok, r.error ?? "").toBe(true);
+      expect(roles.callOf(1).prompt).not.toContain("already answered");
+    });
+  });
+});
+
+const implement2 = (r: AgentRunner, signal: AbortSignal) =>
+  r.call({ role: "implementer", agentRole: "implementer", prompt: prompt("implementer"), schemaName: "implementation", logPrefix: "020-implement-r1", signal });

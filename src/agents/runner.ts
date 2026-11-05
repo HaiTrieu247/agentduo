@@ -1,14 +1,18 @@
+import { randomUUID } from "node:crypto";
 import { appendFileSync, createWriteStream, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { IMAGE_MEDIA_TYPES, selectNative, type Attachment } from "../core/attachment-types.js";
 import { AttachmentError, existingAttachmentFile } from "../core/attachments.js";
+import {
+  answerErrors, clarificationSection, cleanAnswers, openEntry, type ClarificationEntry, type ClarificationRequest, type ClarificationResponse,
+} from "../core/clarification.js";
 import type { AgentRole, Backend, ConfigData } from "../core/config.js";
-import type { Activity, CallContext, EventBus, Party, PermissionAnswer, PermissionDecider, Role } from "../events.js";
+import type { Activity, CallContext, ClarificationDecider, EventBus, Party, PermissionAnswer, PermissionDecider, Role } from "../events.js";
 import { ClaudeBackend } from "./claude.js";
 import { CodexBackend } from "./codex.js";
 import { runProcess, type ChildIO, type RunResult } from "./process.js";
 import { validateOutput, type SchemaName } from "./schema.js";
-import { AgentFailure, BinaryNotFound, type AgentBackend, type AgentMeta, type NativeImage, type ParsedEvent } from "./types.js";
+import { AgentFailure, BinaryNotFound, type AgentBackend, type AgentMeta, type ClarificationReply, type NativeImage, type ParsedEvent } from "./types.js";
 
 /**
  * The files attached to what the call answers. Its prompt already lists them with their paths (prompts.ts does); the
@@ -38,8 +42,11 @@ export interface StructuredCall extends WithAttachments {
 
 /** What a pipeline run may still spend, asked before each attempt of a call with what the call used so far. */
 export interface CallBudget {
-  /** Why no further attempt may start (a limit of the run reached); null when one may. */
-  stop(call: { tokens: number; costUsd: number; calls: number }): string | null;
+  /**
+   * Why no further attempt may start (a limit of the run reached); null when one may. `waitedSec`: the seconds this call
+   * has spent waiting for the user, which are not work.
+   */
+  stop(call: { tokens: number; costUsd: number; calls: number; waitedSec: number }): string | null;
   /** The most the next attempt may cost, for a CLI that caps a call itself (Claude's --max-budget-usd); null: no cap. */
   costCap(callCostUsd: number): number | null;
 }
@@ -99,6 +106,8 @@ export interface AgentResult {
   budgetStop: string | null;
   /** Every answer agentduo rejected (not JSON, or failing the schema or the role's check), by attempt; empty for a text call. */
   rejections: Rejection[];
+  /** Seconds the call waited for the user (permission prompts and questions, together, never counted twice): not work. */
+  waitedSec: number;
 }
 
 /** An answer agentduo rejected, and why: the next attempt is told, also when it runs in a fresh session. */
@@ -139,11 +148,58 @@ export interface RunnerOptions {
   backends?: Record<"codex" | "claude", AgentBackend>;
   /** Who answers permission prompts; absent when nobody can (CI, background), so prompts are denied by the CLI. */
   permissions?: PermissionDecider;
+  /** Who answers an agent's structured questions; absent when nobody can, so Claude is not offered the question tool. */
+  clarifications?: ClarificationDecider;
   /** Where attachments' copies are (their paths are relative to it); needed only by calls with attachments. */
   runsDir?: string;
 }
 
 type PermissionEvent = Extract<ParsedEvent, { type: "permission" }>;
+type QuestionEvent = Extract<ParsedEvent, { type: "question" }>;
+
+/** The time a call waited for the user, with overlapping waits counted once. */
+class HumanWaits {
+  ms = 0;
+  private open = 0;
+  private since = 0;
+
+  start(): void {
+    if (this.open++ === 0) this.since = Date.now();
+  }
+
+  end(): void {
+    if (this.open > 0 && --this.open === 0) this.ms += Date.now() - this.since;
+  }
+
+  /** The attempt is over: whatever still waits stops counting. */
+  close(): void {
+    if (this.open > 0) {
+      this.open = 0;
+      this.ms += Date.now() - this.since;
+    }
+  }
+}
+
+/** What answering the host-mode requests of one attempt needs. */
+interface Attempt {
+  channel: Channel;
+  /** Aborted when the call is interrupted, when a question is deferred, and when the attempt is over. */
+  signal: AbortSignal;
+  agent: Party;
+  backend: AgentBackend;
+  io: ChildIO;
+  callId: string;
+  answersLog: string;
+  waits: HumanWaits;
+  /** Every question the user answered in any attempt of this call so far, which a later attempt's new session never saw. */
+  answered: ClarificationEntry[];
+  /** Ends the call: the user would answer later, and a CLI process cannot wait for that. */
+  stopCall(): void;
+}
+
+const NO_QUESTIONS = "The user cannot be asked questions in this run. Decide from the repository, state the assumption you made in your report, and continue.";
+const DISMISSED = "The user dismissed the question without answering. Do not assume an answer: continue without it, and say in your report what you could not decide.";
+const PROMPTS_OFF = "This tool call needs a permission, and permission prompts are off (claude.permission_prompts: deny). Do not retry it; continue without it and say so in your report.";
 
 /** Where one call's activities, usage and permission prompts go: a pipeline role, or a conversation turn. */
 interface Channel {
@@ -156,6 +212,7 @@ interface Channel {
 export class AgentRunner {
   readonly backends: Record<"codex" | "claude", AgentBackend>;
   private readonly permissions?: PermissionDecider;
+  private readonly clarifications?: ClarificationDecider;
   private readonly runsDir?: string;
   /** Images already said to go only as paths, so each call of a run does not say it again. */
   private readonly warned = new Set<string>();
@@ -164,6 +221,7 @@ export class AgentRunner {
     private readonly bus: EventBus, o: RunnerOptions = {}) {
     this.backends = o.backends ?? { codex: new CodexBackend(cfg.codex, repo), claude: new ClaudeBackend(cfg.claude, repo) };
     this.permissions = o.permissions;
+    this.clarifications = o.clarifications;
     this.runsDir = o.runsDir;
   }
 
@@ -196,29 +254,113 @@ export class AgentRunner {
     }
   }
 
-  /** Host mode: the backend can relay permission prompts, the config asks for it, and someone can answer. */
+  /** Whether permission prompts go to the user: someone can answer and the config asks for it. */
+  private asksPermissions(backend: AgentBackend): boolean {
+    return !!this.permissions && backend.name === "claude" && this.cfg.claude.permission_prompts === "ask" && !!backend.permissionReply;
+  }
+
+  /** Whether the agent's structured questions go to the user: someone can answer and the config allows it. Independent of permissions. */
+  private asksQuestions(backend: AgentBackend): boolean {
+    return !!this.clarifications && backend.name === "claude" && this.cfg.clarification?.enabled !== false && !!backend.clarificationReply;
+  }
+
+  /**
+   * Host mode: the backend relays its requests to agentduo, which answers each, because the user can answer permission
+   * prompts or questions. It is a transport only: what a request may do stays with the config that allows it, so with
+   * only the questions on, every permission prompt is still denied as the CLI itself would.
+   */
   private hosts(backend: AgentBackend): boolean {
-    return !!this.permissions && backend.name === "claude" && this.cfg.claude.permission_prompts === "ask"
-      && !!backend.hostInput && !!backend.permissionReply;
+    return backend.name === "claude" && !!backend.hostInput && !!backend.permissionReply && (this.asksPermissions(backend) || this.asksQuestions(backend));
+  }
+
+  /** Writes the answer to a request on the CLI's stdin, and keeps it in the call's log. */
+  private send(a: Attempt, reply: string): void {
+    appendFileSync(a.answersLog, reply);
+    a.io.write(reply);
   }
 
   /** Asks the user while the agent's clocks are stopped, then answers on its stdin. */
-  private async answerPermission(ev: PermissionEvent, channel: Channel, signal: AbortSignal | undefined, agent: Party, backend: AgentBackend,
-    io: ChildIO, deniedByUser: Set<string>, answersLog: string): Promise<void> {
+  private async answerPermission(ev: PermissionEvent, a: Attempt, deniedByUser: Set<string>): Promise<void> {
+    const { channel, agent, backend } = a;
+    if (!this.asksPermissions(backend)) {
+      // Host mode only for the questions: a tool that needs permission is denied, as the CLI does with permission prompts off.
+      this.send(a, backend.permissionReply!(ev.raw, { decision: "deny", message: PROMPTS_OFF }));
+      return;
+    }
     this.bus.emit({ type: "permission.requested", ...channel.context, agent, request: ev.request });
-    io.pause();
+    a.io.pause();
+    a.waits.start();
     let answer: PermissionAnswer;
     try {
-      answer = await this.permissions!.askPermission({ ...channel.context, agent, request: ev.request }, signal);
+      answer = await this.permissions!.askPermission({ ...channel.context, agent, request: ev.request }, a.signal);
     } catch {
       answer = { decision: "deny" };
+    } finally {
+      a.waits.end();
+      a.io.resume();
     }
     if (answer.decision === "deny" && typeof ev.raw.tool_use_id === "string") deniedByUser.add(ev.raw.tool_use_id);
-    const reply = backend.permissionReply!(ev.raw, answer);
-    appendFileSync(answersLog, reply);
-    io.write(reply);
-    io.resume();
+    this.send(a, backend.permissionReply!(ev.raw, answer));
     this.bus.emit({ type: "permission.answered", ...channel.context, agent, id: ev.request.id, answer });
+  }
+
+  /**
+   * Claude's question, asked to the user while the agent's clocks are stopped; the answer goes back in the same turn.
+   * Nothing is chosen for the user: a dismissed question, or one nobody can answer, is refused with the reason. A question
+   * the user would answer later (defer) ends the call, since the CLI cannot wait across a restart; it is recorded interrupted.
+   */
+  private async answerQuestion(ev: QuestionEvent, a: Attempt): Promise<void> {
+    const { channel, agent, backend } = a;
+    const reply = (r: ClarificationReply) => this.send(a, backend.clarificationReply!(ev.raw, r));
+    if (!this.asksQuestions(backend)) return reply({ deny: NO_QUESTIONS });
+    if (!ev.questions) {
+      return reply({ deny: `agentduo could not show this question to the user (${ev.error ?? "malformed"}). Ask again with at most 4 questions that each have 2 to 6 distinct options, or continue without asking.` });
+    }
+    const request: ClarificationRequest = {
+      id: `clq-${randomUUID().replaceAll("-", "").slice(0, 12)}`, source: "claude", callId: a.callId, agent: "claude", ...channel.context,
+      questions: ev.questions, at: new Date().toISOString(),
+    };
+    const closed = (status: "cancelled" | "interrupted") => this.bus.emit({ type: "clarification.closed", id: request.id, callId: request.callId, status });
+    this.bus.emit({ type: "clarification.requested", request });
+    a.io.pause();
+    a.waits.start();
+    let response: ClarificationResponse;
+    // Whoever answers is told to stop when the call ends, but the call does not depend on it: its end settles the question here.
+    let onAbort: (() => void) | undefined;
+    const ended = new Promise<ClarificationResponse>((resolve) => {
+      if (a.signal.aborted) return resolve({ kind: "defer" });
+      onAbort = () => resolve({ kind: "defer" });
+      a.signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      response = await Promise.race([this.clarifications!.askClarification({ request }, a.signal), ended]);
+    } catch {
+      response = { kind: "defer" };
+    } finally {
+      if (onAbort) a.signal.removeEventListener("abort", onAbort);
+      a.waits.end();
+      a.io.resume();
+    }
+    // The call ended (interrupted, or the CLI exited) while it waited: nothing is written to a process that is going away.
+    if (a.signal.aborted || response.kind === "defer") {
+      closed("interrupted");
+      if (!a.signal.aborted) a.stopCall();
+      return;
+    }
+    if (response.kind === "cancelled") {
+      closed("cancelled");
+      return reply({ deny: DISMISSED });
+    }
+    if (answerErrors(request.questions, response.answers).length) {
+      closed("cancelled");
+      return reply({ deny: "The answers did not match the questions, so none was given. Do not assume an answer; continue without it, or ask again." });
+    }
+    const answers = cleanAnswers(request.questions, response.answers);
+    // Saved before it is sent, so an answer given is never lost to a call that ends right after.
+    this.bus.emit({ type: "clarification.answered", id: request.id, callId: request.callId, answers });
+    // And kept for the call: if this attempt fails, the attempt that follows runs in a session that never heard it (see earlierAnswers).
+    a.answered.push({ ...openEntry(request, a.answered.length + 1), status: "answered", answers, closedAt: new Date().toISOString() });
+    reply({ questions: request.questions, answers });
   }
 
   private channel(o: CallOptions, agent: Party): Channel {
@@ -267,17 +409,25 @@ export class AgentRunner {
     let resuming: CallSession["resume"];
     let calls = 0;
     let priced = 0;
+    const waits = new HumanWaits();
+    // What the user answered to Claude's questions during this call's attempts. The prompt was built before any of it existed, so a
+    // retry, or the fresh session after a continued one, gets it here: the session that finally answers must have all of it.
+    const answered: ClarificationEntry[] = [];
+    const earlierAnswers = () => (answered.length
+      ? `\n${clarificationSection(answered, "## What the user already answered during an earlier attempt of this request\nAn earlier attempt asked the user these questions, and this session did not see the answers. Do not ask them again.")}`
+      : "");
     const finish = (ok: boolean, attempts: number, data: unknown, error: string | null, interrupted = false, budgetStop: string | null = null): AgentResult => ({
       ok, data, error, attempts, durationSec: (Date.now() - started) / 1000,
       costUsd: costSeen ? cost : null, tokens: tokensSeen ? tokens : null, meta, backend: backend.name, interrupted, model,
       sessionId: meta.sessionId ?? null, resumed: ok && !!resuming, calls, unpricedCalls: calls - priced, budgetStop, rejections,
+      waitedSec: waits.ms / 1000,
     });
     const budget = o.mode === "text" ? undefined : o.budget;
 
     this.warnFallback(backend, o.attachments ?? []);
     for (let attempt = 1; attempt <= attemptsAllowed; attempt++) {
       // The run's budget comes before every attempt: a retry or a fresh session after a lost one is a call too.
-      const stop = budget?.stop({ tokens, costUsd: cost, calls }) ?? null;
+      const stop = budget?.stop({ tokens, costUsd: cost, calls, waitedSec: waits.ms / 1000 }) ?? null;
       if (stop) return finish(false, attempt - 1, null, stop, false, stop);
       resuming = attempt === 1 ? resume : undefined;
       // The fresh session after a resumed attempt never saw that attempt: a lost session needs no note, but an answer
@@ -298,13 +448,15 @@ export class AgentRunner {
       }
       if (attempt > 1 && o.mode !== "text") this.bus.emit({ type: "agent.retry", role: o.role, agent, attempt, max: attemptsAllowed, reason: lastError ?? "" });
       const stem = join(this.logDir, `${prefix}.a${attempt}`);
+      // Only a new session needs them: a continued one (attempt 1, nothing answered yet) already holds its own conversation.
+      const base = o.prompt + earlierAnswers();
       const prompt = resuming
         ? resuming.prompt
         : rejected
-          ? o.prompt + rejectionNote(rejected.errors, rejected.answer, fellBack)
+          ? base + rejectionNote(rejected.errors, rejected.answer, fellBack)
           : lastError && !fellBack
-            ? `${o.prompt}\n\n## Previous attempt was rejected by the orchestrator\n${lastError}\nReturn ONLY a JSON object that matches the required schema exactly.\n`
-            : o.prompt;
+            ? `${base}\n\n## Previous attempt was rejected by the orchestrator\n${lastError}\nReturn ONLY a JSON object that matches the required schema exactly.\n`
+            : base;
       // A resumed session already has the files of its earlier turns: it gets only the ones it was not given.
       const attachments = resuming ? resuming.attachments ?? [] : o.attachments ?? [];
       const lastMessageFile = `${stem}.last.${text ? "md" : "json"}`;
@@ -349,11 +501,22 @@ export class AgentRunner {
       let io: ChildIO | undefined;
       const deniedByUser = new Set<string>();
       let run: RunResult;
+      // The attempt's own signals: `stopped` ends the CLI when a question is deferred; `over` releases whoever still waits.
+      const stopped = new AbortController();
+      const over = new AbortController();
+      const processSignal = o.signal ? AbortSignal.any([o.signal, stopped.signal]) : stopped.signal;
+      const askSignal = AbortSignal.any([processSignal, over.signal]);
+      const inflight = new Set<Promise<void>>();
+      const track = (work: Promise<void>) => {
+        const done = work.catch(() => undefined).finally(() => inflight.delete(done));
+        inflight.add(done);
+      };
+      const callId = `${prefix}.a${attempt}`;
       try {
-        // Only host mode keeps stdin open (for the permission answers); otherwise it closes after the input.
+        // Only host mode keeps stdin open (for the answers); otherwise it closes after the input.
         const input = stream ? backend.hostInput!(prompt, images) : prompt;
         run = await runProcess(binary, args, {
-          cwd: this.repo, input, holdStdin: host, timeoutMs, idleTimeoutMs, signal: o.signal,
+          cwd: this.repo, input, holdStdin: host, timeoutMs, idleTimeoutMs, signal: processSignal,
           onSpawn: (child) => {
             io = child;
             calls += 1;
@@ -370,8 +533,12 @@ export class AgentRunner {
               if (ev.type === "activity") channel.activity(ev.activity);
               else if (ev.type === "end") {
                 if (host) io?.end(); // host mode keeps stdin open; closing it lets the CLI exit
-              } else if (ev.type === "permission") {
-                if (host && io) void this.answerPermission(ev, channel, o.signal, agent, backend, io, deniedByUser, `${stem}.answers.jsonl`);
+              } else if (ev.type === "permission" || ev.type === "question") {
+                if (!host || !io) continue;
+                const here: Attempt = {
+                  channel, signal: askSignal, agent, backend, io, callId, answersLog: `${stem}.answers.jsonl`, waits, answered, stopCall: () => stopped.abort(),
+                };
+                track(ev.type === "permission" ? this.answerPermission(ev, here, deniedByUser) : this.answerQuestion(ev, here));
               } else if (ev.type === "model") {
                 model = ev.model;
                 channel.model(ev.model);
@@ -384,6 +551,12 @@ export class AgentRunner {
       } catch (e) {
         await new Promise((r) => eventsLog.end(r));
         return finish(false, attempt, null, `cannot start ${backend.name}: ${(e as Error).message}`);
+      } finally {
+        // The process is over: nobody waits for it any more. Whoever still asks the user is released, and has finished
+        // (recording the request as interrupted) before the call reports back, so no late event follows its result.
+        over.abort();
+        await Promise.race([Promise.allSettled([...inflight]), new Promise((r) => setTimeout(r, 2000).unref())]);
+        waits.close();
       }
       await new Promise((r) => eventsLog.end(r));
       writeFileSync(`${stem}.stderr.txt`, run.stderr);

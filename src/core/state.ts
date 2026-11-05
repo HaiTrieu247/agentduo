@@ -3,6 +3,7 @@ import { basename, dirname, join } from "node:path";
 import type { PermissionDenial } from "../agents/types.js";
 import type { BudgetKey, HistoryEntry, HumanReview, Phase, Role } from "../events.js";
 import type { Attachment } from "./attachment-types.js";
+import type { ClarificationEntry, ClarifiedPair } from "./clarification.js";
 import type { AgentRole, Backend, ProfileName } from "./config.js";
 import type { GateResult } from "./gates.js";
 import type { Snapshot } from "./git.js";
@@ -63,6 +64,8 @@ export interface RoleSession {
   answers?: Partial<Record<AgentRole, string>>;
   /** Shared slot: repository notes up to `repoNotes` it was not given, because a turn's role may not see their author's. */
   withheld?: number[];
+  /** The ids of the answered questions (the run's ledger) it holds; a later prompt gives it the ones not listed. Absent in older runs. */
+  clarifications?: string[];
 }
 
 /**
@@ -103,6 +106,8 @@ export interface ProgressMark {
   findings: string;
   /** The implementer's settings, agentduo's and its CLI's own files (those snapshots leave out), as a digest. */
   settings: string;
+  /** What the user answered to the agents' questions so far, as a digest; absent in a mark of an older run (nothing answered). */
+  answers?: string;
 }
 
 /**
@@ -351,6 +356,13 @@ export interface Exchange {
   discussedWith?: "codex" | "claude";
   /** The files the question came with: later prompts list them (their paths), never attach them again. */
   attachments?: Attachment[];
+  /** What the answering agent asked the user on the way, and what they answered; later prompts carry both. Absent: nothing. */
+  clarified?: ClarifiedPair[];
+  /**
+   * The turn ended without an answer (it failed, was stopped, or its process went) after the user had answered questions the
+   * agent asked in it. Only the question and those answers are kept of it; `answer` is empty. Absent: the exchange was answered.
+   */
+  unfinished?: true;
 }
 
 /**
@@ -454,6 +466,11 @@ export interface RunState {
   sessions?: Partial<Record<SessionSlot, RoleSession>>;
   /** What the agents recorded about the repository, oldest first, at most MAX_REPO_NOTES; absent: none yet. */
   repoNotes?: RepoNote[];
+  /**
+   * The questions the agents asked the user, with their answers (src/core/clarification.ts), oldest first: saved when
+   * asked and when answered. The source of truth for prompts and for what a reopened run shows; absent: none was asked.
+   */
+  clarifications?: ClarificationEntry[];
   /** The cost the CLIs reported (Claude's); calls that reported none are counted in `unpricedCalls`. */
   costUsd: number;
   tokens: number;

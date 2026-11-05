@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { EventBus, type DuoEvent } from "../src/events.js";
-import { attachPlainRenderer, deferDecider, plainPermissionDecider } from "../src/ui/plain.js";
+import { parseQuestions, type ClarificationRequest } from "../src/core/clarification.js";
+import { attachPlainRenderer, deferDecider, parsePlainReply, plainClarificationDecider, plainPermissionDecider, plainQuestionText } from "../src/ui/plain.js";
 
 const now = () => new Date(2026, 9, 27, 12, 0, 0);
 const review = { reason: "max_review_rounds", message: "not approved", fromPhase: "CODE_REVIEW" as const, resumePhase: "IMPLEMENT" as const, details: ["F1 bad"], at: "x" };
@@ -139,5 +140,93 @@ describe("plain renderer", () => {
     text = "";
     bus.emit({ type: "discussion.finished", conversationId: "c", discussionId: "e", status: "agreed", answerer: "claude", critic: "codex", rounds: 1, answer: "Old.", error: null, durationSec: 1, logDir: "/logs" });
     expect(text).toContain("✻ Final answer · Claude");
+  });
+});
+
+
+describe("plain questions", () => {
+  const parsed = parseQuestions([
+    { question: "Which database?", header: "Database", multiSelect: false, options: [{ label: "SQLite", description: "one file" }, { label: "Postgres", description: "a server" }] },
+    { question: "Which targets?", header: "Targets", multiSelect: true, options: [{ label: "web", description: "" }, { label: "cli", description: "" }, { label: "api", description: "" }] },
+  ]);
+  const questions = "questions" in parsed ? parsed.questions : [];
+  const [single, multi] = questions;
+  const request = (): ClarificationRequest => ({ id: "clq-1", source: "planner", callId: "c", agent: "codex", role: "planner", questions, at: "t" });
+
+  it("shows a question whole: header, every option with its description, and how to reply", () => {
+    const text = plainQuestionText(single!, 0, 2);
+    expect(text).toContain("Question 1 of 2 [Database]: Which database?");
+    expect(text).toContain("    1) SQLite — one file\n    2) Postgres — a server");
+    expect(text).toContain("Reply with a number, or write your own answer");
+    expect(text).toContain("Enter alone = answer later");
+    expect(plainQuestionText(multi!, 1, 2)).toContain("Reply with numbers separated by commas");
+    expect(plainQuestionText(single!, 0, 1)).toMatch(/^ {2}Question \[Database\]/);
+  });
+
+  it("reads a reply as option numbers or the user's own words, and guesses nothing", () => {
+    expect(parsePlainReply(single!, "2")).toEqual({ kind: "answer", optionIds: ["q1o2"], otherText: null });
+    expect(parsePlainReply(single!, " 1 ")).toEqual({ kind: "answer", optionIds: ["q1o1"], otherText: null });
+    expect(parsePlainReply(single!, "neither, use Mongo")).toEqual({ kind: "answer", optionIds: [], otherText: "neither, use Mongo" });
+    expect(parsePlainReply(single!, "other: 42")).toEqual({ kind: "answer", optionIds: [], otherText: "42" });
+    expect(parsePlainReply(single!, "other:")).toEqual({ kind: "error", message: "write your own answer after 'other:'" });
+    expect(parsePlainReply(single!, "")).toEqual({ kind: "later" });
+    expect(parsePlainReply(single!, "  ")).toEqual({ kind: "later" });
+    expect(parsePlainReply(single!, "3")).toEqual({ kind: "error", message: "3 is not one of the options (1 to 2)" });
+    expect(parsePlainReply(single!, "0")).toEqual({ kind: "error", message: "0 is not one of the options (1 to 2)" });
+    expect(parsePlainReply(single!, "1,2")).toEqual({ kind: "error", message: "this question takes one answer" });
+    expect(parsePlainReply(multi!, "1, 3")).toEqual({ kind: "answer", optionIds: ["q2o1", "q2o3"], otherText: null });
+    expect(parsePlainReply(multi!, "1,3 | and the docs")).toEqual({ kind: "answer", optionIds: ["q2o1", "q2o3"], otherText: "and the docs" });
+    expect(parsePlainReply(multi!, "1,1")).toEqual({ kind: "error", message: "an option is given twice" });
+    expect(parsePlainReply(multi!, "only the docs")).toEqual({ kind: "answer", optionIds: [], otherText: "only the docs" });
+  });
+
+  it("asks each question in turn, asks again for a reply that is wrong, and puts everything off on an empty one", async () => {
+    const prompts: string[] = [];
+    const replies = ["9", "2", "1,3"];
+    const decider = plainClarificationDecider(async (q) => (prompts.push(q), replies[prompts.length - 1] ?? ""));
+    const response = await decider.askClarification({ request: request() });
+    expect(response).toEqual({ kind: "answered", answers: [{ questionId: "q1", optionIds: ["q1o2"], otherText: null }, { questionId: "q2", optionIds: ["q2o1", "q2o3"], otherText: null }] });
+    expect(prompts).toHaveLength(3);
+    expect(prompts[1]).toContain("(9 is not one of the options (1 to 2))");
+
+    // An empty reply to the second question leaves nothing answered: nothing is chosen for the user.
+    const later = plainClarificationDecider(async (q) => (q.includes("Which database?") ? "1" : ""));
+    expect(await later.askClarification({ request: request() })).toEqual({ kind: "defer" });
+  });
+
+  it("asks one request at a time, and not at all once the call is stopped", async () => {
+    const order: string[] = [];
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const decider = plainClarificationDecider(async (q) => {
+      order.push(q.slice(0, 20));
+      await gate;
+      return "1";
+    });
+    const one = request();
+    const two = { ...request(), id: "clq-2", questions: questions.slice(0, 1) };
+    const a = decider.askClarification({ request: one });
+    const b = decider.askClarification({ request: two });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(order).toHaveLength(1);
+    release();
+    await Promise.all([a, b]);
+    const controller = new AbortController();
+    controller.abort();
+    expect(await decider.askClarification({ request: two }, controller.signal)).toEqual({ kind: "defer" });
+  });
+
+  it("prints a line when an agent asks, and what was answered", () => {
+    const bus = new EventBus();
+    let text = "";
+    attachPlainRenderer(bus, { write: (s: string) => { text += s; } }, { color: false, verbose: false, version: "0.1.0", now });
+    bus.emit({ type: "clarification.requested", request: request() });
+    bus.emit({ type: "clarification.answered", id: "clq-1", callId: "c", answers: [{ questionId: "q1", optionIds: ["q1o1"], otherText: null }, { questionId: "q2", optionIds: [], otherText: "docs" }] });
+    bus.emit({ type: "clarification.requested", request: { ...request(), id: "clq-2" } });
+    bus.emit({ type: "clarification.closed", id: "clq-2", callId: "c", status: "deferred" });
+    expect(text).toContain("planner");
+    expect(text).toContain("? asks you 2 questions");
+    expect(text).toContain("→ answered: Database: SQLite; Targets: docs");
+    expect(text).toContain("→ to be answered later");
   });
 });

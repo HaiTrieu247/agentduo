@@ -8,6 +8,9 @@ import { App } from "../src/ui/ink/App.js";
 import { ChatApp, ChatChannel } from "../src/ui/ink/ChatApp.js";
 import { HumanReviewPrompt } from "../src/ui/ink/HumanReviewPrompt.js";
 import { PermissionPrompt } from "../src/ui/ink/PermissionPrompt.js";
+import { QuestionPrompt } from "../src/ui/ink/QuestionPrompt.js";
+import { parseQuestions, type ClarificationAnswer, type ClarificationRequest } from "../src/core/clarification.js";
+import type { QuestionReply } from "../src/ui/ink/session.js";
 import { StaticItemView } from "../src/ui/ink/App.js";
 import { StepBlock } from "../src/ui/ink/StepBlock.js";
 import { initialView, reduce, type StepView, type ViewState } from "../src/ui/ink/store.js";
@@ -566,5 +569,164 @@ describe("Ink components", () => {
       durationSec: 1, logDir: "/l",
     }], initialView("0.1.0", false, { workspace: "/repo" }));
     expect(render(<StaticItemView item={old.items.at(-1)!} />).lastFrame()).toContain("✻ Final answer · Claude");
+  });
+});
+
+
+describe("questions from the agents", () => {
+  const parsed = parseQuestions([
+    { question: "Which database?", header: "Database", multiSelect: false, options: [{ label: "SQLite", description: "one file, no server" }, { label: "Postgres", description: "a server for concurrent writers" }] },
+    { question: "Which targets?", header: "Targets", multiSelect: true, options: [{ label: "web", description: "the browser" }, { label: "cli", description: "the terminal" }] },
+  ]);
+  const questions = "questions" in parsed ? parsed.questions : [];
+  const asking = (source: "planner" | "claude" = "claude", id = "clq-1"): ClarificationRequest => ({
+    id, source, callId: "call-1", agent: "claude", role: "implementer", questions, at: "t",
+  });
+  const DOWN = "\u001B[B";
+  const RIGHT = "\u001B[C";
+  const key = async (ui: { stdin: { write(s: string): void } }, ...keys: string[]) => {
+    for (const k of keys) {
+      ui.stdin.write(k);
+      await wait();
+    }
+  };
+
+  it("keeps the waiting questions in the view, one request once, and moves each to the scrollback with its outcome", () => {
+    const req = asking();
+    let s = play([{ type: "clarification.requested", request: req }, { type: "clarification.requested", request: req }]);
+    expect(s.questions.map((q) => q.id)).toEqual(["clq-1"]);
+    s = play([{ type: "clarification.answered", id: "clq-1", callId: "call-1", answers: [
+      { questionId: "q1", optionIds: ["q1o2"], otherText: null }, { questionId: "q2", optionIds: ["q2o1"], otherText: "and the docs" }] }], s);
+    expect(s.questions).toEqual([]);
+    expect(s.items.at(-1)).toMatchObject({ kind: "question", status: "answered", text: "Database: Postgres; Targets: web, and the docs" });
+    // An answer for a request that does not wait changes nothing; neither does a second close.
+    const after = play([{ type: "clarification.answered", id: "clq-1", callId: "call-1", answers: [] }, { type: "clarification.closed", id: "clq-1", callId: "call-1", status: "cancelled" }], s);
+    expect(after.items).toHaveLength(s.items.length);
+    s = play([{ type: "clarification.requested", request: asking("claude", "clq-2") }, { type: "clarification.closed", id: "clq-2", callId: "call-1", status: "interrupted" }], s);
+    expect(s.items.at(-1)).toMatchObject({ kind: "question", status: "interrupted", text: "interrupted before it was answered" });
+    s = play([{ type: "clarification.requested", request: asking("claude", "clq-3") }, { type: "run.finished", runId: "r", phase: "INTERRUPTED", reportPath: "/r", exitCode: 130 }], s);
+    expect(s.questions).toEqual([]);
+  });
+
+  it("shows the whole question: header, each option with its description, multiple choice and the way to write your own — and no 'always allow'", () => {
+    const ui = render(<QuestionPrompt request={asking()} onSubmit={noop} onLater={noop} onDismiss={noop} />);
+    const frame = ui.lastFrame()!;
+    for (const text of ["Claude (implementer) asks you 2 questions", "1 of 2", "[Database] Which database?", "Choose one, or write your own.", "( ) SQLite", "one file, no server",
+      "( ) Postgres", "a server for concurrent writers", "Something else…", "Submit answers", "Answer later", "Don't answer"]) expect(frame).toContain(text);
+    expect(frame).not.toMatch(/always allow/i);
+    expect(frame).not.toContain("(•)");
+    expect(render(<QuestionPrompt request={asking("planner")} onSubmit={noop} onLater={noop} onDismiss={noop} />).lastFrame()).not.toContain("Don't answer");
+    // Claude's question that outlived its call, asked again by the run that owes it: no one is left to be told it was dismissed.
+    const owed = render(<QuestionPrompt request={{ ...asking(), held: true }} onSubmit={noop} onLater={noop} onDismiss={noop} />).lastFrame()!;
+    expect(owed).not.toContain("Don't answer");
+    expect(owed).toContain("Answer later");
+  });
+
+  it("says what Answer later does: the run keeps a run's question, a chat turn's answer ends", () => {
+    const later = (request: ClarificationRequest) => render(<QuestionPrompt request={request} onSubmit={noop} onLater={noop} onDismiss={noop} />).lastFrame()!;
+    expect(later({ ...asking(), role: "implementer" })).toContain("the run waits; /resume answers");
+    expect(later(asking("planner"))).toContain("the run waits; /resume answers");
+    const { role: _role, ...turn } = asking();
+    expect(later({ ...turn, turnId: "t1" })).toContain("ends this answer; ask again after");
+  });
+
+  it("does not take the focused option for an answer: Enter picks only what is on, Submit waits for every question", async () => {
+    const given: ClarificationAnswer[][] = [];
+    const ui = render(<QuestionPrompt request={asking()} onSubmit={(a) => given.push(a)} onLater={noop} onDismiss={noop} />);
+    await wait();
+    // Nothing chosen yet: going to Submit and pressing Enter sends nothing and says what is missing.
+    await key(ui, DOWN, DOWN, DOWN, "\r");
+    expect(given).toEqual([]);
+    expect(ui.lastFrame()).toContain("Not yet: question 1 (Database) has no answer yet; question 2 (Targets) has no answer yet.");
+    // Round to the first option (six rows in all): Enter chooses it.
+    await key(ui, DOWN, DOWN, DOWN, "\r");
+    expect(ui.lastFrame()).toMatch(/❯ \(•\) SQLite/);
+    // Choose the other one: only one stays chosen.
+    await key(ui, DOWN, "\r");
+    expect(ui.lastFrame()).toMatch(/\(•\) Postgres/);
+    expect(ui.lastFrame()).toMatch(/\( \) SQLite/);
+    // The second question: several options, then Submit.
+    await key(ui, RIGHT);
+    expect(ui.lastFrame()).toContain("[Targets] Which targets?");
+    expect(ui.lastFrame()).toContain("Several may apply");
+    await key(ui, "\r", DOWN, "\r");
+    expect(ui.lastFrame()).toMatch(/\[x\] web/);
+    expect(ui.lastFrame()).toMatch(/\[x\] cli/);
+    await key(ui, " ");
+    expect(ui.lastFrame()).toMatch(/\[ \] cli/);
+    await key(ui, DOWN, DOWN);
+    expect(ui.lastFrame()).toMatch(/❯ Submit answers/);
+    await pressUntil(() => ui.stdin.write("\r"), () => expect(given).toHaveLength(1));
+    expect(given[0]).toEqual([{ questionId: "q1", optionIds: ["q1o2"], otherText: null }, { questionId: "q2", optionIds: ["q2o1"], otherText: null }]);
+  });
+
+  it("takes the user's own words, and lets them replace an option of a single choice", async () => {
+    const given: ClarificationAnswer[][] = [];
+    const ui = render(<QuestionPrompt request={asking()} onSubmit={(a) => given.push(a)} onLater={noop} onDismiss={noop} />);
+    await wait();
+    await key(ui, "\r"); // SQLite
+    await key(ui, DOWN, DOWN, "\r"); // "Something else…": typing
+    ui.stdin.write("Mongo, please");
+    await wait();
+    expect(ui.lastFrame()).toContain("Type your answer");
+    await key(ui, "\r");
+    expect(ui.lastFrame()).toContain("Something else: Mongo, please");
+    expect(ui.lastFrame()).toMatch(/\( \) SQLite/);
+    await key(ui, RIGHT, "\r"); // web
+    await key(ui, DOWN, DOWN, DOWN);
+    await pressUntil(() => ui.stdin.write("\r"), () => expect(given).toHaveLength(1));
+    expect(given[0]![0]).toEqual({ questionId: "q1", optionIds: [], otherText: "Mongo, please" });
+  });
+
+  it("puts a question off with Esc or its row, and tells Claude no answer is given with the last one; Esc while typing only goes back", async () => {
+    const calls: string[] = [];
+    const ui = render(<QuestionPrompt request={asking()} onSubmit={() => calls.push("submit")} onLater={() => calls.push("later")} onDismiss={() => calls.push("dismiss")} />);
+    await wait();
+    await key(ui, DOWN, DOWN, "\r");
+    ui.stdin.write("draft");
+    await wait();
+    await key(ui, "\u001B");
+    expect(calls).toEqual([]);
+    expect(ui.lastFrame()).toContain("Something else…");
+    await pressUntil(() => ui.stdin.write("\u001B"), () => expect(calls).toEqual(["later"]));
+    const rows = render(<QuestionPrompt request={asking()} onSubmit={noop} onLater={() => calls.push("later2")} onDismiss={() => calls.push("dismiss")} />);
+    await wait();
+    await key(rows, DOWN, DOWN, DOWN, DOWN, DOWN);
+    expect(rows.lastFrame()).toMatch(/❯ Don't answer/);
+    await pressUntil(() => rows.stdin.write("\r"), () => expect(calls).toContain("dismiss"));
+  });
+
+  it("is shown by the app in place of the decision prompt, and the answer goes back with the request's id", async () => {
+    const bus = new EventBus();
+    const given: Array<[string, QuestionReply]> = [];
+    const app = render(<App bus={bus} version="0.1.0" verbose={false} interactive onStop={noop} onInterrupt={noop} onDecision={noop}
+      onQuestion={(id, r) => given.push([id, r])} views={() => []} readView={async () => null} />);
+    bus.emit(phase("PLAN", "planner", "codex"));
+    // The run waits on the planner's questions: the generic decision prompt is not shown for that.
+    bus.emit({ type: "human.required", runId: "r1", review: { ...review, reason: "clarification_required", fromPhase: "PLAN", resumePhase: "PLAN" } });
+    bus.emit({ type: "clarification.requested", request: asking("planner") });
+    await wait();
+    expect(app.lastFrame()).toContain("asks you 2 questions");
+    expect(app.lastFrame()).not.toContain("Resume");
+    await pressUntil(() => app.stdin.write("\u001B"), () => expect(given).toEqual([["clq-1", { kind: "defer" }]]));
+    app.unmount();
+  });
+
+  it("shows a deferred planner question in the scrollback with its reason, and does not prompt for a decision", async () => {
+    let s = play([
+      { type: "human.required", runId: "r1", review: { ...review, reason: "clarification_required", fromPhase: "PLAN", resumePhase: "PLAN", details: ["[Database] Which database? — SQLite / Postgres"] } },
+      { type: "clarification.requested", request: asking("planner") },
+      { type: "clarification.closed", id: "clq-1", callId: "call-1", status: "deferred" },
+      { type: "run.finished", runId: "r1", phase: "HUMAN_REVIEW", reportPath: "/r", exitCode: 2 },
+    ]);
+    expect(s.items.map((i) => i.kind)).toEqual(["question", "review", "finish"]);
+    const finish = s.items.at(-1) as { reason?: string };
+    expect(finish.reason).toBe("clarification_required");
+    const text = render(<StaticItemView item={s.items.at(-1)!} />).lastFrame()!;
+    expect(text).toContain("Waiting for your decision");
+    expect(text).toContain("answers the questions in the terminal");
+    expect(text).toContain("--answers <file>");
+    s = reduce(s, { type: "toggleVerbose" });
+    expect(s.questions).toEqual([]);
   });
 });

@@ -224,7 +224,7 @@ export function withChange(changes: SettingChange[], change: SettingChange): Set
 }
 
 // ------------------------------------------------------------------ the keys the desktop's Settings change
-export type SettingKind = "bin" | "model" | "effort" | "args" | "budget" | "prompts" | "backend" | "profile" | "positive" | "count" | "limit";
+export type SettingKind = "bin" | "model" | "effort" | "args" | "budget" | "prompts" | "toggle" | "backend" | "profile" | "positive" | "count" | "limit";
 
 /** A config key a Settings field sets: where it is, what it takes, and when work already going gets it. */
 export interface SettingKey {
@@ -261,6 +261,8 @@ export const SETTING_KEYS: SettingKey[] = [
   ]),
   { key: "claude.max_budget_usd", path: ["claude", "max_budget_usd"], kind: "budget", live: "next-call", removable: false },
   { key: "claude.permission_prompts", path: ["claude", "permission_prompts"], kind: "prompts", live: "next-call", removable: false },
+  // Structured questions from the agents; independent of permission prompts (it never allows a tool).
+  { key: "clarification.enabled", path: ["clarification", "enabled"], kind: "toggle", live: "next-call", removable: false },
   // A run keeps the profile it started with: a change applies to the runs started after it.
   { key: "pipeline.profile", path: ["pipeline", "profile"], kind: "profile", live: "next-run", removable: false },
   ...AGENT_ROLES.map((role): SettingKey => ({ key: `agents.${role}`, path: ["agents", role], kind: "backend", live: "next-run", removable: false })),
@@ -292,6 +294,8 @@ export function checkSettingValue(k: SettingKey, value: unknown): string | null 
       return value === null || (typeof value === "number" && Number.isFinite(value) && value > 0) ? null : `${k.key} must be a positive number or null`;
     case "prompts":
       return value === "ask" || value === "deny" ? null : `${k.key} must be 'ask' or 'deny'`;
+    case "toggle":
+      return typeof value === "boolean" ? null : `${k.key} must be true or false`;
     case "backend":
       return value === "codex" || value === "claude" ? null : `${k.key} must be one of codex, claude`;
     case "profile":

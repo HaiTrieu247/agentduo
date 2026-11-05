@@ -7,7 +7,7 @@ export interface ConversationEntry {
   updatedAt: string | null;
   open: boolean;
   running: boolean;
-  /** Decisions and permission prompts waiting in its tab. */
+  /** Decisions, permission prompts and questions waiting in its tab. */
   waiting: number;
 }
 

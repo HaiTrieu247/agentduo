@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { isAbsolute, join, posix } from "node:path";
 import { relPath } from "../agents/types.js";
 import type { Attachment } from "./attachment-types.js";
+import { answeredEntries, type ClarificationEntry } from "./clarification.js";
 import type { AgentRole, Backend } from "./config.js";
 import type { Change } from "./git.js";
 import type { RepoNoteOutput } from "./outputs.js";
@@ -161,6 +162,8 @@ export interface Continuation {
   repoNotes: RepoNote[];
   /** The plan this turn is about is the one its last turn had. */
   knowsPlan: boolean;
+  /** The user's answers to the agents' questions that it was not given yet (its own native ones are in its session already). */
+  clarifications: ClarificationEntry[];
 }
 
 /** One agent turn of the pipeline: the notes a fresh session gets, and the session to continue instead when there is one. */
@@ -207,6 +210,7 @@ export async function planTurn(o: {
     // The notes it was not given: the newer ones, and those an earlier turn's role could not see (the critic's, the planner's).
     repoNotes: repoNotes.filter((n) => n.seq > session.repoNotes || withheld.has(n.seq)),
     knowsPlan: o.planHash !== null && session.planHash === o.planHash,
+    clarifications: answeredEntries(state.clarifications).filter((e) => !(session.clarifications ?? []).includes(e.id)),
     ...(session.role && session.role !== o.role ? { from: session.role } : {}),
     knowsAnswer: !session.answers || o.answer == null || session.answers[o.role] === o.answer,
   };
@@ -232,6 +236,9 @@ export function rememberSession(state: RunState, role: AgentRole, r: { sessionId
   const record: RoleSession = {
     backend: r.backend, id: r.sessionId, tree: at.tree, notes: turn.notesGiven, repoNotes: latestRepoNote(state),
     planHash: at.planHash, reviewed: at.reviewed ?? null,
+    // The answers it holds: its prompt gave it those so far, and a question it asked itself was answered in the session.
+    // Absent when there are none, as in a record from before questions existed.
+    ...(answeredEntries(state.clarifications).length ? { clarifications: answeredEntries(state.clarifications).map((e) => e.id) } : {}),
   };
   if (slot !== SHARED_SESSION) {
     state.sessions = { ...state.sessions, [slot]: record };

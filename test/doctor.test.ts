@@ -30,7 +30,12 @@ describe("runDoctor", () => {
     const denying = (await runDoctor({ dir: repo, cfg, sources: [], runsDir: join(repo, ".agentduo", "runs") })).map((c) => c.message).join("\n");
     expect(denying).toContain("implementer edits rely on your Claude Code permission settings");
     expect(denying).toContain("claude supports --output-format, --verbose, --json-schema, --permission-prompts");
-    expect(denying).not.toContain("--permission-prompt-tool");
+    // Claude's questions need the host protocol whatever the permission prompts do; with both off, it is not needed.
+    expect(denying).toContain("--permission-prompt-tool");
+    cfg.clarification.enabled = false;
+    const neither = (await runDoctor({ dir: repo, cfg, sources: [], runsDir: join(repo, ".agentduo", "runs") })).map((c) => c.message).join("\n");
+    expect(neither).not.toContain("--permission-prompt-tool");
+    cfg.clarification.enabled = true;
     cfg.claude.role_args = { implementer: ["--permission-mode", "acceptEdits"] };
     const quiet = await runDoctor({ dir: repo, cfg, sources: [], runsDir: join(repo, ".agentduo", "runs") });
     expect(quiet.map((c) => c.message).join("\n")).not.toContain("implementer edits rely on");

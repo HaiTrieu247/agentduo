@@ -178,7 +178,7 @@ describe("settings", () => {
     expect(now.map((c) => c.live)).toEqual(Array(now.length).fill("next-call"));
     const live = Object.fromEntries(SETTING_KEYS.map((k) => [k.key, k.live]));
     for (const key of ["claude.bin", "codex.bin", "claude.model", "codex.args", "claude.role_args.implementer", "codex.role_args.code_reviewer", "claude.max_budget_usd",
-      "claude.permission_prompts", "claude.role_models.plan_reviewer", "codex.role_models.planner", "claude.role_efforts.implementer", "codex.role_efforts.code_reviewer",
+      "claude.permission_prompts", "clarification.enabled", "claude.role_models.plan_reviewer", "codex.role_models.planner", "claude.role_efforts.implementer", "codex.role_efforts.code_reviewer",
     ]) expect(live[key], key).toBe("next-call");
     for (const key of ["agents.planner", "agents.implementer", "limits.max_retries", "limits.agent_timeout_sec", "limits.max_consecutive_gate_failures",
       "limits.max_discussion_rounds", "limits.max_planning_rounds"]) expect(live[key], key).toBe("next-run");
@@ -217,6 +217,15 @@ describe("settings", () => {
       ["claude.args", "--x"], ["claude.args", [1]], ["claude.bin", ""], ["claude.permission_prompts", "maybe"], ["claude.max_budget_usd", -2], ["codex.model", "two words"]] as const) {
       expect(() => settings.value(key, value), `${key}=${JSON.stringify(value)}`).toThrow(ConfigError);
     }
+    // The agents' questions: a switch of its own, in place and idempotent, apart from the permission prompts.
+    const prompts = cfg.claude.permission_prompts;
+    const clarification = cfg.clarification;
+    for (const _ of [1, 2]) settings.value("clarification.enabled", false).apply(cfg);
+    expect(cfg.clarification).toBe(clarification);
+    expect([cfg.clarification.enabled, cfg.claude.permission_prompts]).toEqual([false, prompts]);
+    expect(settings.value("clarification.enabled", true).live).toBe("next-call");
+    for (const bad of ["yes", 1, null]) expect(() => settings.value("clarification.enabled", bad), String(bad)).toThrow("clarification.enabled must be true or false");
+    expect(() => settings.value("clarification.enabled", undefined)).toThrow("cannot be removed");
     expect(() => settings.value("paths.runs_dir", "/elsewhere")).toThrow("not a setting");
     expect(() => settings.value("claude.bin", undefined)).toThrow("cannot be removed");
     expect(checkSettingValue(settingKey("limits.agent_idle_timeout_sec")!, 0)).toBeNull();

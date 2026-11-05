@@ -12,6 +12,8 @@ import { StaticItemView } from "./App.js";
 import { HumanReviewPrompt, VIEWS, type ViewKind } from "./HumanReviewPrompt.js";
 import { LiveFooter, TurnFooter } from "./LiveFooter.js";
 import { PermissionPrompt } from "./PermissionPrompt.js";
+import { QuestionPrompt } from "./QuestionPrompt.js";
+import type { QuestionReply } from "./session.js";
 import { initialView, reduce } from "./store.js";
 import { UsagePanel } from "./UsagePanel.js";
 
@@ -85,6 +87,8 @@ export interface ChatAppProps {
   onUsageRefresh?(): void;
   onDecision(d: Decision | "defer"): void;
   onPermission(id: string, answer: PermissionAnswer): void;
+  /** The user's reply to an agent's question. */
+  onQuestion?(id: string, reply: QuestionReply): void;
   views(): ViewKind[];
   readView(kind: ViewKind): Promise<string | null>;
   /** An @ in the input: the workspace's paths for what follows it, best first (src/core/mentions.ts). */
@@ -288,6 +292,7 @@ export function ChatApp(p: ChatAppProps) {
     void p.readView(kind).then((body) => dispatch({ type: "artifact", title: VIEWS[kind].title, body: body ?? "(not available)" }));
   };
   const ask = view.permissions[0];
+  const question = view.questions[0];
 
   return (
     <>
@@ -300,7 +305,10 @@ export function ChatApp(p: ChatAppProps) {
       </Static>
       {ask ? (
         <PermissionPrompt key={ask.request.id} ask={ask} onAnswer={(answer) => p.onPermission(ask.request.id, answer)} />
-      ) : view.humanReview ? (
+      ) : question ? (
+        <QuestionPrompt key={question.id} request={question} onSubmit={(answers) => p.onQuestion?.(question.id, { kind: "answered", answers })}
+          onLater={() => p.onQuestion?.(question.id, { kind: "defer" })} onDismiss={() => p.onQuestion?.(question.id, { kind: "cancelled" })} />
+      ) : view.humanReview && view.humanReview.reason !== "clarification_required" ? (
         <HumanReviewPrompt review={view.humanReview} views={p.views()} onDecision={p.onDecision} onView={onView} />
       ) : (
         <>

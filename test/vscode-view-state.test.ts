@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { PipelineStep } from "../extensions/vscode/src/protocol.js";
 import { restoredView } from "../extensions/vscode/src/workspaceSession.js";
+import type { ClarificationEntry, ClarificationRequest } from "../src/core/clarification.js";
 import {
   activityParts, canSubmit, decisionChoices, effortOptions, initialState, MAX_ACTIVITIES, MAX_ANSWER_CHARS, MAX_TIMELINE, modelOptions, permissionChoices, pipelineView,
-  placeholder, readyAttachments, reduce, runInProgress, sendStops, uploading, type TimelineItem, type ViewAction, type ViewState,
+  placeholder, readyAttachments, reduce, runInProgress, sendStops, uploading, withLedger, hasPending, type TimelineItem, type ViewAction, type ViewState,
 } from "../extensions/vscode/webview/state.js";
 import { FileQueue, type FileReading } from "../extensions/vscode/webview/uploads.js";
 import type { Attachment } from "../src/core/attachment-types.js";
@@ -88,6 +89,60 @@ describe("view state", () => {
     s = reduce(s, ev({ type: "permission.answered", role: "implementer", agent: "claude", id: "p1", answer: { decision: "deny", message: "no" } }));
     expect(s.permissions).toEqual([]);
     expect(s.timeline.at(-1)).toMatchObject({ kind: "permission", answer: { decision: "deny", message: "no" } });
+  });
+
+  describe("the agents' questions", () => {
+    const asked = (id: string, o: Partial<ClarificationRequest> = {}): ClarificationRequest => ({
+      id, source: "claude", callId: `call-${id}`, agent: "claude", turnId: "t1", at: "t",
+      questions: [{ id: "q1", header: "Auth", question: "Which auth?", multiSelect: false, options: [
+        { id: "q1o1", label: "Token", description: "A bearer token" }, { id: "q1o2", label: "Session", description: "A cookie" },
+      ] }], ...o,
+    });
+
+    it("waits for the user once however often it is shown, keeps what was answered in the timeline and is not an answer in itself", () => {
+      let s = run(initialState("active"), ev({ type: "clarification.requested", request: asked("c1") }), ev({ type: "clarification.requested", request: asked("c1") }));
+      expect(s.questions.map((q) => q.id)).toEqual(["c1"]);
+      expect([hasPending(s), s.permissions, s.decision]).toEqual([true, [], null]);
+      // An answer for a request that does not wait changes nothing.
+      expect(reduce(s, ev({ type: "clarification.answered", id: "c9", callId: "call-c9", answers: [] }))).toBe(s);
+      s = reduce(s, ev({ type: "clarification.answered", id: "c1", callId: "call-c1", answers: [{ questionId: "q1", optionIds: ["q1o2"], otherText: null }] }));
+      expect(s.questions).toEqual([]);
+      expect(hasPending(s)).toBe(false);
+      expect(s.timeline.at(-1)).toMatchObject({ kind: "question", requestId: "c1", status: "answered", answers: [{ questionId: "q1", optionIds: ["q1o2"] }] });
+      // Over: showing it again (a resumed run) does not make it wait again... it is only a new request that does.
+      expect(reduce(s, ev({ type: "clarification.answered", id: "c1", callId: "call-c1", answers: [] }))).toBe(s);
+    });
+
+    it("keeps a dismissed or deferred one in the timeline, and clears the waiting ones when the run ends or the worker is new", () => {
+      let s = run(initialState("active"), ev({ type: "clarification.requested", request: asked("c1") }), ev({ type: "clarification.requested", request: asked("c2") }));
+      s = reduce(s, ev({ type: "clarification.closed", id: "c1", callId: "call-c1", status: "cancelled" }));
+      expect(s.timeline.at(-1)).toMatchObject({ kind: "question", requestId: "c1", status: "cancelled" });
+      expect(s.questions.map((q) => q.id)).toEqual(["c2"]);
+      expect(reduce(s, { type: "workspace", session: "active", generation: s.generation + 1, workspace: s.workspace }).questions).toEqual([]);
+      s = reduce(s, ev({ type: "run.finished", runId: "r", phase: "HUMAN_REVIEW", reportPath: "/r", exitCode: 2 }));
+      expect(s.questions).toEqual([]);
+    });
+
+    it("shows the saved ledger on reopening: the ended ones as they ended, a still-open one as interrupted and never as a form", () => {
+      const entry = (id: string, status: ClarificationEntry["status"], extra: Partial<ClarificationEntry> = {}): ClarificationEntry => ({ ...asked(id), seq: 1, status, ...extra });
+      const entries = [
+        entry("c1", "answered", { answers: [{ questionId: "q1", optionIds: ["q1o1"], otherText: null }] }), entry("c2", "pending"), entry("c3", "cancelled"),
+      ];
+      let s = withLedger(initialState("dormant"), entries);
+      expect(s.questions).toEqual([]);
+      expect(s.timeline.map((i) => (i.kind === "question" ? `${i.requestId}:${i.status}` : i.kind))).toEqual(["c1:answered", "c2:interrupted", "c3:cancelled"]);
+      // The saved view may already show some of them: none is shown twice.
+      s = withLedger(s, entries);
+      expect(s.timeline.filter((i) => i.kind === "question")).toHaveLength(3);
+    });
+
+    it("is dropped from a view saved with it, and a view saved before questions existed still opens", () => {
+      const withOne = reduce(initialState("active"), ev({ type: "clarification.requested", request: asked("c1") }));
+      expect(restoredView(withOne, initialState("dormant")).questions).toEqual([]);
+      const { questions: _gone, ...old } = initialState("active");
+      expect(restoredView(old as ViewState, initialState("dormant")).questions).toEqual([]);
+      expect(hasPending(old as ViewState)).toBe(false);
+    });
   });
 
   it("opens and closes a decision by id, keeps a deferred one in the timeline, and clears questions when a run ends", () => {

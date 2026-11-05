@@ -1,18 +1,22 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { relative, resolve } from "node:path";
 import { AgentRunner, type AgentResult, type CallBudget } from "../agents/runner.js";
 import type { SchemaName } from "../agents/schema.js";
 import type { PermissionDenial } from "../agents/types.js";
 import type { Attachment } from "./attachment-types.js";
 import { attachmentFile } from "./attachments.js";
-import type { Decider, DuoEvent, EventBus, HistoryEntry, HumanReview, Message, Party, PermissionDecider, Phase, Role } from "../events.js";
+import type { ClarificationDecider, Decider, DuoEvent, EventBus, HistoryEntry, HumanReview, Message, Party, PermissionDecider, Phase, Role } from "../events.js";
 import { budgetView, costLeft, ensureBudget, exhaustedMessage, newWarnings, raiseReached, reachedLimits, usageOf } from "./budget.js";
 import type { AgentRole, Backend, ConfigData } from "./config.js";
+import {
+  answeredEntries, answerSummary, MAX_PLANNER_ASKS, ledgerAnswer, ledgerClose, ledgerOpen, parseAnswersFile, parseQuestions, pendingEntry,
+  type ClarificationAnswer, type ClarificationEntry, type ClarificationRequest,
+} from "./clarification.js";
 import { acceptRepoNotes, addRepoNotes, planTurn, rememberSession, sessionSlot, type Turn } from "./context.js";
 import { GatesInterrupted, runGates, type GateResult } from "./gates.js";
 import type { Change, Git } from "./git.js";
 import { taggedPaths } from "./mentions.js";
-import type { Approval, Critique, Finding, Implementation, Issue, Plan, RepoNoteOutput, Review } from "./outputs.js";
+import type { Approval, Critique, Finding, Implementation, Issue, Plan, PlannerOutput, PlannerQuestion, RepoNoteOutput, Review } from "./outputs.js";
 import * as prompts from "./prompts.js";
 import * as render from "./render.js";
 import {
@@ -25,7 +29,7 @@ import {
   scopeReview, taskIssues,
 } from "./scope.js";
 import {
-  blockedReview, changedParts, cycleProgress, findingsDigest, heldReview, implementerSettings, nextBlocker, nextStall, planAnswer, planProgress,
+  answersDigest, blockedReview, changedParts, cycleProgress, findingsDigest, heldReview, implementerSettings, nextBlocker, nextStall, planAnswer, planProgress,
   planStallReview, stallHeldReview, stallReview, trackCritique,
 } from "./progress.js";
 import {
@@ -94,6 +98,8 @@ interface AgentTurn<T> {
    * one); after: the plan its session has once the turn is done; file: where `about` is, to point a session at.
    */
   plan: { about: string | null; after: (data: T) => string | null; file?: string };
+  /** Where the answer's `repo_notes` are, when the answer wraps its content (the planner's `result`); absent: the answer itself. */
+  notesIn?: (data: T) => unknown;
   /** Code reviewer: the revision it reviews, which its next turn's diff starts from. */
   reviewed?: string;
   /**
@@ -139,6 +145,8 @@ export interface WorkflowOptions {
   decider: Decider;
   /** Answers Claude's permission prompts; absent when nobody can (CI, background), so the CLI denies them. */
   permissions?: PermissionDecider;
+  /** Answers the agents' structured questions; absent when nobody can (CI, background): a planner's question then waits, saved, for `--answers`. */
+  clarifier?: ClarificationDecider;
   runner?: AgentRunner;
   /** Where agentduo's data root is read from (and HOME): default, this process's environment. */
   env?: NodeJS.ProcessEnv;
@@ -166,6 +174,10 @@ function stableStringify(value: unknown): string {
   }
   return JSON.stringify(value);
 }
+
+/** The planner's questions as the shared question model takes them (src/core/clarification.ts parseQuestions). */
+const askedQuestions = (list: PlannerQuestion[]) =>
+  list.map((q) => ({ header: q.header, question: q.question, multiSelect: q.multi_select, options: q.options }));
 
 const planHash = (plan: Plan) => createHash("sha256").update(stableStringify(plan)).digest("hex");
 
@@ -195,10 +207,12 @@ export class Workflow {
   private readonly abort = new AbortController();
   private stopRequested = false;
   private phaseStartedAt = Date.now();
+  /** Seconds of the step under way spent waiting for the user (permission prompts, questions): not work, so not the budget's minutes. */
+  private waitedInStep = 0;
   private inSubdir: boolean | null = null;
 
   constructor(private readonly o: WorkflowOptions) {
-    this.runner = o.runner ?? new AgentRunner(o.cfg, o.repo, o.store.path("logs"), o.bus, { permissions: o.permissions, runsDir: o.store.runsDir });
+    this.runner = o.runner ?? new AgentRunner(o.cfg, o.repo, o.store.path("logs"), o.bus, { permissions: o.permissions, clarifications: o.clarifier, runsDir: o.store.runsDir });
     const runsRel = relativeInside(o.store.runsDir, o.repo);
     this.snapshotExclude = runsRel ? [runsRel] : [];
   }
@@ -269,6 +283,8 @@ export class Workflow {
       // Never changed on resume: the run keeps the review policy it started with (escalations aside).
       this.emit({ type: "warning", text: `this run keeps its pipeline profile, ${profileText(st.profile)}; pipeline.profile '${configured}' applies to new runs` });
     }
+    // A question of Claude that an earlier process left open: asked again before anything runs (see holdLeftQuestion).
+    this.holdLeftQuestion();
     if (st.inProgress) this.warn(`previous run was interrupted during ${st.inProgress.phase}; re-running it`);
     const budget = ensureBudget(st, this.o.cfg);
     if (budget?.limits.cost != null && Object.values(this.o.cfg.agents).includes("codex")) {
@@ -276,6 +292,17 @@ export class Workflow {
       this.emit({ type: "warning", text: "limits.max_run_cost_usd counts the cost the CLIs report: Codex reports none, so the cost of its calls " +
         "is not in it (limits.max_run_tokens and max_run_agent_calls bound them)" });
     }
+    // The questions agents ask in a call are saved the moment they are asked and answered, before the call reports back.
+    const off = this.o.bus.on((e) => this.recordClarification(e));
+    try {
+      return await this.loop();
+    } finally {
+      off();
+    }
+  }
+
+  private async loop(): Promise<number> {
+    const st = this.state;
     for (;;) {
       const phase = st.phase;
       if (phase === "DONE") return this.finish("DONE", EXIT.DONE);
@@ -285,6 +312,12 @@ export class Workflow {
         this.save();
         await this.writeReport();
         const review = st.humanReview!;
+        if (review.reason === "clarification_required") {
+          // The planner's questions: answered through the clarification decider, never through a generic decision.
+          const ended = await this.askPending();
+          if (ended !== null) return ended;
+          continue;
+        }
         this.emit({ type: "human.required", runId: st.taskId, review });
         const answer = await this.o.decider.decide(review);
         if (answer === "defer") return this.finish("HUMAN_REVIEW", EXIT.HUMAN_REVIEW);
@@ -293,7 +326,7 @@ export class Workflow {
       }
       if (this.stopRequested) return this.finish("INTERRUPTED", EXIT.INTERRUPTED);
       // No step starts once the run's budget is reached: it waits, with everything it did kept, for your decision.
-      this.phaseStartedAt = Date.now();
+      this.startClock();
       if (this.budgetExhausted(phase)) {
         this.save();
         continue;
@@ -302,7 +335,7 @@ export class Workflow {
       await this.prepare();
       st.inProgress = { phase, startedAt: nowIso() };
       this.save();
-      this.phaseStartedAt = Date.now();
+      this.startClock();
       this.emitPhaseStarted(phase);
       let interrupted = false;
       try {
@@ -317,8 +350,16 @@ export class Workflow {
         }
       }
       // Work time, the budget's minutes: the step's, interrupted or not (before finish saves); never a wait for a decision.
-      st.activeSec = (st.activeSec ?? 0) + (Date.now() - this.phaseStartedAt) / 1000;
+      st.activeSec = (st.activeSec ?? 0) + this.workedSec();
       for (const text of newWarnings(st)) this.warn(text);
+      // A question of Claude nobody answered: owed when the step was stopped on it, else its call is simply gone.
+      const owed = this.settleQuestions(interrupted);
+      if (interrupted && owed) {
+        // Answer later, a closed app, or Esc on the question: the run waits for the answer instead of re-running the step without it.
+        this.holdQuestion(owed, phase);
+        this.save();
+        return this.finish(this.abort.signal.aborted ? "INTERRUPTED" : "HUMAN_REVIEW", this.abort.signal.aborted ? EXIT.INTERRUPTED : EXIT.HUMAN_REVIEW);
+      }
       if (interrupted) return this.finish("INTERRUPTED", EXIT.INTERRUPTED);
       st.inProgress = null;
       this.save();
@@ -398,6 +439,8 @@ export class Workflow {
       repo: this.o.repo, taskId: st.taskId, task: st.task, agents: this.o.cfg.agents, gates: this.o.cfg.gates, notes: st.humanNotes, earlier: st.earlier,
       conversation: st.conversationContext, attachments: st.attachments, locate: (a) => attachmentFile(this.o.store.runsDir, a),
       tagged: (text) => taggedPaths(text, this.o.repo), internalSnapshots: this.internal, baseline: st.baseline?.results ?? null, profile: st.profile,
+      clarifications: answeredEntries(st.clarifications), mayAsk: this.mayAsk(),
+      canAskNow: !!this.o.clarifier && this.o.cfg.clarification?.enabled !== false,
     };
   }
 
@@ -526,17 +569,18 @@ export class Workflow {
     this.record("HUMAN_REVIEW", IMPL_PHASES.includes(fromPhase) ? st.implRound : st.planningRound, "orchestrator", reason, message, "warn");
   }
 
-  private async envelope(role: Role, round: number, r: AgentResult, extra: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+  private async envelope(role: Role, round: number, r: AgentResult, extra: Record<string, unknown> = {}, output: unknown = r.data): Promise<Record<string, unknown>> {
     const st = this.state;
     return {
       task_id: st.taskId, role, agent: r.backend, round, timestamp: nowIso(), git_sha: await this.git.head(),
       plan_version: st.planVersion, attempts: r.attempts, duration_sec: Math.round(r.durationSec * 10) / 10,
-      cost_usd: r.costUsd, tokens: r.tokens, meta: r.meta, resumed_session: r.resumed, ...extra, output: r.data,
+      cost_usd: r.costUsd, tokens: r.tokens, meta: r.meta, resumed_session: r.resumed, ...extra, output,
     };
   }
 
   private addUsage(r: AgentResult, role: Role): void {
     const st = this.state;
+    this.waitedInStep += r.waitedSec ?? 0;
     // By role too: what each profile spends where (the report's metrics).
     const by = st.usageByRole?.[role] ?? { calls: 0, tokens: 0, costUsd: 0, unpricedCalls: 0 };
     st.usageByRole = {
@@ -558,9 +602,19 @@ export class Workflow {
     st.rejected = [...st.rejected ?? [], entry].slice(-MAX_REJECTED);
   }
 
-  /** Minutes of the step under way, which the run's minutes do not include until it ends. */
+  /** Minutes of the step under way, which the run's minutes do not include until it ends: work, not the time spent waiting for the user. */
   private stepMinutes(): number {
-    return (Date.now() - this.phaseStartedAt) / 60_000;
+    return this.workedSec() / 60;
+  }
+
+  private startClock(): void {
+    this.phaseStartedAt = Date.now();
+    this.waitedInStep = 0;
+  }
+
+  /** Seconds the step under way has worked: its time less what it waited for the user. */
+  private workedSec(): number {
+    return Math.max(0, (Date.now() - this.phaseStartedAt) / 1000 - this.waitedInStep);
   }
 
   /**
@@ -571,7 +625,7 @@ export class Workflow {
     const st = this.state;
     return {
       tree: tree ?? await this.tree(), notes: notes ?? st.humanNotes.length, plan: st.finalPlanHash, findings: findingsDigest(st.openFindings),
-      settings: implementerSettings(this.o.cfg, this.o.repo, this.o.env ?? process.env),
+      settings: implementerSettings(this.o.cfg, this.o.repo, this.o.env ?? process.env), answers: answersDigest(st.clarifications),
     };
   }
 
@@ -581,7 +635,7 @@ export class Workflow {
     if (!st.budget) return undefined;
     return {
       stop: (call) => {
-        const used = usageOf(st, { tokens: call.tokens, cost: call.costUsd, calls: call.calls, minutes: this.stepMinutes() });
+        const used = usageOf(st, { tokens: call.tokens, cost: call.costUsd, calls: call.calls, minutes: Math.max(0, this.stepMinutes() - call.waitedSec / 60) });
         const reached = reachedLimits(st.budget, used);
         return reached.length ? exhaustedMessage(st, reached, used).message : null;
       },
@@ -636,7 +690,7 @@ export class Workflow {
       ? {
         id: c.session.id, attachments: c.attachments,
         prompt: await o.build({
-          ...ctx, notes: c.notes, repoNotes: c.repoNotes,
+          ...ctx, notes: c.notes, repoNotes: c.repoNotes, clarifications: c.clarifications,
           continued: { changed: c.changed, knowsPlan: c.knowsPlan, knowsAnswer: c.knowsAnswer, ...(c.from ? { from: c.from } : {}) },
         }),
       }
@@ -651,7 +705,7 @@ export class Workflow {
 
   /** After a turn that succeeded: what it recorded about the repository, then its session (which knows those notes). */
   private afterTurn<T>(o: AgentTurn<T>, res: AgentResult, turn: Turn, tree: string): void {
-    const notes = acceptRepoNotes((res.data as { repo_notes?: RepoNoteOutput[] }).repo_notes, this.o.repo);
+    const notes = acceptRepoNotes(((o.notesIn ? o.notesIn(res.data as T) : res.data) as { repo_notes?: RepoNoteOutput[] } | null)?.repo_notes, this.o.repo);
     addRepoNotes(this.state, { role: o.agentRole, backend: res.backend, round: o.round, tree }, notes);
     rememberSession(this.state, o.agentRole, res, turn, {
       tree, planHash: o.plan.after(res.data as T), reviewed: o.reviewed, answer: o.answer?.of(res.data as T) ?? null,
@@ -720,8 +774,8 @@ export class Workflow {
     this.record("PLAN", round, "gates", failing.length ? "baseline failing" : "baseline passed",
       `before any change: ${results.map((g) => `${g.name} ${g.passed ? "PASS" : "FAIL"}`).join(", ")}`, failing.length ? "warn" : "ok", "gates.baseline.json");
     // A step of its own: its time is work done (the budget's minutes), and the planner's turn starts a step after it.
-    st.activeSec = (st.activeSec ?? 0) + (Date.now() - this.phaseStartedAt) / 1000;
-    this.phaseStartedAt = Date.now();
+    st.activeSec = (st.activeSec ?? 0) + this.workedSec();
+    this.startClock();
     this.save();
     this.emitPhaseStarted(st.phase);
   }
@@ -743,6 +797,12 @@ export class Workflow {
     return outOfScopeGates(this.finalPlan(), this.state.baseline?.results);
   }
 
+  /** The planner may stop to ask: the setting allows it, and it has not asked its limit in this run (then it plans on assumptions). */
+  private mayAsk(): boolean {
+    const asked = (this.state.clarifications ?? []).filter((e) => e.source === "planner").length;
+    return this.o.cfg.clarification?.enabled !== false && asked < MAX_PLANNER_ASKS;
+  }
+
   private async stepPlan(): Promise<void> {
     const st = this.state;
     const { store } = this.o;
@@ -751,19 +811,37 @@ export class Workflow {
     const previous = v > 1 ? store.readJson<{ output: Plan }>(`plan.v${v - 1}.json`).output : null;
     const feedback = st.planFeedback;
     await this.runBaseline(r);
-    const check = (p: Plan) => [
+    const planChecks = (p: Plan) => [
       ...(["goals", "scope_in", "steps", "acceptance_criteria"] as const).filter((k) => p[k].length === 0).map((k) => `'${k}' must not be empty`),
       ...criteriaErrors(p),
       ...missingBaselineEntries(p, st.baseline?.results),
     ];
-    const res = await this.callReviewer<Plan>({
-      role: "planner", agentRole: "planner", label: "plan", schemaName: "plan", round: r, check,
+    // Questions or the plan: each answer is checked as what it claims to be, so a plan's checks never run on a question.
+    const check = (out: PlannerOutput) => {
+      if (out.result.kind === "plan") return planChecks(out.result.plan);
+      if (!this.mayAsk()) {
+        return [this.o.cfg.clarification?.enabled === false
+          ? "asking the user is turned off in this run (clarification.enabled: false): return `result.kind` `plan`, with each assumption in `open_questions`"
+          : `you have already asked ${MAX_PLANNER_ASKS} times in this run: return \`result.kind\` \`plan\`, with each assumption you made in \`open_questions\``];
+      }
+      const parsed = parseQuestions(askedQuestions(out.result.questions));
+      return "error" in parsed ? [`questions: ${parsed.error}`] : [];
+    };
+    const res = await this.callReviewer<PlannerOutput>({
+      role: "planner", agentRole: "planner", label: "plan", schemaName: "planner", round: r, check,
       build: (ctx) => prompts.planner(ctx, r, v, previous, feedback),
-      plan: { about: previous ? st.planHash : null, after: (p) => planHash(p), file: previous ? store.path(`plan.v${v - 1}.md`) : undefined },
+      // A turn that asks leaves its session with the plan it had before (none, for a first plan).
+      plan: {
+        about: previous ? st.planHash : null, file: previous ? store.path(`plan.v${v - 1}.md`) : undefined,
+        after: (out) => (out.result.kind === "plan" ? planHash(out.result.plan) : previous ? st.planHash : null),
+      },
+      notesIn: (out) => (out.result.kind === "plan" ? out.result.plan : null),
     });
     if (!res) return;
-    const plan = res.data as Plan;
-    store.writeJson(`plan.v${v}.json`, await this.envelope("planner", r, res, { plan_version: v }));
+    const answer = (res.data as PlannerOutput).result;
+    if (answer.kind === "needs_clarification") return this.planAsks(res, answer.questions, r);
+    const plan = answer.plan;
+    store.writeJson(`plan.v${v}.json`, await this.envelope("planner", r, res, { plan_version: v }, plan));
     const md = render.planMarkdown(plan, v);
     store.writeText(`plan.v${v}.md`, md);
     store.writeText("plan.md", md);
@@ -790,6 +868,179 @@ export class Workflow {
     const large = profileOf(st) === "lightweight" ? planTooLarge(plan) : null;
     if (large) this.escalateProfile("plan_size", large);
     st.phase = "PLAN_REVIEW";
+  }
+
+  // ----------------------------------------------------- the user's answers to questions
+  /**
+   * The planner answered with questions instead of a plan: they are saved (pending) before anyone is asked, and the run waits
+   * for the answers in HUMAN_REVIEW. It is not a planning round: the round, the plan version and the planning cycles stay as
+   * they were, so the planner is called again for the same plan once the answers are in.
+   */
+  private planAsks(res: AgentResult, asked: PlannerQuestion[], round: number): void {
+    const st = this.state;
+    const { store } = this.o;
+    const parsed = parseQuestions(askedQuestions(asked));
+    if ("error" in parsed) throw new Error(`the planner's questions passed their check but do not parse: ${parsed.error}`);
+    const request: ClarificationRequest = {
+      id: `clq-${randomUUID().replaceAll("-", "").slice(0, 12)}`, source: "planner", callId: this.logPrefix("plan", round), agent: res.backend, role: "planner",
+      questions: parsed.questions, at: nowIso(),
+    };
+    const entry = ledgerOpen((st.clarifications ??= []), request);
+    const artifact = `clarification.${entry.seq}.json`;
+    store.writeJson(artifact, { request, attempts: res.attempts, tokens: res.tokens, cost_usd: res.costUsd });
+    const headers = entry.questions.map((q) => q.header || q.question).join(", ");
+    this.record("PLAN", round, this.agentName("planner"), "questions asked", `${entry.questions.length} question(s) for you: ${headers}`, "info", artifact, res);
+    const details = entry.questions.map((q) => `${q.header ? `[${q.header}] ` : ""}${q.question} — ${q.options.map((o) => o.label).join(" / ")}${q.multiSelect ? " (several may apply)" : ""}`);
+    this.escalate("clarification_required", `the planner needs your answers before it can plan (${entry.questions.length} question${entry.questions.length === 1 ? "" : "s"}). ` +
+      "Nothing goes on until they are answered; choose an option or write your own answer. Answer where you run agentduo (the chat or the terminal asks), or with " +
+      "`duo resume --answers <file>`; `abort` ends the run.", "PLAN", details);
+  }
+
+  /**
+   * HUMAN_REVIEW for the planner's questions: asks the user when someone can answer, or leaves the run waiting with the
+   * questions saved. Returns the exit code when the run ends here, null when it goes on (the answers are in).
+   */
+  private async askPending(): Promise<number | null> {
+    const st = this.state;
+    const review = st.humanReview!;
+    const entry = pendingEntry(st.clarifications);
+    if (!entry) {
+      // Nothing waits any more (it was answered or closed elsewhere): the step that asked goes on.
+      st.humanReview = null;
+      st.phase = review.resumePhase;
+      this.save();
+      return null;
+    }
+    this.emit({ type: "human.required", runId: st.taskId, review });
+    if (!this.o.clarifier) return this.finish("HUMAN_REVIEW", EXIT.HUMAN_REVIEW);
+    const { seq: _seq, status: _status, answers: _answers, closedAt: _closedAt, settled: _settled, ...asked } = entry;
+    // Claude's question outlived its call: it can only be answered or put off now, never dismissed to the agent that is gone.
+    const request: ClarificationRequest = entry.source === "claude" ? { ...asked, held: true } : asked;
+    this.emit({ type: "clarification.requested", request });
+    let response;
+    try {
+      response = await this.o.clarifier.askClarification({ request }, this.abort.signal);
+    } catch {
+      response = { kind: "defer" as const };
+    }
+    if (response.kind !== "answered" || !this.commitAnswers(entry, response.answers)) {
+      // Not answered (later, dismissed, or stopped): it stays pending, and only its form goes away.
+      this.emit({ type: "clarification.closed", id: entry.id, callId: entry.callId, status: "deferred" });
+      return this.finish("HUMAN_REVIEW", EXIT.HUMAN_REVIEW);
+    }
+    return null;
+  }
+
+  /**
+   * Records the answers of the pending request and sends the run back to the step that asked (the planner, for the same
+   * round and plan version; a step whose Claude call was stopped on a question, which runs again with the answers in its
+   * prompt). False (nothing changes) when they are not a complete answer to that request: an old or foreign answer is refused.
+   * It is information for the agent; it decides nothing about the scope, the gates or the budget.
+   */
+  private commitAnswers(entry: ClarificationEntry, answers: ClarificationAnswer[]): boolean {
+    const st = this.state;
+    const review = st.humanReview;
+    if (!review || review.reason !== "clarification_required") return false;
+    if (!ledgerAnswer(st.clarifications ?? [], entry.id, entry.callId, answers, nowIso())) return false;
+    const done = st.clarifications!.find((e) => e.id === entry.id)!;
+    this.o.store.writeJson(`clarification.${done.seq}.json`, { request: { ...done, answers: undefined, status: undefined, closedAt: undefined }, answers: done.answers, answeredAt: done.closedAt });
+    this.emit({ type: "clarification.answered", id: done.id, callId: done.callId, answers: done.answers! });
+    const role: AgentRole = done.role === undefined || done.role === "plan_finalizer" ? "planner" : done.role;
+    this.message({
+      from: "human", to: this.party(role), kind: "decision", headline: `answered ${done.source === "planner" ? "the planner's" : "Claude's"} ${done.questions.length === 1 ? "question" : `${done.questions.length} questions`}`,
+      items: done.questions.map((q) => answerSummary({ questions: [q], answers: done.answers, status: "answered" })),
+    });
+    this.record("HUMAN_REVIEW", IMPL_PHASES.includes(review.fromPhase) ? st.implRound : st.planningRound, "human", "questions answered", answerSummary(done), "ok", `clarification.${done.seq}.json`);
+    st.humanReview = null;
+    st.phase = review.resumePhase;
+    st.inProgress = null;
+    this.save();
+    return true;
+  }
+
+  /**
+   * `duo resume --answers <file>`: the answers the file gives for the pending request (the planner's, or Claude's). Refused, with the reasons,
+   * when the run does not wait for answers, or the file names another request or does not answer every question.
+   */
+  applyAnswers(file: unknown): void {
+    const st = this.state;
+    // A run that a crash left in the middle of a step, with Claude's question open, waits for the answer already: put it where run() would
+    // before anything else, so the answers can be given straight away (the caller holds the workspace lock; no agent is called here).
+    this.holdLeftQuestion();
+    const entry = st.phase === "HUMAN_REVIEW" && st.humanReview?.reason === "clarification_required" ? pendingEntry(st.clarifications) : null;
+    if (!entry) throw new DecisionError(`run ${st.taskId} is not waiting for answers to questions`);
+    const parsed = parseAnswersFile(file, entry);
+    if ("errors" in parsed) throw new DecisionError(`the answers do not fit the questions:\n- ${parsed.errors.join("\n- ")}`);
+    if (!this.commitAnswers(entry, parsed.answers)) throw new DecisionError("the answers could not be recorded");
+  }
+
+  /**
+   * After a step: a question of Claude that nobody answered is owed when the step was stopped on it (answer later, a closed
+   * app, Esc), and stays pending; otherwise its call is gone and it is closed as interrupted. Returns the owed one, if any.
+   */
+  private settleQuestions(stopped: boolean): ClarificationEntry | null {
+    const st = this.state;
+    const open = (st.clarifications ?? []).filter((e) => e.status === "pending" && e.source === "claude");
+    const owed = stopped ? open.at(-1) ?? null : null;
+    for (const e of open) if (e !== owed) ledgerClose(st.clarifications!, e.id, "interrupted", nowIso());
+    return owed;
+  }
+
+  /**
+   * The run waits for the answer to a question Claude asked while `phase` ran. The tool call of the process that asked is gone
+   * (agentduo never keeps one alive), so the answer is not sent to it: the step runs again afterwards, with the question and
+   * the answer in its prompt. Until then no agent is called and `resume` does not go past it.
+   */
+  private holdQuestion(entry: ClarificationEntry, phase: Phase): void {
+    const st = this.state;
+    st.inProgress = null;
+    const details = entry.questions.map((q) => `${q.header ? `[${q.header}] ` : ""}${q.question} — ${q.options.map((o) => o.label).join(" / ")}${q.multiSelect ? " (several may apply)" : ""}`);
+    this.escalate("clarification_required", `Claude asked you ${entry.questions.length === 1 ? "a question" : `${entry.questions.length} questions`} during ${phase} and the step stopped before ` +
+      "you answered. Nothing goes on until you do: the step then runs again with your answer in its prompt (the tool call that asked is gone). Answer where you run " +
+      "agentduo (the chat or the terminal asks), or with `duo resume --answers <file>`; `abort` ends the run.", phase, details, phase);
+  }
+
+  /**
+   * A run starting up: a question of Claude that an earlier process left open (killed, crashed, closed) belongs to a call that
+   * is gone and can never be answered into. The user still owes the answer, so the run holds on it before the step runs again.
+   * A run that is over, or waits for something else, has no use for it.
+   */
+  private holdLeftQuestion(): void {
+    const st = this.state;
+    const open = (st.clarifications ?? []).filter((e) => e.status === "pending" && e.source === "claude");
+    if (!open.length) return;
+    const waiting = st.phase === "HUMAN_REVIEW" && st.humanReview?.reason === "clarification_required";
+    const live = st.phase !== "DONE" && st.phase !== "ABORTED" && st.phase !== "HUMAN_REVIEW";
+    const owed = waiting || live ? open.at(-1)! : null;
+    for (const e of open) if (e !== owed) ledgerClose(st.clarifications!, e.id, "interrupted", nowIso());
+    if (owed && live) this.holdQuestion(owed, st.phase);
+    this.save();
+  }
+
+  /**
+   * Keeps what the agents ask the user, and what the user answers, in the run, the moment it happens (the runner reports
+   * a question of a call as it is asked and answered). Idempotent; a request of another call than the one it names is
+   * refused (ledgerAnswer), so an answer that comes late never lands on a newer request.
+   */
+  private recordClarification(e: DuoEvent): void {
+    const st = this.state;
+    if (e.type === "clarification.requested") {
+      if (e.request.role === undefined || e.request.source !== "claude") return;
+      // One call asks at a time: a question still open from an earlier call is for a call that is gone.
+      for (const old of st.clarifications ?? []) if (old.id !== e.request.id && old.status === "pending" && old.source === "claude") ledgerClose(st.clarifications!, old.id, "interrupted", nowIso());
+      ledgerOpen((st.clarifications ??= []), e.request);
+    } else if (e.type === "clarification.answered") {
+      if (st.clarifications && ledgerAnswer(st.clarifications, e.id, e.callId, e.answers, nowIso())) this.save();
+      return;
+    } else if (e.type === "clarification.closed") {
+      // Put off, or its call ended with no answer: it stays pending, and the end of the step says whether it is still owed
+      // (settleQuestions). Only a dismissal closes it for good.
+      if (e.status === "deferred" || e.status === "interrupted") return;
+      if (st.clarifications) ledgerClose(st.clarifications, e.id, e.status, nowIso(), e.callId);
+    } else {
+      return;
+    }
+    this.save();
   }
 
   private async stepPlanReview(): Promise<void> {
@@ -1519,6 +1770,13 @@ export class Workflow {
   async applyDecision(decision: "resume" | "revise" | "abort", note?: string): Promise<void> {
     const st = this.state;
     if (st.phase !== "HUMAN_REVIEW" || !st.humanReview) throw new DecisionError(`run ${st.taskId} is not waiting for a decision (phase ${st.phase})`);
+    // An agent's questions are answered, not decided: a resume or a revise would go on without what it asked for.
+    const asked = st.humanReview.reason === "clarification_required" ? pendingEntry(st.clarifications) : null;
+    if (asked && decision !== "abort") {
+      throw new DecisionError(`run ${st.taskId} waits for your answers to ${asked.source === "planner" ? "the planner's" : "Claude's"} questions: answer them (in the chat or terminal, or with ` +
+        "`duo resume --answers <file>`), or abort the run; 'resume' and 'revise' do not answer them");
+    }
+    if (asked) ledgerClose(st.clarifications!, asked.id, "cancelled", nowIso());
     // Before anything changes: a run whose snapshots are unusable keeps waiting for its decision. Abort needs none.
     if (decision !== "abort") await this.prepare();
     const hr = st.humanReview;

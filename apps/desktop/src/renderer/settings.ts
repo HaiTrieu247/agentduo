@@ -172,6 +172,7 @@ export function editorKind(e: Pick<ConfigEntry, "kind">): EditorKind {
     case "limit":
       return "number";
     case "prompts":
+    case "toggle":
     case "backend":
     case "profile":
     case "effort":
@@ -188,7 +189,7 @@ const isStepKey = (key: string) => /^(claude|codex)\.role_(models|efforts)\./.te
 export function groupOf(key: string): string {
   const head = key.split(".")[0]!;
   // The pipeline's profile, and each step's model and effort, sit with who plays each step: they shape the workflow.
-  if (head === "pipeline" || isStepKey(key)) return "agents";
+  if (head === "pipeline" || head === "clarification" || isStepKey(key)) return "agents";
   return ["claude", "codex", "agents", "limits"].includes(head) ? head : "other";
 }
 
@@ -200,7 +201,7 @@ export function settingLabel(key: string): string {
   if (parts[1] === "role_efforts") return parts[0] === "codex" ? "Reasoning effort" : "Effort";
   if (parts[0] === "agents") return words(parts[1]!);
   const labels: Record<string, string> = {
-    bin: "CLI executable", model: "Model", args: "Options", max_budget_usd: "Budget per call", permission_prompts: "Permission requests", profile: "Pipeline profile",
+    bin: "CLI executable", model: "Model", args: "Options", max_budget_usd: "Budget per call", permission_prompts: "Permission requests", profile: "Pipeline profile", enabled: "Questions from the agents",
     max_planning_rounds: "Planning rounds", max_review_rounds: "Review rounds", max_discussion_rounds: "Discussion rounds",
     max_retries: "Retries", max_consecutive_gate_failures: "Failed checks in a row", agent_timeout_sec: "Agent timeout",
     agent_idle_timeout_sec: "Idle timeout", gate_timeout_sec: "Check timeout", max_diff_chars: "Diff size", max_gate_output_chars: "Check output size",
@@ -221,6 +222,8 @@ export function settingHelp(key: string): string {
     "codex.model": "Default leaves it to Codex's own setting (~/.codex/config.toml).",
     "claude.permission_prompts": "When Claude needs approval for a tool: ask you in the chat, or deny it.",
     "claude.max_budget_usd": "The most one Claude call may spend. Empty: no limit.",
+    "clarification.enabled": "Let the agents ask you questions with choices when something only you know would change the result (the planner between its " +
+      "steps, Claude inside a step). Separate from permission requests: an answer never allows a tool, widens the task or skips a check.",
     "pipeline.profile": "How much planning and review a new run spends. Lightweight: small, clear tasks (no sign-off; it moves to standard when " +
       "the task turns out bigger). Thorough: complex or risky tasks. Every profile keeps the critique, the review, the checks and your decisions.",
     "agents.planner": "Writes the plan.",
@@ -330,7 +333,7 @@ const GROUPS: Array<{ id: string; title: string; description: string; cards: Arr
     id: "agents", title: "Workflow roles",
     description: "How deep a pipeline goes, who handles each step, and the model and effort it runs with. Who handles a step applies to new runs " +
       "and discussions; a step's model and effort reach a running pipeline from its next call.",
-    cards: [{ title: null, keys: ["pipeline.profile"] }],
+    cards: [{ title: null, keys: ["pipeline.profile", "clarification.enabled"] }],
   },
   {
     id: "limits", title: "Rounds & limits", description: "How many rounds the agents take and how long they may work. A change applies to new work.",
@@ -653,6 +656,12 @@ export class SettingsPanel {
     };
     if (e.kind === "model") return this.modelControl(e, id, typeof current === "string" ? current : null, save);
     if (e.kind === "effort") return this.effortControl(e, id, typeof current === "string" ? current : null, save);
+    if (e.kind === "toggle") {
+      const select = el("select", { attrs: { id } }, el("option", { text: "On", attrs: { value: "on" } }), el("option", { text: "Off", attrs: { value: "off" } }));
+      select.value = current === false ? "off" : "on";
+      select.addEventListener("change", () => save(select.value === "on"));
+      return select;
+    }
     if (kind === "choice") {
       const words: Record<string, string> = { ask: "Ask me", deny: "Deny automatically", claude: "Claude Code", codex: "Codex" };
       const select = el("select", { attrs: { id } }, ...(CHOICES[e.kind] ?? []).map((c) => el("option", { text: words[c] ?? c, attrs: { value: c } })));

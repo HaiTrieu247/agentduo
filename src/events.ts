@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import type { ClarificationAnswer, ClarificationRequest, ClarificationResponse, ClarificationStatus } from "./core/clarification.js";
 import type { ProfileName } from "./core/config.js";
 
 export type Phase =
@@ -151,6 +152,15 @@ export type DuoEvent =
   | { type: "agent.retry"; role: Role; agent: Party; attempt: number; max: number; reason: string }
   | ({ type: "permission.requested"; agent: Party; request: PermissionRequest } & CallContext)
   | ({ type: "permission.answered"; agent: Party; id: string; answer: PermissionAnswer } & CallContext)
+  /**
+   * An agent asks the user structured questions (src/core/clarification.ts): Claude inside a turn, or the planner between
+   * its turns. Saved by the run or the conversation when it is asked, before anyone can answer. `answered` carries the
+   * answers; `closed` ends a request that got none (dismissed, or its call ended first); `deferred`: a planner's request stays
+   * pending, saved, to be answered later, and only its form goes away.
+   */
+  | { type: "clarification.requested"; request: ClarificationRequest }
+  | { type: "clarification.answered"; id: string; callId: string; answers: ClarificationAnswer[] }
+  | { type: "clarification.closed"; id: string; callId: string; status: Exclude<ClarificationStatus, "pending" | "answered"> | "deferred" }
   /** A question of the conversation went to one agent; `model` is what it runs with as the turn starts. */
   | { type: "turn.started"; conversationId: string; turnId: string; backend: Agent; question: string; model: ModelIdentity; discussion?: DiscussionPlace }
   | { type: "turn.activity"; conversationId: string; turnId: string; backend: Agent; activity: Activity }
@@ -200,6 +210,14 @@ export interface Decider {
 /** Answers an agent's permission prompt; only given to the runner when someone can answer. */
 export interface PermissionDecider {
   askPermission(ask: { agent: Party; request: PermissionRequest } & CallContext, signal?: AbortSignal): Promise<PermissionAnswer>;
+}
+
+/**
+ * Answers an agent's structured questions. Only given to the runner when someone can answer; `defer` (or an abort) ends a
+ * turn's call and leaves a pipeline request pending. A response is applied once, to the request it was given for.
+ */
+export interface ClarificationDecider {
+  askClarification(ask: { request: ClarificationRequest }, signal?: AbortSignal): Promise<ClarificationResponse>;
 }
 
 export class EventBus {

@@ -5,6 +5,7 @@ import { ClaudeBackend, ClaudeParser } from "../src/agents/claude.js";
 import { CodexBackend, CodexParser } from "../src/agents/codex.js";
 import { loadSchema, schemaPath } from "../src/agents/schema.js";
 import { AgentFailure } from "../src/agents/types.js";
+import { parseQuestions } from "../src/core/clarification.js";
 import { defaultConfig } from "../src/core/config.js";
 import { tempDir } from "./helpers/tmp.js";
 
@@ -150,6 +151,58 @@ describe("ClaudeBackend", () => {
     expect(reply({ decision: "deny", message: "use the npm script" }).response.response).toEqual({ behavior: "deny", message: "use the npm script" });
     expect(reply({ decision: "deny" }).response.response.message).toContain("denied");
     expect(backend.hostInput("x").endsWith("\n")).toBe(true);
+  });
+
+  it("answers AskUserQuestion with updatedInput.answers keyed by the question's text (the format Claude Code 2.1.318 takes)", () => {
+    const backend = new ClaudeBackend(defaultConfig().claude, "/ws");
+    const input = {
+      questions: [
+        { question: "Which flag?", header: "Flag", multiSelect: false, options: [{ label: "--fast", description: "" }, { label: "--safe", description: "" }] },
+        { question: "Which targets?", header: "Targets", multiSelect: true, options: [{ label: "web", description: "" }, { label: "cli", description: "" }, { label: "api", description: "" }] },
+      ],
+    };
+    const raw = { request_id: "r9", tool_use_id: "t9", input };
+    const parsed = parseQuestions(input.questions);
+    if ("error" in parsed) throw new Error(parsed.error);
+    const questions = parsed.questions;
+    const reply = (r: Parameters<typeof backend.clarificationReply>[1]) => JSON.parse(backend.clarificationReply(raw, r));
+    const answers = [
+      { questionId: "q1", optionIds: ["q1o2"], otherText: null },
+      { questionId: "q2", optionIds: ["q2o1", "q2o3"], otherText: "and the docs" },
+    ];
+    expect(reply({ questions, answers })).toEqual({
+      type: "control_response",
+      response: { subtype: "success", request_id: "r9", response: { behavior: "allow", updatedInput: { ...input, answers: { "Which flag?": "--safe", "Which targets?": "web, api, and the docs" } } } },
+    });
+    // The user's own words alone, in place of an option.
+    expect(reply({ questions, answers: [{ questionId: "q1", optionIds: [], otherText: "neither" }, answers[1]!] }).response.response.updatedInput.answers["Which flag?"]).toBe("neither");
+    // A refusal is a deny with its reason, as a permission denial is; there is no "always" to save for a question.
+    expect(reply({ deny: "The user dismissed the question." })).toEqual({
+      type: "control_response", response: { subtype: "success", request_id: "r9", response: { behavior: "deny", message: "The user dismissed the question." } },
+    });
+    expect(JSON.stringify(reply({ questions, answers }))).not.toContain("updatedPermissions");
+    expect(backend.clarificationReply(raw, { questions, answers }).endsWith("\n")).toBe(true);
+  });
+
+  it("keys the answers by the question's text as Claude sent it, edge spaces included, so they match the questions it gets back", () => {
+    const backend = new ClaudeBackend(defaultConfig().claude, "/ws");
+    const input = { questions: [{ question: "Which flag? ", header: "Flag", multiSelect: false, options: [{ label: "--fast ", description: "" }, { label: "--safe", description: "" }] }] };
+    const parsed = parseQuestions(input.questions);
+    if ("error" in parsed) throw new Error(parsed.error);
+    const out = JSON.parse(backend.clarificationReply({ request_id: "r1", input }, { questions: parsed.questions, answers: [{ questionId: "q1", optionIds: ["q1o1"], otherText: null }] }));
+    const updated = out.response.response.updatedInput;
+    expect(Object.keys(updated.answers)).toEqual([updated.questions[0].question]);
+    expect(updated.answers).toEqual({ "Which flag? ": "--fast " });
+  });
+
+  it("does not report a refused question as a tool that needs allowing in Claude's settings", () => {
+    const backend = new ClaudeBackend(defaultConfig().claude, "/ws");
+    const p = new ClaudeParser("/ws");
+    p.feed(JSON.stringify({
+      type: "result", subtype: "success", is_error: false, result: "{\"a\":1}", total_cost_usd: 0.1,
+      permission_denials: [{ tool_name: "AskUserQuestion", tool_use_id: "t1" }, { tool_name: "Bash", tool_use_id: "t2" }],
+    }));
+    expect(backend.finalize(p, "", "").meta.permissionDenials).toEqual([{ tool_name: "Bash", tool_use_id: "t2" }]);
   });
 
   it("finalizes from the result envelope and keeps the cost on errors", () => {

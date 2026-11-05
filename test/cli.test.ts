@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyColorPreference, chatAvailable, isBackgroundFromPs, main, pinTerminalSize, type CliIO } from "../src/cli.js";
 import { acquireWorkspaceLock, RunStore } from "../src/core/state.js";
 import { packageVersion } from "../src/paths.js";
-import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
+import { approval, critique, finding, impl, plan, plannerAsk, review } from "./helpers/builders.js";
 import { GIT_MISSING } from "../src/core/run-git.js";
 import { type ConfigOverrides, testConfig, userConfigEnv, userDataEnv } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
@@ -408,5 +408,139 @@ describe("cli", () => {
     const r = await cli(["Make app.txt fixed"], repo, { stdout: { write: (s: string) => { shown += s; }, isTTY: true }, isBackground: () => true });
     expect(r.code).toBe(0);
     expect(shown).toContain("[DONE]");
+  });
+});
+
+
+describe("cli: the questions the agents ask", () => {
+  const asked = () => ({ ...happy(), planner: [{ output: plannerAsk() }, { output: plan() }] });
+  const loadRun = () => RunStore.open(join(repo, ".agentduo", "runs")).loadState();
+  const writeAnswers = (name: string, body: unknown) => {
+    const file = join(t.path, name);
+    writeFileSync(file, typeof body === "string" ? body : JSON.stringify(body));
+    return file;
+  };
+
+  it("waits, saved, when nobody can answer; says what the questions are and what answers them; and goes on only with the answers", async () => {
+    writeConfig(repo);
+    fake.setScenario(asked());
+    const first = await cli(["Make app.txt fixed"]);
+    expect(first.code).toBe(2);
+    expect(first.out).toContain("HUMAN_REVIEW needed (clarification_required)");
+    expect(first.out).toContain("[Database] Which database? — SQLite / Postgres");
+    expect(first.out).toContain("duo resume");
+    expect(first.out).toContain("--answers <file>");
+    expect(fake.calls().map((c) => c.role)).toEqual(["planner"]);
+    const pending = loadRun().clarifications![0]!;
+    expect(pending.status).toBe("pending");
+
+    // status gives what a file needs.
+    const status = (await cli(["status"])).out;
+    expect(status).toContain("waiting for your answers (clarification_required)");
+    expect(status).toContain("q1 [Database]: Which database?");
+    expect(status).toContain("q1o1  SQLite — one file, no server");
+    expect(status).toContain(`"requestId": "${pending.id}"`);
+
+    // A resume with nobody to answer calls no agent; a decision does not answer; a decision and an answers file are two things.
+    expect((await cli(["resume"])).code).toBe(2);
+    expect(fake.calls()).toHaveLength(1);
+    const decided = await cli(["resume", "--decision", "resume"]);
+    expect([decided.code, decided.err]).toEqual([1, expect.stringContaining("waits for your answers to the planner's questions")]);
+    const both = await cli(["resume", "--decision", "resume", "--answers", writeAnswers("a.json", {})]);
+    expect([both.code, both.err]).toEqual([1, expect.stringContaining("--answers answers the questions a run waits on")]);
+
+    // A file that is not one, another request's, and one that does not answer everything leave the run as it is.
+    expect((await cli(["resume", "--answers", join(t.path, "missing.json")])).err).toContain("cannot read the answers file");
+    expect((await cli(["resume", "--answers", writeAnswers("bad.json", "{ nope")])).err).toContain("cannot read the answers file");
+    const other = await cli(["resume", "--answers", writeAnswers("other.json", { requestId: "clq-other", answers: { q1: { options: ["q1o1"] } } })]);
+    expect([other.code, other.err]).toEqual([1, expect.stringContaining("the file answers request clq-other")]);
+    const partial = await cli(["resume", "--answers", writeAnswers("partial.json", { requestId: pending.id, answers: {} })]);
+    expect([partial.code, partial.err]).toEqual([1, expect.stringContaining('question q1 ("Which database?") is not answered')]);
+    expect(loadRun().clarifications![0]!.status).toBe("pending");
+    expect(fake.calls()).toHaveLength(1);
+
+    const ok = await cli(["resume", "--answers", writeAnswers("ok.json", { requestId: pending.id, answers: { q1: { options: ["q1o2"] } } })]);
+    expect(ok.code, ok.err).toBe(0);
+    expect(loadRun().phase).toBe("DONE");
+    expect(fake.calls("planner")[1]!.prompt).toContain("Which database?\n  → Postgres");
+    // Answered once: the same file again has nothing left to answer.
+    const again = await cli(["resume", "--answers", writeAnswers("again.json", { requestId: pending.id, answers: { q1: { options: ["q1o1"] } } })]);
+    expect(again.code).toBe(1);
+  });
+
+  it("asks in a plain terminal, one numbered question at a time, and takes nothing for an answer until the user gives one", async () => {
+    writeConfig(repo);
+    fake.setScenario(asked());
+    let out = "";
+    const prompts: string[] = [];
+    const replies = ["7", "", "2"];
+    const terminal: Partial<CliIO> = {
+      stdin: { isTTY: true }, stdout: { write: (s: string) => { out += s; }, isTTY: true }, isBackground: () => false,
+      ask: async (q: string) => { prompts.push(q); return replies[prompts.length - 1] ?? ""; },
+    };
+    // "7" is no option (asked again with why); an empty reply puts it off, and the run waits.
+    const first = await cli(["--plain", "--no-color", "Make app.txt fixed"], repo, terminal);
+    expect(first.code).toBe(2);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toContain("Question [Database]: Which database?");
+    expect(prompts[0]).toContain("1) SQLite — one file, no server");
+    expect(prompts[0]).toContain("2) Postgres — a server, concurrent writers");
+    expect(prompts[1]).toContain("(7 is not one of the options (1 to 2))");
+    expect(out).toContain("asks you a question");
+    expect(out).toContain("to be answered later");
+    expect(loadRun().clarifications![0]!.status).toBe("pending");
+
+    // Resumed in a terminal, it asks again and goes on with the answer.
+    const second = await cli(["--plain", "--no-color", "resume"], repo, { ...terminal, ask: async (q: string) => { prompts.push(q); return "2"; } });
+    expect(second.code, second.err).toBe(0);
+    expect(loadRun().clarifications).toMatchObject([{ status: "answered", answers: [{ optionIds: ["q1o2"] }] }]);
+    expect(out).toContain("answered: Database: Postgres");
+  });
+
+  it("takes `resume --answers` for a question of Claude's that a crash left open, without a resume first, and calls no agent before the step runs again", async () => {
+    writeConfig(repo);
+    const flag = {
+      questions: [{
+        question: "Which flag should the build use?", header: "Flag", multiSelect: false,
+        options: [{ label: "--fast", description: "skips the slow checks" }, { label: "--safe", description: "keeps every check" }],
+      }],
+    };
+    fake.setScenario({
+      ...happy(),
+      implementer: [{ questions: [flag], afterQuestion: 5000, write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }],
+    });
+    const terminal: Partial<CliIO> = {
+      stdin: { isTTY: true }, stdout: { write: () => undefined, isTTY: true }, isBackground: () => false, ask: async () => "",
+    };
+    // Put off in a terminal: the question is saved and still owed.
+    const first = await cli(["--plain", "--no-color", "Make app.txt fixed"], repo, terminal);
+    expect(first.code, first.err).toBe(2);
+    const pending = loadRun().clarifications![0]!;
+    expect(pending).toMatchObject({ source: "claude", role: "implementer", status: "pending" });
+    expect(fake.calls("implementer")).toHaveLength(1);
+
+    // The process is killed instead: the run is left in the middle of the step, with no decision recorded.
+    const store = RunStore.open(join(repo, ".agentduo", "runs"));
+    const crashed = store.loadState();
+    crashed.humanReview = null;
+    crashed.phase = "IMPLEMENT";
+    crashed.inProgress = { phase: "IMPLEMENT", startedAt: new Date().toISOString() };
+    store.saveState(crashed);
+
+    // A file for another request is refused; the run holds on the question for the next try, and no agent has run.
+    const other = await cli(["resume", "--answers", writeAnswers("other.json", { requestId: "clq-other", answers: { q1: { options: ["q1o1"] } } })]);
+    expect([other.code, other.err]).toEqual([1, expect.stringContaining("the file answers request clq-other")]);
+    expect(loadRun()).toMatchObject({ phase: "HUMAN_REVIEW", humanReview: { reason: "clarification_required", resumePhase: "IMPLEMENT" } });
+    expect(fake.calls("implementer")).toHaveLength(1);
+
+    // Crashed again, the right file is taken as it is, in the same command.
+    store.saveState({ ...loadRun(), humanReview: null, phase: "IMPLEMENT", inProgress: { phase: "IMPLEMENT", startedAt: new Date().toISOString() } });
+    const ok = await cli(["resume", "--answers", writeAnswers("ok.json", { requestId: pending.id, answers: { q1: { options: ["q1o2"] } } })]);
+    expect(ok.code, ok.err).toBe(0);
+    expect(loadRun().phase).toBe("DONE");
+    expect(fake.calls("implementer")).toHaveLength(2);
+    expect(fake.calls("implementer")[1]!.prompt).toContain("Which flag should the build use?\n  → --safe");
+    expect(loadRun().clarifications).toMatchObject([{ status: "answered", answers: [{ optionIds: ["q1o2"] }] }]);
+    expect(ok.out).not.toContain("previous run was interrupted");
   });
 });

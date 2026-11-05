@@ -7,6 +7,7 @@ import {
 } from "../../../src/core/commands.js";
 import type { Check } from "../../../src/core/doctor.js";
 import type { ConfigScope, ConfigurationView } from "../../../src/core/configuration.js";
+import { MAX_OPTIONS, MAX_OTHER_CHARS, MAX_QUESTIONS, type ClarificationAnswer } from "../../../src/core/clarification.js";
 import { MENTION_LIMITS, type PathEntry } from "../../../src/core/mention-text.js";
 import type { CodexCatalog } from "../../../src/core/models.js";
 import type { SettingsView } from "../../../src/core/settings.js";
@@ -28,8 +29,11 @@ import type { ViewAction, ViewState } from "../webview/state.js";
  *    conversation and no lock, and are answered before `initialize` too (for the workspace they name);
  *    `syncConfiguration`, after another process (the desktop's host, another project's worker) wrote a file.
  * 10: @ mentions: `findFiles`, the workspace's files and folders for what the composer typed after an @ (relative paths).
+ * 11: the agents' structured questions: `clarificationAnswer` (the user's reply to a question, naming its conversation, request
+ *    and call, so it is applied only there) and the webview's `question` message; the questions themselves travel as
+ *    `clarification.*` events.
  */
-export const PROTOCOL_VERSION = 10;
+export const PROTOCOL_VERSION = 11;
 
 export const BACKENDS = ["codex", "claude"] as const;
 /** How the composer's text is meant: a message (to the recipient, or a slash command), a pipeline task, or a question to discuss. */
@@ -57,6 +61,12 @@ export interface DecisionAnswer {
   decision: DecisionChoice;
   note: string | null;
 }
+
+/** What the user did with an agent's question: answered it (every question), dismissed it, or will answer later. */
+export type ClarificationReplyPayload =
+  | { kind: "answered"; answers: ClarificationAnswer[] }
+  | { kind: "cancelled" }
+  | { kind: "defer" };
 
 export type SnapshotSide = "base" | "snapshot";
 
@@ -103,6 +113,8 @@ export type WorkerRequest =
   | { type: "findFiles"; query: string }
   | { type: "decision"; requestId: string; answer: DecisionAnswer }
   | { type: "permissionAnswer"; requestId: string; answer: PermissionAnswer }
+  /** The reply to a question of an agent: applied only to the pending request `requestId` of call `callId` in `conversation`. */
+  | { type: "clarificationAnswer"; conversation: string; requestId: string; callId: string; reply: ClarificationReplyPayload }
   | { type: "inspectFocusedRun"; conversation: string | null }
   | { type: "readArtifact"; artifact: ArtifactName; conversation: string | null }
   | { type: "listChanges"; conversation: string | null }
@@ -231,6 +243,7 @@ export interface WorkerResults {
   findFiles: { matches: PathEntry[] };
   decision: { applied: true };
   permissionAnswer: { applied: true };
+  clarificationAnswer: { applied: true };
   inspectFocusedRun: FocusedRun | null;
   readArtifact: ArtifactContent;
   listChanges: ChangeList;
@@ -308,6 +321,8 @@ export type WebviewMessage =
   | { type: "usage" }
   | { type: "decision"; generation: number; id: string; decision: DecisionChoice; note: string | null }
   | { type: "permission"; generation: number; id: string; answer: PermissionAnswer }
+  /** The reply to an agent's question: `id` is the request's, `callId` the call that asked. */
+  | { type: "question"; generation: number; id: string; callId: string; reply: ClarificationReplyPayload }
   | { type: "command"; name: WebviewCommand }
   /** Copy (a code block, a command an agent ran): the host puts `text` on the clipboard. */
   | { type: "copy"; text: string }
@@ -485,6 +500,32 @@ function permissionAnswer(v: unknown): PermissionAnswer {
   return message ? { decision, message } : { decision };
 }
 
+/** A question's or an option's id, as agentduo assigns them (q1, q1o2): short and plain. */
+const SHORT_ID = /^[A-Za-z0-9_-]{1,32}$/;
+
+/**
+ * The user's reply to a question, by shape only: ids, a bounded list, bounded words. Whether the answers fit the question is
+ * checked against the pending request itself, where it waits (the webview can only name things).
+ */
+export function parseClarificationReply(v: unknown): ClarificationReplyPayload {
+  const o = obj(v, "reply");
+  const kind = oneOf(o.kind, ["answered", "cancelled", "defer"] as const, "reply.kind");
+  if (kind !== "answered") return { kind };
+  if (!Array.isArray(o.answers) || o.answers.length === 0 || o.answers.length > MAX_QUESTIONS) {
+    throw new ProtocolError(`reply.answers must be a list of 1 to ${MAX_QUESTIONS} answers`);
+  }
+  const answers = o.answers.map((a, i): ClarificationAnswer => {
+    const x = obj(a, `reply.answers[${i}]`);
+    if (typeof x.questionId !== "string" || !SHORT_ID.test(x.questionId)) throw new ProtocolError(`reply.answers[${i}].questionId is not a question id`);
+    if (!Array.isArray(x.optionIds) || x.optionIds.length > MAX_OPTIONS || !x.optionIds.every((id) => typeof id === "string" && SHORT_ID.test(id))) {
+      throw new ProtocolError(`reply.answers[${i}].optionIds must be a list of at most ${MAX_OPTIONS} option ids`);
+    }
+    const other = x.otherText === undefined || x.otherText === null ? null : text(x.otherText, `reply.answers[${i}].otherText`, MAX_OTHER_CHARS);
+    return { questionId: x.questionId, optionIds: x.optionIds as string[], otherText: other };
+  });
+  return { kind, answers };
+}
+
 function decisionAnswer(v: unknown): DecisionAnswer {
   const o = obj(v, "answer");
   return { decision: oneOf(o.decision, DECISIONS, "answer.decision"), note: optionalText(o.note, "answer.note")?.trim() || null };
@@ -567,7 +608,7 @@ export function parseRequest(v: unknown): WorkerRequest {
   const o = obj(v, "request");
   const type = oneOf(o.type, [
     "initialize", "submit", "stageAttachment", "removeAttachment", "recipient", "setting", "interrupt", "cycleMode", "usage", "closeConversation", "findFiles", "decision",
-    "permissionAnswer", "inspectFocusedRun", "readArtifact", "listChanges", "readSnapshotFile", "accountUsage", "doctor", "shutdown",
+    "permissionAnswer", "clarificationAnswer", "inspectFocusedRun", "readArtifact", "listChanges", "readSnapshotFile", "accountUsage", "doctor", "shutdown",
     ...CONFIGURATION_REQUESTS,
   ] as const, "request.type");
   switch (type) {
@@ -599,6 +640,8 @@ export function parseRequest(v: unknown): WorkerRequest {
       return { type, requestId: requestId(o.requestId, "requestId"), answer: decisionAnswer(o.answer) };
     case "permissionAnswer":
       return { type, requestId: requestId(o.requestId, "requestId"), answer: permissionAnswer(o.answer) };
+    case "clarificationAnswer":
+      return { type, conversation: conversationId(o.conversation), requestId: requestId(o.requestId, "requestId"), callId: requestId(o.callId, "callId"), reply: parseClarificationReply(o.reply) };
     case "readArtifact":
       return { type, artifact: oneOf(o.artifact, ARTIFACTS, "artifact"), conversation: focusedOn(o.conversation) };
     case "readConfiguration":
@@ -668,7 +711,7 @@ export function parseAccountViewMessage(v: unknown): AccountViewMessage {
 export function parseWebviewMessage(v: unknown): WebviewMessage {
   const o = obj(v, "webview message");
   const type = oneOf(o.type, [
-    "ready", "submit", "attach", "upload", "detach", "recipient", "setting", "interrupt", "cycleMode", "usage", "decision", "permission", "command",
+    "ready", "submit", "attach", "upload", "detach", "recipient", "setting", "interrupt", "cycleMode", "usage", "decision", "permission", "question", "command",
     "copy", "readyToReload", "findFiles",
   ] as const, "type");
   switch (type) {
@@ -689,6 +732,8 @@ export function parseWebviewMessage(v: unknown): WebviewMessage {
       };
     case "permission":
       return { type, generation: int(o.generation, "generation"), id: requestId(o.id, "id"), answer: permissionAnswer(o.answer) };
+    case "question":
+      return { type, generation: int(o.generation, "generation"), id: requestId(o.id, "id"), callId: requestId(o.callId, "callId"), reply: parseClarificationReply(o.reply) };
     case "command":
       return { type, name: oneOf(o.name, WEBVIEW_COMMANDS, "name") };
     case "copy":

@@ -52,6 +52,31 @@ describe("parseDesktopRequest", () => {
   });
 });
 
+describe("an agent's question", () => {
+  const ids = { projectId: "0123456789abcdef", conversationId: "20261031-120000-tab-abcd1234", view: 3 };
+  const question = (reply: unknown, extra: object = {}) => ({ method: "chat.message", ...ids, message: { type: "question", generation: 2, id: "clar-1", callId: "call-1", reply, ...extra } });
+
+  it("takes the user's reply as the chat message that names its request and call, and only ids and bounded words", () => {
+    const answered = { kind: "answered", answers: [{ questionId: "q1", optionIds: ["q1o1", "q1o3"], otherText: null }, { questionId: "q2", optionIds: [], otherText: "something else" }] };
+    expect(parseDesktopRequest(question(answered))).toMatchObject({ method: "chat.message", message: { type: "question", id: "clar-1", callId: "call-1", reply: answered } });
+    expect(parseDesktopRequest(question({ kind: "defer" }))).toMatchObject({ message: { reply: { kind: "defer" } } });
+    expect(parseDesktopRequest(question({ kind: "cancelled", answers: [{ questionId: "x" }] }))).toMatchObject({ message: { reply: { kind: "cancelled" } } });
+  });
+
+  it("refuses a reply without its call, with an unprintable id, with no answers, or with a huge text", () => {
+    const bad = [
+      question({ kind: "defer" }, { callId: undefined }),
+      question({ kind: "defer" }, { id: "bad\u0000id" }),
+      question({ kind: "answered", answers: [] }),
+      question({ kind: "answered", answers: [{ questionId: "../q", optionIds: [] }] }),
+      question({ kind: "answered", answers: [{ questionId: "q1", optionIds: ["/etc/passwd"] }] }),
+      question({ kind: "answered", answers: [{ questionId: "q1", optionIds: [], otherText: "x".repeat(200_000) }] }),
+      question({ kind: "pick-for-me" }),
+    ];
+    for (const r of bad) expect(() => parseDesktopRequest(r), JSON.stringify(r).slice(0, 120)).toThrow(ProtocolError);
+  });
+});
+
 describe("trustedSender", () => {
   it("trusts only the app window's top frame on the app origin", () => {
     expect(trustedSender(good)).toBe(true);

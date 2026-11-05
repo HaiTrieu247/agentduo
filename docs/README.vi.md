@@ -210,13 +210,43 @@ codex:
 
 agentduo không chặn gì. Nó chỉ cảnh báo khi agent lập kế hoạch hoặc review sửa file, và khi có file ngoài workspace bị sửa. agentduo không bao giờ commit hay push.
 
+## Câu hỏi từ các agent
+
+Khi thiếu một thông tin chỉ bạn biết và nó làm đổi phạm vi hoặc kết quả, agent hỏi bạn trước khi làm tiếp, kèm các lựa chọn có chú thích. Điều tìm được trong repository thì agent tự tìm; yêu cầu rõ ràng đi thẳng tới plan, không có lượt kiểm tra yêu cầu riêng. Khả năng của từng backend khác nhau:
+
+| Ở đâu | Điều xảy ra |
+|---|---|
+| **Claude, ngay trong lượt** (chat, `/discuss`, lượt phản biện hoặc implement) | Công cụ `AskUserQuestion` của Claude mở một form: header và nội dung từng câu hỏi, mọi lựa chọn kèm mô tả, chọn một hoặc nhiều, và ô nhập ý khác. Không có gì được chọn sẵn; chỉ gửi được khi mọi câu đã có đáp án. Claude tiếp tục đúng lượt đó với đáp án của bạn. Timeout của agent tạm dừng lúc chờ, và thời gian chờ không tính vào số phút của run. Không có "always allow": đáp án là thông tin, không phải quyền. |
+| **Planner** (pipeline) | Planner có thể kết thúc lượt bằng danh sách câu hỏi thay vì plan. agentduo hiện ngay, trước critic, sign-off hay implementer, rồi gọi lại planner kèm đáp án. Một câu hỏi không phải vòng sửa plan thất bại: không tăng phiên bản plan và không tạo tín hiệu planning stalled, nhưng mọi lần gọi vẫn được tính ngân sách. Mỗi run planner hỏi tối đa ba lần. |
+| **Codex trong chat hoặc `/discuss`** | Không có form. `codex exec` không hỏi được giữa lượt, nên Codex hỏi bằng văn bản và bạn trả lời ở tin nhắn sau. |
+
+Trong `/discuss` chỉ các lượt của Claude có form; lựa chọn của bạn vẫn đến Codex ở bước sửa và tổng hợp.
+
+**Đáp án** được lưu cùng run hoặc cuộc trò chuyện ngay khi bạn trả lời, hiện lại khi mở lại, và được đưa vào prompt của các agent liên quan (cả khi session được tiếp tục). Đáp án không mở rộng phạm vi, không bỏ qua gate hay review, không nâng giới hạn và không chấp nhận finding nào. Nếu đáp án đòi đổi phạm vi đã chốt, agent báo lại và run đi qua `revise` cùng cơ chế chấp nhận phạm vi như trước.
+
+**Khi không ai trả lời được** (CI, chạy nền, output bị pipe), Claude không được cấp công cụ hỏi và các câu hỏi của planner được lưu lại: run dừng với lý do `clarification_required` và exit code 2. Không có gì được chọn thay bạn.
+
+```bash
+duo status                          # in câu hỏi, id các lựa chọn và mẫu file đáp án
+duo resume                          # trong terminal: hỏi lại các câu đã lưu
+duo resume --answers answers.json   # có cấu trúc: file ghi requestId và id lựa chọn của từng câu
+```
+
+```json
+{ "requestId": "clar-…", "answers": { "q1": { "options": ["q1o2"], "other": null }, "q2": { "options": [], "other": "chỉ API" } } }
+```
+
+`--answers` bị từ chối nếu file trả lời request khác, ghi lựa chọn không có trong câu hỏi, hoặc bỏ sót câu nào; khi đó run vẫn chờ. `--note` không bao giờ được hiểu là đáp án. Đóng ứng dụng hoặc terminal sẽ kết thúc lời gọi Claude đang chờ câu hỏi; agentduo không giữ sống lời gọi tool. Trong chat, câu hỏi được lưu là bị gián đoạn và lượt đó không tự chạy lại, nhưng các đáp án bạn đã đưa ra trong lượt rồi bị lỗi, bị dừng hoặc mất tiến trình vẫn được giữ trong cuộc trò chuyện và vẫn đến cả hai agent. Trong một run pipeline, câu hỏi của Claude đã bị hoãn (*Answer later*, đóng ứng dụng, Esc, tiến trình bị kill) vẫn là việc bạn phải trả lời: run dừng với `clarification_required` (giống câu hỏi của planner), không gọi agent nào và `resume` thường không đi qua được; bạn trả lời trong terminal hoặc bằng `--answers`, rồi bước đó chạy lại với câu hỏi và đáp án trong prompt (tool call cũ không được trả lời). Câu hỏi đang chờ của planner được giữ và hỏi lại ở `resume`.
+
+**Cài đặt.** `clarification.enabled` (mặc định `true`, đặt trong file config hoặc Settings của app desktop, áp dụng từ lần gọi agent kế tiếp) bật hoặc tắt các câu hỏi. Nó độc lập với `claude.permission_prompts`: khi câu hỏi bật và quyền là `deny`, Claude vẫn được hiện form, còn các yêu cầu công cụ khác vẫn bị từ chối như cũ. agentduo không thêm permission mode, rule hay flag nào cho việc này.
+
 ## Lệnh
 
 | Lệnh | Tác dụng |
 |---|---|
 | `duo` | Mở [chat](#chat) (trong terminal) |
 | `duo "<task>"` | Tạo run mới (`--task-file`; task bắt đầu bằng `-` thì gõ `duo -- "-x …"`) |
-| `duo resume [id]` | Chạy tiếp với config lúc run bắt đầu (thêm `--reload-config` để dùng config hiện tại); `--decision resume\|revise\|abort [--note "..."]` để trả lời quyết định đang chờ |
+| `duo resume [id]` | Chạy tiếp với config lúc run bắt đầu (thêm `--reload-config` để dùng config hiện tại); `--decision resume\|revise\|abort [--note "..."]` để trả lời quyết định đang chờ; `--answers F` để trả lời [câu hỏi của agent](#câu-hỏi-từ-các-agent) |
 | `duo status`, `duo list` | Xem tiến độ |
 | `duo doctor`, `duo init` | Kiểm tra môi trường, tạo config (và hỏi có `git init` không; pipeline không cần) |
 

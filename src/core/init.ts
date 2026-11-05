@@ -76,6 +76,8 @@ export function renderConfigYaml(gates: DetectedGate[]): string {
     "#     implementer: [--permission-mode, acceptEdits]",
     "#   role_models: { plan_reviewer: opus, implementer: sonnet }   # a step's own model when this CLI plays it",
     "#   role_efforts: { plan_reviewer: high }                       # and its own effort; unset steps use the CLI's",
+    "# clarification:",
+    "#   enabled: true   # agents may ask you questions with annotated choices when someone can answer (separate from permission_prompts); false = never",
     "# codex:",
     "#   args: [--ephemeral]   # start every Codex call fresh instead of continuing its role's session (claude: --no-session-persistence)",
     "",

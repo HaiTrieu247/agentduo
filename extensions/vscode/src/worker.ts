@@ -83,6 +83,9 @@ async function dispatch(s: RuntimeSession, request: WorkerRequest): Promise<Work
     case "permissionAnswer":
       s.answerPermission(request.requestId, request.answer);
       return { applied: true };
+    case "clarificationAnswer":
+      s.answerClarification(request.conversation, request.requestId, request.callId, request.reply);
+      return { applied: true };
     case "inspectFocusedRun":
       return s.inspectFocusedRun(request.conversation);
     case "readArtifact":

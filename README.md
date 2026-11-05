@@ -404,13 +404,43 @@ agentduo reports what the agents did; it does not block it. Two kinds of change 
 Nothing is ever committed or pushed by agentduo: review the changes with `git diff` (or the report's command, in a
 folder without a repository) and commit them yourself.
 
+## Questions from the agents
+
+When something only you know would change the scope or the result, an agent asks you before it goes on, with choices that carry a short description. It looks in the repository first and asks only what the repository cannot tell. A clear task goes straight to the plan: there is no separate requirements pass. What each backend can do differs:
+
+| Where | What happens |
+|---|---|
+| **Claude, inside any turn** (chat, `/discuss`, an implementer or critic turn) | Claude's own `AskUserQuestion` tool opens a form: each question with its header, every option with its description, one choice or several, and a field for your own words. Nothing is chosen for you, and Submit stays off until every question has an answer. Claude goes on in the same turn with your answers. The agent's timeouts stop while it waits, and the waiting time does not count toward the run's minutes. If you put it off, the chat ends that answer; a pipeline step waits for your answer and runs again with it. There is no "always allow": an answer is information, not a permission. |
+| **The planner** (a pipeline run) | The planner may end its turn with a list of questions instead of a plan. agentduo shows them straight away, before the critic, the sign-off or the implementer, then calls the planner again with your answers. A question is not a failed planning round: it adds no plan version and no stalled-planning signal, but every call is budgeted and counted as usual. A planner asks at most three times in a run. |
+| **Codex in the chat or in `/discuss`** | No form. `codex exec` cannot ask in the middle of a turn, so Codex asks in plain text and you answer in your next message. |
+
+In `/discuss`, only Claude's turns have the form; what you chose reaches Codex at the revision and the synthesis too.
+
+**Your answers.** They are saved with the run or the conversation as soon as they are given, shown again when you reopen it, and passed to the agents they concern (also in a continued session). An answer never widens the task, waives a gate or a review, raises a limit or accepts a finding. If an answer would change the scope already agreed, the agent says so and the run goes through `revise` and scope acceptance as before.
+
+**When nobody can answer** (CI, the background, output piped elsewhere), Claude is not offered the question tool, and a planner's questions are saved: the run stops with the reason `clarification_required` and exit code 2. Nothing is chosen for you.
+
+```bash
+duo status                      # prints the questions, their option ids, and an answers file template
+duo resume                      # in a terminal: asks the saved questions again
+duo resume --answers answers.json   # structured: the file names the request and each question's options
+```
+
+```json
+{ "requestId": "clar-…", "answers": { "q1": { "options": ["q1o2"], "other": null }, "q2": { "options": [], "other": "only the API" } } }
+```
+
+`--answers` is refused if the file answers another request, names an option the question does not have, or leaves a question without an answer; the run then keeps waiting. `--note` is never read as an answer. Closing the app or the terminal ends the Claude call that was waiting on a question; agentduo never keeps a tool call alive. In the chat, that question is saved as interrupted and the turn is not restarted for you, but answers you had already given in a turn that then failed, was stopped or lost its process are kept in the conversation and still reach both agents. In a pipeline run, a Claude question that was put off (*Answer later*, a closed app, Esc, a killed process) is still yours to answer: the run stops with `clarification_required` (the same as for a planner's question), calls no agent, and no plain `resume` or `--decision` gets past it; you answer it in the terminal or with `--answers`, and only then does the step run again with the question and your answer in its prompt (the old tool call is not answered). A planner's pending question survives a restart and is asked again on `resume`.
+
+**Settings.** `clarification.enabled` (default `true`; set it in the config file, or in Settings in the desktop app; it applies from the next agent call) turns the questions on or off. It is independent of `claude.permission_prompts`: with questions on and permission prompts `deny`, Claude still gets the form, while every other tool request is denied as before. agentduo adds no permission mode, rule or flag for it.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `duo` | Open the [chat](#chat) (in a terminal) |
 | `duo "<task>"`, `duo run "<task>"` | Start a run (`--task-file F`; `--profile lightweight\|standard\|thorough`; use `duo -- "-x …"` for a task that starts with `-`) |
-| `duo resume [id]` | Continue the latest (or given) run with the config it started with (`--reload-config` to use today's); `--decision resume\|revise\|abort [--note "..."]` answers a pending decision |
+| `duo resume [id]` | Continue the latest (or given) run with the config it started with (`--reload-config` to use today's); `--decision resume\|revise\|abort [--note "..."]` answers a pending decision; `--answers F` answers the agents' [questions](#questions-from-the-agents) |
 | `duo status [id]`, `duo list` | Progress, history, what the gates and `DONE` were verified on, and where the files are |
 | `duo doctor` | Check the CLIs and config without calling models |
 | `duo init` | Create `.agentduo/config.yaml` and `.agentduo/.gitignore`, and offer `git init` (a run does not need it) |
@@ -425,6 +455,7 @@ In a terminal, agentduo shows the reason and a menu: Resume, Revise (with a note
 |---|---|
 | `max_planning_rounds` | Implements the latest plan, recorded as accepted by you |
 | `planning_stalled` (shown as *Implement latest plan*) | Implements the latest plan, recorded as accepted by you; `revise` with a note that settles the critic's issues re-plans instead |
+| `clarification_required` | Waits for your answers (the terminal asks them, or `--answers F`); a plain `resume` or `--decision resume` never goes past an unanswered question. `abort` ends the run. See [Questions from the agents](#questions-from-the-agents) |
 | `plan_ready` (with `safety.pause_before_implement`) | Starts implementing |
 | `max_review_rounds`, `critical_finding`, `gates_failing` | Starts another fix round |
 | `implementer_blocked`, `no_progress` | Re-runs the implementation round, but only with something new (see below) |
@@ -491,6 +522,7 @@ Settings are merged in this order, later sources winning: built-in defaults, the
 ```yaml
 agents: { planner: codex, plan_reviewer: claude, implementer: claude, code_reviewer: codex }
 pipeline: { profile: standard }   # lightweight | standard | thorough: the profile new runs start with
+clarification: { enabled: true }   # agents may ask you questions with choices; independent of claude.permission_prompts
 limits: { max_planning_rounds: 4, max_review_rounds: 5, max_discussion_rounds: 3, agent_timeout_sec: 1800, agent_idle_timeout_sec: 900 }
 gates:                       # optional
   - name: tests
@@ -565,6 +597,7 @@ Everything about a run lives in `.agentduo/runs/<run-id>/`:
 - `metrics.json`: the run's profile and escalations, agent calls, tokens and cost by role, rounds, steps, decisions, minutes and outcome, to compare profiles;
 - `verification.json`: what `DONE` rests on (the final code's snapshot, each gate's outcome, the approving review);
 - the plans, the critiques, and every agent's JSON (with task id, round, timestamp, git SHA and plan version);
+- `clarification.<n>.json`: each question a planner asked and your answers, as asked and answered (`state.json` keeps the same ledger);
 - `diff.r<round>.patch`: the whole diff each code review was given;
 - `logs/`: the prompt, the command line, the raw event stream and stderr of every CLI call.
 

@@ -6,6 +6,8 @@ import { permissionAnswerText, whoLabel } from "../format.js";
 import { HumanReviewPrompt, VIEWS, type ViewKind } from "./HumanReviewPrompt.js";
 import { LiveFooter } from "./LiveFooter.js";
 import { PermissionPrompt } from "./PermissionPrompt.js";
+import { QuestionPrompt } from "./QuestionPrompt.js";
+import type { QuestionReply } from "./session.js";
 import { AnswerBlock, DiscussionBlock, StepBlock } from "./StepBlock.js";
 import { initialView, reduce, type StaticItem } from "./store.js";
 
@@ -19,6 +21,8 @@ export interface AppProps {
   onDecision(d: Decision | "defer"): void;
   /** The user's answer to a relayed permission prompt. */
   onPermission?(id: string, answer: PermissionAnswer): void;
+  /** The user's reply to an agent's question. */
+  onQuestion?(id: string, reply: QuestionReply): void;
   views(): ViewKind[];
   readView(kind: ViewKind): Promise<string | null>;
   /** Called once the finish line has been rendered, so the session can unmount without losing it. */
@@ -74,6 +78,13 @@ export function StaticItemView({ item }: { item: StaticItem }) {
           {` ${whoLabel(item.agent, item.role)} ${item.label} — ${permissionAnswerText(item.answer, item.rules)}`}
         </Text>
       );
+    case "question":
+      return (
+        <Text dimColor wrap="wrap">
+          <Text color={item.status === "answered" ? "green" : "yellow"}>{item.status === "answered" ? "✓" : "⊘"}</Text>
+          {` ${whoLabel(item.agent, item.role)} asked${item.header ? ` [${item.header}]` : ""} — ${item.text}`}
+        </Text>
+      );
     case "review":
       return (
         <Box flexDirection="column">
@@ -118,8 +129,9 @@ export function App(p: AppProps) {
   // Raw mode swallows SIGINT, so Ctrl-C arrives as input.
   useInput((input, key) => {
     if (!(key.ctrl && input === "c")) return;
-    // At the decision prompt nothing is running, so Ctrl-C means "decide later".
-    if (view.humanReview) p.onDecision("defer");
+    // At the question or the decision prompt, Ctrl-C means "later"; otherwise it stops the run.
+    if (view.questions[0]) p.onQuestion?.(view.questions[0].id, { kind: "defer" });
+    else if (view.humanReview && view.humanReview.reason !== "clarification_required") p.onDecision("defer");
     else p.onInterrupt();
   }, { isActive: p.interactive });
   useEffect(() => {
@@ -132,7 +144,7 @@ export function App(p: AppProps) {
       dispatch({ type: "stopping" });
       p.onStop();
     }
-  }, { isActive: p.interactive && !view.humanReview && !view.permissions.length });
+  }, { isActive: p.interactive && !view.humanReview && !view.permissions.length && !view.questions.length });
 
   const onView = (kind: ViewKind) => {
     void p.readView(kind).then((body) => dispatch({ type: "artifact", title: VIEWS[kind].title, body: body ?? "(not available)" }));
@@ -150,7 +162,12 @@ export function App(p: AppProps) {
       {view.permissions[0] && p.interactive ? (
         <PermissionPrompt key={view.permissions[0].request.id} ask={view.permissions[0]}
           onAnswer={(answer) => p.onPermission?.(view.permissions[0]!.request.id, answer)} />
-      ) : view.humanReview && p.interactive ? (
+      ) : view.questions[0] && p.interactive ? (
+        <QuestionPrompt key={view.questions[0].id} request={view.questions[0]}
+          onSubmit={(answers) => p.onQuestion?.(view.questions[0]!.id, { kind: "answered", answers })}
+          onLater={() => p.onQuestion?.(view.questions[0]!.id, { kind: "defer" })}
+          onDismiss={() => p.onQuestion?.(view.questions[0]!.id, { kind: "cancelled" })} />
+      ) : view.humanReview && view.humanReview.reason !== "clarification_required" && p.interactive ? (
         <HumanReviewPrompt review={view.humanReview} views={p.views()} onDecision={p.onDecision} onView={onView} />
       ) : view.finished ? null : (
         <LiveFooter view={view} now={Date.now()} frame={frame} interactive={p.interactive} />

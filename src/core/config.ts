@@ -63,6 +63,11 @@ export interface ConfigData {
   gates: GateConfig[];
   /** profile: the pipeline profile new runs start with; a run keeps its own (state.profile). */
   pipeline: { profile: ProfileName };
+  /**
+   * enabled: agents may ask you structured questions (Claude's AskUserQuestion inside a turn, the planner between its turns)
+   * when someone can answer. Independent of claude.permission_prompts: it never allows a tool.
+   */
+  clarification: { enabled: boolean };
   safety: { pause_before_implement: boolean };
   /**
    * role_models / role_efforts: the model and effort a pipeline role runs with when this CLI plays it, over `model`
@@ -105,6 +110,7 @@ const DEFAULTS: ConfigData = {
   },
   gates: [],
   pipeline: { profile: "standard" },
+  clarification: { enabled: true },
   safety: { pause_before_implement: false },
   // No session flag here: agentduo keeps a pipeline role's sessions to continue them, and passes --ephemeral /
   // --no-session-persistence to every other call. Listing one in args turns the continuation off.
@@ -305,6 +311,7 @@ export function configErrors(cfg: ConfigData): string[] {
     ...(["require_plan_approval", "require_tests_pass", "require_codex_approval", "stop_on_critical_issue", "review_on_gate_failure"] as const)
       .map((k): [string, unknown] => [`quality_gates.${k}`, cfg.quality_gates[k]]),
     ["safety.pause_before_implement", cfg.safety.pause_before_implement],
+    ["clarification.enabled", cfg.clarification?.enabled],
   ];
   for (const [name, value] of flags) if (typeof value !== "boolean") errors.push(`${name} must be true or false`);
   const strings: Array<[string, unknown]> = [["codex.bin", cfg.codex.bin], ["claude.bin", cfg.claude.bin], ["paths.runs_dir", cfg.paths.runs_dir]];

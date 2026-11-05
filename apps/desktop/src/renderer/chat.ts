@@ -104,6 +104,7 @@ export class ChatHost {
       usage: () => send({ type: "usage" }),
       decide: (id, decision, note) => mount.state && send({ type: "decision", generation: mount.state.generation, id, decision, note }),
       permit: (id, answer) => mount.state && send({ type: "permission", generation: mount.state.generation, id, answer }),
+      answerQuestion: (id, callId, reply) => mount.state && send({ type: "question", generation: mount.state.generation, id, callId, reply }),
       command: (name) => {
         if (!this.hooks.command(name, mount)) send({ type: "command", name });
       },
@@ -206,6 +207,7 @@ export function chatStatus(s: ViewState | null): string {
   if (!s) return "starting…";
   if (s.decision) return "waiting for your decision";
   if (s.permissions.length) return `${s.permissions.length} permission question(s) waiting`;
+  if (s.questions?.length) return `${s.questions.length} question(s) from the agents waiting`;
   if (s.discussion && !s.discussion.status) return `discussing · round ${Math.max(1, s.discussion.turns.length)} of ${s.discussion.maxRounds}`;
   if (s.current) {
     const who = s.current.agent ? `${s.current.agent}` : "AgentDuo";

@@ -54,7 +54,7 @@ describe("progress: a blocker's identity and repeats", () => {
     expect(held.message).toContain("so it was not run again (that would repeat the same call): API key needed. Give it what it needs: 'resume' with a --note");
     expect(held.message).toContain("such as a credential, a service or a tool");
     expect(held.details).toEqual(["blocked in round 2, 3 times in a row",
-      "unchanged since: the workspace's files, your notes, the final plan, the open review findings, the implementer's settings (agentduo's and its CLI's)"]);
+      "unchanged since: the workspace's files, your notes, the final plan, the open review findings, the implementer's settings (agentduo's and its CLI's), your answers to the agents' questions"]);
   });
 });
 
@@ -109,7 +109,7 @@ describe("progress: review cycles that do not converge", () => {
     const held = stallHeldReview(stall);
     expect(held.message).toContain("nothing changed since the review loop stalled, so no fix round was started");
     expect(held.details).toEqual(["stalled at round 3 on F1",
-      "unchanged since: the workspace's files, your notes, the final plan, the open review findings, the implementer's settings (agentduo's and its CLI's)"]);
+      "unchanged since: the workspace's files, your notes, the final plan, the open review findings, the implementer's settings (agentduo's and its CLI's), your answers to the agents' questions"]);
   });
 });
 

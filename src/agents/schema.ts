@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { Ajv, type ErrorObject, type ValidateFunction } from "ajv";
 import { packageRoot } from "../paths.js";
 
-export const SCHEMA_NAMES = ["plan", "plan_critique", "plan_approval", "implementation", "review"] as const;
+export const SCHEMA_NAMES = ["plan", "planner", "plan_critique", "plan_approval", "implementation", "review"] as const;
 export type SchemaName = (typeof SCHEMA_NAMES)[number];
 
 const ajv = new Ajv({ allErrors: true, strict: false });
@@ -35,8 +35,40 @@ function formatError(e: ErrorObject): string {
   return `${where}: ${e.message}`;
 }
 
+/** The two branches of the planner's answer, each compiled on its own: see validatePlanner. */
+const PLANNER_KINDS = ["needs_clarification", "plan"] as const;
+const branches = new Map<string, ValidateFunction>();
+
+function plannerBranch(kind: (typeof PLANNER_KINDS)[number]): ValidateFunction {
+  let validate = branches.get(kind);
+  if (!validate) {
+    const variants = ((loadSchema("planner").properties as Record<string, any>).result.anyOf as Array<Record<string, any>>);
+    validate = ajv.compile(variants.find((v) => v.properties.kind.enum[0] === kind)!);
+    branches.set(kind, validate);
+  }
+  return validate;
+}
+
+/**
+ * The planner's answer is one of two objects (`result.kind`): its errors are those of the branch it chose, never of the
+ * other, because a retry sees only them and must be told exactly what to correct.
+ */
+function validatePlanner(data: unknown): string[] {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return ["$: must be an object with a 'result'"];
+  const root = data as Record<string, unknown>;
+  const errors = Object.keys(root).filter((k) => k !== "result").map((k) => `$: unexpected property '${k}'`);
+  const result = root.result;
+  if (typeof result !== "object" || result === null || Array.isArray(result)) return [...errors, "$.result: must be an object with a 'kind'"];
+  const kind = (result as Record<string, unknown>).kind;
+  if (!(PLANNER_KINDS as readonly unknown[]).includes(kind)) return [...errors, `$.result.kind: must be one of ${JSON.stringify(PLANNER_KINDS)}`];
+  const validate = plannerBranch(kind as (typeof PLANNER_KINDS)[number]);
+  if (validate(result)) return errors;
+  return [...errors, ...(validate.errors ?? []).map((e) => formatError({ ...e, instancePath: `/result${e.instancePath}` }))];
+}
+
 /** Validate an agent's final JSON; returns human-readable errors (empty = valid). */
 export function validateOutput(name: SchemaName, data: unknown): string[] {
+  if (name === "planner") return validatePlanner(data);
   let validate = validators.get(name);
   if (!validate) {
     validate = ajv.compile(loadSchema(name));
@@ -57,5 +89,13 @@ export function strictProblems(schema: Record<string, unknown>, path = "$"): str
     for (const [key, sub] of Object.entries(props)) problems.push(...strictProblems(sub, `${path}.${key}`));
   }
   if (types.includes("array") && schema.items) problems.push(...strictProblems(schema.items as Record<string, unknown>, `${path}[]`));
+  // The root of a structured output must be an object, so a choice between shapes sits inside it, not at the top.
+  if (path === "$" && (schema.anyOf || schema.oneOf)) problems.push("$: the root must not be anyOf/oneOf");
+  for (const key of ["anyOf", "oneOf", "allOf"] as const) {
+    (Array.isArray(schema[key]) ? schema[key] as Array<Record<string, unknown>> : []).forEach((sub, i) => problems.push(...strictProblems(sub, `${path}.${key}[${i}]`)));
+  }
+  for (const key of ["$defs", "definitions"] as const) {
+    for (const [name, sub] of Object.entries((schema[key] ?? {}) as Record<string, Record<string, unknown>>)) problems.push(...strictProblems(sub, `${path}.${key}.${name}`));
+  }
   return problems;
 }

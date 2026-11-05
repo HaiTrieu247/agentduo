@@ -208,6 +208,8 @@ class Controller implements vscode.Disposable, PanelHost {
           return c.answerDecision(message.generation, message.id, message.decision, message.note);
         case "permission":
           return c.answerPermission(message.generation, message.id, message.answer);
+        case "question":
+          return c.answerQuestion(message.generation, message.id, message.callId, message.reply);
       }
     })();
   }
@@ -329,7 +331,7 @@ class Controller implements vscode.Disposable, PanelHost {
     if (!busy && this.busy.delete(conversation)) this.account.changed();
     else if (busy) this.busy.add(conversation);
     const title = titleOf(state);
-    const seen = `${title}\n${state.status}\n${state.decision?.id ?? ""}\n${state.permissions.length}\n${state.timeline.length > 0}`;
+    const seen = `${title}\n${state.status}\n${state.decision?.id ?? ""}\n${state.permissions.length}\n${(state.questions ?? []).length}\n${state.timeline.length > 0}`;
     if (this.shown.get(conversation) === seen) return;
     this.shown.set(conversation, seen);
     this.panels.get(conversation)?.setTitle(title);
@@ -340,14 +342,14 @@ class Controller implements vscode.Disposable, PanelHost {
   private updateContext(): void {
     const states = this.session ? [...this.panels.keys()].map((id) => this.session!.conversation(id).state) : [];
     void vscode.commands.executeCommand("setContext", "agentduo.running", states.some((s) => s.status === "running" || s.status === "answering"));
-    const waiting = states.reduce((n, s) => n + (s.decision ? 1 : 0) + s.permissions.length, 0);
+    const waiting = states.reduce((n, s) => n + (s.decision ? 1 : 0) + s.permissions.length + (s.questions ?? []).length, 0);
     if (this.tree) this.tree.badge = waiting ? { value: waiting, tooltip: `${waiting} question(s) from agentduo waiting for you` } : undefined;
   }
 
-  private onQuestion(conversation: string, kind: "decision" | "permission", text: string): void {
+  private onQuestion(conversation: string, kind: "decision" | "permission" | "question", text: string): void {
     const panel = this.panels.get(conversation);
     if (panel?.visible) return;
-    const what = kind === "decision" ? "agentduo needs your decision" : "Claude asks for permission";
+    const what = kind === "decision" ? "agentduo needs your decision" : kind === "question" ? "An agent asks you a question" : "Claude asks for permission";
     void vscode.window.showInformationMessage(`${what}: ${text.slice(0, 160)}`, "Open").then((answer) => {
       if (answer) void this.openConversation(conversation);
     });
@@ -364,7 +366,7 @@ class Controller implements vscode.Disposable, PanelHost {
       const st = state(id);
       return {
         id, title: st && st.timeline.length ? titleOf(st) : title, updatedAt, open: this.panels.has(id),
-        running: !!st && (st.status === "running" || st.status === "answering"), waiting: st ? (st.decision ? 1 : 0) + st.permissions.length : 0,
+        running: !!st && (st.status === "running" || st.status === "answering"), waiting: st ? (st.decision ? 1 : 0) + st.permissions.length + (st.questions ?? []).length : 0,
       };
     };
     const known = new Set(saved.map((c) => c.id));

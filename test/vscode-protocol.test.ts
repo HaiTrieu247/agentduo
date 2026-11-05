@@ -37,8 +37,8 @@ describe("worker requests", () => {
     expect([init({}), init({ discover: true }), init({ discover: false })].map((r) => r.type === "initialize" && r.discover)).toEqual([true, true, false]);
   });
 
-  it("is protocol 10 (@ mentions); takes only the permission modes the chat offers", () => {
-    expect(PROTOCOL_VERSION).toBe(10);
+  it("is protocol 11 (the agents' questions); takes only the permission modes the chat offers", () => {
+    expect(PROTOCOL_VERSION).toBe(11);
     const setting = (s: unknown) => parseRequestEnvelope(envelope({ type: "setting", conversation: "c-1", setting: s })).request;
     for (const mode of ["manual", "acceptEdits", "auto"]) expect(setting({ target: "mode", mode })).toMatchObject({ setting: { target: "mode", mode } });
     expect(setting({ target: "mode" })).toMatchObject({ setting: { target: "mode" } });
@@ -167,6 +167,35 @@ describe("webview messages", () => {
     expect(parseWebviewMessage({ type: "copy", text: "x".repeat(MAX_ANSWER_CHARS) })).toMatchObject({ type: "copy" });
     expect(() => parseWebviewMessage({ type: "copy", text: "x".repeat(MAX_ANSWER_CHARS + 1) })).toThrow(/too long/);
     expect(() => parseWebviewMessage({ type: "copy" })).toThrow(ProtocolError);
+  });
+});
+
+describe("the agents' questions", () => {
+  const answered = { kind: "answered", answers: [{ questionId: "q1", optionIds: ["q1o2"], otherText: null }, { questionId: "q2", optionIds: [], otherText: " my own " }] };
+
+  it("since protocol 11, the webview's reply names the conversation's request and call, and says only ids and bounded words", () => {
+    expect(parseWebviewMessage({ type: "question", generation: 2, id: "clar-1", callId: "call-1", reply: answered }))
+      .toEqual({ type: "question", generation: 2, id: "clar-1", callId: "call-1", reply: { kind: "answered", answers: [
+        { questionId: "q1", optionIds: ["q1o2"], otherText: null }, { questionId: "q2", optionIds: [], otherText: expect.stringContaining("my own") },
+      ] } });
+    for (const kind of ["cancelled", "defer"]) {
+      expect(parseWebviewMessage({ type: "question", generation: 2, id: "clar-1", callId: "call-1", reply: { kind, answers: [{ questionId: "x" }] } }))
+        .toEqual({ type: "question", generation: 2, id: "clar-1", callId: "call-1", reply: { kind } });
+    }
+    const bad = (m: object) => () => parseWebviewMessage({ type: "question", generation: 2, id: "clar-1", callId: "call-1", reply: answered, ...m });
+    expect(bad({ callId: undefined })).toThrow(ProtocolError);
+    expect(bad({ reply: { kind: "maybe" } })).toThrow(ProtocolError);
+    expect(bad({ reply: { kind: "answered", answers: [] } })).toThrow(/1 to/);
+    expect(bad({ reply: { kind: "answered", answers: [{ questionId: "has space", optionIds: [] }] } })).toThrow(/question id/);
+    expect(bad({ reply: { kind: "answered", answers: [{ questionId: "q1", optionIds: ["a b"] }] } })).toThrow(/option ids/);
+    expect(bad({ reply: { kind: "answered", answers: [{ questionId: "q1", optionIds: [], otherText: "x".repeat(100_000) }] } })).toThrow(ProtocolError);
+  });
+
+  it("the worker takes the same reply with the conversation it was asked in", () => {
+    expect(parseRequestEnvelope(envelope({ type: "clarificationAnswer", conversation: "c-1", requestId: "clar-1", callId: "call-1", reply: { kind: "defer" } })).request)
+      .toEqual({ type: "clarificationAnswer", conversation: "c-1", requestId: "clar-1", callId: "call-1", reply: { kind: "defer" } });
+    expect(() => parseRequestEnvelope(envelope({ type: "clarificationAnswer", requestId: "clar-1", callId: "call-1", reply: { kind: "defer" } }))).toThrow(ProtocolError);
+    expect(() => parseRequestEnvelope(envelope({ type: "clarificationAnswer", conversation: "c-1", requestId: "clar-1", reply: { kind: "defer" } }))).toThrow(ProtocolError);
   });
 });
 

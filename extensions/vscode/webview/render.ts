@@ -5,6 +5,8 @@ import {
   type SettingCommand,
 } from "../../../src/core/commands.js";
 import { ATTACHMENT_LIMITS, attachmentDetail, formatBytes, type Attachment } from "../../../src/core/attachment-types.js";
+import { emptyForm, formComplete, formProblems, formSubmission, setWords, toggleOption, type FormState } from "../../../src/core/clarification-form.js";
+import { answerText, answerSummary, dismissable, keptByRun, type ClarificationRequest } from "../../../src/core/clarification.js";
 import { needsInput } from "../../../src/core/decisions.js";
 import { insertMention, mentionAt, type MentionRange, type PathEntry } from "../../../src/core/mention-text.js";
 import type { UsageReport } from "../../../src/core/usage.js";
@@ -13,7 +15,7 @@ import {
   budgetText, discussionAuthor, discussionDoing, discussionOutcome, discussionStepText, formatClock, formatDuration, modelText, partyLabel, permissionAnswerText, PROVIDERS, roleLabel,
   usageRows, usageText, verdictText, whoLabel,
 } from "../../../src/ui/format.js";
-import type { DecisionChoice, Route, SettingRequest, WebviewCommand } from "../src/protocol.js";
+import type { ClarificationReplyPayload, DecisionChoice, Route, SettingRequest, WebviewCommand } from "../src/protocol.js";
 import { h, icon, providerMark, type Child } from "./dom.js";
 import { parseInline, parseMarkdown, type Block, type Inline } from "./markdown.js";
 import {
@@ -41,6 +43,8 @@ export interface Actions {
   usage(): void;
   decide(id: string, decision: DecisionChoice, note: string | null): void;
   permit(id: string, answer: PermissionAnswer): void;
+  /** The user's reply to an agent's question: `id` is the request's, `callId` the call that asked. */
+  answerQuestion(id: string, callId: string, reply: ClarificationReplyPayload): void;
   command(name: WebviewCommand): void;
   /** Copy: the host puts `text` on the clipboard. */
   copy(text: string): void;
@@ -357,6 +361,8 @@ function timelineItem(item: TimelineItem, actions: Actions): HTMLElement {
         `${whoLabel(item.agent, item.role)} ${item.label}: ${permissionAnswerText(item.answer, item.rules)}`);
     case "review":
       return note("debug-pause", "warn", `Decision deferred (${item.review.reason}): ${item.review.message}`);
+    case "question":
+      return questionHistory(item);
     case "finish": {
       const f = FINISH[item.phase] ?? { icon: "circle-outline", tone: "warn", text: item.phase };
       return h("div", { class: `finish finish-${f.tone}`, role: "status" },
@@ -477,6 +483,95 @@ function permissionCard(p: PendingPermission, actions: Actions): HTMLElement {
       b.addEventListener("click", () => actions.permit(r.id, answer(c.key)));
       return b;
     })));
+}
+
+// ------------------------------------------------------------------ questions of the agents
+/** What the user has picked and written in each open question, kept while the card is rebuilt (a new question arrives, a file is added). */
+const drafts = new Map<string, FormState>();
+/** The questions whose answer is on its way: the form waits for the outcome (a retry is possible after a few seconds, if none came). */
+const sending = new Map<string, number>();
+const RESEND_MS = 4000;
+let optionSeq = 0;
+
+/**
+ * An agent's question, whole: each question with its header, each option with its description, a way to choose one or several and
+ * to write something else. Nothing is chosen until the user does it; Submit is enabled once every question has an answer. There
+ * is no "always allow": an answer is information, not a permission.
+ */
+function questionCard(request: ClarificationRequest, actions: Actions): HTMLElement {
+  let form = drafts.get(request.id) ?? emptyForm();
+  const questions = request.questions;
+  const inputs: Array<{ q: (typeof questions)[number]; option: string | null; el: HTMLInputElement }> = [];
+  const groups = questions.map((q, qi) => {
+    const group = `agentduo-q${++optionSeq}`;
+    const legend = h("legend", { class: "q-text" }, q.header ? h("span", { class: "q-header" }, q.header) : null, q.question);
+    const hint = h("p", { class: "muted small" }, q.multiSelect ? "Choose any number that apply, or write your own." : "Choose one, or write your own.");
+    const options = q.options.map((o) => {
+      const box = h("input", { attrs: { type: q.multiSelect ? "checkbox" : "radio", name: group, value: o.id } });
+      inputs.push({ q, option: o.id, el: box });
+      box.addEventListener("change", () => {
+        // A radio reports only what became chosen; a checkbox says which way it went. Either way the form decides.
+        const chosen = (form.picked[q.id] ?? []).includes(o.id);
+        if (box.checked !== chosen) form = toggleOption(questions, form, q.id, o.id);
+        sync();
+      });
+      return h("label", { class: "q-option" }, box, h("span", { class: "q-option-text" }, h("span", { class: "q-label" }, o.label), o.description ? h("span", { class: "q-desc" }, o.description) : null));
+    });
+    const words = h("input", { class: "input", label: `Your own answer to question ${qi + 1}`, attrs: { type: "text", placeholder: "Something else…", maxlength: "4000" } });
+    inputs.push({ q, option: null, el: words });
+    words.addEventListener("input", () => {
+      form = setWords(questions, form, q.id, words.value);
+      sync(words);
+    });
+    return h("fieldset", { class: "q-group" }, legend, hint, ...options, h("div", { class: "q-other" }, words));
+  });
+  const problem = h("p", { class: "muted small", role: "status" });
+  const submit = button("Submit answers", () => {
+    const answers = formSubmission(questions, form);
+    if (!answers || sending.has(request.id)) return;
+    sending.set(request.id, Date.now());
+    sync();
+    actions.answerQuestion(request.id, request.callId, { kind: "answered", answers });
+  }, { class: "btn primary" });
+  const later = button("Answer later", () => actions.answerQuestion(request.id, request.callId, { kind: "defer" }),
+    { class: "btn secondary", title: keptByRun(request) ? "The run waits, with the question saved. /resume answers it." : "Ends this answer: the agent cannot wait. Ask again afterwards." });
+  const dismiss = dismissable(request)
+    ? button("Don't answer", () => actions.answerQuestion(request.id, request.callId, { kind: "cancelled" }), { class: "btn secondary", title: "Tells the agent it got no answer" })
+    : null;
+
+  function sync(typing?: HTMLInputElement): void {
+    drafts.set(request.id, form);
+    for (const i of inputs) {
+      if (i.option === null) {
+        if (i.el !== typing && i.el.value !== (form.words[i.q.id] ?? "")) i.el.value = form.words[i.q.id] ?? "";
+      } else i.el.checked = (form.picked[i.q.id] ?? []).includes(i.option);
+    }
+    const at = sending.get(request.id);
+    const waiting = at !== undefined && Date.now() - at < RESEND_MS;
+    if (!waiting) sending.delete(request.id);
+    submit.disabled = waiting || !formComplete(questions, form);
+    problem.textContent = waiting ? "Sending your answer…" : formComplete(questions, form) ? "" : `Not yet: ${formProblems(questions, form).join("; ")}.`;
+  }
+  sync();
+  return h("section", { class: "card question", role: "group", label: `Question from ${whoLabel(request.agent, request.role)}` },
+    h("h2", {}, icon("question", "card-icon"), `${whoLabel(request.agent, request.role)} asks you ${questions.length === 1 ? "a question" : `${questions.length} questions`}`),
+    ...groups, problem, h("div", { class: "choices" }, submit, later, dismiss));
+}
+
+/** A question once over, in the timeline: what was asked, and the answer (or that there was none). */
+function questionHistory(item: Extract<TimelineItem, { kind: "question" }>): HTMLElement {
+  const outcome = item.status === "answered" ? null
+    : item.status === "cancelled" ? "Dismissed without an answer."
+      : item.status === "deferred" ? "To be answered later." : "Interrupted before it was answered.";
+  const rows = item.questions.map((q) => {
+    const a = item.answers?.find((x) => x.questionId === q.id);
+    return h("li", {}, h("strong", {}, q.header ? `${q.header}: ` : ""), q.question, h("div", { class: "q-answer" }, a ? `→ ${answerText(q, a)}` : "→ —"));
+  });
+  return h("div", { class: `question-history${item.status === "answered" ? "" : " ended"}` },
+    h("div", { class: "q-head" }, icon(item.status === "answered" ? "pass" : "circle-slash", "note-icon"),
+      `${whoLabel(item.agent, item.role)} asked ${item.questions.length === 1 ? "a question" : `${item.questions.length} questions`}`),
+    h("ul", { class: "items" }, ...rows), outcome ? h("p", { class: "muted small" }, outcome) : null,
+    h("span", { class: "sr-only" }, answerSummary({ questions: item.questions, answers: item.answers, status: item.status === "deferred" ? "pending" : item.status })));
 }
 
 // ------------------------------------------------------------------ settings panel
@@ -778,7 +873,7 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   // the sidebar is resized). Scrolling up unpins it; scrolling back down pins it again.
   let pinned = true;
   const items = new Map<string, { item: TimelineItem; el: HTMLElement }>();
-  let lastPending: { decision: unknown; permissions: unknown; files: number } = { decision: undefined, permissions: undefined, files: 0 };
+  let lastPending: { decision: unknown; permissions: unknown; questions: unknown; files: number } = { decision: undefined, permissions: undefined, questions: undefined, files: 0 };
   let lastSettings: unknown[] = [];
   const prefs: SettingsPrefs = { save: false, global: false, yes: false };
   let completions: Completion[] = [];
@@ -1282,13 +1377,19 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
 
   function renderPending(s: ViewState): void {
     const waiting = readyAttachments(s).length;
-    if (lastPending.decision === s.decision && lastPending.permissions === s.permissions && lastPending.files === waiting) return;
+    const questions = s.questions ?? [];
+    if (lastPending.decision === s.decision && lastPending.permissions === s.permissions && lastPending.questions === questions && lastPending.files === waiting) return;
     const hadFocus = pending.contains(document.activeElement);
-    lastPending = { decision: s.decision, permissions: s.permissions, files: waiting };
-    const cards = [...s.permissions.map((p) => permissionCard(p, actions)), ...(s.decision ? [decisionCard(s.decision, s.generation, actions, waiting)] : [])];
+    lastPending = { decision: s.decision, permissions: s.permissions, questions, files: waiting };
+    // Drafts of questions no longer waiting are let go.
+    for (const id of [...drafts.keys()]) if (!questions.some((q) => q.id === id)) drafts.delete(id);
+    for (const id of [...sending.keys()]) if (!questions.some((q) => q.id === id)) sending.delete(id);
+    const cards = [...s.permissions.map((p) => permissionCard(p, actions)), ...questions.map((q) => questionCard(q, actions)),
+      ...(s.decision ? [decisionCard(s.decision, s.generation, actions, waiting)] : [])];
     pending.replaceChildren(...cards);
     if (cards.length) {
-      announce.textContent = s.permissions.length ? `${partyLabel(s.permissions[0]!.agent)} asks to use ${s.permissions[0]!.request.tool}` : "Your decision is needed";
+      announce.textContent = s.permissions.length ? `${partyLabel(s.permissions[0]!.agent)} asks to use ${s.permissions[0]!.request.tool}`
+        : questions.length ? `${partyLabel(questions[0]!.agent)} asks you a question` : "Your decision is needed";
       if (hadFocus || document.activeElement === input || document.activeElement === document.body) cards[0]!.querySelector<HTMLButtonElement>("button.primary")?.focus();
     } else if (hadFocus) input.focus();
   }

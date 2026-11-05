@@ -11,12 +11,13 @@ import type { ConfigData } from "../src/core/config.js";
 import { listConversations } from "../src/core/conversation.js";
 import { RunStore } from "../src/core/state.js";
 import type { UsageReport } from "../src/core/usage.js";
-import { EventBus, type Decider, type Decision, type DuoEvent, type ModelMap } from "../src/events.js";
+import { ClarificationBroker } from "../src/core/clarification-broker.js";
+import { EventBus, type ClarificationDecider, type Decider, type Decision, type DuoEvent, type ModelMap } from "../src/events.js";
 import { approval, critique, finding, impl, plan, review } from "./helpers/builders.js";
 import { GIT_MISSING } from "../src/core/run-git.js";
 import { testConfig, userDataEnv } from "./helpers/config.js";
 import { FakeClis } from "./helpers/fake-clis.js";
-import { ScriptedDecider } from "./helpers/harness.js";
+import { pickFirst, ScriptedClarifier, ScriptedDecider } from "./helpers/harness.js";
 import { png } from "./helpers/images.js";
 import { makeRepo } from "./helpers/repo.js";
 import { tempDir } from "./helpers/tmp.js";
@@ -94,11 +95,11 @@ const happy = () => ({
 });
 const userConfig = () => join(t.path, "xdg", "agentduo", "config.yaml");
 const newChat = (o: { cfg?: ConfigData; decider?: Decider; env?: NodeJS.ProcessEnv; conversationId?: string; busyElsewhere?: () => string | null;
-  userConfigFile?: string; } = {}) => {
+  userConfigFile?: string; clarifier?: ClarificationDecider; } = {}) => {
   const chat = new Chat({
     cfg: o.cfg ?? testConfig(fake), workspace: repo, runsDir, configFile: join(repo, ".agentduo", "config.yaml"), userConfigFile: o.userConfigFile ?? userConfig(),
     bus, decider: o.decider ?? new ScriptedDecider(), ui,
-    env: o.env, conversationId: o.conversationId, busyElsewhere: o.busyElsewhere,
+    env: o.env, conversationId: o.conversationId, busyElsewhere: o.busyElsewhere, clarifier: o.clarifier,
   });
   chats.push(chat);
   return chat;
@@ -1565,4 +1566,287 @@ describe("Chat: attached files", () => {
     expect(fake.calls("implementer")[1]!.prompt).toContain("spec.pdf");
     expect(chat.pending).toEqual([]);
   });
+});
+
+
+describe("Chat: the questions Claude asks the user", () => {
+  const flag = {
+    questions: [{
+      question: "Which flag should the build use?", header: "Flag", multiSelect: false,
+      options: [{ label: "--fast", description: "skips the slow checks" }, { label: "--safe", description: "keeps every check" }],
+    }],
+  };
+  const pickSafe = (r: { questions: Array<{ id: string; options: Array<{ id: string; label: string }> }> }) =>
+    ({ kind: "answered" as const, answers: r.questions.map((q) => ({ questionId: q.id, optionIds: [q.options.find((o) => o.label === "--safe")!.id], otherText: null })) });
+  const say = async (chat: Chat, ...questions: string[]) => {
+    for (const question of questions) {
+      await chat.submit(question);
+      await chat.idle();
+    }
+  };
+  const count = (text: string, part: string) => text.split(part).length - 1;
+  const saved = (chat: Chat) => JSON.parse(readFileSync(join(runsDir, "conversations", chat.conversationId, "conversation.json"), "utf8"));
+
+  it("saves a question and its answer the moment they happen, keeps them with the exchange, and gives them to Codex in later prompts", async () => {
+    const chat = newChat({ conversationId: "ask-1", clarifier: new ScriptedClarifier([pickSafe]) });
+    // The answer's text never says what the user chose: only the saved question and answer can tell Codex.
+    fake.setScenario({ chat_claude: [{ questions: [flag], answer: "Done: built it." }], chat_codex: [{ answer: "Noted." }] });
+    await say(chat, "/claude Build it");
+    const record = saved(chat);
+    expect(record.clarifications).toMatchObject([{
+      status: "answered", source: "claude", agent: "claude", questions: [{ question: "Which flag should the build use?" }], answers: [{ questionId: "q1", optionIds: ["q1o2"], otherText: null }],
+    }]);
+    expect(record.clarifications[0].turnId).toBe(record.exchanges.length ? `ask-1-t1` : "");
+    expect(record.exchanges[0].clarified).toEqual([{ asker: "claude", header: "Flag", question: "Which flag should the build use?", answer: "--safe" }]);
+    expect(fake.questionReplies()[0]).toMatchObject({ behavior: "allow", updatedInput: { answers: { "Which flag should the build use?": "--safe" } } });
+    expect(fake.calls("chat_claude")[0]!.prompt).toContain("You may use the AskUserQuestion tool");
+
+    await say(chat, "/codex What did we pick?");
+    const codex = fake.calls("chat_codex")[0]!.prompt;
+    expect(codex).toContain("**Questions asked of the user while that was answered:**\n- Claude Code asked [Flag]: Which flag should the build use?\n  → The user answered: --safe");
+    expect(count(codex, "--safe")).toBe(1);
+    // Reopened, the conversation still has it, with the answer.
+    const again = Conversation.open(runsDir, "ask-1");
+    expect(again.clarifications.map((e) => [e.status, answerOf(e)])).toEqual([["answered", "--safe"]]);
+    expect(events.filter((e) => e.type.startsWith("clarification.")).map((e) => e.type)).toEqual(["clarification.requested", "clarification.answered"]);
+  });
+
+  const answerOf = (e: { answers?: Array<{ optionIds: string[] }> }) => (e.answers?.[0]?.optionIds[0] === "q1o2" ? "--safe" : "?");
+
+  it("keeps a question that was never answered as interrupted, and does not make an exchange of the turn it was in", async () => {
+    const broker = new ClarificationBroker();
+    const chat = newChat({ conversationId: "ask-2", clarifier: broker });
+    fake.setScenario({ chat_claude: [{ questions: [flag], afterQuestion: 10_000, answer: "never" }] });
+    await chat.submit("/claude Build it");
+    await waitUntil(() => broker.pending().length === 1);
+    expect(saved(chat).clarifications).toMatchObject([{ status: "pending" }]);
+    // Esc while the question is open: the user answers nothing, the turn is stopped, and the process goes.
+    chat.escape();
+    await chat.idle();
+    const finished = answers().at(-1)!;
+    expect(finished.status).toBe("interrupted");
+    expect(saved(chat).clarifications).toMatchObject([{ status: "interrupted" }]);
+    expect(saved(chat).exchanges).toEqual([]);
+    expect(broker.pending()).toEqual([]);
+    expect(fake.questionReplies()).toEqual([]);
+    expect(events.map((e) => e.type)).toContain("clarification.closed");
+
+    // A conversation reopened after a crash: a question still pending belonged to a process that is gone.
+    const file = join(runsDir, "conversations", "ask-2", "conversation.json");
+    const record = JSON.parse(readFileSync(file, "utf8"));
+    record.clarifications[0].status = "pending";
+    delete record.clarifications[0].closedAt;
+    writeFileSync(file, JSON.stringify(record));
+    expect(Conversation.open(runsDir, "ask-2").clarifications.map((e) => e.status)).toEqual(["interrupted"]);
+    expect(Conversation.open(runsDir, "ask-2").pendingClarification(record.clarifications[0].id)).toBeNull();
+  });
+
+  it("holds a pipeline step's question that the user put off: /resume asks it again, then runs the step with the answer", async () => {
+    const asker = new ScriptedClarifier([{ kind: "defer" }, pickSafe]);
+    const chat = newChat({ conversationId: "pipe-ask", clarifier: asker });
+    fake.setScenario({
+      ...happy(), implementer: [{ questions: [flag], afterQuestion: 5000, write: { "app.txt": "fixed\n" }, output: impl() }, { write: { "app.txt": "fixed\n" }, output: impl() }],
+    });
+    await say(chat, "/pipeline Make app.txt fixed");
+    expect(latest().phase).toBe("HUMAN_REVIEW");
+    expect(latest().humanReview).toMatchObject({ reason: "clarification_required", resumePhase: "IMPLEMENT" });
+    expect(ui.lines.at(-1)).toContain("waiting for your answers");
+    expect(fake.calls("implementer")).toHaveLength(1);
+    // The run's question is not the conversation's: the chat's own ledger keeps none of it.
+    expect(saved(chat).clarifications).toBeUndefined();
+    await say(chat, "/resume");
+    // Asked again before anything ran, as a request the user can answer or put off but not dismiss to the agent that is gone.
+    expect(asker.seen).toHaveLength(2);
+    expect(asker.seen[0]!.held).toBeUndefined();
+    expect(asker.seen[1]).toMatchObject({ held: true, source: "claude", role: "implementer", id: asker.seen[0]!.id });
+    expect(latest().phase).toBe("DONE");
+    expect(fake.calls("implementer")).toHaveLength(2);
+    expect(fake.calls("implementer")[1]!.prompt).toContain("Which flag should the build use?\n  → --safe");
+  });
+
+  it("says, when Esc stops a pipeline on a question, that /resume asks it first", async () => {
+    const broker = new ClarificationBroker();
+    const chat = newChat({ conversationId: "pipe-esc", clarifier: broker });
+    fake.setScenario({ ...happy(), implementer: [{ questions: [flag], afterQuestion: 10_000, write: { "app.txt": "fixed\n" }, output: impl() }] });
+    await chat.submit("/pipeline Make app.txt fixed");
+    await waitUntil(() => broker.pending().length === 1);
+    chat.escape();
+    await chat.idle();
+    expect(ui.lines.at(-1)).toContain("question of Claude's");
+    expect(latest().humanReview).toMatchObject({ reason: "clarification_required", fromPhase: "IMPLEMENT" });
+    expect(latest().clarifications).toMatchObject([{ status: "pending" }]);
+  });
+
+  describe("answers given in a turn that does not finish", () => {
+    const pairLine = "Claude Code asked [Flag]: Which flag should the build use?\n  → The user answered: --safe";
+    const noRetries = () => testConfig(fake, { limits: { max_retries: 0 } });
+
+    it("keeps them when the turn fails afterwards, and gives them to the other agent, in this process and once it is reopened", async () => {
+      const chat = newChat({ conversationId: "fail-1", cfg: noRetries(), clarifier: new ScriptedClarifier([pickSafe]) });
+      // The failed turn never says what the user chose: only the saved answer can tell Codex.
+      fake.setScenario({ chat_claude: [{ questions: [flag], exit: 1 }], chat_codex: [{ answer: "Noted." }, { answer: "Noted again." }] });
+      await say(chat, "/claude Build it");
+      expect(answers().at(-1)!.status).toBe("error");
+      expect(fake.questionReplies()).toHaveLength(1);
+      expect(saved(chat).exchanges).toEqual([{
+        backend: "claude", question: "Build it", answer: "", unfinished: true,
+        clarified: [{ asker: "claude", header: "Flag", question: "Which flag should the build use?", answer: "--safe" }],
+      }]);
+      await say(chat, "/codex What did we pick?");
+      const codex = fake.calls("chat_codex")[0]!.prompt;
+      expect(codex).toContain(pairLine);
+      expect(codex).toContain("That turn did not finish");
+      expect(count(codex, "--safe")).toBe(1);
+
+      // Reopened, the conversation still passes it on, once: Codex's session was given it, so its continued prompt does not repeat it,
+      // while Claude, whose failed turn kept no session, gets the whole conversation with it.
+      fake.setScenario({ chat_claude: [{ answer: "Built." }], chat_codex: [{ answer: "Noted." }, { answer: "Noted again." }] });
+      const again = newChat({ conversationId: "fail-1", cfg: noRetries() });
+      await say(again, "/codex And now?");
+      const later = fake.calls("chat_codex").at(-1)!;
+      expect(later.resumed).toBeTruthy();
+      expect(later.prompt).not.toContain("--safe");
+      await say(again, "/claude Build it for real");
+      const claude = fake.calls("chat_claude").at(-1)!;
+      expect(claude.resumed).toBeUndefined();
+      expect(count(claude.prompt, pairLine)).toBe(1);
+    });
+
+    it("gives the fresh session a continued turn falls back to the answers it was given before it failed, and does not repeat them to that session later", async () => {
+      const chat = newChat({ conversationId: "fallback-1", cfg: noRetries(), clarifier: new ScriptedClarifier([pickSafe]) });
+      // The continued call asks, is answered, and then fails: the fallback is a new session that never heard the answer.
+      fake.setScenario({ chat_claude: [{ answer: "Hello." }, { questions: [flag], exit: 1 }, { answer: "Built it." }, { answer: "Done." }], chat_codex: [{ answer: "Noted." }] });
+      await say(chat, "/claude Hello", "/claude Build it");
+      const [first, continued, fallback] = fake.calls("chat_claude");
+      expect(continued!.resumed).toBe(first!.session);
+      expect(continued!.prompt).not.toContain(pairLine);
+      expect(fallback!.resumed).toBeUndefined();
+      expect(fallback!.prompt).toContain("[Flag] Which flag should the build use?");
+      expect(fallback!.prompt).toContain("→ --safe");
+      expect(fallback!.prompt).toContain("this session did not see the answers");
+      expect(answers().at(-1)).toMatchObject({ status: "success", answer: "Built it." });
+      // The turn succeeded in the fallback session, which has the answer: the exchange carries it, once, for every later prompt.
+      expect(saved(chat).exchanges[1]).toMatchObject({ backend: "claude", answer: "Built it.", clarified: [{ answer: "--safe" }] });
+      await say(chat, "/claude And now?");
+      const later = fake.calls("chat_claude").at(-1)!;
+      expect(later.resumed).toBe(fallback!.session);
+      expect(later.prompt).not.toContain("--safe");
+      await say(chat, "/codex What did we pick?");
+      expect(count(fake.calls("chat_codex")[0]!.prompt, pairLine)).toBe(1);
+    });
+
+    it("keeps them when the turn is stopped (Esc) after the answer, and the next call to the same agent has them in its full prompt", async () => {
+      const chat = newChat({ conversationId: "stop-1", cfg: noRetries(), clarifier: new ScriptedClarifier([pickSafe]) });
+      fake.setScenario({ chat_claude: [{ questions: [flag], afterQuestion: 10_000, answer: "never" }, { answer: "Built." }], chat_codex: [{ answer: "Noted." }] });
+      await chat.submit("/claude Build it");
+      await waitUntil(() => saved(chat).clarifications?.[0]?.status === "answered");
+      chat.escape();
+      await chat.idle();
+      expect(answers().at(-1)!.status).toBe("interrupted");
+      expect(saved(chat).exchanges).toMatchObject([{ backend: "claude", answer: "", unfinished: true, clarified: [{ answer: "--safe" }] }]);
+      // The stopped turn kept no session, so Claude's next call is a whole prompt; Codex's carries the pair too.
+      await say(chat, "/claude Go on");
+      expect(fake.calls("chat_claude").at(-1)!.resumed).toBeUndefined();
+      expect(fake.calls("chat_claude").at(-1)!.prompt).toContain(pairLine);
+      await say(chat, "/codex What did we pick?");
+      expect(fake.calls("chat_codex")[0]!.prompt).toContain(pairLine);
+    });
+
+    it("recovers answers given in a turn whose process went before it ended, once, when the conversation is reopened", async () => {
+      const dir = join(runsDir, "conversations", "crash-1");
+      mkdirSync(dir, { recursive: true });
+      const entry = {
+        id: "clq-1", source: "claude", callId: "c1", agent: "claude", turnId: "crash-1-t1", at: "2026-11-05T00:00:00.000Z", seq: 1, status: "answered", closedAt: "2026-11-05T00:00:01.000Z",
+        questions: [{ id: "q1", header: "Flag", question: "Which flag should the build use?", multiSelect: false, options: [{ id: "q1o1", label: "--fast", description: "" }, { id: "q1o2", label: "--safe", description: "" }] }],
+        answers: [{ questionId: "q1", optionIds: ["q1o2"], otherText: null }],
+      };
+      writeFileSync(join(dir, "conversation.json"), JSON.stringify({
+        version: 1, id: "crash-1", title: "Crash", createdAt: "2026-11-05T00:00:00.000Z", updatedAt: "2026-11-05T00:00:00.000Z", recipient: "codex", turns: 1,
+        exchanges: [], earlier: [], clarifications: [entry],
+      }));
+      fake.setScenario({ chat_codex: [{ answer: "Noted." }, { answer: "Noted again." }] });
+      const chat = newChat({ conversationId: "crash-1" });
+      await say(chat, "/codex What did we pick?");
+      expect(count(fake.calls("chat_codex")[0]!.prompt, pairLine)).toBe(1);
+      expect(saved(chat).exchanges[0]).toMatchObject({ unfinished: true, answer: "", clarified: [{ answer: "--safe" }] });
+      expect(saved(chat).clarifications[0].settled).toBe(true);
+      // Saved with the next message: reopening again does not make a second copy.
+      const again = Conversation.open(runsDir, "crash-1");
+      expect(again.context().exchanges.filter((e) => e.unfinished)).toHaveLength(1);
+    });
+
+    it("keeps them when a /discuss ends without an answer, and gives them to the next question", async () => {
+      fake.setScenario({
+        discuss_answer: [{ questions: [flag], answer: "DRAFT-1" }], discuss_critique: [{ exit: 1 }], chat_codex: [{ answer: "Noted." }],
+      });
+      const chat = newChat({ conversationId: "disc-fail", cfg: noRetries(), clarifier: new ScriptedClarifier([pickSafe]) });
+      await say(chat, "/claude", "/discuss Which flag?");
+      expect(events.some((e) => e.type === "discussion.finished" && e.answer === null)).toBe(true);
+      expect(saved(chat).exchanges).toMatchObject([{ backend: "claude", question: "Which flag?", answer: "", unfinished: true, discussedWith: "codex", clarified: [{ answer: "--safe" }] }]);
+      await say(chat, "/codex So?");
+      expect(count(fake.calls("chat_codex")[0]!.prompt, pairLine)).toBe(1);
+    });
+  });
+
+  it("opens an older conversation, from before questions, as it was", () => {
+    const dir = join(runsDir, "conversations", "old-1");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "conversation.json"), JSON.stringify({
+      version: 1, id: "old-1", title: "Old", createdAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-01T00:00:00.000Z", recipient: "claude", turns: 1,
+      exchanges: [{ backend: "claude", question: "Q?", answer: "A." }], earlier: [], sessions: { claude: { id: "s1", exchanges: 1, earlier: 0, discussion: { id: "d", messages: 2 } } },
+    }));
+    const c = Conversation.open(runsDir, "old-1");
+    expect(c.clarifications).toEqual([]);
+    expect(c.context().exchanges).toEqual([{ backend: "claude", question: "Q?", answer: "A." }]);
+    const next = c.begin("codex", "More?", [], repo);
+    expect(next.prompt).toContain("**User → Claude Code:**\nQ?\n\n**Claude Code:**\nA.");
+    expect(next.prompt).not.toContain("Questions asked of the user");
+  });
+
+  const discussFlag = async (lost: boolean) => {
+    fake.setScenario({
+      ...(lost ? { sessions: { lost: true } } : {}),
+      discuss_answer: [{ questions: [flag], answer: "DRAFT-1" }], discuss_critique: [{ answer: "Fix X\nVERDICT: REVISE" }, { answer: "ok\nVERDICT: AGREE" }],
+      discuss_revise: [{ answer: "DRAFT-2" }], discuss_synthesis: [{ answer: "FINAL" }],
+    });
+    const chat = newChat({ conversationId: "disc", clarifier: new ScriptedClarifier([pickSafe]) });
+    await say(chat, "/claude", "/discuss Which flag?");
+    // Calls that ran (a resume that failed is logged too, before the fresh call that follows it).
+    const ran = (role: string) => fake.calls(role).filter((c) => !c.lost);
+    return { chat, answer: ran("discuss_answer"), critiques: ran("discuss_critique"), revise: ran("discuss_revise"), synthesis: ran("discuss_synthesis") };
+  };
+  const pair = "Claude Code asked [Flag]: Which flag should the build use?\n  → The user answered: --safe";
+
+  it("gives Claude's choice in a /discuss to Codex at its review, and not again at its next steps while its session holds it", async () => {
+    const { chat, answer, critiques, revise, synthesis } = await discussFlag(false);
+    // Claude asked in its answer step; its own words never say what the user chose, so the pair is what carried it.
+    expect(answer).toHaveLength(1);
+    expect(answer[0]!.prompt).not.toContain("--safe");
+    expect(fake.questionReplies()).toHaveLength(1);
+    expect(critiques).toHaveLength(2);
+    expect(count(critiques[0]!.prompt, pair)).toBe(1);
+    expect(critiques[0]!.prompt).toContain("## Answers from the user to questions asked during this discussion");
+    // Codex's session was given it in the first review; the second review and the synthesis continue that session without repeating it.
+    expect(critiques[1]!.resumed).toBe(critiques[0]!.session);
+    expect(critiques[1]!.prompt).not.toContain("--safe");
+    expect(synthesis[0]!.resumed).toBeTruthy();
+    expect(synthesis[0]!.prompt).not.toContain("--safe");
+    // Claude's revise continues the session in which it asked and was answered.
+    expect(revise[0]!.resumed).toBe(answer[0]!.session);
+    expect(revise[0]!.prompt).not.toContain("--safe");
+    // The response carries the pair into every later prompt.
+    expect(saved(chat).exchanges.at(-1).clarified).toEqual([{ asker: "claude", header: "Flag", question: "Which flag should the build use?", answer: "--safe" }]);
+    fake.setScenario({ chat_codex: [{ answer: "Right." }] });
+    await say(chat, "/codex So?");
+    expect(fake.calls("chat_codex").at(-1)!.prompt).toContain(pair);
+  });
+
+  it("gives it to every Codex step with the whole prompt when no session can be continued", async () => {
+    const { chat, answer, critiques, revise, synthesis } = await discussFlag(true);
+    expect(answer[0]!.prompt).not.toContain("--safe");
+    expect(critiques).toHaveLength(2);
+    for (const call of [...critiques, ...synthesis, ...revise]) expect(count(call.prompt, pair), call.role).toBe(1);
+    expect(saved(chat).exchanges.at(-1).clarified).toHaveLength(1);
+  });
+
 });

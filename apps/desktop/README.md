@@ -70,7 +70,16 @@ copies the app's PNG to `dist/main` for the window on Windows and Linux and the 
    back after a restart with what they showed.
 5. **Inspector**: Plan, Changes (a line diff of each changed file between the run's snapshots, kept as you look at it even
    when a new round starts), Checks (gate runs) and the review and report.
-6. **Stop** (or Esc) stops what runs; quitting stops every run's process tree, answers open questions as the engine does
+6. **Questions from the agents**: when something only you know would change the result, Claude (inside any Claude turn)
+   or the pipeline's planner (between its turns) asks with annotated choices, as a form above the composer. The sidebar
+   counts it as waiting and a notification names it when another conversation is shown. Choose one or several options,
+   or write your own; Submit stays off until every question has an answer, and nothing is preselected. A reply is sent
+   with the conversation's view, the request and the call, and main checks all of them before the worker applies it once
+   (`apps/desktop/src/shared/protocol.ts`), so a late, repeated or other conversation's answer is refused. Codex asks in
+   text, without a form. Closing a tab or quitting ends an open Claude question (a chat turn's is saved as interrupted; the app never
+   keeps a tool call alive; a pipeline step's stays pending like a planner's, and the step runs again with the answer); reopening shows the history, and `/resume` asks the pending
+   one again.
+7. **Stop** (or Esc) stops what runs; quitting stops every run's process tree, answers open questions as the engine does
    on shutdown, and frees each project's lock. A run that was going stays resumable.
 
 ### Settings
@@ -95,7 +104,7 @@ copies the app's PNG to `dist/main` for the window on Windows and Linux and the 
   A change that would make the configuration invalid is not written. A file that is not valid YAML is left alone: Settings
   shows the error and its line, and opens the file for you.
 - **When it applies**: *next call* settings (model, effort, permission mode, rules and directories, args, role args, bin,
-  budget, permission prompts) apply from the agent's next call, also to a run that is going and when it is resumed.
+  budget, permission prompts, questions from the agents (`clarification.enabled`, under *Workflow roles*)) apply from the agent's next call, also to a run that is going and when it is resumed.
   *Next run* settings (`agents.*` roles and every `limits.*`) apply to new work only: a run that is going, a discussion
   under way and a resumed run keep the values they started with.
 - **Storage** (read only): where runs and conversations live (`paths.runs_dir`, by default `<project>/.agentduo/runs`)

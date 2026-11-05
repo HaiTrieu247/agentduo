@@ -1,4 +1,4 @@
-import type { Approval, Critique, Finding, Implementation, Issue, IssueScope, Origin, Plan, Review, Severity } from "../../src/core/outputs.js";
+import type { Approval, Critique, Finding, Implementation, Issue, IssueScope, Origin, Plan, PlannerOutput, PlannerQuestion, Review, Severity } from "../../src/core/outputs.js";
 
 export function plan(title = "Demo plan", extra: Partial<Plan> = {}): Plan {
   return {
@@ -41,3 +41,15 @@ export const review = (approved: boolean, findings: Finding[] = [], resolved: st
   status: approved ? "approved" : "changes_requested", approved, reviewed_commit: commit,
   summary: "review", findings, resolved_findings: resolved, gate_failures: [], repo_notes: [],
 });
+
+/** A question for the user with two annotated options. */
+export const plannerQuestion = (question = "Which database?", multi = false): PlannerQuestion => ({
+  header: "Database", question, multi_select: multi,
+  options: [{ label: "SQLite", description: "one file, no server" }, { label: "Postgres", description: "a server, concurrent writers" }],
+});
+
+/** What a planner answers when it needs the user before it can plan. */
+export const plannerAsk = (questions: PlannerQuestion[] = [plannerQuestion()]): PlannerOutput => ({ result: { kind: "needs_clarification", questions } });
+
+/** The planner's answer that carries a plan. */
+export const plannerPlan = (p: Plan = plan()): PlannerOutput => ({ result: { kind: "plan", plan: p } });

@@ -6,12 +6,13 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Attachment } from "../../../src/core/attachment-types.js";
 import { attachmentFile } from "../../../src/core/attachments.js";
+import type { ClarificationEntry } from "../../../src/core/clarification.js";
 import type { Backend } from "../../../src/core/commands.js";
 import type { PathEntry } from "../../../src/core/mention-text.js";
 import { atomicWrite } from "../../../src/core/state.js";
 import type { PermissionAnswer } from "../../../src/events.js";
-import { initialState, reduce, uploading, type ViewAction, type ViewState } from "../webview/state.js";
-import type { DecisionChoice, HostMessage, Problem, Route, SettingRequest, WorkerRequest, WorkerResults } from "./protocol.js";
+import { initialState, reduce, uploading, withLedger, type ViewAction, type ViewState } from "../webview/state.js";
+import type { ClarificationReplyPayload, DecisionChoice, HostMessage, Problem, Route, SettingRequest, WorkerRequest, WorkerResults } from "./protocol.js";
 import { WorkerClient, WorkerError, type NodeLookup } from "./workerClient.js";
 
 /** Messages arriving this close together reach the webview in one batch. */
@@ -50,7 +51,7 @@ export function restoredView(saved: ViewState, now: ViewState): ViewState {
   return {
     ...saved, generation: now.generation, session: now.session, workspace: now.workspace, version: now.version, pipeline: now.pipeline, mode: now.mode,
     models: now.models, settings: now.settings, catalog: now.catalog, problem: now.problem, status: "idle", current: null, turn: null, discussion: null,
-    decision: null, permissions: [], usage: null, attachments: [],
+    decision: null, permissions: [], questions: [], usage: null, attachments: [],
   };
 }
 
@@ -94,6 +95,8 @@ export interface ConversationHandle {
   findFiles(seq: number, query: string): Promise<void>;
   answerDecision(generation: number, id: string, decision: DecisionChoice, note: string | null): Promise<void>;
   answerPermission(generation: number, id: string, answer: PermissionAnswer): Promise<void>;
+  /** The reply to an agent's question: applied only while that request of that call still waits in this tab. */
+  answerQuestion(generation: number, id: string, callId: string, reply: ClarificationReplyPayload): Promise<void>;
   /** The tab was closed: what it shows is saved, and what runs in it stops. */
   close(): Promise<void>;
 }
@@ -112,7 +115,7 @@ export interface WorkspaceSessionOptions {
   /** A tab's state changed (its title, its questions); the host updates the tab, the list and the badge. */
   onChange?(conversation: string, state: ViewState): void;
   /** A question arrived in a tab; the host may tell the user when that tab is not visible. */
-  onQuestion?(conversation: string, kind: "decision" | "permission", text: string): void;
+  onQuestion?(conversation: string, kind: "decision" | "permission" | "question", text: string): void;
   /** /new in a tab: the host opens a new tab with a new conversation; the old one keeps its own. */
   onNewConversation?(): void;
   /** A chat command wrote the user config (--global); a host with other workspaces' sessions has them read it again. */
@@ -214,6 +217,7 @@ export class WorkspaceSession {
       findFiles: (seq, query) => this.findFiles(id, seq, query),
       answerDecision: (generation, requestId, decision, note) => this.answerDecision(id, generation, requestId, decision, note),
       answerPermission: (generation, requestId, answer) => this.answerPermission(id, generation, requestId, answer),
+      answerQuestion: (generation, requestId, callId, reply) => this.answerQuestion(id, generation, requestId, callId, reply),
       close: () => this.close(id),
     };
     const session = this;
@@ -225,13 +229,30 @@ export class WorkspaceSession {
     let view = this.views.get(id);
     if (view) return view;
     const saved = this.runsDir ? this.loadView(id) : null;
-    view = { state: saved ? restoredView(saved, this.base) : this.base, post: null, queue: [], timer: null, saveTimer: null, restore: !this.runsDir };
+    view = { state: saved ? this.restored(id, saved) : this.base, post: null, queue: [], timer: null, saveTimer: null, restore: !this.runsDir };
     this.views.set(id, view);
     return view;
   }
 
   private viewFile(id: string): string | null {
     return this.runsDir ? join(this.runsDir, "conversations", id, VIEW_FILE) : null;
+  }
+
+  /** The conversation's questions and answers as its record keeps them (the source of truth, also when the saved view lacks the last ones). */
+  private loadLedger(id: string): ClarificationEntry[] {
+    if (!this.runsDir) return [];
+    const file = join(this.runsDir, "conversations", id, "conversation.json");
+    try {
+      const record = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as { clarifications?: ClarificationEntry[] }) : null;
+      return Array.isArray(record?.clarifications) ? record!.clarifications : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** A saved view as the tab shows it now, with the questions its conversation asked that the view does not show yet. */
+  private restored(id: string, saved: ViewState): ViewState {
+    return withLedger(restoredView(saved, this.base), this.loadLedger(id));
   }
 
   private loadView(id: string): ViewState | null {
@@ -267,7 +288,7 @@ export class WorkspaceSession {
       view.restore = false;
       const saved = this.loadView(id);
       if (!saved || view.state.timeline.length) continue;
-      view.state = restoredView(saved, this.base);
+      view.state = this.restored(id, saved);
       view.queue = [];
       view.post?.({ type: "snapshot", state: view.state, conversation: id });
       this.o.onChange?.(id, view.state);
@@ -382,6 +403,7 @@ export class WorkspaceSession {
         case "event":
           this.dispatch({ type: "event", event: m.event, now: Date.now() }, m.conversation);
           if (m.event.type === "permission.requested") this.o.onQuestion?.(m.conversation, "permission", `${m.event.request.tool}: ${m.event.request.label}`);
+          else if (m.event.type === "clarification.requested") this.o.onQuestion?.(m.conversation, "question", m.event.request.questions[0]?.question ?? "");
           break;
         case "ui":
           this.dispatch({ type: "ui", update: m.update }, m.conversation);
@@ -537,6 +559,26 @@ export class WorkspaceSession {
       return;
     }
     await this.send({ type: "permissionAnswer", requestId: id, answer }, conversation);
+  }
+
+  /** Questions whose reply is on its way to the worker: a second click on the same one is dropped, not sent twice. */
+  private readonly answering = new Set<string>();
+
+  private async answerQuestion(conversation: string, generation: number, id: string, callId: string, reply: ClarificationReplyPayload): Promise<void> {
+    const st = this.view(conversation).state;
+    const asked = (st.questions ?? []).find((q) => q.id === id && q.callId === callId);
+    if (generation !== st.generation || !asked) {
+      this.note("That question is no longer pending.", "error", conversation);
+      return;
+    }
+    const key = `${conversation}\u0000${id}`;
+    if (this.answering.has(key)) return;
+    this.answering.add(key);
+    try {
+      await this.send({ type: "clarificationAnswer", conversation, requestId: id, callId, reply }, conversation);
+    } finally {
+      this.answering.delete(key);
+    }
   }
 
   /** A request of a tab (`to`), whose failure that tab shows. */

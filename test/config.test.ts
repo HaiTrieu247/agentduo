@@ -82,6 +82,20 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ dir: bad.dir, env: bad.env })).toThrow("claude.permission_prompts must be 'ask' or 'deny'");
   });
 
+  it("lets the agents ask questions by default, apart from the permission prompts, and reads a saved run's config from before the setting", () => {
+    const { dir, env } = setup();
+    expect(loadConfig({ dir, env }).data.clarification).toEqual({ enabled: true });
+    const off = setup("clarification:\n  enabled: false\nclaude:\n  permission_prompts: ask\n");
+    expect(loadConfig({ dir: off.dir, env: off.env }).data).toMatchObject({ clarification: { enabled: false }, claude: { permission_prompts: "ask" } });
+    const bad = setup("clarification:\n  enabled: maybe\n");
+    expect(() => loadConfig({ dir: bad.dir, env: bad.env })).toThrow("clarification.enabled must be true or false");
+    // A run's config.json written before the setting existed takes today's default for it.
+    const saved = JSON.parse(JSON.stringify(defaultConfig())) as Record<string, unknown>;
+    delete saved.clarification;
+    expect(configFromSaved(saved).clarification).toEqual({ enabled: true });
+    expect(configFromSaved({ ...saved, clarification: { enabled: false } }).clarification).toEqual({ enabled: false });
+  });
+
   it("takes a model and an effort per role, merged role by role, and refuses unknown roles, efforts or values", () => {
     const { dir, env } = setup("claude:\n  role_models:\n    plan_reviewer: opus\n    implementer: null\n  role_efforts:\n    plan_reviewer: high\n",
       "claude:\n  role_models:\n    implementer: sonnet\n    code_reviewer: haiku\ncodex:\n  role_efforts:\n    planner: minimal\n");
@@ -215,6 +229,20 @@ describe("configuration service (the desktop's Settings)", () => {
     expect(entry(v, "claude.max_budget_usd")).toMatchObject({ source: "session", effective: 4, session: { value: 4 } });
     expect(v.storage).toMatchObject({ runsDir: join(dir, ".agentduo", "runs"), value: ".agentduo/runs", source: "default" });
     expect(v.lockedBy).toBeNull();
+  });
+
+  it("shows and sets the questions switch by layer, from the next call, and a clear inherits it again", () => {
+    const { dir, env } = setup(undefined, "clarification:\n  enabled: false\n");
+    const o = { workspace: dir, env };
+    let v = read(o);
+    expect(entry(v, "clarification.enabled")).toMatchObject({ kind: "toggle", live: "next-call", removable: false, effective: false, source: "global", defaultValue: true });
+    v = updateConfiguration(o, "project", "clarification.enabled", true);
+    expect(entry(v, "clarification.enabled")).toMatchObject({ effective: true, source: "project", projectOverridesGlobal: true });
+    expect(() => updateConfiguration(o, "project", "clarification.enabled", "yes")).toThrow(ConfigurationError);
+    v = clearConfiguration(o, "project", "clarification.enabled");
+    expect(entry(v, "clarification.enabled")).toMatchObject({ effective: false, source: "global" });
+    // The key is deleted from the file, never written as null.
+    expect(file(join(dir, ".agentduo", "config.yaml"))).not.toContain("clarification");
   });
 
   it("shows and sets a role's model and effort by layer: null uses the CLI's own again, a clear inherits", () => {

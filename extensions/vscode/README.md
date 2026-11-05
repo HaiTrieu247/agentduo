@@ -113,6 +113,16 @@ Click the agentduo button in an editor's title bar (beside Claude Code's and Cod
 - HUMAN_REVIEW decisions (resume, revise, abort, defer, with a note) and Claude's permission requests (allow once,
   always allow, deny) appear above the composer. They stay there when you hide the sidebar. **Always allow** saves
   Claude's rule to `.claude/settings.local.json`, the same file the CLI uses.
+- **Questions from the agents.** When something only you know would change the result, an agent asks with annotated
+  choices (see the root README's *Questions from the agents*). Claude's `AskUserQuestion`, in any Claude turn
+  (including the Claude turns of `/discuss`), and the pipeline planner's questions between its turns appear above the
+  composer as a form: each question's header, every option with its description, one choice or several, and your
+  own words. Nothing is preselected, and **Submit answers** stays off until every question has an answer. There is no
+  *always allow*: an answer is information, not a permission. A reply names its tab, request and call, so a second click,
+  a late answer or another tab's question changes nothing. **Answer later** puts a planner's question off, saved, and
+  `/resume` asks it again; for a Claude question it ends the call, since Claude cannot wait. Codex's turns have no
+  form: Codex asks in text and you answer in your next message. The questions and answers stay in the conversation
+  when you reopen it; one that was still open when the window closed is shown as interrupted, never as a form (answers you had given in a turn that then failed or was stopped still reach the agents). In a pipeline run, a Claude question you put off stays yours: the run waits (`clarification_required`), asks it again as a form (without *Don't answer*) on `/resume`, and runs the step again with your answer.
 - The `⋯` menu and the links under each step open the plan, review, feedback and report of the run in an editor. **Changes** lists the files
   the run changed and opens them in VS Code's diff editor. The diff goes from the run's baseline snapshot to its latest
   snapshot, so edits you made before the run are not included. Opening Changes again after another round shows that
@@ -122,10 +132,13 @@ Click the agentduo button in an editor's title bar (beside Claude Code's and Cod
   **agentduo** output channel. **agentduo: Open Configuration** opens `.agentduo/config.yaml`.
 
 Agents, models, flags and gates are configured as for the CLI. The extension adds no permission rules or flags of its
-own. Claude's permission requests come to the sidebar only while it can answer them.
+own. Claude's permission requests come to the sidebar only while it can answer them. Questions are a separate setting,
+`clarification.enabled` (default on, from the next call), independent of `claude.permission_prompts`: turning one off
+does not turn the other off.
 
 Reloading the window or closing VS Code stops the current step, as Esc does in the terminal. Pending decisions are
-deferred, unanswered permission requests are denied, the lock is released, and the run stays resumable. The engine
+deferred, unanswered permission requests are denied, an open Claude question ends its call (a chat turn's is saved as interrupted;
+a pipeline step's, like a planner's, stays pending, to be asked again), the lock is released, and the run stays resumable. The engine
 gets 4 seconds to do this, even when it is still starting, and is then stopped outright. The extension never restarts
 a task on its own. It offers **Resume** instead.
 

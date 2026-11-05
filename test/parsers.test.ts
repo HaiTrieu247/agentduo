@@ -126,6 +126,44 @@ describe("ClaudeParser", () => {
     expect(events.at(-1)).toEqual({ type: "end" });
   });
 
+  it("turns a real AskUserQuestion (host mode, Claude Code 2.1.318) into a question of its own, never a permission prompt", () => {
+    const p = new ClaudeParser("/repo");
+    const events = feedAll(p, fixture("claude-question-stream.jsonl"));
+    expect(events.filter((e) => e.type === "permission")).toEqual([]);
+    const asks = events.filter((e) => e.type === "question");
+    expect(asks).toHaveLength(1);
+    expect(asks[0]).toMatchObject({
+      type: "question",
+      questions: [{
+        id: "q1", header: "Langs", question: "Which options do you want to select?", multiSelect: true,
+        options: [
+          { id: "q1o1", label: "Alpha", description: "The first option." },
+          { id: "q1o2", label: "Beta", description: "The second option." },
+          { id: "q1o3", label: "Gamma", description: "The third option." },
+        ],
+      }],
+      raw: { request_id: "e781c027-2761-4c46-8430-c7ff52a4a035", tool_use_id: "toolu_015EPbKyHxtdZ7TDQht8N1CQ" },
+    });
+    expect(events.at(-1)).toEqual({ type: "end" });
+    // The step shows that Claude asked (running while it waits, ok once answered), around the question itself.
+    expect(summary(events).map((x) => x.replace(/^usage:.*/, "usage"))).toEqual(["model", "usage", "other:running:AskUserQuestion", "question", "other:ok:AskUserQuestion", "usage", "say:ok:ANSWER_WAS=Alpha, Gamma", "usage", "end"]);
+  });
+
+  it("reports a question it cannot show with why, and keeps the CLI's request to answer", () => {
+    const p = new ClaudeParser("/repo");
+    const request = (input: unknown) => JSON.stringify({ type: "control_request", request_id: "r1", request: { subtype: "can_use_tool", tool_name: "AskUserQuestion", input, tool_use_id: "t1" } });
+    const bad = (input: unknown) => p.feed(request(input))[0] as { type: string; questions: unknown; error?: string; raw: { request_id: string; input: unknown } };
+    expect(bad({})).toMatchObject({ type: "question", questions: null, error: "questions must be a non-empty list", raw: { request_id: "r1" } });
+    expect(bad({ questions: [{ question: "q", options: [{ label: "a" }] }] }).error).toContain("needs 2 to 6 options");
+    expect(bad({ questions: [{ question: "same", options: [{ label: "a" }, { label: "b" }] }, { question: "same", options: [{ label: "a" }, { label: "b" }] }] }).error)
+      .toContain("repeats an earlier question's");
+    expect(bad({ questions: [{ question: "q", options: [{ label: "a" }, { label: "a" }] }] }).error).toContain("option label 'a' repeats");
+    expect(bad({ questions: Array.from({ length: 5 }, (_, i) => ({ question: `q${i}`, options: [{ label: "a" }, { label: "b" }] })) }).error).toContain("at most 4 questions");
+    // Without a header or descriptions it is still a question; the user's multiSelect is read as given.
+    const fine = bad({ questions: [{ question: "q", multi_select: true, options: [{ label: "a" }, { label: "b", description: "bee" }] }] }) as unknown as { questions: Array<{ header: string; multiSelect: boolean; options: Array<{ description: string }> }> };
+    expect(fine.questions[0]).toMatchObject({ header: "", multiSelect: true, options: [{ description: "" }, { description: "bee" }] });
+  });
+
   it("shows repo-relative paths through symlinks and ignores the trailing newline when counting lines", () => {
     const t = tempDir();
     try {

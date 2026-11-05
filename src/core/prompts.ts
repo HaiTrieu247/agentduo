@@ -1,5 +1,6 @@
 import type { DiscussionStep, Verdict } from "../events.js";
 import { attachmentDetail, type Attachment } from "./attachment-types.js";
+import { clarificationSection, type ClarificationEntry, type ClarifiedPair } from "./clarification.js";
 import type { AgentRole, Backend, GateConfig } from "./config.js";
 import { MAX_NOTES_PER_TURN } from "./context.js";
 import { describeGates, type GateResult } from "./gates.js";
@@ -45,6 +46,15 @@ export interface PromptContext {
   planFile?: string;
   /** The quality gates before any change (the baseline); null or absent when there is none. */
   baseline?: GateResult[] | null;
+  /**
+   * What the user answered to the agents' questions (src/core/clarification.ts): all of it in a fresh prompt, only what the
+   * session was not given in a continued one. Information about the task, never a change to its scope or an exception.
+   */
+  clarifications?: ClarificationEntry[];
+  /** The user may be asked questions in this run (clarification.enabled): the planner may answer with questions instead of a plan. */
+  mayAsk?: boolean;
+  /** Someone can answer a question now, so a Claude role is offered its AskUserQuestion tool. */
+  canAskNow?: boolean;
   /** The run's pipeline profile (src/core/profiles.ts); absent: standard, as it always was. */
   profile?: RunProfile;
 }
@@ -204,12 +214,52 @@ function opening(role: string, title: string, ctx: PromptContext, position: stri
       ctx.profile && ctx.profile.name !== ctx.profile.initial ? profileSection(ctx.profile, role) : "",
       changedSection(ctx.continued.changed),
       notes(ctx.notes, ctx.locate, true, ctx.tagged),
+      clarificationSection(ctx.clarifications ?? [], "## New answers from the user to questions the agents asked"),
       repoNotesSection(ctx.repoNotes, true),
     ].filter(Boolean);
   }
   const profile = profileSection(ctx.profile, role);
   return [header(role, title, ctx), position, ...(profile ? [profile] : []), taskSection(ctx), earlier(ctx), notes(ctx.notes, ctx.locate, false, ctx.tagged),
-    repoNotesSection(ctx.repoNotes, false), baselineSection(ctx.baseline)];
+    clarificationSection(ctx.clarifications ?? []), repoNotesSection(ctx.repoNotes, false), baselineSection(ctx.baseline)];
+}
+
+/**
+ * When to ask the user, for a role that may. The repository answers most questions, so the agent finds those itself; the user is
+ * asked only for what they alone can say and what would change the scope or the result. The answers are information: they never
+ * widen the agreed scope or waive a check.
+ */
+const ASK_RULES = "Look in the repository first: do not ask what its code, tests, docs or configuration can tell you. Ask only when " +
+  "information that only the user has would materially change the scope or the result, and ask it once, with all its questions " +
+  "together. Never ask for confirmation of a task that is clear.";
+
+/** For Claude in the chat: it may use its AskUserQuestion tool. Codex has none in a turn (it asks in words, and the user answers in the next message). */
+function chatAskSection(): string {
+  return "\n## Questions for the user\n" + ASK_RULES + " You may use the AskUserQuestion tool for that (annotated choices; the user can answer " +
+    "in their own words). Its answers are information for this message only.\n";
+}
+
+/** The asking guidance of a role's prompt (fresh prompts only: a continued session has it). */
+function askingSection(ctx: PromptContext, role: "planner" | "plan_reviewer" | "implementer"): string[] {
+  // A continued session has its role's guidance already; one that changes role (the critic going on as the implementer) gets the new role's.
+  if (ctx.continued && (!ctx.continued.from || ctx.continued.from === role)) return [];
+  const native = !!ctx.canAskNow && ctx.agents[role] === "claude";
+  if (role === "planner") {
+    if (!ctx.mayAsk) {
+      return ["## Questions\nThe user cannot be asked questions in this run: where information is missing, decide on an assumption, state it, and " +
+        "list it in `open_questions`. Return `result.kind` `plan`.\n"];
+    }
+    return ["## Questions for the user\n" + ASK_RULES + " To ask, return `result.kind` `needs_clarification` with only `questions` (no plan): each " +
+      "has a short `header`, the `question`, `multi_select` (true when several options can apply) and 2 to 6 distinct `options`, each with a " +
+      "`label` and a `description` of what choosing it means. The user may also answer in their own words. You are then called again with the " +
+      "answers and write the plan. A clear task goes straight to `result.kind` `plan` with the whole plan in `plan`." +
+      (native ? " Do not use the AskUserQuestion tool in this call: asking is the `needs_clarification` result." : "") +
+      " Do not ask again what the answers given to you already settle.\n"];
+  }
+  if (!native) return [];
+  return ["## Questions for the user\n" + ASK_RULES + " You may use the AskUserQuestion tool for that (annotated choices; the user can answer " +
+    "in their own words). Its answers are information: they do not change the agreed scope or the acceptance contract. If an answer would " +
+    (role === "implementer" ? "change them, do not go on outside them: report `blocked` with that as the blocking reason, so that the user decides.\n"
+      : "change them, raise it as an issue (in the task's scope) rather than assuming it.\n")];
 }
 
 /**
@@ -309,16 +359,27 @@ function taggedSection(title: string, text: string, tagged: Tagged | undefined):
   return `\n### ${title}\n${TAGGED}\n${list.map((e) => `- ${inlineCode(e.path)} (${e.kind})`).join("\n")}\n`;
 }
 
+/** What agents asked the user in a conversation, and what the user answered: information about what they want, nothing more. */
+function pairLines(pairs: ClarifiedPair[]): string {
+  return pairs.map((p) => `- ${NAMES[p.asker]} asked${p.header ? ` [${p.header}]` : ""}: ${p.question.trim()}\n  → The user answered: ${p.answer.trim()}`).join("\n");
+}
+
 function exchangeText(e: Exchange, locate?: Locate): string {
   const name = NAMES[e.backend];
+  const asked = e.clarified?.length ? `\n\n**Questions asked of the user while that was answered:**\n${pairLines(e.clarified)}` : "";
   // Files of an earlier message go by path only: they were attached to that message, not to this one.
   const files = e.attachments?.length && locate
     ? `\n\nFiles attached to that message (not attached again; read them at their paths if you need them):\n${attachmentLines(e.attachments, locate)}` : "";
+  if (e.unfinished) {
+    const other = e.discussedWith ? ` (discussed with ${NAMES[e.discussedWith]})` : "";
+    return `**User → ${name}${other}:**\n${e.question.trim()}${files}${asked}\n\n**${name}:**\n` +
+      "(That turn did not finish: it was stopped or failed, so nothing written in it is kept. The user's answers above were given and stand.)";
+  }
   if (e.discussedWith) {
     const other = NAMES[e.discussedWith];
-    return `**User → ${name} (discussed with ${other}):**\n${e.question.trim()}${files}\n\n**${name}, after discussing it with ${other}:**\n${e.answer.trim()}`;
+    return `**User → ${name} (discussed with ${other}):**\n${e.question.trim()}${files}${asked}\n\n**${name}, after discussing it with ${other}:**\n${e.answer.trim()}`;
   }
-  return `**User → ${name}:**\n${e.question.trim()}${files}\n\n**${name}:**\n${e.answer.trim()}`;
+  return `**User → ${name}:**\n${e.question.trim()}${files}${asked}\n\n**${name}:**\n${e.answer.trim()}`;
 }
 
 /** What was said in the chat, oldest first, and how many older exchanges did not fit. */
@@ -346,6 +407,8 @@ function taskSection(ctx: PromptContext): string {
 export function conversation(o: {
   workspace: string; backend: Backend; context: ConversationContext; earlier: EarlierTask[]; question: string; attachments?: Attachment[]; locate?: Locate;
   tagged?: Tagged;
+  /** Claude is offered its AskUserQuestion tool in this call (someone can answer, clarification.enabled). */
+  canAsk?: boolean;
 }): string {
   const name = NAMES[o.backend];
   const other = NAMES[o.backend === "codex" ? "claude" : "codex"];
@@ -357,6 +420,7 @@ export function conversation(o: {
     earlierTasks(o.earlier, false) + conversationSection(o.context, "Conversation so far", "Oldest first.", o.locate),
     `## The user's message to ${name}\n${o.question}\n` + filesSection("Files the user attached to this message", o.attachments, o.locate) +
       taggedSection("Workspace paths the user tagged", o.question, o.tagged),
+    ...(o.canAsk && o.backend === "claude" ? [chatAskSection()] : []),
   ].filter(Boolean).join("\n");
 }
 
@@ -414,6 +478,11 @@ export function discussion(o: {
   workspace: string; context: ConversationContext; earlier: EarlierTask[]; question: string; answerer: Backend; critic: Backend; maxRounds: number;
   step: DiscussionStep; round: number; history: DiscussionMessage[]; historyStart?: number; attachments?: Attachment[]; locate?: Locate;
   tagged?: Tagged;
+  /** What the user answered to questions asked during this discussion (all of it, or only what the session was not given). */
+  clarified?: ClarifiedPair[];
+  clarifiedNew?: boolean;
+  /** Claude is offered its AskUserQuestion tool in this call. */
+  canAsk?: boolean;
 }): string {
   const answerer = NAMES[o.answerer];
   const critic = NAMES[o.critic];
@@ -445,8 +514,13 @@ export function discussion(o: {
     earlierTasks(o.earlier, false) + conversationSection(o.context, "Conversation so far", "Oldest first.", o.locate),
     `## The user's question\n${o.question}\n` + filesSection("Files the user attached to the question", o.attachments, o.locate) +
       taggedSection("Workspace paths the user tagged", o.question, o.tagged),
+    o.clarified?.length
+      ? `\n## ${o.clarifiedNew ? "New answers" : "Answers"} from the user to questions asked during this discussion\n${pairLines(o.clarified)}\n` +
+        "These answers are information about what the user wants, and apply to the question above, for every step of the discussion.\n"
+      : "",
     discussionHistory(o.history.slice(o.historyStart ?? 0)),
     asks[o.step],
+    ...(o.canAsk && o.step !== "synthesis" && (o.step === "critique" ? o.critic : o.answerer) === "claude" ? [chatAskSection()] : []),
   ].filter(Boolean).join("\n");
 }
 
@@ -490,12 +564,14 @@ export function planner(ctx: PromptContext, round: number, version: number, prev
       "acceptance contract: the reviewers hold the change to them and cannot add to them, so derive them from the task and do not add what it " +
       "does not need. When you revise the plan, keep each criterion's id, and give a new one the next free number.\n" +
       "- Risks with mitigations, and a test strategy (which tests to add or update).\n" +
-      "- Open questions only for things that truly cannot be decided from the repository; state the assumption you made for each.\n" +
+      "- Open questions only for things you decided on an assumption because the repository cannot settle them; state the assumption you made for each. " +
+      "(Information that only the user has and that would change the scope or the result is asked as `questions` instead: see below.)\n" +
       "- Acceptance criteria and scope that agree with each other and with the baseline: a criterion must be reachable within the scope. " +
       KEEP_THE_TASK + " Name such a contradiction in `open_questions`; the critic checks it and agentduo asks the user.\n" +
       (ctx.gates.length ? "\nAfter implementation agentduo runs these commands and shows their results to the code reviewer:\n" + gateList(ctx.gates) + "\n" : ""),
     baselineDuty(ctx),
   ];
+  out.push(...askingSection(ctx, "planner"));
   if (!previousPlan) {
     out.push("\nThis is the first version: return `feedback_resolution` as an empty list.\n");
   } else {
@@ -515,11 +591,15 @@ export function planner(ctx: PromptContext, round: number, version: number, prev
       "them) unless a note from the user asks for it, and answer them `disputed`, giving that reason. Adopting one (`accepted` or " +
       "`partially_accepted`) widens the task, and agentduo asks the user to approve that before the plan goes on.\n");
   }
-  out.push(REPO_NOTES_ASK, OUTPUT_RULES);
+  out.push(REPO_NOTES_ASK, OUTPUT_RULES, PLANNER_SHAPE);
   return out.join("\n");
 }
 
 /** The planner's `baseline_failures`: whether the plan fixes each required gate that fails before any change. */
+/** The planner's answer wraps its plan: `result` is the plan or the questions. */
+const PLANNER_SHAPE = "The JSON object has a single property `result`: either `{ \"kind\": \"plan\", \"plan\": <the plan, with all the fields above> }` " +
+  "or, when you must ask the user first, `{ \"kind\": \"needs_clarification\", \"questions\": [...] }`.\n";
+
 function baselineDuty(ctx: PromptContext): string {
   const failing = baselineFailing(ctx.baseline);
   if (!failing.length) return "\nNo required gate fails before any change" + (ctx.baseline?.length ? "" : " that agentduo knows of") + ": `baseline_failures` is an empty list.\n";
@@ -546,6 +626,7 @@ export function planReviewer(ctx: PromptContext, round: number, version: number,
   const out = [
     ...opening("plan_reviewer", "Plan Critic", ctx, `- Planning round: ${round} · Plan under review: v${version}\n`),
     "## Plan under review\n" + planMd + "\n",
+    ...askingSection(ctx, "plan_reviewer"),
     "## Your job\n" +
       "Judge whether this plan is feasible in THIS codebase; the implementer must be able to execute it without guessing:\n" +
       "- Do the files, modules, APIs and commands it relies on actually exist and work as assumed?\n" +
@@ -722,6 +803,7 @@ export function implementer(ctx: PromptContext, round: number, planMd: string, f
     ...(ctx.continued?.from === "plan_reviewer"
       ? planHandoff(planMd, ctx, handoff)
       : [planSection("Final approved plan", planMd, ctx, "Unchanged: the final approved plan you were given earlier in this session.")]),
+    ...askingSection(ctx, "implementer"),
     "## How to work\n" +
       "- Implement the plan and stay within its scope.\n" +
       (ctx.gates.length

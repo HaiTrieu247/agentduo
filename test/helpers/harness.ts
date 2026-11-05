@@ -2,7 +2,8 @@ import { join } from "node:path";
 import type { ConfigData } from "../../src/core/config.js";
 import { RunStore, type RunState } from "../../src/core/state.js";
 import { Workflow } from "../../src/core/workflow.js";
-import { EventBus, type Decider, type Decision, type DuoEvent, type HumanReview, type PermissionDecider } from "../../src/events.js";
+import type { ClarificationAnswer, ClarificationRequest, ClarificationResponse } from "../../src/core/clarification.js";
+import { EventBus, type ClarificationDecider, type Decider, type Decision, type DuoEvent, type HumanReview, type PermissionDecider } from "../../src/events.js";
 
 export class ScriptedDecider implements Decider {
   readonly seen: string[] = [];
@@ -13,6 +14,22 @@ export class ScriptedDecider implements Decider {
   }
 }
 
+/** Answers the questions it is asked with `responses` in turn (the last one repeats); records the requests it saw. Out of responses: defer. */
+export class ScriptedClarifier implements ClarificationDecider {
+  readonly seen: ClarificationRequest[] = [];
+  constructor(private readonly responses: Array<ClarificationResponse | ((r: ClarificationRequest) => ClarificationResponse)> = []) {}
+  async askClarification({ request }: { request: ClarificationRequest }): Promise<ClarificationResponse> {
+    this.seen.push(request);
+    const next = this.responses[Math.min(this.seen.length - 1, this.responses.length - 1)];
+    return typeof next === "function" ? next(request) : next ?? { kind: "defer" };
+  }
+}
+
+/** The first option of every question, as the user's answer (a test's choice, never agentduo's). */
+export const pickFirst = (request: ClarificationRequest): ClarificationResponse => ({
+  kind: "answered", answers: request.questions.map((q): ClarificationAnswer => ({ questionId: q.id, optionIds: [q.options[0]!.id], otherText: null })),
+});
+
 export interface Harness {
   repo: string;
   cfg: ConfigData;
@@ -20,6 +37,8 @@ export interface Harness {
   events: DuoEvent[];
   /** Answers Claude's permission prompts in host mode; absent = nobody can answer. */
   permissions?: PermissionDecider;
+  /** Answers the agents' structured questions; absent = nobody can answer. */
+  clarifier?: ClarificationDecider;
   /** The workflow's environment (its data root); absent: this process's. */
   env?: NodeJS.ProcessEnv;
 }
@@ -41,13 +60,13 @@ export function newWorkflow(h: Harness, task: string, decider: Decider = new Scr
     prepare(state);
     store.saveState(state);
   }
-  return { wf: new Workflow({ cfg: h.cfg, repo: h.repo, store, state, bus, decider, permissions: h.permissions, env: h.env }), bus };
+  return { wf: new Workflow({ cfg: h.cfg, repo: h.repo, store, state, bus, decider, permissions: h.permissions, clarifier: h.clarifier, env: h.env }), bus };
 }
 
 export function resumedWorkflow(h: Harness, opts: { decider?: Decider } = {}): { wf: Workflow; bus: EventBus } {
   const bus = busFor(h);
   const store = RunStore.open(h.runsDir);
-  const wf = new Workflow({ cfg: h.cfg, repo: h.repo, store, state: store.loadState(), bus, decider: opts.decider ?? new ScriptedDecider(), permissions: h.permissions, env: h.env });
+  const wf = new Workflow({ cfg: h.cfg, repo: h.repo, store, state: store.loadState(), bus, decider: opts.decider ?? new ScriptedDecider(), permissions: h.permissions, clarifier: h.clarifier, env: h.env });
   return { wf, bus };
 }
 

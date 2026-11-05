@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
+import { parseQuestions, type ClarificationRequest } from "../src/core/clarification.js";
 import { EventBus } from "../src/events.js";
 import { startChatInk } from "../src/ui/ink/chat-session.js";
 import { startInk } from "../src/ui/ink/session.js";
@@ -46,6 +47,32 @@ describe("startInk", () => {
     controller.abort();
     expect(await pending).toEqual({ decision: "deny" });
     await live.close();
+  });
+
+  const asking = (): ClarificationRequest => {
+    const parsed = parseQuestions([{ question: "Which one?", header: "One", options: [{ label: "A", description: "" }, { label: "B", description: "" }] }]);
+    return { id: "clq-1", source: "claude", callId: "c1", agent: "claude", role: "implementer", questions: "questions" in parsed ? parsed.questions : [], at: "t" };
+  };
+
+  it("puts every question off when nobody can answer, when the call is aborted, and when the screen closes", async () => {
+    const make = (interactive: boolean) => startInk({
+      bus: new EventBus(), version: "0.1.0", verbose: false, interactive, onStop: noop, onInterrupt: noop,
+      views: () => [], readView: async () => null, stdout: new FakeStdout() as unknown as NodeJS.WriteStream,
+    });
+    const quiet = make(false);
+    expect(await quiet.clarifier.askClarification({ request: asking() })).toEqual({ kind: "defer" });
+    await quiet.close();
+
+    const live = make(true);
+    const controller = new AbortController();
+    const aborted = live.clarifier.askClarification({ request: asking() }, controller.signal);
+    controller.abort();
+    expect(await aborted).toEqual({ kind: "defer" });
+    // Still open when the screen closes: put off, not left waiting for a screen that is gone.
+    const open = live.clarifier.askClarification({ request: { ...asking(), id: "clq-2" } });
+    await live.close();
+    expect(await open).toEqual({ kind: "defer" });
+    expect(await live.clarifier.askClarification({ request: { ...asking(), id: "clq-3" } })).toEqual({ kind: "defer" });
   });
 
   it("closes promptly after the finish line, and within a second without one", async () => {
@@ -131,5 +158,22 @@ describe("startChatInk", () => {
     stdin.write("\u0003");
     expect(await answer).toBe("defer");
     await session.close();
+  });
+  it("puts a question that waits off with the first Ctrl-C, as the decision prompt is, and when the chat closes", async () => {
+    const { session, stdin } = start();
+    await tick();
+    const request = { id: "clq-1", source: "claude" as const, callId: "c1", agent: "claude" as const, role: "implementer" as const, at: "t",
+      questions: [{ id: "q1", header: "One", question: "Which one?", multiSelect: false, options: [{ id: "q1o1", label: "A", description: "" }, { id: "q1o2", label: "B", description: "" }] }] };
+    const waiting = session.clarifier.askClarification({ request });
+    await tick();
+    let left = false;
+    void session.exited.then(() => { left = true; });
+    stdin.write("\u0003");
+    await tick();
+    expect(await waiting).toEqual({ kind: "defer" });
+    expect(left).toBe(false);
+    const again = session.clarifier.askClarification({ request: { ...request, id: "clq-2" } });
+    await session.close();
+    expect(await again).toEqual({ kind: "defer" });
   });
 });

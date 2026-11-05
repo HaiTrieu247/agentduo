@@ -1,5 +1,6 @@
+import { answerSummary, type ClarificationAnswer, type ClarificationQuestion, type ClarificationResponse } from "../core/clarification.js";
 import { decisionCommand } from "../core/decisions.js";
-import type { Activity, Decider, DuoEvent, EventBus, PermissionAnswer, PermissionDecider } from "../events.js";
+import type { Activity, ClarificationDecider, Decider, DuoEvent, EventBus, PermissionAnswer, PermissionDecider } from "../events.js";
 import {
   activityText, DISCUSSION_LINES, discussionAuthor, discussionOutcome, discussionStepText, firstLines, formatDuration, messageHeadline, modelText, permissionAnswerText, PROVIDERS, roleLabel,
   statusIcon, usageText, verdictText, budgetText,
@@ -48,6 +49,79 @@ export function plainPermissionDecider(ask: (question: string) => Promise<string
   };
 }
 
+/** A question in lines, numbered for a terminal that cannot show a form: what the user types is in `parsePlainReply`. */
+export function plainQuestionText(q: ClarificationQuestion, index: number, total: number): string {
+  const lines = [`  ${total > 1 ? `Question ${index + 1} of ${total}` : "Question"}${q.header ? ` [${q.header}]` : ""}: ${q.question}`];
+  q.options.forEach((o, i) => lines.push(`    ${i + 1}) ${o.label}${o.description ? ` — ${o.description}` : ""}`));
+  lines.push(q.multiSelect
+    ? "  Reply with numbers separated by commas (e.g. 1,3); add your own words after a |  (e.g. 1,3 | also X), or write only your own words."
+    : "  Reply with a number, or write your own answer. (To answer with words that are only a number, start them with 'other:'.)");
+  lines.push("  Enter alone = answer later.");
+  return lines.join("\n");
+}
+
+/**
+ * What one reply in a terminal means for one question: option numbers, the user's own words, or nothing yet. Words that are
+ * not all option numbers are the user's own; `other:` forces them to be. Nothing is guessed: a number outside the options,
+ * or several for a single-choice question, is an error to correct.
+ */
+export function parsePlainReply(q: ClarificationQuestion, reply: string):
+  { kind: "answer"; optionIds: string[]; otherText: string | null } | { kind: "later" } | { kind: "error"; message: string } {
+  const text = reply.trim();
+  if (!text) return { kind: "later" };
+  if (/^other:/i.test(text)) {
+    const words = text.slice(text.indexOf(":") + 1).trim();
+    return words ? { kind: "answer", optionIds: [], otherText: words } : { kind: "error", message: "write your own answer after 'other:'" };
+  }
+  const [head = "", ...rest] = q.multiSelect ? text.split("|") : [text];
+  const tail = rest.join("|").trim();
+  const tokens = head.split(",").map((t) => t.trim()).filter(Boolean);
+  if (tokens.length && tokens.every((t) => /^\d+$/.test(t))) {
+    const numbers = tokens.map(Number);
+    const bad = numbers.find((n) => n < 1 || n > q.options.length);
+    if (bad !== undefined) return { kind: "error", message: `${bad} is not one of the options (1 to ${q.options.length})` };
+    if (new Set(numbers).size !== numbers.length) return { kind: "error", message: "an option is given twice" };
+    if (!q.multiSelect && numbers.length > 1) return { kind: "error", message: "this question takes one answer" };
+    return { kind: "answer", optionIds: numbers.map((n) => q.options[n - 1]!.id), otherText: tail || null };
+  }
+  // Not numbers: the user's own words (a multiple-choice question has no options mixed in without the numbers).
+  return { kind: "answer", optionIds: [], otherText: text };
+}
+
+/**
+ * The agents' questions in plain mode, for a terminal that can answer: one request at a time, each question printed with
+ * numbered options. An empty reply is "later"; nothing is ever chosen for the user.
+ */
+export function plainClarificationDecider(ask: (question: string) => Promise<string>): ClarificationDecider {
+  let queue: Promise<unknown> = Promise.resolve();
+  const run = async ({ request }: { request: { questions: ClarificationQuestion[] } }, signal?: AbortSignal): Promise<ClarificationResponse> => {
+    const answers: ClarificationAnswer[] = [];
+    const total = request.questions.length;
+    for (const [i, q] of request.questions.entries()) {
+      let notice = "";
+      for (;;) {
+        if (signal?.aborted) return { kind: "defer" };
+        const parsed = parsePlainReply(q, await ask(`${plainQuestionText(q, i, total)}\n${notice}  > `));
+        if (parsed.kind === "later") return { kind: "defer" };
+        if (parsed.kind === "error") {
+          notice = `  (${parsed.message})\n`;
+          continue;
+        }
+        answers.push({ questionId: q.id, optionIds: parsed.optionIds, otherText: parsed.otherText });
+        break;
+      }
+    }
+    return { kind: "answered", answers };
+  };
+  return {
+    askClarification: (ask, signal) => {
+      const next = queue.then(() => (signal?.aborted ? ({ kind: "defer" } as const) : run(ask, signal)));
+      queue = next.catch(() => undefined);
+      return next;
+    },
+  };
+}
+
 const CODES = { dim: 2, bold: 1, red: 31, green: 32, yellow: 33, cyan: 36 } as const;
 const AGENT_WIDTH = 12; // fits "orchestrator"
 const INDENT = " ".repeat(8 + 2 + AGENT_WIDTH + 1 + 16 + 1);
@@ -58,6 +132,7 @@ export function attachPlainRenderer(bus: EventBus, out: TextSink, o: PlainOption
   const cmd = o.commandName ?? "duo";
   let ctx = { agent: "", where: "" };
   const rulesFor = new Map<string, string[]>(); // an answer line names the rules its request offered
+  const asked = new Map<string, ClarificationQuestion[]>(); // an answer line names the questions it answers
   const clock = () => {
     const d = now();
     return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
@@ -165,6 +240,23 @@ export function attachPlainRenderer(bus: EventBus, out: TextSink, o: PlainOption
       case "permission.answered":
         line(paint(e.answer.decision === "deny" ? "yellow" : "green", `→ ${permissionAnswerText(e.answer, rulesFor.get(e.id) ?? [])}`), e.agent);
         rulesFor.delete(e.id);
+        break;
+      case "clarification.requested": {
+        const r = e.request;
+        const who = r.role ? roleLabel(r.role) : r.agent;
+        asked.set(r.id, r.questions);
+        line(paint("cyan", `? asks you ${r.questions.length === 1 ? "a question" : `${r.questions.length} questions`}`), who);
+        break;
+      }
+      case "clarification.answered": {
+        const questions = asked.get(e.id);
+        if (questions) line(paint("green", `→ answered: ${answerSummary({ questions, answers: e.answers, status: "answered" })}`));
+        asked.delete(e.id);
+        break;
+      }
+      case "clarification.closed":
+        line(paint("yellow", e.status === "deferred" ? "→ to be answered later" : `→ ${e.status === "cancelled" ? "dismissed without an answer" : "interrupted before it was answered"}`));
+        asked.delete(e.id);
         break;
       case "human.required": {
         const r = e.review;

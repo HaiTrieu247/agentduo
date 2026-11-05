@@ -6,6 +6,7 @@ import { Command, CommanderError, Option } from "commander";
 import { killAllActive } from "./agents/process.js";
 import { Chat, newRun } from "./chat.js";
 import { settings } from "./core/settings.js";
+import { answersTemplate, pendingEntry } from "./core/clarification.js";
 import { configFromSaved, ConfigError, PROFILES, type ConfigData, type ProfileName } from "./core/config.js";
 import { decisionCommand } from "./core/decisions.js";
 import { diagnose, EnvironmentError, prepareEnvironment, runnableProblem, type RunnableNeeds, type WorkspaceEnv } from "./core/environment.js";
@@ -17,10 +18,10 @@ import { openRunGit, RunGitError } from "./core/run-git.js";
 import { acquireWorkspaceLock, LockError, RunStore, type RunState } from "./core/state.js";
 import { gateSpecs, verificationLines } from "./core/verification.js";
 import { DecisionError, EXIT, Workflow, workspaceTree } from "./core/workflow.js";
-import { EventBus, type Decider, type Decision, type PermissionDecider } from "./events.js";
+import { EventBus, type ClarificationDecider, type Decider, type Decision, type PermissionDecider } from "./events.js";
 import { packageVersion } from "./paths.js";
 import type { ViewKind } from "./ui/ink/HumanReviewPrompt.js";
-import { attachPlainRenderer, deferDecider, plainPermissionDecider } from "./ui/plain.js";
+import { attachPlainRenderer, deferDecider, plainClarificationDecider, plainPermissionDecider } from "./ui/plain.js";
 
 export interface CliIO {
   stdout: { write(text: string): unknown; isTTY?: boolean };
@@ -115,7 +116,7 @@ function withProfile<T extends ConfigData>(cfg: T, opts: { profile?: ProfileName
   if (opts.profile) cfg.pipeline = { ...cfg.pipeline, profile: opts.profile };
   return cfg;
 }
-interface ResumeOptions extends CommonOptions { decision?: Decision["decision"]; note?: string; reloadConfig?: boolean; acceptEdits?: boolean }
+interface ResumeOptions extends CommonOptions { decision?: Decision["decision"]; note?: string; reloadConfig?: boolean; acceptEdits?: boolean; answers?: string }
 
 /** --accept-edits: the implementer edits files without asking, like /mode acceptEdits in the chat. */
 function withAcceptEdits<T extends ConfigData>(cfg: T, opts: { acceptEdits?: boolean }): T {
@@ -207,7 +208,7 @@ async function readView(kind: ViewKind, store: RunStore, st: RunState, workspace
 }
 
 /** Runs the workflow; the caller holds the workspace lock. */
-async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, state: RunState, opts: CommonOptions, decision?: Decision): Promise<number> {
+async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, state: RunState, opts: CommonOptions, decision?: Decision, answers?: unknown): Promise<number> {
   try {
     store.lock();
   } catch (e) {
@@ -222,6 +223,9 @@ async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, st
   // Claude's permission prompts reach the user only where someone can answer; elsewhere Claude denies them itself.
   const terminal = !!io.stdin.isTTY && !!io.stdout.isTTY && !background && io.env.CI !== "true";
   let permissions: PermissionDecider | undefined;
+  // The agents' questions likewise: only where someone can answer. Elsewhere Claude is not offered the tool and the planner's
+  // questions wait, saved, for `duo resume --answers`.
+  let clarifier: ClarificationDecider | undefined;
   const version = packageVersion();
   let workflow: Workflow | undefined;
   let presses = 0;
@@ -240,7 +244,10 @@ async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, st
   if (plain) {
     const detach = attachPlainRenderer(bus, io.stdout, { color: opts.color !== false && !io.env.NO_COLOR && !!io.stdout.isTTY, verbose: !!opts.verbose, version });
     closeUi = async () => detach();
-    if (terminal && io.ask) permissions = plainPermissionDecider(io.ask);
+    if (terminal && io.ask) {
+      permissions = plainPermissionDecider(io.ask);
+      clarifier = plainClarificationDecider(io.ask);
+    }
   } else {
     applyColorPreference(opts, io.env);
     pinTerminalSize(io.stdout, io.env);
@@ -253,12 +260,16 @@ async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, st
     });
     decider = session.decider;
     closeUi = session.close;
-    if (interactive) permissions = session.permissions;
+    if (interactive) {
+      permissions = session.permissions;
+      clarifier = session.clarifier;
+    }
   }
-  workflow = new Workflow({ cfg, repo: env.workspace, store, state, bus, decider, permissions, env: io.env });
+  workflow = new Workflow({ cfg, repo: env.workspace, store, state, bus, decider, permissions, clarifier, env: io.env });
   const offSignal = io.onSignal?.(onInterrupt);
   try {
     if (decision) await workflow.applyDecision(decision.decision, decision.note);
+    if (answers !== undefined) workflow.applyAnswers(answers);
     return await workflow.run();
   } catch (e) {
     if (e instanceof DecisionError) throw new CliExit(EXIT.ERROR, e.message);
@@ -370,7 +381,7 @@ async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
       stdout: io.stdout as NodeJS.WriteStream, stdin: io.stdin as NodeJS.ReadStream,
     });
     chat = new Chat({
-      cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, userConfigFile: env.userConfigFile, bus, decider: session.decider, permissions: session.permissions, ui: session.ui,
+      cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, userConfigFile: env.userConfigFile, bus, decider: session.decider, permissions: session.permissions, clarifier: session.clarifier, ui: session.ui,
       env: io.env,
     });
     const offSignal = io.onSignal?.(() => session.ui.exit());
@@ -387,6 +398,18 @@ async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
 
 async function resumeCommand(io: CliIO, runId: string | undefined, opts: ResumeOptions): Promise<number> {
   if (opts.note && !opts.decision) throw new CliExit(EXIT.ERROR, "--note is only accepted together with --decision");
+  if (opts.answers && opts.decision) {
+    throw new CliExit(EXIT.ERROR, "--answers answers the questions a run waits on; --decision decides something else. Give one of them (an abort needs no answers)");
+  }
+  let answers: unknown;
+  if (opts.answers) {
+    const path = resolve(io.cwd, opts.answers);
+    try {
+      answers = JSON.parse(readFileSync(path, "utf8"));
+    } catch (e) {
+      throw new CliExit(EXIT.ERROR, `cannot read the answers file ${path}: ${(e as Error).message}`);
+    }
+  }
   const env = await prepare(io, opts);
   const store = openStore(env.runsDir, runId);
   const state = store.loadState();
@@ -403,7 +426,7 @@ async function resumeCommand(io: CliIO, runId: string | undefined, opts: ResumeO
     requireRunnable(env, cfg, useSaved ? store.path("config.json") : env.sources.join(", "), io, { saved: useSaved, repo: false });
     if (!useSaved || opts.acceptEdits) store.writeJson("config.json", cfg);
     state.workspace ??= env.workspace;
-    return await execute(io, env, cfg, store, state, opts, opts.decision ? { decision: opts.decision, note: opts.note } : undefined);
+    return await execute(io, env, cfg, store, state, opts, opts.decision ? { decision: opts.decision, note: opts.note } : undefined, answers);
   } finally {
     release();
   }
@@ -437,7 +460,16 @@ async function statusCommand(io: CliIO, runId: string | undefined, opts: CommonO
   }
   if (st.warnings?.length) out(`  warnings: ${st.warnings.length} (see report.md)`);
   if (st.phase === "HUMAN_REVIEW" && st.humanReview) {
-    out(`  waiting for a decision (${st.humanReview.reason}): ${st.humanReview.message}`);
+    const asked = st.humanReview.reason === "clarification_required" ? pendingEntry(st.clarifications) : null;
+    out(`  waiting for ${asked ? "your answers" : "a decision"} (${st.humanReview.reason}): ${st.humanReview.message}`);
+    if (asked) {
+      for (const q of asked.questions) {
+        out(`    ${q.id}${q.header ? ` [${q.header}]` : ""}: ${q.question}${q.multiSelect ? " (several may apply)" : ""}`);
+        for (const o of q.options) out(`      ${o.id}  ${o.label}${o.description ? ` — ${o.description}` : ""}`);
+      }
+      out(`    answers file template (fill in 'options' with option ids and/or 'other' with your own words, per question):`);
+      for (const l of JSON.stringify(answersTemplate(asked), null, 2).split("\n")) out(`      ${l}`);
+    }
     out(`  continue: ${decisionCommand("duo", st.taskId, st.humanReview.reason)}`);
   }
   out(`  files: ${store.dir}`);
@@ -551,9 +583,10 @@ export async function main(argv: string[], io: CliIO = processIO()): Promise<num
     .action(async (words: string[], _opts: RunOptions, cmd: Command) => {
       exitCode = await runCommand(io, words, withGlobals<RunOptions>(cmd), true);
     });
-  common(program.command("resume").description("continue a run (default: the latest), optionally answering a pending decision").argument("[runId]")
+  common(program.command("resume").description("continue a run (default: the latest), optionally answering a pending decision or the agents' questions").argument("[runId]")
     .addOption(new Option("--decision <decision>", "answer a run waiting in HUMAN_REVIEW").choices(["resume", "revise", "abort"]))
     .option("--note <text>", "instruction for the agents, recorded with the decision")
+    .option("--answers <file>", "answer the questions a run waits on, from a JSON file (`duo status` prints its template)")
     .option("--reload-config", "use the current config instead of the one the run started with")
     .option("--accept-edits", acceptEdits))
     .action(async (runId: string | undefined, _opts: ResumeOptions, cmd: Command) => {

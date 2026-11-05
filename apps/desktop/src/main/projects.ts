@@ -72,6 +72,7 @@ export function titleOf(state: ViewState): string {
 export function activityOf(state: ViewState): string | null {
   if (state.decision) return "Waiting for your decision";
   if (state.permissions.length) return "Waiting for permission";
+  if (state.questions?.length) return "Waiting for your answer";
   if (state.status !== "running" && state.status !== "answering") return null;
   const last = [...state.timeline].reverse().find((i) => i.kind === "step" || i.kind === "answer" || i.kind === "discussion");
   const who = (agent: string | undefined) => (agent === "claude" ? "Claude" : agent === "codex" ? "Codex" : "AgentDuo");
@@ -187,7 +188,7 @@ export class ProjectManager {
       },
       onQuestion: (conversation, kind, text) => {
         if (this.activeProject === p.id && this.activeConversation === conversation) return;
-        this.o.host.notify?.(kind === "decision" ? "AgentDuo needs your decision" : "Claude asks for permission", text.slice(0, 160));
+        this.o.host.notify?.(kind === "decision" ? "AgentDuo needs your decision" : kind === "question" ? "An agent asks you a question" : "Claude asks for permission", text.slice(0, 160));
       },
       onNewConversation: () => this.o.post({ type: "menu", command: "newConversation" }),
       // `/codex model … --global` (or the chat's settings menu with Global) in this project: the others read it too.
@@ -345,6 +346,10 @@ export class ProjectManager {
       case "permission":
         void c.answerPermission(message.generation, message.id, message.answer);
         break;
+      case "question":
+        // Checked again where it waits: the tab's generation and request, then the worker's conversation, request and call.
+        void c.answerQuestion(message.generation, message.id, message.callId, message.reply);
+        break;
       case "copy":
         this.o.host.copy(message.text);
         break;
@@ -432,7 +437,7 @@ export class ProjectManager {
       const st = session && live.has(id) ? session.conversation(id).state : null;
       return {
         id, title: st && st.timeline.length ? titleOf(st) : title || "New conversation", updatedAt,
-        running: !!st && (st.status === "running" || st.status === "answering"), waiting: st ? (st.decision ? 1 : 0) + st.permissions.length : 0,
+        running: !!st && (st.status === "running" || st.status === "answering"), waiting: st ? (st.decision ? 1 : 0) + st.permissions.length + (st.questions ?? []).length : 0,
         activity: st ? activityOf(st) : null,
       };
     };

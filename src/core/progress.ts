@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { answeredEntries, type ClarificationEntry } from "./clarification.js";
 import type { ConfigData } from "./config.js";
 import { touched, workspacePath } from "./context.js";
 import type { Change } from "./git.js";
@@ -23,6 +24,7 @@ export const MARK_PARTS: Record<keyof ProgressMark, string> = {
   plan: "the final plan",
   findings: "the open review findings",
   settings: "the implementer's settings (agentduo's and its CLI's)",
+  answers: "your answers to the agents' questions",
 };
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -35,6 +37,16 @@ export function blockerKey(reason: string): string {
 export const findingsDigest = (findings: Finding[]): string => digest(findings);
 
 /**
+ * What the user answered to the agents' questions, as a digest: each answered request once, by id, so a duplicate
+ * answer, an unanswered or dismissed question never changes it. "" when nothing was answered, which is also what a mark
+ * of a run from before questions holds (it has none).
+ */
+export function answersDigest(entries: readonly ClarificationEntry[] | undefined): string {
+  const answered = answeredEntries(entries);
+  return answered.length ? digest(answered.map((e) => [e.id, e.answers])) : "";
+}
+
+/**
  * The implementer's settings as far as a blocker can depend on them: which CLI plays it and what agentduo passes it
  * (the config's cost cap aside), and that CLI's own settings files, which snapshots leave out (a permission rule Claude
  * saved to .claude/settings.local.json, ~/.claude/settings.json, ~/.codex/config.toml…).
@@ -45,7 +57,9 @@ export function implementerSettings(cfg: ConfigData, workspace: string, env: Nod
   if (backend === "claude") {
     const { bin, model, permission_prompts, args, role_args } = cfg.claude;
     const own = role_args.implementer ?? [];
-    return digest([backend, bin, model, permission_prompts, args, own, claudeSettingsSignature({ args: [...args, ...own], workspace, env }), ...step]);
+    // Whether it may ask questions changes its run; the default (on) adds nothing, so a mark taken before the setting existed holds.
+    const questions = cfg.clarification?.enabled === false ? [{ clarification: false }] : [];
+    return digest([backend, bin, model, permission_prompts, args, own, claudeSettingsSignature({ args: [...args, ...own], workspace, env }), ...step, ...questions]);
   }
   const { bin, model, args, role_args } = cfg.codex;
   return digest([backend, bin, model, args, role_args.implementer ?? [], codexLocalSignature(workspace, env), ...step]);
@@ -60,7 +74,9 @@ function ownStep(cli: ConfigData["claude"] | ConfigData["codex"]): unknown[] {
 
 /** The parts of what the implementer is given that differ between two marks, in MARK_PARTS order. */
 export function changedParts(before: ProgressMark, now: ProgressMark): Array<keyof ProgressMark> {
-  return (Object.keys(MARK_PARTS) as Array<keyof ProgressMark>).filter((k) => before[k] !== now[k]);
+  // A mark from before the answers existed has none, as a run that was answered nothing.
+  const value = (m: ProgressMark, k: keyof ProgressMark) => (k === "answers" ? m.answers ?? "" : m[k]);
+  return (Object.keys(MARK_PARTS) as Array<keyof ProgressMark>).filter((k) => value(before, k) !== value(now, k));
 }
 
 /**

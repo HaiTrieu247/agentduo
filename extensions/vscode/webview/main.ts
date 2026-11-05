@@ -25,6 +25,7 @@ const ui = createUi(document.getElementById("app")!, {
   usage: () => vscode.postMessage({ type: "usage" }),
   decide: (id, decision, note) => state && vscode.postMessage({ type: "decision", generation: state.generation, id, decision, note }),
   permit: (id, answer) => state && vscode.postMessage({ type: "permission", generation: state.generation, id, answer }),
+  answerQuestion: (id, callId, reply) => state && vscode.postMessage({ type: "question", generation: state.generation, id, callId, reply }),
   command: (name) => vscode.postMessage({ type: "command", name }),
   copy: (text) => vscode.postMessage({ type: "copy", text }),
   findFiles: (seq, query) => vscode.postMessage({ type: "findFiles", seq, query }),

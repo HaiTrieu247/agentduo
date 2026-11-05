@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { answerText, ASK_TOOL, parseQuestions } from "../core/clarification.js";
 import { roleEffort, roleModel, type AgentRole, type ConfigData } from "../core/config.js";
 import { implementerPermissionArgs } from "../core/settings.js";
 import type { Activity, PermissionAnswer } from "../events.js";
@@ -6,7 +7,7 @@ import { resolveBinary } from "./resolve.js";
 import { loadSchema } from "./schema.js";
 import {
   AgentFailure, BinaryNotFound, extractJson, firstLine, relPath, wholeCommand,
-  type AgentBackend, type AgentMeta, type BuildArgs, type FinalOutput, type NativeImage, type ParsedEvent, type StreamParser,
+  type AgentBackend, type AgentMeta, type BuildArgs, type ClarificationReply, type FinalOutput, type NativeImage, type ParsedEvent, type StreamParser,
 } from "./types.js";
 
 const DENIAL_RE = /permission|denied|haven't granted|not allowed/i;
@@ -94,6 +95,14 @@ export class ClaudeParser implements StreamParser {
     const r = event.request;
     if (!r || typeof r !== "object" || r.subtype !== "can_use_tool" || !event.request_id) return [];
     const id = String(event.request_id);
+    // Claude's own question tool: a question of its own, never a permission prompt (and nothing "always allow" can save).
+    if (r.tool_name === ASK_TOOL) {
+      const parsed = parseQuestions((r.input as { questions?: unknown } | undefined)?.questions);
+      return [{
+        type: "question", questions: "questions" in parsed ? parsed.questions : null, ...("error" in parsed ? { error: parsed.error } : {}),
+        raw: { request_id: id, tool_use_id: r.tool_use_id ?? null, input: r.input ?? {} },
+      }];
+    }
     const activity = this.toolActivity({ type: "tool_use", id: String(r.tool_use_id ?? id), name: r.tool_name, input: r.input });
     // Only persistent allow rules: Claude also suggests switching the session to acceptEdits, which is broader than "always allow this".
     const suggestions = (Array.isArray(r.permission_suggestions) ? r.permission_suggestions : [])
@@ -243,6 +252,24 @@ export class ClaudeBackend implements AgentBackend {
     return `${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: raw.request_id, response } })}\n`;
   }
 
+  /**
+   * Claude takes `updatedInput.answers`: its own input back, with an object that maps each question's text to the answer's
+   * text (the chosen labels joined by ", " when several, or the user's own words). Verified against Claude Code 2.1.318
+   * (test/fixtures/claude-question-stream.jsonl). A refusal is a deny with the reason, which Claude reads as the tool's result.
+   */
+  clarificationReply(raw: Record<string, unknown>, reply: ClarificationReply): string {
+    const response = "deny" in reply
+      ? { behavior: "deny", message: reply.deny }
+      : {
+        behavior: "allow",
+        updatedInput: {
+          ...(raw.input && typeof raw.input === "object" ? raw.input as Record<string, unknown> : {}),
+          answers: Object.fromEntries(reply.questions.map((q) => [q.question, answerText(q, reply.answers.find((a) => a.questionId === q.id)!)])),
+        },
+      };
+    return `${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: raw.request_id, response } })}\n`;
+  }
+
   createParser(): ClaudeParser {
     return new ClaudeParser(this.repo);
   }
@@ -264,7 +291,8 @@ export class ClaudeBackend implements AgentBackend {
       tokens: (parser as ClaudeParser).usage?.().tokens,
       sessionId: envelope.session_id, numTurns: envelope.num_turns,
       model: (parser as ClaudeParser).model ?? undefined,
-      permissionDenials: Array.isArray(envelope.permission_denials) ? envelope.permission_denials : [],
+      // A question the user dismissed, or that could not be asked, is not a tool that needs allowing in Claude's settings.
+      permissionDenials: (Array.isArray(envelope.permission_denials) ? envelope.permission_denials : []).filter((d: any) => d?.tool_name !== ASK_TOOL),
     };
     if (envelope.is_error || (envelope.subtype !== undefined && envelope.subtype !== "success")) {
       throw new AgentFailure(`claude reported an error (subtype=${envelope.subtype}): ${String(envelope.result ?? "").slice(0, 500)}`, meta);

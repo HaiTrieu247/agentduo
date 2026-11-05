@@ -21,7 +21,7 @@ import { nowIso, RunStore, type ConversationContext, type EarlierTask, type RunS
 import { readClaudeUsage, readCodexUsage, type UsageReport, type UsageState } from "./core/usage.js";
 import { EXIT, Workflow } from "./core/workflow.js";
 import type {
-  Decider, DiscussionPlace, DiscussionStatus, DiscussionStep, EventBus, ModelMap, PermissionDecider, TurnStatus, Verdict,
+  ClarificationDecider, Decider, DiscussionPlace, DiscussionStatus, DiscussionStep, EventBus, ModelMap, PermissionDecider, TurnStatus, Verdict,
 } from "./events.js";
 import { formatCost, formatTokens, modelText, usageReportText } from "./ui/format.js";
 
@@ -85,6 +85,11 @@ export interface ChatOptions {
   bus: EventBus;
   decider: Decider;
   permissions?: PermissionDecider;
+  /**
+   * Who answers an agent's structured questions (Claude's AskUserQuestion inside a turn, the planner's questions in a
+   * run); absent when nobody can. Codex's turns keep asking in words: the user answers in the next message.
+   */
+  clarifier?: ClarificationDecider;
   ui: ChatUi;
   /** The environment the agents get (and their binaries are looked up in); default: this process's. */
   env?: NodeJS.ProcessEnv;
@@ -145,7 +150,9 @@ export function resumeHint(runsDir: string, workspace: string): string | null {
   const store = latestResumable(runsDir, workspace);
   if (!store) return null;
   const st = store.loadState();
-  const where = st.phase === "HUMAN_REVIEW" ? "is waiting for your decision" : `stopped during ${st.inProgress?.phase ?? st.phase}`;
+  const where = st.phase === "HUMAN_REVIEW"
+    ? (st.humanReview?.reason === "clarification_required" ? "is waiting for your answers to an agent's questions" : "is waiting for your decision")
+    : `stopped during ${st.inProgress?.phase ?? st.phase}`;
   return `Run ${st.taskId} (${firstLine(st.task, 60)}) ${where}. Type /resume to continue it.`;
 }
 
@@ -229,6 +236,11 @@ export class Chat {
     this.models = o.models ?? new ModelRegistry({ cfg: () => this.cfg, workspace: o.workspace, env: this.env, onChange: (m) => o.ui.setModels(m) });
     this.offBus = o.bus.on((e) => {
       if (e.type === "human.required" && this.conversation.pending.length) o.ui.info(DECISION_FILES);
+      // What an agent asks in this conversation's turns and what the user answers is saved the moment it happens (a pipeline's
+      // questions are the run's, not the conversation's: Conversation ignores a request that names no turn of its own).
+      else if (e.type === "clarification.requested") this.conversation.clarificationAsked(e.request);
+      else if (e.type === "clarification.answered") this.conversation.clarificationAnswered(e.id, e.callId, e.answers);
+      else if (e.type === "clarification.closed" && e.status !== "deferred") this.conversation.clarificationClosed(e.id, e.callId, e.status);
     });
   }
 
@@ -562,8 +574,13 @@ export class Chat {
     this.startTurn(backend, question, files);
   }
 
+  /** Claude may ask the user in this chat's turns: someone can answer, and the setting allows it (checked per call, so a change applies at once). */
+  private canAsk(): boolean {
+    return !!this.o.clarifier && this.cfg.clarification?.enabled !== false;
+  }
+
   private directRunner(): AgentRunner {
-    return this.runner ??= new AgentRunner(this.cfg, this.o.workspace, this.conversation.logDir, this.o.bus, { permissions: this.o.permissions, runsDir: this.o.runsDir });
+    return this.runner ??= new AgentRunner(this.cfg, this.o.workspace, this.conversation.logDir, this.o.bus, { permissions: this.o.permissions, clarifications: this.o.clarifier, runsDir: this.o.runsDir });
   }
 
   /** What a conversation is about when its first message was files with no words: their names. */
@@ -582,7 +599,7 @@ export class Chat {
   /** Starts the answer in the background: the active record exists before anything can finish, and only it clears itself. */
   private startTurn(backend: Backend, question: string, files: Attachment[]): void {
     this.entitle(this.titleOf(question, files));
-    const { turn, prompt, omitted } = this.conversation.begin(backend, question, this.conversation.earlier, this.o.workspace, files);
+    const { turn, prompt, omitted } = this.conversation.begin(backend, question, this.conversation.earlier, this.o.workspace, files, this.canAsk());
     this.sentFiles(files);
     this.noteOmitted(omitted);
     const exec: Extract<Execution, { kind: "conversation" }> = { kind: "conversation", turnId: turn.id, backend, abort: new AbortController(), done: Promise.resolve() };
@@ -666,7 +683,7 @@ export class Chat {
     // The discussion keeps the limits it started with (next-run settings), while each agent's options stay the chat's
     // own objects, so a model or flag changed meanwhile reaches its next turn (next-call).
     const snapshot: ConfigData = { ...this.cfg, limits: structuredClone(this.cfg.limits), agents: structuredClone(this.cfg.agents) };
-    const runner = new AgentRunner(snapshot, this.o.workspace, conversation.logDir, this.o.bus, { permissions: this.o.permissions, runsDir: this.o.runsDir });
+    const runner = new AgentRunner(snapshot, this.o.workspace, conversation.logDir, this.o.bus, { permissions: this.o.permissions, clarifications: this.o.clarifier, runsDir: this.o.runsDir });
     const maxRounds = snapshot.limits.max_discussion_rounds;
     const d = conversation.beginDiscussion(answerer, critic, question, maxRounds, files);
     this.sentFiles(files);
@@ -679,7 +696,7 @@ export class Chat {
     const total = { durationSec: 0, costUsd: 0, tokens: 0 };
     const step = async (kind: DiscussionStep, round: number): Promise<TurnOutcome> => {
       if (exec.abort.signal.aborted) return { status: "interrupted", answer: null, error: null, verdict: null, durationSec: 0, costUsd: 0, tokens: 0 };
-      const { turn, prompt } = conversation.discussionTurn(d.id, kind, round, conversation.earlier, this.o.workspace);
+      const { turn, prompt } = conversation.discussionTurn(d.id, kind, round, conversation.earlier, this.o.workspace, this.canAsk());
       const out = await this.callTurn(turn, prompt, exec.abort.signal, { id: d.id, step: kind, round }, runner);
       total.durationSec += out.durationSec;
       total.costUsd += out.costUsd;
@@ -805,7 +822,7 @@ export class Chat {
       return false;
     }
     this.models.refresh();
-    const workflow = new Workflow({ cfg, repo: this.o.workspace, store, state, bus: this.o.bus, decider: this.o.decider, permissions: this.o.permissions, env: this.env });
+    const workflow = new Workflow({ cfg, repo: this.o.workspace, store, state, bus: this.o.bus, decider: this.o.decider, permissions: this.o.permissions, clarifier: this.o.clarifier, env: this.env });
     this.escaped = false;
     const exec: Extract<Execution, { kind: "pipeline" }> = { kind: "pipeline", store, workflow, cfg, done: Promise.resolve() };
     const conversation = this.conversation;
@@ -833,10 +850,18 @@ export class Chat {
       const st = store.loadState();
       if (code === EXIT.INTERRUPTED && this.escaped) {
         this.paused = store;
-        this.o.ui.info(`Stopped ${st.inProgress?.phase ?? st.phase}. /resume re-runs it (/resume <what to change> adds a note); /new leaves it. Meanwhile you can ask Claude or Codex.`);
+        // Stopped on a question of Claude's: the step runs again only once it is answered, so /resume asks it first.
+        const owes = st.phase === "HUMAN_REVIEW" && st.humanReview?.reason === "clarification_required";
+        this.o.ui.info(owes
+          ? `Stopped ${st.humanReview!.fromPhase} on a question of Claude's. /resume asks it again, and re-runs the step with your answer; /new leaves it. Meanwhile you can ask Claude or Codex.`
+          : `Stopped ${st.inProgress?.phase ?? st.phase}. /resume re-runs it (/resume <what to change> adds a note); /new leaves it. Meanwhile you can ask Claude or Codex.`);
         return;
       }
-      if (code === EXIT.HUMAN_REVIEW) this.o.ui.info("The run is waiting for your decision; type /resume to decide.");
+      if (code === EXIT.HUMAN_REVIEW) {
+        this.o.ui.info(st.humanReview?.reason === "clarification_required"
+          ? "The run is waiting for your answers to an agent's questions; type /resume to answer them."
+          : "The run is waiting for your decision; type /resume to decide.");
+      }
       // The conversation that started it keeps what came of it.
       conversation.addEarlier(await this.outcome(st));
     })().finally(() => {

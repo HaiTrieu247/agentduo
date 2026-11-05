@@ -111,7 +111,7 @@ export class FakeClis {
 
   /** Agent calls (not permission answers, not codex doctor, its catalog or a usage lookup), optionally of one role ("chat_claude" for a chat answer). */
   calls(role?: string): FakeCall[] {
-    return this.entries().filter((e) => !e.permission && !e.doctor && !e.catalog && !e.usage).map((e) => e as unknown as FakeCall).filter((c) => !role || c.role === role);
+    return this.entries().filter((e) => !e.permission && !e.question && !e.doctor && !e.catalog && !e.usage).map((e) => e as unknown as FakeCall).filter((c) => !role || c.role === role);
   }
 
   /** Every `claude -p /usage`, `claude auth status` and finished `codex app-server` run: its arguments, and the methods the app server was asked. */
@@ -127,6 +127,11 @@ export class FakeClis {
   /** The arguments of every `codex debug models` run. */
   catalogCalls(): string[][] {
     return this.entries().flatMap((e) => (e.catalog ? [e.args as string[]] : []));
+  }
+
+  /** The replies the fake Claude received to its AskUserQuestion requests (`behavior` allow with `updatedInput.answers`, or deny), in order. */
+  questionReplies(): Array<{ behavior: string; message?: string; updatedInput?: { answers?: Record<string, string> } }> {
+    return this.entries().flatMap((e) => (e.question ? [e.question as { behavior: string; message?: string }] : []));
   }
 
   /** The answers the fake Claude received to its permission prompts, in order. */

@@ -26,9 +26,10 @@ import { verificationLines } from "../../../src/core/verification.js";
 import { EventBus, type DuoEvent, type HumanReview, type ModelMap, type PermissionAnswer } from "../../../src/events.js";
 import { packageVersion } from "../../../src/paths.js";
 import { PIPELINE } from "../../../src/ui/format.js";
+import { ClarificationBroker } from "../../../src/core/clarification-broker.js";
 import { DecisionBroker, PermissionBroker } from "./decisionBroker.js";
 import type {
-  AccountUsage, ArtifactContent, ArtifactName, ChangeList, DecisionAnswer, FocusedRun, InitializeResult, PipelineStep, Problem, Route, SettingRequest,
+  AccountUsage, ArtifactContent, ArtifactName, ChangeList, ClarificationReplyPayload, DecisionAnswer, FocusedRun, InitializeResult, PipelineStep, Problem, Route, SettingRequest,
   SnapshotFile, SnapshotSide, UiUpdate, WorkerErrorCode, WorkerResults,
 } from "./protocol.js";
 
@@ -59,6 +60,8 @@ interface Tab {
   bus: EventBus;
   decisions: DecisionBroker;
   permissions: PermissionBroker;
+  /** The agents' structured questions waiting for this tab's user. */
+  clarifications: ClarificationBroker;
 }
 
 type Run = { store: RunStore; state: RunState };
@@ -290,10 +293,11 @@ export class RuntimeSession {
       closed: (id) => this.o.sink.decisionClosed(conversation, id),
     });
     const permissions = new PermissionBroker();
+    const clarifications = new ClarificationBroker();
     const ui = this.uiFor(conversation);
     const models = this.modelsFor(env);
     const chat = new Chat({
-      cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, userConfigFile: env.userConfigFile, bus, decider: decisions, permissions, ui, env: this.o.env, models,
+      cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, userConfigFile: env.userConfigFile, bus, decider: decisions, permissions, clarifier: clarifications, ui, env: this.o.env, models,
       conversationId: conversation, busyElsewhere: () => this.runningElsewhere(conversation), changed: (change, wrote) => this.changedIn(conversation, change, wrote),
     });
     // The settings changed in the other tabs of this session and in Settings (already said and saved there).
@@ -301,7 +305,7 @@ export class RuntimeSession {
     const chosen = this.chosen.get(conversation);
     this.chosen.delete(conversation);
     if (chosen) chat.selectRecipient(chosen);
-    this.tabs.set(conversation, { chat, bus, decisions, permissions });
+    this.tabs.set(conversation, { chat, bus, decisions, permissions, clarifications });
     models.refresh();
     ui.setRecipient(chat.to);
     return chat;
@@ -548,6 +552,7 @@ export class RuntimeSession {
       if (!tab) return;
       this.tabs.delete(conversation);
       tab.decisions.deferAll(true);
+      await this.deferQuestions(tab, true);
       await this.denyPermissions(tab, true);
       await tab.chat.stop();
     });
@@ -561,6 +566,45 @@ export class RuntimeSession {
   answerPermission(requestId: string, answer: PermissionAnswer): void {
     for (const tab of this.tabs.values()) if (tab.permissions.answer(requestId, answer)) return;
     throw new SessionError("stale", "this permission prompt was already answered or is no longer pending");
+  }
+
+  /**
+   * The user's reply to a question of an agent, applied only to the pending request `requestId` of call `callId` in
+   * `conversation`: another tab's, an earlier call's, an answered or ended request, are all `stale` and change nothing; an
+   * answer that does not fit the questions is refused with why, and the question keeps waiting.
+   */
+  answerClarification(conversation: string, requestId: string, callId: string, reply: ClarificationReplyPayload): void {
+    const broker = this.tabs.get(conversation)?.clarifications;
+    const stale = () => new SessionError("stale", "this question was already answered or is no longer pending");
+    if (!broker) throw stale();
+    if (reply.kind === "answered") {
+      const result = broker.answer(requestId, callId, reply.answers);
+      if (result.ok) return;
+      throw result.reason === "stale" ? stale() : new SessionError("bad_request", `the answers do not fit the questions: ${result.errors.join("; ")}`);
+    }
+    if (!(reply.kind === "cancelled" ? broker.cancel(requestId, callId) : broker.defer(requestId, callId))) throw stale();
+  }
+
+  /**
+   * A tab's open questions are put off and the runner has recorded each as interrupted (or the planner's as pending again): a
+   * question of a call that is going away is never left waiting, and never answered into a process that has gone.
+   */
+  private async deferQuestions(tab: Tab, close: boolean): Promise<void> {
+    const open = new Set(tab.clarifications.pending().map((r) => r.id));
+    const recorded = new Promise<void>((resolve) => {
+      if (!open.size) return resolve();
+      const timer = setTimeout(done, 500);
+      const off = tab.bus.on((e) => {
+        if (e.type === "clarification.closed" && open.delete(e.id) && !open.size) done();
+      });
+      function done() {
+        clearTimeout(timer);
+        off();
+        resolve();
+      }
+    });
+    tab.clarifications.deferAll(close);
+    await recorded;
   }
 
   /**
@@ -590,6 +634,7 @@ export class RuntimeSession {
     const tabs = [...this.tabs];
     this.tabs.clear();
     for (const [, tab] of tabs) tab.decisions.deferAll(close);
+    await Promise.all(tabs.map(([, tab]) => this.deferQuestions(tab, close)));
     await Promise.all(tabs.map(([, tab]) => this.denyPermissions(tab, close)));
     await Promise.all(tabs.map(([, tab]) => tab.chat.stop()));
     for (const [id] of tabs) this.o.sink.ui({ type: "status", status: "idle" }, id);

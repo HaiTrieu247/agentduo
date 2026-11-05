@@ -307,6 +307,34 @@ describe("agentduo desktop", () => {
     await expect.poll(() => img.evaluate((i) => (i as HTMLImageElement).naturalWidth), { timeout: 10_000 }).toBe(8);
   });
 
+  it("shows Claude's question as a form with the choices described, sends nothing until every question is answered, and goes on in the same call", async () => {
+    fake.setScenario({
+      chat_claude: [{
+        answer: "Claude went with the session cookie",
+        questions: [{ questions: [{
+          question: "Which auth should the demo use?", header: "Auth", multiSelect: false,
+          options: [{ label: "Token", description: "a bearer token in a header" }, { label: "Session", description: "a cookie kept by the server" }],
+        }] }],
+      }],
+    });
+    await send("/claude Add login");
+    const form = page.locator(`${SHOWN} .card.question`);
+    await form.waitFor({ timeout: 30_000 });
+    const text = (await form.textContent()) ?? "";
+    for (const shown of ["Auth", "Which auth should the demo use?", "Token", "a bearer token in a header", "Session", "a cookie kept by the server"]) expect(text).toContain(shown);
+    // It is a question, not a permission prompt: nothing to "always allow", nothing chosen, nothing to send yet.
+    expect(await form.getByRole("button", { name: /always allow/i }).count()).toBe(0);
+    expect(await form.locator("input:checked").count()).toBe(0);
+    expect(await form.getByRole("button", { name: "Submit answers" }).isDisabled()).toBe(true);
+    expect(fake.questionReplies()).toEqual([]);
+    await form.locator(".q-option", { hasText: "Session" }).click();
+    await form.getByRole("button", { name: "Submit answers" }).click();
+    await seeInChat("Claude went with the session cookie");
+    expect(fake.questionReplies()).toMatchObject([{ behavior: "allow", updatedInput: { answers: { "Which auth should the demo use?": "Session" } } }]);
+    // The question stays in the conversation, with its answer.
+    expect(await page.locator(`${SHOWN} .question-history`).last().textContent()).toContain("Session");
+  });
+
   it("discusses a question until both agents agree, and shows the final answer", async () => {
     fake.setScenario({ discuss_answer: [{ answer: "Use SQLite." }], discuss_synthesis: [{ answer: "Final: SQLite it is." }] });
     await send("/discuss Which database should the demo use?");

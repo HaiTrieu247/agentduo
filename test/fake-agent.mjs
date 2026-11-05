@@ -8,6 +8,10 @@
 // synthesis); an unscripted critique agrees, and an unscripted synthesis is a chat answer.
 // Claude in host mode (--permission-prompt-tool stdio) reads the prompt as a stream-json user message, asks
 // for each scripted `permissions` entry with a control_request, and applies the answer the way Claude does.
+// A scripted `questions` entry (host mode only: without a host the real CLI is not offered the tool) asks AskUserQuestion with
+// a control_request ({ questions: [...] } is its input), logs the reply as `question`, and goes on in the same call; a
+// refused one is a denial, as in the real CLI. A planner call whose schema is the planner's (a `result` property) gets a bare
+// Plan output wrapped as { result: { kind: "plan", plan } }; an output that already has a `result` is sent as it is.
 // Claude with --input-format stream-json but no host reads that one message, then stdin must close. A message's
 // content may be blocks: its text blocks are the prompt, and its image blocks are logged as `images` (media type,
 // base64 length, and the sha256 of the bytes). Codex logs each --image=<path> the same way, from the file.
@@ -126,6 +130,18 @@ async function main() {
   };
   writeFiles(resp.write);
   const denials = [...(resp.denials ?? [])];
+  for (const [i, ask] of (host ? resp.questions ?? [] : []).entries()) {
+    const toolUseId = `ask-tool-${i}`;
+    process.stdout.write(JSON.stringify({ type: "control_request", request_id: `ask-${i}`, request: {
+      subtype: "can_use_tool", tool_name: "AskUserQuestion", display_name: "AskUserQuestion", input: ask, tool_use_id: toolUseId, requires_user_interaction: true,
+    } }) + "\n");
+    const line = (await stdin.next()).value;
+    if (!line) return 9; // the host closed stdin or killed the call: nothing more to do
+    const reply = JSON.parse(line).response.response;
+    appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend, role, question: reply }) + "\n");
+    if (reply.behavior !== "allow") denials.push({ tool_name: "AskUserQuestion", tool_use_id: toolUseId, tool_input: ask });
+    if (resp.afterQuestion) await new Promise((r) => setTimeout(r, resp.afterQuestion));
+  }
   for (const [i, ask] of (host ? resp.permissions ?? [] : []).entries()) {
     const toolUseId = `perm-tool-${i}`;
     const suggestions = [{ type: "addRules", rules: ask.rules ?? [], behavior: "allow", destination: "localSettings" }, { type: "setMode", mode: "acceptEdits", destination: "session" }];
@@ -164,7 +180,10 @@ async function main() {
   } else if ("raw" in resp) {
     text = resp.raw;
   } else {
-    const output = structuredClone(resp.output);
+    let output = structuredClone(resp.output);
+    const schemaText = args.includes("--output-schema") ? readFileSync(args[args.indexOf("--output-schema") + 1], "utf8")
+      : args.includes("--json-schema") ? args[args.indexOf("--json-schema") + 1] : null;
+    if (schemaText && JSON.parse(schemaText).properties?.result && output && !output.result) output = { result: { kind: "plan", plan: output } };
     if (output.reviewed_commit === "$SNAPSHOT") output.reviewed_commit = /Revision under review: `([0-9a-f]{40})`/.exec(prompt)[1];
     text = JSON.stringify(output);
   }

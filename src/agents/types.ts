@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import type { AgentRole } from "../core/config.js";
+import type { ClarificationAnswer, ClarificationQuestion } from "../core/clarification.js";
 import type { Activity, PermissionAnswer, PermissionRequest } from "../events.js";
 import type { SchemaName } from "./schema.js";
 
@@ -26,6 +27,11 @@ export type ParsedEvent =
   | { type: "usage"; costUsd?: number; tokens?: number }
   /** A permission prompt in host mode; `raw` is what the backend needs to answer it. */
   | { type: "permission"; request: PermissionRequest; raw: Record<string, unknown> }
+  /**
+   * Claude's AskUserQuestion in host mode: `questions` as the user is shown them, or `error` when the request cannot be
+   * (agentduo then refuses it and says why). `raw` is what the backend needs to answer it.
+   */
+  | { type: "question"; questions: ClarificationQuestion[] | null; error?: string; raw: Record<string, unknown> }
   /** The CLI said which model this call runs on. */
   | { type: "model"; model: string }
   /** The final result arrived; in host mode the runner closes stdin so the CLI exits. */
@@ -52,7 +58,11 @@ export interface NativeImage {
 
 interface CallArgs {
   lastMessageFile: string;
-  /** Route permission prompts to the runner (host mode) instead of denying them. */
+  /**
+   * Host mode: the CLI sends its permission prompts and AskUserQuestion to the runner instead of deciding them itself
+   * (denying the prompts; the question tool is not offered). The runner answers each: what is allowed stays the user's
+   * configuration's.
+   */
   askPermissions?: boolean;
   /** Images to attach to the prompt, in order. */
   images?: NativeImage[];
@@ -107,7 +117,15 @@ export interface AgentBackend {
   hostInput?(prompt: string, images?: NativeImage[]): string;
   /** Host mode: the answer to a permission prompt. */
   permissionReply?(raw: Record<string, unknown>, answer: PermissionAnswer): string;
+  /**
+   * Host mode: the answer to a structured question (`raw` from the `question` event): the user's answers in the CLI's
+   * format, or a refusal that tells the agent why it got none.
+   */
+  clarificationReply?(raw: Record<string, unknown>, reply: ClarificationReply): string;
 }
+
+/** `answers` are in the order of `questions`; `deny`: no answer is given, and the agent is told why. */
+export type ClarificationReply = { questions: ClarificationQuestion[]; answers: ClarificationAnswer[] } | { deny: string };
 
 export class AgentFailure extends Error {
   override name = "AgentFailure";

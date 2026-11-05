@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { initialState } from "../../../extensions/vscode/webview/state.js";
 import { chatStatus } from "../src/renderer/chat.js";
+import { activityOf } from "../src/main/projects.js";
+import type { ClarificationRequest } from "../../../src/core/clarification.js";
 import { gateActivities } from "../src/renderer/inspector.js";
 import { needsSignIn, readyToGo } from "../src/renderer/onboarding.js";
 import { readConfiguration } from "../../../src/core/configuration.js";
@@ -68,8 +70,12 @@ describe("settings editors", () => {
     expect(kinds).toMatchObject({
       "limits.max_review_rounds": "number", "claude.max_budget_usd": "number", "claude.permission_prompts": "choice", "agents.implementer": "choice",
       "codex.args": "list", "claude.role_args.implementer": "list", "claude.model": "text", "codex.bin": "text",
-      "claude.role_models.implementer": "text", "codex.role_efforts.planner": "choice",
+      "claude.role_models.implementer": "text", "codex.role_efforts.planner": "choice", "clarification.enabled": "choice",
     });
+    // The questions switch sits with the workflow's roles, is labelled as what it does and is checked as a true/false.
+    expect([groupOf("clarification.enabled"), settingLabel("clarification.enabled"), editorKind({ kind: "toggle" })]).toEqual(["agents", "Questions from the agents", "choice"]);
+    expect([checkSettingValue(settingKey("clarification.enabled")!, false), checkSettingValue(settingKey("clarification.enabled")!, "off")])
+      .toEqual([null, "clarification.enabled must be true or false"]);
     expect(CHOICES.prompts).toEqual(["ask", "deny"]);
     // The pipeline profile: a choice of the values config validation allows, with the workflow's roles.
     expect([CHOICES.profile, editorKind({ kind: "profile" }), groupOf("pipeline.profile")]).toEqual([["lightweight", "standard", "thorough"], "choice", "agents"]);
@@ -310,6 +316,19 @@ describe("chat status and gates", () => {
   it("says what a fresh chat is doing", () => {
     expect(chatStatus(null)).toBe("starting…");
     expect(chatStatus(initialState("active", "/repo", 1))).toBe("ready");
+  });
+  it("says an agent's question waits for you, and counts it among what waits", () => {
+    const ask: ClarificationRequest = {
+      id: "c1", source: "claude", callId: "call-1", agent: "claude", turnId: "t1", at: "t",
+      questions: [{ id: "q1", header: "Auth", question: "Which auth?", multiSelect: false, options: [{ id: "q1o1", label: "Token", description: "a" }, { id: "q1o2", label: "Session", description: "b" }] }],
+    };
+    const s = { ...initialState("active", "/repo", 1), questions: [ask] };
+    expect(chatStatus(s)).toBe("1 question(s) from the agents waiting");
+    expect(activityOf(s)).toBe("Waiting for your answer");
+    // A view saved before questions existed has none.
+    const { questions: _none, ...old } = initialState("active", "/repo", 1);
+    expect(chatStatus(old as typeof s)).toBe("ready");
+    expect(activityOf(old as typeof s)).toBeNull();
   });
   it("lists the gates a view saw, the latest result of each", () => {
     const s = initialState("active", "/repo", 1);
