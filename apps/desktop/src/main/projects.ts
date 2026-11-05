@@ -336,6 +336,9 @@ export class ProjectManager {
       case "usage":
         void c.usage();
         break;
+      case "findFiles":
+        void c.findFiles(message.seq, message.query);
+        break;
       case "decision":
         void c.answerDecision(message.generation, message.id, message.decision, message.note);
         break;

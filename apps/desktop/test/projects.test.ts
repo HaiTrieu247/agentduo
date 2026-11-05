@@ -312,6 +312,20 @@ describe("with real workers", () => {
     expect((await again.file("logo.bin")).after).toMatchObject({ binary: true, text: null });
   }, 120_000);
 
+  it("answers a composer's @ with the project's paths, to the view that asked", async () => {
+    writeYaml(userConfig(), { claude: { bin: fake.path("claude") }, codex: { bin: fake.path("codex") } });
+    const h = harness({ worker: worker.script, env: env() });
+    const p = await project(h, "p", null);
+    const { conversationId } = await ok<{ conversationId: string }>(h.d.handle(good, { method: "conversation.new", projectId: p.id }));
+    const view = h.events.filter((e) => e.type === "host" && e.projectId === p.id && e.conversationId === conversationId).map((e) => (e as { view: number }).view).at(-1)!;
+    await ok(h.d.handle(good, { method: "chat.message", projectId: p.id, conversationId, view, message: { type: "findFiles", seq: 3, query: "check" } }));
+    await waitUntil(() => h.events.some((e) => e.type === "host" && e.message.type === "fileMatches"), 20_000, "the matches");
+    expect(h.events.find((e) => e.type === "host" && e.message.type === "fileMatches")).toEqual({
+      type: "host", projectId: p.id, conversationId, view, message: { type: "fileMatches", seq: 3, matches: [{ path: "check.mjs", kind: "file" }] },
+    });
+    expect(fake.calls()).toEqual([]);
+  }, 120_000);
+
   it("starts a new conversation with the default recipient, and keeps a saved one's", async () => {
     writeYaml(userConfig(), { claude: { bin: fake.path("claude") }, codex: { bin: fake.path("codex") } });
     const h = harness({ worker: worker.script, env: env() });

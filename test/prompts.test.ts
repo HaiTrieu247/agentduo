@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ReviewFindings } from "../src/core/findings.js";
 import type { GateResult } from "../src/core/gates.js";
 import type { Change } from "../src/core/git.js";
+import type { PathEntry } from "../src/core/mention-text.js";
 import * as prompts from "../src/core/prompts.js";
 import { critique, finding, impl, issue, plan } from "./helpers/builders.js";
 
@@ -345,6 +346,42 @@ describe("attachment manifests", () => {
       expect(p).toContain("no longer available");
     }
     expect(prompts.planner(ctx, 1, 1, null, null)).not.toContain("Files");
+  });
+});
+
+describe("tagged workspace paths", () => {
+  const entries: Record<string, PathEntry[]> = {
+    "Explain @src/a.ts and @src": [{ path: "src/a.ts", kind: "file" }, { path: "src/", kind: "folder" }],
+    "Fix @app.txt": [{ path: "app.txt", kind: "file" }],
+    "look at @docs/x.md": [{ path: "docs/x.md", kind: "file" }],
+  };
+  const tagged = (text: string) => entries[text] ?? [];
+  const empty = { exchanges: [], omitted: 0 };
+
+  it("list the message's tagged files and folders once, after it", () => {
+    const p = prompts.conversation({ workspace: "/ws", backend: "claude", context: empty, earlier: [], question: "Explain @src/a.ts and @src", tagged });
+    expect(p).toContain("### Workspace paths the user tagged\n");
+    expect(p).toContain("- `src/a.ts` (file)\n- `src/` (folder)");
+    expect(p.indexOf("Explain @src/a.ts")).toBeLessThan(p.indexOf("### Workspace paths the user tagged"));
+    expect(prompts.conversation({ workspace: "/ws", backend: "claude", context: empty, earlier: [], question: "hi", tagged })).not.toContain("tagged");
+    expect(prompts.conversation({ workspace: "/ws", backend: "claude", context: empty, earlier: [], question: "Explain @src/a.ts and @src" })).not.toContain("tagged");
+  });
+
+  it("give every discussion step the question's, and the pipeline the task's and the notes'", () => {
+    for (const step of ["answer", "critique", "revise", "synthesis"] as const) {
+      const p = prompts.discussion({
+        workspace: "/ws", context: empty, earlier: [], question: "Explain @src/a.ts and @src", answerer: "codex", critic: "claude", maxRounds: 2, step, round: 1, history: [], tagged,
+      });
+      expect(p).toContain("- `src/a.ts` (file)\n- `src/` (folder)");
+    }
+    const withTags: prompts.PromptContext = {
+      ...ctx, task: "Fix @app.txt", tagged, notes: [{ at: "2026-11-04T10:00:00+07:00", phase: "IMPLEMENT", note: "look at @docs/x.md" }],
+    };
+    for (const p of [prompts.planner(withTags, 1, 1, null, null), prompts.implementer(withTags, 1, "# Plan", null, [], null)]) {
+      expect(p.indexOf("### Workspace paths the user tagged in the task")).toBeGreaterThan(p.indexOf("## Task"));
+      expect(p).toContain("- `app.txt` (file)");
+      expect(p).toContain("- (2026-11-04T10:00:00+07:00, during IMPLEMENT) look at @docs/x.md\n  Tagged: `docs/x.md`");
+    }
   });
 });
 

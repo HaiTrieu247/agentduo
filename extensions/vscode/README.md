@@ -70,6 +70,10 @@ Click the agentduo button in an editor's title bar (beside Claude Code's and Cod
   each agent's account, how much of their plans' limits Claude Code and Codex have used, a meter per limit, then Claude's "What's contributing
   to your limits usage?". Each part fills in as its agent answers. **Refresh** looks again; Esc or **✕** closes it, and
   an answer under way goes on. A permission prompt or a decision goes before it.
+- **@ to tag files.** Type `@` in the composer to list the workspace's files and folders; typing more narrows the list,
+  best match first. ↑↓ choose, Tab opens a folder or puts a file in, Enter puts the path in, Esc closes the list; a click
+  works as Tab. The agents get the tagged paths to read with their own tools (nothing is copied), as in the terminal
+  chat.
 - **Attached files.** The paperclip under the input picks any files (images, PDFs, text, code…). You can also paste an
   image (Cmd/Ctrl+V), or **hold Shift** while you drag files from Finder or Explorer onto the composer: VS Code needs
   Shift to let a webview take a drop. A drag from VS Code's own Explorer or an editor carries no file the tab can read,

@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { killAllActive } from "../../../src/agents/process.js";
 import { Chat, resumeHint, snapshotNote, type ChatUi, type SaveFlags } from "../../../src/chat.js";
@@ -11,6 +11,8 @@ import {
 import { Conversation } from "../../../src/core/conversation.js";
 import type { Check } from "../../../src/core/doctor.js";
 import { diagnose, EnvironmentError, prepareEnvironment, runnableProblem, type WorkspaceEnv } from "../../../src/core/environment.js";
+import type { PathEntry } from "../../../src/core/mention-text.js";
+import { workspaceExcludes, WorkspacePaths } from "../../../src/core/mentions.js";
 import { ModelRegistry, resolvingModels } from "../../../src/core/models.js";
 import type { Review } from "../../../src/core/outputs.js";
 import { findingsMarkdown } from "../../../src/core/render.js";
@@ -138,6 +140,8 @@ export class RuntimeSession {
    * change made of the effective config).
    */
   private changed: SettingChange[] = [];
+  /** The workspace's paths for @ mentions, listed for the runs directory they leave out. */
+  private paths: { runsDir: string; paths: WorkspacePaths } | null = null;
   /**
    * The files' configuration as this session last read it (when it read the config, and after each file change it
    * made or was told of): a key whose value in the files moves away from it is followed by every tab.
@@ -771,6 +775,17 @@ export class RuntimeSession {
     const o = { cfg, workspace: this.env?.workspace ?? this.o.workspace, env: this.o.env, signal: this.lookups.signal };
     const [claude, codex] = await Promise.all([readClaudeUsage(o), readCodexUsage(o)]);
     return { claude, codex };
+  }
+
+  /**
+   * The workspace's files and folders for what a composer typed after an @, best first, without agentduo's runs. Only
+   * reads, for no tab: no lock, no agent; the list is kept a few seconds, so typing does not list the workspace each time.
+   */
+  async findFiles(query: string): Promise<PathEntry[]> {
+    if (this.closing) throw new SessionError("shutting_down", "the worker is shutting down");
+    const runsDir = this.env?.runsDir ?? join(this.workspace, ".agentduo", "runs");
+    if (this.paths?.runsDir !== runsDir) this.paths = { runsDir, paths: new WorkspacePaths(this.workspace, { exclude: workspaceExcludes(this.workspace, [runsDir]) }) };
+    return this.paths.paths.find(query);
   }
 
   async doctor(): Promise<Check[]> {

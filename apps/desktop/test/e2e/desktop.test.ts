@@ -314,6 +314,40 @@ describe("agentduo desktop", () => {
     expect(fake.calls().map((c) => c.role)).toEqual(expect.arrayContaining(["discuss_answer", "discuss_synthesis"]));
   });
 
+  it("suggests the project's files and folders after an @, narrows them as the user types, and tags the ones picked", async () => {
+    mkdirSync(join(repo, "docs"), { recursive: true });
+    writeFileSync(join(repo, "docs", "guide.md"), "# Guide\n");
+    const input = page.locator(`${SHOWN} .composer-input`);
+    const shown = () => page.locator(`${SHOWN} .completions:not([hidden]) .completion.mention`).evaluateAll((l) => l.map((e) => (e as HTMLElement).dataset.path));
+    // A bare @: the project's top level, folders first.
+    await input.fill("Summarise @");
+    await expect.poll(shown, { timeout: 15_000 }).toEqual(expect.arrayContaining(["docs/", "README.md", "check.mjs"]));
+    expect((await shown()).indexOf("docs/")).toBeLessThan((await shown()).indexOf("README.md"));
+    // More letters narrow it, best first; Enter puts the path in with a space after it, and the list closes.
+    await input.pressSequentially("gui");
+    await expect.poll(async () => (await shown())[0], { timeout: 15_000 }).toBe("docs/guide.md");
+    await input.press("Enter");
+    expect(await input.inputValue()).toBe("Summarise @docs/guide.md ");
+    await expect.poll(shown).toEqual([]);
+    // Tab on a folder opens it: its own entries are listed, and typing goes on inside it.
+    await input.pressSequentially("and @do");
+    await expect.poll(async () => (await shown())[0], { timeout: 15_000 }).toBe("docs/");
+    await input.press("Tab");
+    expect(await input.inputValue()).toBe("Summarise @docs/guide.md and @docs/");
+    await expect.poll(shown, { timeout: 15_000 }).toEqual(["docs/guide.md"]);
+    await input.press("Escape");
+    await expect.poll(shown).toEqual([]);
+    // It goes to the recipient the chat has now (an earlier /claude chose Claude).
+    fake.setScenario({ chat_codex: [{ answer: "The agent read the guide" }], chat_claude: [{ answer: "The agent read the guide" }] });
+    await input.pressSequentially(" too");
+    await input.press("Enter");
+    await seeInChat("The agent read the guide");
+    const prompt = fake.calls().filter((c) => c.role.startsWith("chat_")).at(-1)!.prompt;
+    expect(prompt).toContain("Summarise @docs/guide.md and @docs/ too");
+    expect(prompt).toContain("### Workspace paths the user tagged\n");
+    expect(prompt).toContain("- `docs/guide.md` (file)\n- `docs/` (folder)");
+  });
+
   it("keeps main's selection with the conversation shown: A, then B, then A again, through a preference change", async () => {
     const a = (await activeConversation()).conversationId!;
     await page.locator(".sidebar .nav-head", { hasText: "Conversations" }).getByTitle("New conversation").click();
@@ -467,6 +501,43 @@ describe("agentduo desktop", () => {
     await page.locator("#pref-theme").selectOption("dark");
     await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe("dark");
     await closeSettings();
+  });
+
+  it("resizes the sidebar by dragging its edge or with the keyboard, resets it with a double-click, and keeps the width after a restart", async () => {
+    const width = () => page.locator(".sidebar").evaluate((e) => Math.round(e.getBoundingClientRect().width));
+    const saved = async () => (await invoke<{ prefs: { sidebarWidth: number } }>({ method: "app.state" })).prefs.sidebarWidth;
+    const edge = page.locator(".sidebar-edge");
+    const drag = async (by: number) => {
+      const box = (await edge.boundingBox())!;
+      const x = box.x + box.width / 2;
+      await page.mouse.move(x, box.y + 300);
+      await page.mouse.down();
+      await page.mouse.move(x + by / 2, box.y + 300, { steps: 3 });
+      await page.mouse.move(x + by, box.y + 300, { steps: 3 });
+      await page.mouse.up();
+    };
+    expect(await width()).toBe(248);
+    await drag(100);
+    expect(await width()).toBe(348);
+    await expect.poll(saved).toBe(348);
+    // No wider than its limit, however far it goes.
+    await drag(400);
+    expect(await width()).toBe(480);
+    await edge.focus();
+    await edge.press("ArrowLeft");
+    expect(await edge.getAttribute("aria-valuenow")).toBe("464");
+    await expect.poll(saved).toBe(464);
+    await edge.dblclick();
+    expect(await width()).toBe(248);
+    await expect.poll(saved).toBe(248);
+    await drag(72);
+    await expect.poll(saved).toBe(320);
+    await quit();
+    await launch();
+    await page.locator(`${SHOWN} .composer-input`).waitFor({ timeout: 30_000 });
+    expect(await width()).toBe(320);
+    await page.locator(".sidebar-edge").dblclick();
+    await expect.poll(saved).toBe(248);
   });
 
   it("finds a newer version on its update feed and says how to get it, in Settings and the sidebar", async () => {

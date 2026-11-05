@@ -10,6 +10,7 @@ import { ChatHost, chatStatus, type Mount } from "./chat.js";
 import { Inspector, type InspectorTab } from "./inspector.js";
 import { Onboarding } from "./onboarding.js";
 import { SettingsPanel, type SettingsSection } from "./settings.js";
+import { sidebarResizer } from "./resizer.js";
 import { renderSidebar, type SidebarModel } from "./sidebar.js";
 import { applyAppearance } from "./theme.js";
 import { restartQuestion } from "./update.js";
@@ -33,7 +34,9 @@ const toast = el("div", { class: "toast", attrs: { role: "alert" } });
 settingsEl.hidden = true;
 onboardEl.hidden = true;
 toast.hidden = true;
-root.replaceChildren(el("div", { class: "workbench" }, sidebar, center, inspectorEl), settingsEl, onboardEl, toast);
+// The sidebar's right edge, over the line between it and the chat: dragged, it sets the sidebar's width.
+const sidebarEdge = el("div", { class: "sidebar-edge" });
+root.replaceChildren(el("div", { class: "workbench" }, sidebar, center, inspectorEl, sidebarEdge), settingsEl, onboardEl, toast);
 
 let snapshot: AppSnapshot | null = null;
 const current = (): AppSnapshot | null => snapshot;
@@ -45,6 +48,7 @@ const model: SidebarModel = {
 const usage = new UsageStore((projectId) => call({ method: "account.usage", projectId }));
 let inspectorOpen = true;
 let narrowOverride: boolean | null = null;
+const sidebarWidth = sidebarResizer(sidebarEdge, (width) => void setPrefs({ sidebarWidth: width }).catch(showError));
 
 function showError(e: unknown): void {
   toast.textContent = errorText(e);
@@ -123,6 +127,7 @@ function setSnapshot(next: AppSnapshot): void {
   model.snapshot = next;
   setUpdate(next.update);
   inspectorOpen = next.prefs.inspector;
+  sidebarWidth.set(next.prefs.sidebarWidth);
   applyAppearance({ theme: next.prefs.theme, dark: next.dark, fontSize: next.prefs.fontSize });
   if (before?.projectId !== next.active.projectId) {
     model.runs = null;
@@ -359,6 +364,7 @@ async function showOnboarding(): Promise<void> {
 
 window.addEventListener("resize", () => {
   if (window.innerWidth >= NARROW) narrowOverride = null;
+  sidebarWidth.fit();
   layout();
 });
 

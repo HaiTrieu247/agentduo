@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Conversation, listConversations } from "../src/core/conversation.js";
@@ -25,6 +25,19 @@ describe("Conversation", () => {
     expect(turn.status).toBe("running");
     expect(existsSync(join(t.path, "state.json"))).toBe(false);
     expect(c.dir.startsWith(join(t.path, "conversations"))).toBe(true);
+  });
+
+  it("lists the workspace paths a message or a discussion question tags with @, in its prompts", () => {
+    const ws = join(t.path, "ws");
+    mkdirSync(join(ws, "src"), { recursive: true });
+    writeFileSync(join(ws, "src", "a.ts"), "x\n");
+    const c = new Conversation(join(t.path, "runs"));
+    const { prompt } = c.begin("claude", "What does @src/a.ts do? And @missing.ts?", [], ws);
+    expect(prompt).toContain("### Workspace paths the user tagged\n");
+    expect(prompt).toContain("- `src/a.ts` (file)");
+    expect(prompt).not.toContain("`missing.ts`");
+    const d = c.beginDiscussion("codex", "claude", "Is @src right?", 1);
+    expect(c.discussionTurn(d.id, "answer", 1, [], ws).prompt).toContain("- `src/` (folder)");
   });
 
   it("passes on only the answered turns, from both agents, and the pipeline tasks once", () => {

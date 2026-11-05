@@ -231,6 +231,18 @@ describe("vscode worker", () => {
     expect(h.messages.some((m) => m.kind === "ui" && (m.update.type === "usage" || m.update.type === "info"))).toBe(false);
   });
 
+  it("finds the workspace's paths for an @ in a composer, best first, for no tab, with no lock and no agent call", async () => {
+    mkdirSync(join(repo, "src", "core"), { recursive: true });
+    writeFileSync(join(repo, "src", "chat.ts"), "x\n");
+    writeFileSync(join(repo, "src", "core", "chat-state.ts"), "x\n");
+    const { h } = await open();
+    const find = async (query: string) => (await h.client.request({ type: "findFiles", query })).matches.map((e) => e.path);
+    expect(await find("chat")).toEqual(["src/chat.ts", "src/core/chat-state.ts"]);
+    expect(await find("")).toEqual([".agentduo/", "src/", ".gitignore", "check.mjs", "README.md"]);
+    expect(fake.calls()).toEqual([]);
+    expect(existsSync(lockFile())).toBe(false);
+  });
+
   it("looks no model up when initialized only for the Account & Usage view, and still answers it", async () => {
     fake.setScenario({ catalog: { models: [{ slug: "gpt-one", display_name: "One", priority: 1 }] } });
     const { h } = await open({ discover: false });

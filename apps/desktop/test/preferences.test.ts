@@ -15,14 +15,14 @@ describe("PreferencesStore", () => {
     const s = new PreferencesStore(file);
     expect(s.prefs).toEqual(DEFAULT_PREFERENCES);
     expect(s.prefs.autoUpdate).toBe(true);
-    s.setPrefs({ theme: "light", fontSize: 15, autoUpdate: false });
+    s.setPrefs({ theme: "light", fontSize: 15, autoUpdate: false, sidebarWidth: 320 });
     s.remember("/a");
     s.remember("/b");
     s.setConversation("/a", "20261031-120000-tab-abcd1234");
     s.setDraft("/a", "20261031-120000-tab-abcd1234", "half typed");
     s.flush();
     const again = new PreferencesStore(file);
-    expect(again.prefs).toMatchObject({ theme: "light", fontSize: 15, autoUpdate: false });
+    expect(again.prefs).toMatchObject({ theme: "light", fontSize: 15, autoUpdate: false, sidebarWidth: 320 });
     expect(again.projects.map((p) => p.path)).toEqual(["/b", "/a"]);
     expect(again.active).toBe("/b");
     expect(again.draft("/a", "20261031-120000-tab-abcd1234")).toBe("half typed");
@@ -35,8 +35,8 @@ describe("PreferencesStore", () => {
     writeFileSync(file, "{not json");
     expect(new PreferencesStore(file).prefs).toEqual(DEFAULT_PREFERENCES);
     expect(readFileSync(`${file}.unreadable`, "utf8")).toBe("{not json");
-    writeFileSync(file, JSON.stringify({ version: 1, prefs: { theme: "neon", fontSize: 16, autoUpdate: "sometimes" }, projects: [], active: null, drafts: {} }));
-    expect(new PreferencesStore(file).prefs).toMatchObject({ theme: "system", fontSize: 16, autoUpdate: true });
+    writeFileSync(file, JSON.stringify({ version: 1, prefs: { theme: "neon", fontSize: 16, autoUpdate: "sometimes", sidebarWidth: 5000 }, projects: [], active: null, drafts: {} }));
+    expect(new PreferencesStore(file).prefs).toMatchObject({ theme: "system", fontSize: 16, autoUpdate: true, sidebarWidth: 248 });
     expect(existsSync(file)).toBe(true);
   });
 

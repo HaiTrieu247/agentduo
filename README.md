@@ -257,6 +257,16 @@ agentduo 0.5.0 · chat
     its own), which costs tokens and time each time. A later question only lists an earlier message's files by path.
   - At a HUMAN_REVIEW decision, waiting files do not go with the decision: send them with a message first (a note for
     the run's next step), or decide later and `/resume` with a note.
+- **Tagging workspace files with @.** Type `@` in the input and a list of the workspace's files and folders opens (the
+  top level, folders first); type more and it narrows to the paths that have those letters in order, best first, as a
+  quick-open does. ↑↓ choose, Tab opens a folder (its own entries come next) or puts a file in, Enter puts the path in
+  and closes the list, Esc closes it. A path with spaces is written in quotes (`@"my docs/notes.md"`). The list is what
+  git lists in the workspace (tracked files and untracked ones it does not ignore), or the folder walked without `.git`
+  and `node_modules` outside a repository; agentduo's runs are never in it. The same works in the VS Code extension and
+  the desktop app.
+  - The message keeps `@path` as you typed it, and its prompt adds a list of the tagged files and folders that exist in
+    the workspace (others, and anything outside it, are left out), for the agent to read with its own tools: nothing is
+    copied, unlike `/attach`. It works in questions, `/discuss`, `/pipeline` tasks (every role's first prompt) and notes.
 - **Commands:** `/claude`, `/codex`, `/pipeline`, `/discuss`, `/plan`, `/diff`, `/status`, `/usage`, `/attach`,
   `/attachments`, `/detach`, `/resume` (continue a stopped or waiting run, also from an earlier session), `/new`,
   `/settings`, `/config`, `/help`, `/quit`. Ctrl-C twice also quits; a running run stops at its current step and stays

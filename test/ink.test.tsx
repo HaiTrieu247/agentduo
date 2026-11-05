@@ -1,6 +1,7 @@
 import { Box } from "ink";
 import { render } from "ink-testing-library";
 import { describe, expect, it, vi } from "vitest";
+import { rankPaths, type PathEntry } from "../src/core/mention-text.js";
 import type { AgentUsage } from "../src/core/usage.js";
 import { EventBus, type Activity, type DuoEvent, type HistoryEntry, type PermissionAnswer, type PermissionRequest, type Phase, type Role } from "../src/events.js";
 import { App } from "../src/ui/ink/App.js";
@@ -282,6 +283,35 @@ describe("Ink components", () => {
     channel.mode("acceptEdits");
     await wait();
     expect(app.lastFrame()).toContain("mode: Edit automatically (Shift+Tab)");
+    app.unmount();
+  });
+
+  it("chat: an @ lists the workspace's paths for what follows it; Tab opens a folder, Enter puts a path in", async () => {
+    const entries: PathEntry[] = [{ path: "docs/", kind: "folder" }, { path: "docs/guide.md", kind: "file" }, { path: "README.md", kind: "file" }];
+    const asked: string[] = [];
+    const findFiles = async (query: string) => {
+      asked.push(query);
+      return rankPaths(query, entries);
+    };
+    const sent: string[] = [];
+    const app = render(<ChatApp bus={new EventBus()} channel={new ChatChannel()} version="0.2.0" workspace="/ws" verbose={false} onSubmit={(text) => sent.push(text)}
+      onEscape={noop} onCtrlC={noop} onDecision={noop} onPermission={noop} views={() => []} readView={async () => null} findFiles={findFiles} />);
+    await wait();
+    expect(app.lastFrame()).toContain("@ to tag files");
+    app.stdin.write("read @");
+    await vi.waitFor(() => expect(app.lastFrame()).toMatch(/❯ docs\/[\s\S]*README\.md/));
+    expect(app.lastFrame()).toContain("Tab opens a folder");
+    app.stdin.write("do");
+    await vi.waitFor(() => expect(asked.at(-1)).toBe("do"));
+    app.stdin.write("\t");
+    await vi.waitFor(() => expect(app.lastFrame()).toContain("› read @docs/"));
+    await vi.waitFor(() => expect(app.lastFrame()).toContain("❯ docs/guide.md"));
+    app.stdin.write("\r");
+    await vi.waitFor(() => expect(app.lastFrame()).toContain("› read @docs/guide.md "));
+    expect(sent).toEqual([]);
+    expect(app.lastFrame()).not.toContain("❯");
+    app.stdin.write("now\r");
+    await vi.waitFor(() => expect(sent).toEqual(["read @docs/guide.md now"]));
     app.unmount();
   });
 

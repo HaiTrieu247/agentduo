@@ -509,6 +509,12 @@ body {
 .completion-label { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; overflow-wrap: anywhere; }
 .completion-desc { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
 .completion.selected .completion-desc { color: inherit; opacity: 0.85; }
+/* An @'s paths: the icon, the name, then the folder it is in, on one line. */
+.completion.mention { flex-direction: row; align-items: center; gap: 6px; }
+.completion.mention .completion-label { flex: 0 1 auto; overflow-wrap: normal; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.completion.mention .completion-desc { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.completion-icon { flex: none; font-size: 14px; color: var(--muted); }
+.completion.selected .completion-icon { color: inherit; }
 
 /* The settings: a sheet above the box, with room of its own. */
 .sheet { display: flex; flex-direction: column; max-height: 50vh; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius-lg); }

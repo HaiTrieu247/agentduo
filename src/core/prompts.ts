@@ -3,6 +3,7 @@ import { attachmentDetail, type Attachment } from "./attachment-types.js";
 import type { AgentRole, Backend, GateConfig } from "./config.js";
 import { MAX_NOTES_PER_TURN } from "./context.js";
 import { describeGates, type GateResult } from "./gates.js";
+import type { PathEntry } from "./mention-text.js";
 import type { Change } from "./git.js";
 import type { FindingItem, ReviewFindings } from "./findings.js";
 import type { Approval, Critique, Implementation, Plan } from "./outputs.js";
@@ -11,6 +12,9 @@ import type { ConversationContext, EarlierTask, Exchange, HumanNote, Preexisting
 
 /** Where an attachment's copy is, as a prompt names it: its absolute path, or null when its reference is unusable. */
 export type Locate = (a: Attachment) => string | null;
+
+/** The workspace's files and folders a text tags with @ (src/core/mentions.ts), for its prompt. */
+export type Tagged = (text: string) => PathEntry[];
 
 export interface PromptContext {
   repo: string;
@@ -26,6 +30,8 @@ export interface PromptContext {
   attachments?: Attachment[];
   /** Where attached files are (the task's, the notes', the conversation's); without it no file is listed. */
   locate?: Locate;
+  /** The paths the task and the notes tag with @; without it none is listed. */
+  tagged?: Tagged;
   /** The run keeps its snapshots in agentduo's own Git repository, outside the workspace (which may have none). */
   internalSnapshots?: boolean;
   /** What earlier agents of the run recorded about the repository, already limited to the notes this role may have that still hold. */
@@ -197,12 +203,12 @@ function opening(role: string, title: string, ctx: PromptContext, position: stri
       // A continued session knows the profile it started with: it is told again only once the profile changed.
       ctx.profile && ctx.profile.name !== ctx.profile.initial ? profileSection(ctx.profile, role) : "",
       changedSection(ctx.continued.changed),
-      notes(ctx.notes, ctx.locate, true),
+      notes(ctx.notes, ctx.locate, true, ctx.tagged),
       repoNotesSection(ctx.repoNotes, true),
     ].filter(Boolean);
   }
   const profile = profileSection(ctx.profile, role);
-  return [header(role, title, ctx), position, ...(profile ? [profile] : []), taskSection(ctx), earlier(ctx), notes(ctx.notes, ctx.locate),
+  return [header(role, title, ctx), position, ...(profile ? [profile] : []), taskSection(ctx), earlier(ctx), notes(ctx.notes, ctx.locate, false, ctx.tagged),
     repoNotesSection(ctx.repoNotes, false), baselineSection(ctx.baseline)];
 }
 
@@ -293,6 +299,16 @@ function filesSection(title: string, list: Attachment[] | undefined, locate: Loc
   return `\n### ${title}\n${CURRENT_FILES}\n${attachmentLines(list, locate)}\n`;
 }
 
+const TAGGED = "The user tagged these files and folders of the workspace with @ for you to read (paths relative to the workspace; for a " +
+  "folder, what in it bears on the message).";
+
+/** The workspace paths the message the prompt is about tags with @: listed once, where that message is. */
+function taggedSection(title: string, text: string, tagged: Tagged | undefined): string {
+  const list = tagged?.(text) ?? [];
+  if (!list.length) return "";
+  return `\n### ${title}\n${TAGGED}\n${list.map((e) => `- ${inlineCode(e.path)} (${e.kind})`).join("\n")}\n`;
+}
+
 function exchangeText(e: Exchange, locate?: Locate): string {
   const name = NAMES[e.backend];
   // Files of an earlier message go by path only: they were attached to that message, not to this one.
@@ -317,9 +333,10 @@ function earlier(ctx: PromptContext): string {
     "Before giving this task, the user talked about it with Claude Code and Codex in this chat. Use it as context; the task above is what to do.", ctx.locate);
 }
 
-/** The task, then the files attached to it. */
+/** The task, then the files attached to it and the paths it tags. */
 function taskSection(ctx: PromptContext): string {
-  return "## Task\n" + ctx.task + "\n" + filesSection("Files the user attached to the task", ctx.attachments, ctx.locate);
+  return "## Task\n" + ctx.task + "\n" + filesSection("Files the user attached to the task", ctx.attachments, ctx.locate) +
+    taggedSection("Workspace paths the user tagged in the task", ctx.task, ctx.tagged);
 }
 
 /**
@@ -328,6 +345,7 @@ function taskSection(ctx: PromptContext): string {
  */
 export function conversation(o: {
   workspace: string; backend: Backend; context: ConversationContext; earlier: EarlierTask[]; question: string; attachments?: Attachment[]; locate?: Locate;
+  tagged?: Tagged;
 }): string {
   const name = NAMES[o.backend];
   const other = NAMES[o.backend === "codex" ? "claude" : "codex"];
@@ -337,7 +355,8 @@ export function conversation(o: {
       `You are ${name}. Answer the user's latest message as ${name}; earlier answers may come from ${other}, and the user can read all of them.`,
     "Follow your own configuration and the repository's instructions (AGENTS.md / CLAUDE.md).",
     earlierTasks(o.earlier, false) + conversationSection(o.context, "Conversation so far", "Oldest first.", o.locate),
-    `## The user's message to ${name}\n${o.question}\n` + filesSection("Files the user attached to this message", o.attachments, o.locate),
+    `## The user's message to ${name}\n${o.question}\n` + filesSection("Files the user attached to this message", o.attachments, o.locate) +
+      taggedSection("Workspace paths the user tagged", o.question, o.tagged),
   ].filter(Boolean).join("\n");
 }
 
@@ -394,6 +413,7 @@ function discussionHistory(history: DiscussionMessage[]): string {
 export function discussion(o: {
   workspace: string; context: ConversationContext; earlier: EarlierTask[]; question: string; answerer: Backend; critic: Backend; maxRounds: number;
   step: DiscussionStep; round: number; history: DiscussionMessage[]; historyStart?: number; attachments?: Attachment[]; locate?: Locate;
+  tagged?: Tagged;
 }): string {
   const answerer = NAMES[o.answerer];
   const critic = NAMES[o.critic];
@@ -423,7 +443,8 @@ export function discussion(o: {
       `the whole discussion and gets that synthesis as the response. You are ${me}.`,
     "Follow your own configuration and the repository's instructions (AGENTS.md / CLAUDE.md).",
     earlierTasks(o.earlier, false) + conversationSection(o.context, "Conversation so far", "Oldest first.", o.locate),
-    `## The user's question\n${o.question}\n` + filesSection("Files the user attached to the question", o.attachments, o.locate),
+    `## The user's question\n${o.question}\n` + filesSection("Files the user attached to the question", o.attachments, o.locate) +
+      taggedSection("Workspace paths the user tagged", o.question, o.tagged),
     discussionHistory(o.history.slice(o.historyStart ?? 0)),
     asks[o.step],
   ].filter(Boolean).join("\n");
@@ -432,9 +453,13 @@ export function discussion(o: {
 const NOTE_FILES = "agentduo keeps a copy of each file that came with a note at the path given. The images your CLI can take are also attached " +
   "to this message as images; read the other files at their paths.";
 
-function notes(list: HumanNote[], locate?: Locate, onlyNew = false): string {
+function notes(list: HumanNote[], locate?: Locate, onlyNew = false, tagged?: Tagged): string {
   if (!list.length) return "";
-  const files = (n: HumanNote) => (n.attachments?.length && locate ? `\n  Files:\n${attachmentLines(n.attachments, locate, "  ")}` : "");
+  const tags = (n: HumanNote) => {
+    const paths = tagged?.(n.note) ?? [];
+    return paths.length ? `\n  Tagged: ${paths.map((e) => inlineCode(e.path)).join(", ")}` : "";
+  };
+  const files = (n: HumanNote) => tags(n) + (n.attachments?.length && locate ? `\n  Files:\n${attachmentLines(n.attachments, locate, "  ")}` : "");
   const intro = locate && list.some((n) => n.attachments?.length) ? `${NOTE_FILES}\n` : "";
   return `\n## ${onlyNew ? "New notes" : "Notes"} from the human operator (highest priority)\n` + intro +
     list.map((n) => `- (${n.at}, during ${n.phase}) ${n.note}${files(n)}`).join("\n") + "\n";

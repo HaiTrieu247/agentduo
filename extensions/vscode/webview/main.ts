@@ -27,6 +27,7 @@ const ui = createUi(document.getElementById("app")!, {
   permit: (id, answer) => state && vscode.postMessage({ type: "permission", generation: state.generation, id, answer }),
   command: (name) => vscode.postMessage({ type: "command", name }),
   copy: (text) => vscode.postMessage({ type: "copy", text }),
+  findFiles: (seq, query) => vscode.postMessage({ type: "findFiles", seq, query }),
   // The webview is recreated whenever its tab is shown again; a half-typed message survives that.
   draft: (text) => {
     draft = text;
@@ -56,6 +57,7 @@ window.addEventListener("message", (e: MessageEvent<HostMessage>) => {
   else if (m.type === "focusComposer") ui.focusComposer();
   else if (m.type === "showSettings") ui.showSettings();
   else if (m.type === "attachmentUris") ui.setUris(m.uris);
+  else if (m.type === "fileMatches") ui.fileMatches(m.seq, m.matches);
   else if (m.type === "prepareReload") ui.release(() => vscode.postMessage({ type: "readyToReload" }));
   schedule();
 });

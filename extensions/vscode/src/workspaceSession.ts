@@ -7,6 +7,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Attachment } from "../../../src/core/attachment-types.js";
 import { attachmentFile } from "../../../src/core/attachments.js";
 import type { Backend } from "../../../src/core/commands.js";
+import type { PathEntry } from "../../../src/core/mention-text.js";
 import { atomicWrite } from "../../../src/core/state.js";
 import type { PermissionAnswer } from "../../../src/events.js";
 import { initialState, reduce, uploading, type ViewAction, type ViewState } from "../webview/state.js";
@@ -89,6 +90,8 @@ export interface ConversationHandle {
   cycleMode(): Promise<void>;
   /** Looks the usage up again for the tab's usage panel (its Refresh, the title bar's Usage), with no line in the timeline. */
   usage(): Promise<void>;
+  /** An @ in the composer: the workspace's paths for `query` go to the tab as `fileMatches` with its `seq` (none if they could not be listed). */
+  findFiles(seq: number, query: string): Promise<void>;
   answerDecision(generation: number, id: string, decision: DecisionChoice, note: string | null): Promise<void>;
   answerPermission(generation: number, id: string, answer: PermissionAnswer): Promise<void>;
   /** The tab was closed: what it shows is saved, and what runs in it stops. */
@@ -208,6 +211,7 @@ export class WorkspaceSession {
       },
       cycleMode: () => this.send({ type: "cycleMode", conversation: id }, id).then(() => undefined),
       usage: () => this.send({ type: "usage", conversation: id }, id).then(() => undefined),
+      findFiles: (seq, query) => this.findFiles(id, seq, query),
       answerDecision: (generation, requestId, decision, note) => this.answerDecision(id, generation, requestId, decision, note),
       answerPermission: (generation, requestId, answer) => this.answerPermission(id, generation, requestId, answer),
       close: () => this.close(id),
@@ -317,6 +321,17 @@ export class WorkspaceSession {
     const actions = view.queue;
     view.queue = [];
     if (actions.length && view.post) view.post({ type: "actions", actions });
+  }
+
+  /** Paths for a tab's @: a failure is only logged (a line in the tab for each keystroke would say too much), and the list comes back empty. */
+  private async findFiles(id: string, seq: number, query: string): Promise<void> {
+    let matches: PathEntry[] = [];
+    try {
+      matches = (await this.request({ type: "findFiles", query })).matches;
+    } catch (e) {
+      this.o.log(`could not list the workspace's files: ${(e as Error).message}`);
+    }
+    this.views.get(id)?.post?.({ type: "fileMatches", seq, matches });
   }
 
   /** A line from agentduo itself, in one tab, or with no conversation in every tab. */

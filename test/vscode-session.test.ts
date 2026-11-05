@@ -136,6 +136,23 @@ describe("WorkspaceSession: a tab per conversation", () => {
 });
 
 describe("WorkspaceSession", () => {
+  it("answers a tab's @ query with the workspace's paths, in that tab only, and with its seq", async () => {
+    const s = session();
+    const a = new FakeView();
+    const b = new FakeView();
+    const posted: HostMessage[] = [];
+    s.conversation("tab-a").attach((m) => {
+      posted.push(m);
+      a.post(m);
+    });
+    s.conversation("tab-b").attach((m) => {
+      posted.push(m);
+      b.post(m);
+    });
+    await s.conversation("tab-a").findFiles(7, "READ");
+    expect(posted.filter((m) => m.type === "fileMatches")).toEqual([{ type: "fileMatches", seq: 7, matches: [{ path: "README.md", kind: "file" }] }]);
+  });
+
   it("opens without a lock or a run, then shows a whole run: steps, gates, usage, DONE", async () => {
     const s = session();
     const view = new FakeView();

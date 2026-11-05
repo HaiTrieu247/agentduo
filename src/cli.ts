@@ -10,6 +10,7 @@ import { configFromSaved, ConfigError, PROFILES, type ConfigData, type ProfileNa
 import { decisionCommand } from "./core/decisions.js";
 import { diagnose, EnvironmentError, prepareEnvironment, runnableProblem, type RunnableNeeds, type WorkspaceEnv } from "./core/environment.js";
 import { initRepo } from "./core/init.js";
+import { workspaceExcludes, WorkspacePaths } from "./core/mentions.js";
 import type { Review } from "./core/outputs.js";
 import { budgetLines, cycleLines, findingsMarkdown, metricsLines, usageSummary } from "./core/render.js";
 import { openRunGit, RunGitError } from "./core/run-git.js";
@@ -353,6 +354,7 @@ async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
     const { startChatInk } = await import("./ui/ink/chat-session.js");
     const bus = new EventBus();
     let chat: Chat | undefined;
+    const paths = new WorkspacePaths(env.workspace, { exclude: workspaceExcludes(env.workspace, [env.runsDir]) });
     const session = startChatInk({
       bus, version: packageVersion(), verbose: !!opts.verbose, workspace: env.workspace,
       onSubmit: (text) => void chat?.submit(text), onEscape: () => chat?.escape(), onCycleMode: () => chat?.cycleMode(), onUsageRefresh: () => chat?.usage(),
@@ -364,6 +366,7 @@ async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
         const run = chat?.focused();
         return run ? readView(kind, run.store, run.state, env.workspace, io.env) : null;
       },
+      findFiles: (query) => paths.find(query),
       stdout: io.stdout as NodeJS.WriteStream, stdin: io.stdin as NodeJS.ReadStream,
     });
     chat = new Chat({

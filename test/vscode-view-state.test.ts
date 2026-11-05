@@ -203,7 +203,7 @@ describe("view state", () => {
   });
 
   it("says what a message does in each state", () => {
-    expect(placeholder({ ...initialState("active"), status: "idle" })).toMatch(/^Ask Codex…/);
+    expect(placeholder({ ...initialState("active"), status: "idle" })).toBe("Ask Codex… (/ for commands, @ to tag files)");
     expect(placeholder({ ...initialState("active"), status: "running" })).toContain("next step");
     expect(placeholder({ ...initialState("active"), status: "paused" })).toContain("/resume continues the stopped run");
     expect(placeholder(initialState("choose-folder"))).toContain("Choose a workspace folder");

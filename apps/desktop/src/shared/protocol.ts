@@ -20,6 +20,8 @@ export const EVENT_CHANNEL = "agentduo:event";
 export const THEMES = ["system", "light", "dark"] as const;
 export type Theme = (typeof THEMES)[number];
 export const FONT_SIZES = { min: 11, max: 20, default: 13 } as const;
+/** The conversations sidebar's width in px, as its edge is dragged; `step` is an arrow key's. */
+export const SIDEBAR_WIDTHS = { min: 180, max: 480, default: 248, step: 16 } as const;
 
 /** The desktop's own preferences (userData/preferences.json); agentduo's engine settings live in its config files. */
 export interface Preferences {
@@ -35,9 +37,12 @@ export interface Preferences {
   accountOpen: boolean;
   /** Look for a new version of the app on a timer (main/updates.ts); a check can always be asked for. */
   autoUpdate: boolean;
+  /** The conversations sidebar's width (px), as the user dragged it; a narrow window may show it narrower. */
+  sidebarWidth: number;
 }
 
-export const DEFAULT_PREFERENCES: Preferences = { theme: "system", fontSize: FONT_SIZES.default, inspector: true, defaultRecipient: "codex", onboarded: false, accountOpen: true, autoUpdate: true };
+export const DEFAULT_PREFERENCES: Preferences = { theme: "system", fontSize: FONT_SIZES.default, inspector: true, defaultRecipient: "codex", onboarded: false, accountOpen: true, autoUpdate: true,
+  sidebarWidth: SIDEBAR_WIDTHS.default };
 
 /** The persistent conversation group used before a project is opened. */
 export const CONVERSATIONS_PROJECT_ID = "0000000000000000";
@@ -324,6 +329,12 @@ export function parsePreferences(v: unknown): Partial<Preferences> {
       case "fontSize":
         if (!Number.isInteger(value) || (value as number) < FONT_SIZES.min || (value as number) > FONT_SIZES.max) throw new ProtocolError(`fontSize must be ${FONT_SIZES.min} to ${FONT_SIZES.max}`);
         out.fontSize = value as number;
+        break;
+      case "sidebarWidth":
+        if (!Number.isInteger(value) || (value as number) < SIDEBAR_WIDTHS.min || (value as number) > SIDEBAR_WIDTHS.max) {
+          throw new ProtocolError(`sidebarWidth must be ${SIDEBAR_WIDTHS.min} to ${SIDEBAR_WIDTHS.max}`);
+        }
+        out.sidebarWidth = value as number;
         break;
       case "inspector":
       case "onboarded":

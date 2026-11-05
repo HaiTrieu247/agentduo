@@ -17,6 +17,7 @@ import {
 import { accountRefreshTitle, projectBusy } from "../src/renderer/sidebar.js";
 import { turnEnded, UsageStore } from "../src/renderer/usage.js";
 import type { AccountUsage } from "../../../extensions/vscode/src/protocol.js";
+import { sidebarWidth } from "../src/renderer/resizer.js";
 import { clampFontSize, resolveTheme } from "../src/renderer/theme.js";
 import { restartQuestion, updateAction, updateLine, updateNotice } from "../src/renderer/update.js";
 import { LINKS, type CliStatus, type ConversationItem } from "../src/shared/protocol.js";
@@ -49,6 +50,15 @@ describe("theme", () => {
     expect(clampFontSize(4)).toBe(11);
     expect(clampFontSize(40)).toBe(20);
     expect(clampFontSize("x")).toBe(13);
+  });
+  it("keeps the sidebar between its limits, and leaves the chat room in a narrow window", () => {
+    expect(sidebarWidth(300, 1400)).toBe(300);
+    expect(sidebarWidth(100, 1400)).toBe(180);
+    expect(sidebarWidth(900, 1400)).toBe(480);
+    expect(sidebarWidth(300.4, 1400)).toBe(300);
+    expect(sidebarWidth(400, 700)).toBe(340);
+    expect(sidebarWidth(400, 400)).toBe(180);
+    expect(sidebarWidth(Number.NaN, 1400)).toBe(248);
   });
 });
 

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { ATTACHMENT_LIMITS, formatBytes, type Attachment } from "./attachment-types.js";
 import { AttachmentError, attachmentFile, AttachmentStore } from "./attachments.js";
 import type { Backend } from "./config.js";
+import { taggedPaths } from "./mentions.js";
 import * as prompts from "./prompts.js";
 import { atomicWrite, ensureRunsDir, stamp, type ConversationContext, type EarlierTask, type Exchange } from "./state.js";
 import type { DiscussionPlace, DiscussionStep, TurnStatus, Verdict } from "../events.js";
@@ -312,10 +313,11 @@ export class Conversation {
     ensureRunsDir(this.runsDir);
     mkdirSync(this.logDir, { recursive: true });
     this.save();
-    const prompt = prompts.conversation({ workspace, backend, context, earlier, question, attachments, locate: this.locate });
+    const tagged = (text: string) => taggedPaths(text, workspace);
+    const prompt = prompts.conversation({ workspace, backend, context, earlier, question, attachments, locate: this.locate, tagged });
     const session = this.sessions[backend];
     if (session) turn.continuation = prompts.conversation({
-      workspace, backend, context: this.newContext(session), earlier: earlier.slice(session.earlier), question, attachments, locate: this.locate,
+      workspace, backend, context: this.newContext(session), earlier: earlier.slice(session.earlier), question, attachments, locate: this.locate, tagged,
     });
     return { turn, prompt, omitted: context.omitted };
   }
@@ -356,16 +358,17 @@ export class Conversation {
     mkdirSync(this.logDir, { recursive: true });
     this.save();
     // Every step is a call of its own, so each gets the question's files again (the images as images too).
+    const tagged = (text: string) => taggedPaths(text, workspace);
     const prompt = prompts.discussion({
       workspace, context: d.context, earlier, question: d.question, answerer: d.answerer, critic: d.critic, maxRounds: d.maxRounds, step, round, history: d.messages,
-      attachments: d.attachments, locate: this.locate,
+      attachments: d.attachments, locate: this.locate, tagged,
     });
     const session = this.sessions[backend];
     if (session) turn.continuation = prompts.discussion({
       workspace, context: this.newContext(session), earlier: earlier.slice(session.earlier), question: d.question,
       answerer: d.answerer, critic: d.critic, maxRounds: d.maxRounds, step, round, history: d.messages,
       historyStart: session.discussion?.id === d.id ? session.discussion.messages : 0,
-      attachments: d.attachments, locate: this.locate,
+      attachments: d.attachments, locate: this.locate, tagged,
     });
     return { turn, prompt };
   }

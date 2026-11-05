@@ -7,6 +7,7 @@ import {
 } from "../../../src/core/commands.js";
 import type { Check } from "../../../src/core/doctor.js";
 import type { ConfigScope, ConfigurationView } from "../../../src/core/configuration.js";
+import { MENTION_LIMITS, type PathEntry } from "../../../src/core/mention-text.js";
 import type { CodexCatalog } from "../../../src/core/models.js";
 import type { SettingsView } from "../../../src/core/settings.js";
 import type { UsageReport, UsageState } from "../../../src/core/usage.js";
@@ -26,8 +27,9 @@ import type { ViewAction, ViewState } from "../webview/state.js";
  * 9: the desktop's Settings: `readConfiguration`, `updateConfiguration` and `clearConfiguration`, which need no
  *    conversation and no lock, and are answered before `initialize` too (for the workspace they name);
  *    `syncConfiguration`, after another process (the desktop's host, another project's worker) wrote a file.
+ * 10: @ mentions: `findFiles`, the workspace's files and folders for what the composer typed after an @ (relative paths).
  */
-export const PROTOCOL_VERSION = 9;
+export const PROTOCOL_VERSION = 10;
 
 export const BACKENDS = ["codex", "claude"] as const;
 /** How the composer's text is meant: a message (to the recipient, or a slash command), a pipeline task, or a question to discuss. */
@@ -97,6 +99,8 @@ export type WorkerRequest =
   | { type: "usage"; conversation: string }
   /** The tab was closed: what runs in it stops (a run stays resumable), and the worker lets the conversation go. */
   | { type: "closeConversation"; conversation: string }
+  /** The workspace's files and folders that best match `query`, what follows an @ in a composer (src/core/mentions.ts). */
+  | { type: "findFiles"; query: string }
   | { type: "decision"; requestId: string; answer: DecisionAnswer }
   | { type: "permissionAnswer"; requestId: string; answer: PermissionAnswer }
   | { type: "inspectFocusedRun"; conversation: string | null }
@@ -224,6 +228,7 @@ export interface WorkerResults {
   cycleMode: { accepted: true };
   usage: { accepted: true };
   closeConversation: { closed: true };
+  findFiles: { matches: PathEntry[] };
   decision: { applied: true };
   permissionAnswer: { applied: true };
   inspectFocusedRun: FocusedRun | null;
@@ -307,7 +312,9 @@ export type WebviewMessage =
   /** Copy (a code block, a command an agent ran): the host puts `text` on the clipboard. */
   | { type: "copy"; text: string }
   /** The answer to `prepareReload`: the files the page read are all with the host, so a reload loses none. */
-  | { type: "readyToReload" };
+  | { type: "readyToReload" }
+  /** An @ in the composer: the workspace's paths for what follows it; `seq` comes back with them, so a later query wins. */
+  | { type: "findFiles"; seq: number; query: string };
 
 export type HostMessage =
   /** `conversation`: the tab's own, which the webview keeps, so the tab is restored with it after a reload. */
@@ -325,7 +332,9 @@ export type HostMessage =
    * The host is to reload the page (new resource roots): it answers `readyToReload` once no pasted or dropped file is
    * left only in the page, and takes no more files until it is reloaded.
    */
-  | { type: "prepareReload" };
+  | { type: "prepareReload" }
+  /** The answer to `findFiles`: workspace-relative paths, best first (none when they could not be listed). */
+  | { type: "fileMatches"; seq: number; matches: PathEntry[] };
 
 // ------------------------------------------------------------------ Account & Usage view ↔ host
 /** What the Account & Usage view shows; the host keeps it, so a view shown again has it at once. */
@@ -461,6 +470,13 @@ function hostPath(v: unknown): string {
   return path;
 }
 
+/** What follows an @: one line, short; a path is looked up by the worker, never taken as one. */
+function mentionQuery(v: unknown): string {
+  const query = text(v, "query", MENTION_LIMITS.query);
+  if (/[\u0000-\u001f\u007f]/.test(query)) throw new ProtocolError("query must be one line");
+  return query;
+}
+
 function permissionAnswer(v: unknown): PermissionAnswer {
   const o = obj(v, "answer");
   const decision = oneOf(o.decision, ["once", "always", "deny"] as const, "answer.decision");
@@ -550,7 +566,7 @@ function settingValue(v: unknown): unknown {
 export function parseRequest(v: unknown): WorkerRequest {
   const o = obj(v, "request");
   const type = oneOf(o.type, [
-    "initialize", "submit", "stageAttachment", "removeAttachment", "recipient", "setting", "interrupt", "cycleMode", "usage", "closeConversation", "decision",
+    "initialize", "submit", "stageAttachment", "removeAttachment", "recipient", "setting", "interrupt", "cycleMode", "usage", "closeConversation", "findFiles", "decision",
     "permissionAnswer", "inspectFocusedRun", "readArtifact", "listChanges", "readSnapshotFile", "accountUsage", "doctor", "shutdown",
     ...CONFIGURATION_REQUESTS,
   ] as const, "request.type");
@@ -577,6 +593,8 @@ export function parseRequest(v: unknown): WorkerRequest {
     case "inspectFocusedRun":
     case "listChanges":
       return { type, conversation: focusedOn(o.conversation) };
+    case "findFiles":
+      return { type, query: mentionQuery(o.query) };
     case "decision":
       return { type, requestId: requestId(o.requestId, "requestId"), answer: decisionAnswer(o.answer) };
     case "permissionAnswer":
@@ -651,7 +669,7 @@ export function parseWebviewMessage(v: unknown): WebviewMessage {
   const o = obj(v, "webview message");
   const type = oneOf(o.type, [
     "ready", "submit", "attach", "upload", "detach", "recipient", "setting", "interrupt", "cycleMode", "usage", "decision", "permission", "command",
-    "copy", "readyToReload",
+    "copy", "readyToReload", "findFiles",
   ] as const, "type");
   switch (type) {
     case "submit":
@@ -675,6 +693,8 @@ export function parseWebviewMessage(v: unknown): WebviewMessage {
       return { type, name: oneOf(o.name, WEBVIEW_COMMANDS, "name") };
     case "copy":
       return { type, text: text(o.text, "text", MAX_COPY) };
+    case "findFiles":
+      return { type, seq: int(o.seq, "seq"), query: mentionQuery(o.query) };
     default:
       return { type };
   }

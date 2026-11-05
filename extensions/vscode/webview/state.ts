@@ -537,7 +537,7 @@ export function placeholder(s: ViewState, next: "pipeline" | "discuss" | null = 
   }
   switch (s.status) {
     case "idle":
-      return `Ask ${name}… (/ for commands)`;
+      return `Ask ${name}… (/ for commands, @ to tag files)`;
     case "running":
       return "A note for the agents: they get it from the next step";
     case "answering":

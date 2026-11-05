@@ -4,6 +4,7 @@ import {
   isWorkspacePath, MAX_UPLOAD_CHARS, parseAccountViewMessage, parseRequestEnvelope, parseWebviewMessage, parseWorkerMessage, PROTOCOL_VERSION, ProtocolError,
 } from "../extensions/vscode/src/protocol.js";
 import { MAX_ANSWER_CHARS } from "../extensions/vscode/webview/state.js";
+import { MENTION_LIMITS } from "../src/core/mention-text.js";
 import type { HumanReview, PermissionRequest } from "../src/events.js";
 
 const envelope = (request: unknown) => ({ protocol: PROTOCOL_VERSION, generation: 3, id: 7, request });
@@ -36,8 +37,8 @@ describe("worker requests", () => {
     expect([init({}), init({ discover: true }), init({ discover: false })].map((r) => r.type === "initialize" && r.discover)).toEqual([true, true, false]);
   });
 
-  it("is protocol 9 (the desktop's Settings); takes only the permission modes the chat offers", () => {
-    expect(PROTOCOL_VERSION).toBe(9);
+  it("is protocol 10 (@ mentions); takes only the permission modes the chat offers", () => {
+    expect(PROTOCOL_VERSION).toBe(10);
     const setting = (s: unknown) => parseRequestEnvelope(envelope({ type: "setting", conversation: "c-1", setting: s })).request;
     for (const mode of ["manual", "acceptEdits", "auto"]) expect(setting({ target: "mode", mode })).toMatchObject({ setting: { target: "mode", mode } });
     expect(setting({ target: "mode" })).toMatchObject({ setting: { target: "mode" } });
@@ -166,6 +167,21 @@ describe("webview messages", () => {
     expect(parseWebviewMessage({ type: "copy", text: "x".repeat(MAX_ANSWER_CHARS) })).toMatchObject({ type: "copy" });
     expect(() => parseWebviewMessage({ type: "copy", text: "x".repeat(MAX_ANSWER_CHARS + 1) })).toThrow(/too long/);
     expect(() => parseWebviewMessage({ type: "copy" })).toThrow(ProtocolError);
+  });
+});
+
+describe("@ mentions", () => {
+  it("since protocol 10, the worker finds the workspace's paths for a query of the composer, which names no path itself", () => {
+    expect(parseRequestEnvelope(envelope({ type: "findFiles", query: "src/co", extra: "ignored" })).request).toEqual({ type: "findFiles", query: "src/co" });
+    expect(parseRequestEnvelope(envelope({ type: "findFiles", query: "" })).request).toEqual({ type: "findFiles", query: "" });
+    expect(parseWebviewMessage({ type: "findFiles", seq: 4, query: "chat" })).toEqual({ type: "findFiles", seq: 4, query: "chat" });
+    for (const raw of [
+      { type: "findFiles", seq: 1 }, { type: "findFiles", seq: -1, query: "a" }, { type: "findFiles", seq: 1.5, query: "a" }, { type: "findFiles", query: "a" },
+      { type: "findFiles", seq: 1, query: "x".repeat(MENTION_LIMITS.query + 1) }, { type: "findFiles", seq: 1, query: "a\nb" },
+    ]) {
+      expect(() => parseWebviewMessage(raw), JSON.stringify(raw).slice(0, 80)).toThrow(ProtocolError);
+    }
+    expect(() => parseRequestEnvelope(envelope({ type: "findFiles", query: 3 }))).toThrow(ProtocolError);
   });
 });
 

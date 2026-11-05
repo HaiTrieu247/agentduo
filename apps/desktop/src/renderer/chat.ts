@@ -108,6 +108,7 @@ export class ChatHost {
         if (!this.hooks.command(name, mount)) send({ type: "command", name });
       },
       copy: (text) => send({ type: "copy", text }),
+      findFiles: (seq, query) => send({ type: "findFiles", seq, query }),
       draft: (text) => {
         if (mount.draftTimer) clearTimeout(mount.draftTimer);
         mount.draftTimer = setTimeout(() => {
@@ -148,6 +149,7 @@ export class ChatHost {
     else if (m.type === "focusComposer") mount.ui.focusComposer();
     else if (m.type === "showSettings") mount.ui.showSettings();
     else if (m.type === "attachmentUris") mount.ui.setUris(m.uris);
+    else if (m.type === "fileMatches") return mount.ui.fileMatches(m.seq, m.matches);
     else if (m.type === "prepareReload") mount.ui.release(() => undefined);
     this.schedule(mount);
   }

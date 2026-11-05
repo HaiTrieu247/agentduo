@@ -4,11 +4,11 @@ AgentDuo is agentduo in a window of its own, on macOS, Windows and Linux: Codex 
 critiques and implements, and you talk to both. It is the same engine as the `duo` CLI and the VS Code extension (the
 worker, `RuntimeSession`, the protocol and the chat UI), hosted by Electron.
 
-- **Sidebar**: Conversations for chats without a project, your projects and each project's conversations (open, waiting for you), plus runs you can resume. A project or conversation where an agent is working (a chat answer, a discussion, a pipeline) has a slowly pulsing dot; the others have none. At the bottom, above Settings, a compact **Account & Usage** box shows each agent's email and its limits (a percent and a thin meter each; the plan and when a limit resets are in tooltips). Click its title to fold it; it stays folded. Above it, a button appears when a new version of the app needs you: *Restart to update*, or *Get AgentDuo x.y.z* where this build cannot install it ([Updates](#updates)).
+- **Sidebar**: Conversations for chats without a project, your projects and each project's conversations (open, waiting for you), plus runs you can resume. A project or conversation where an agent is working (a chat answer, a discussion, a pipeline) has a slowly pulsing dot; the others have none. At the bottom, above Settings, a compact **Account & Usage** box shows each agent's email and its limits (a percent and a thin meter each; the plan and when a limit resets are in tooltips). Click its title to fold it; it stays folded. Above it, a button appears when a new version of the app needs you: *Restart to update*, or *Get AgentDuo x.y.z* where this build cannot install it ([Updates](#updates)). Drag its right edge to make it wider or narrower (180–480 px; the chat keeps at least 360 px), or focus the edge and use ←/→ (Shift for bigger steps), Home and End; double-click it to go back to 248 px. The width is saved with the app's preferences.
 - **Chat**: the three-way conversation User–Claude–Codex, with who is working, in which role and round, and what tools run.
 - **Inspector** (right, collapsible): the run's plan, its changes as a line diff, gate results, the review and the report.
-- **Composer**: attachments (picker, paste, drop), recipient and model, permission mode, the route (message, `/discuss`,
-  `/pipeline`) and Stop.
+- **Composer**: attachments (picker, paste, drop), `@` to tag the project's files and folders for the agents to read,
+  recipient and model, permission mode, the route (message, `/discuss`, `/pipeline`) and Stop.
 - **Settings** (the gear at the bottom of the sidebar) and a first-run **onboarding** that checks both CLIs.
 
 ## Requirements

@@ -1,6 +1,7 @@
 import { render, type RenderOptions } from "ink";
 import type { ChatStatus, ChatUi } from "../../chat.js";
 import { attachmentsText } from "../../core/attachment-types.js";
+import type { PathEntry } from "../../core/mention-text.js";
 import type { Decider, Decision, EventBus, PermissionDecider } from "../../events.js";
 import { ChatApp, ChatChannel } from "./ChatApp.js";
 import type { ViewKind } from "./HumanReviewPrompt.js";
@@ -20,6 +21,8 @@ export interface ChatInkOptions {
   onUsageRefresh?(): void;
   views(): ViewKind[];
   readView(kind: ViewKind): Promise<string | null>;
+  /** An @ in the input: the workspace's paths for what follows it. */
+  findFiles?(query: string): Promise<PathEntry[]>;
   stdout?: NodeJS.WriteStream;
   stdin?: NodeJS.ReadStream;
 }
@@ -91,7 +94,8 @@ export function startChatInk(o: ChatInkOptions): ChatInkSession {
   if (o.stdin) options.stdin = o.stdin;
   const instance = render(
     <ChatApp bus={o.bus} channel={channel} version={o.version} workspace={o.workspace} verbose={o.verbose} onSubmit={onSubmit}
-      onEscape={o.onEscape} onCtrlC={onCtrlC} onCycleMode={o.onCycleMode} onUsageRefresh={o.onUsageRefresh} onDecision={onDecision} onPermission={broker.answer} views={o.views} readView={o.readView} />,
+      onEscape={o.onEscape} onCtrlC={onCtrlC} onCycleMode={o.onCycleMode} onUsageRefresh={o.onUsageRefresh} onDecision={onDecision} onPermission={broker.answer} views={o.views} readView={o.readView}
+      findFiles={o.findFiles} />,
     options,
   );
   return {

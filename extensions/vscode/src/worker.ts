@@ -75,6 +75,8 @@ async function dispatch(s: RuntimeSession, request: WorkerRequest): Promise<Work
     case "closeConversation":
       await s.closeConversation(request.conversation);
       return { closed: true };
+    case "findFiles":
+      return { matches: await s.findFiles(request.query) };
     case "decision":
       s.answerDecision(request.requestId, request.answer);
       return { applied: true };

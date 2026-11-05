@@ -11,6 +11,7 @@ import type { AgentRole, Backend, ConfigData } from "./config.js";
 import { acceptRepoNotes, addRepoNotes, planTurn, rememberSession, sessionSlot, type Turn } from "./context.js";
 import { GatesInterrupted, runGates, type GateResult } from "./gates.js";
 import type { Change, Git } from "./git.js";
+import { taggedPaths } from "./mentions.js";
 import type { Approval, Critique, Finding, Implementation, Issue, Plan, RepoNoteOutput, Review } from "./outputs.js";
 import * as prompts from "./prompts.js";
 import * as render from "./render.js";
@@ -396,7 +397,7 @@ export class Workflow {
     return {
       repo: this.o.repo, taskId: st.taskId, task: st.task, agents: this.o.cfg.agents, gates: this.o.cfg.gates, notes: st.humanNotes, earlier: st.earlier,
       conversation: st.conversationContext, attachments: st.attachments, locate: (a) => attachmentFile(this.o.store.runsDir, a),
-      internalSnapshots: this.internal, baseline: st.baseline?.results ?? null, profile: st.profile,
+      tagged: (text) => taggedPaths(text, this.o.repo), internalSnapshots: this.internal, baseline: st.baseline?.results ?? null, profile: st.profile,
     };
   }
 

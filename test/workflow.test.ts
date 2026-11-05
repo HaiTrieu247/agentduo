@@ -113,6 +113,18 @@ describe("Workflow", () => {
     expect(fake.calls("code_reviewer")[1]!.prompt).toContain("`F1`");
   });
 
+  it("lists the workspace paths the task tags with @ in each role's first prompt", async () => {
+    fake.setScenario(happy());
+    const { wf } = newWorkflow(h, "Make @README.md say what @check.mjs checks (@nothing.md is not there)");
+    expect(await wf.run()).toBe(0);
+    for (const role of ["planner", "plan_reviewer", "code_reviewer"] as const) {
+      const prompt = fake.calls(role)[0]!.prompt;
+      expect(prompt, role).toContain("### Workspace paths the user tagged in the task");
+      expect(prompt, role).toContain("- `README.md` (file)\n- `check.mjs` (file)\n");
+      expect(prompt, role).not.toContain("`nothing.md`");
+    }
+  });
+
   it("gives every call the task's files, retries too, and a note's files from the step after it", async () => {
     fake.setScenario({ ...happy(), planner: [{ raw: "not json" }, { output: plan(), sleep: 600 }] });
     const { wf, bus } = newWorkflow(h, "Make app.txt match the mockup", undefined, (state) => {

@@ -21,6 +21,7 @@ Ngoài phạm vi: tự cài CLI, quản lý credential, terminal nhúng, telemet
 
 - **Main** sở hữu cửa sổ, project/session, dialog, resource, diagnostics và bridge. Mỗi project (đường dẫn canonical, id là hash 16 hex) có một `WorkspaceSession` và một worker. Chuyển view không đóng conversation; quit/restart lưu view, giải quyết câu hỏi đang chờ theo broker, dừng cây tiến trình và nhả lock.
 - Sidebar không có nút đóng (✕) cho conversation, và protocol không có `conversation.close` (bỏ ngày 2026-11-04: người dùng tưởng đó là nút xoá, mà đóng conversation đang xem lại tự mở một conversation mới thay chỗ). Conversation không bị xoá từ app.
+- Độ rộng sidebar (thêm ngày 2026-11-04): mép phải là một separator (`renderer/resizer.ts`) kéo được, hoặc dùng ←/→ (Shift: bước lớn), Home, End; double-click về 248px. Độ rộng trong khoảng 180–480px và luôn chừa ≥ 360px cho chat (cửa sổ hẹp thì hiện hẹp hơn mà không ghi lại); chỉ lưu khi thả chuột, vào preference `sidebarWidth`, được `parsePreferences` kiểm tra.
 - **Worker**: `WorkerClient` có launch mode tường minh. Extension giữ Node ngoài; desktop fork bằng `process.execPath` với `ELECTRON_RUN_AS_NODE=1`, kiểm tra Node đi kèm ≥ 22.12, không bao giờ tìm Node hệ thống. Sau khi IPC khởi động, worker bỏ các biến nội bộ của Electron/IPC khỏi môi trường của agent và gate.
 - **PATH khi mở từ launcher**: resolver async có timeout: binary đã cấu hình → PATH hiện có → PATH của login shell (POSIX, lệnh cố định, không nội suy dữ liệu người dùng) → thư mục cài phổ biến. Windows chuẩn hoá `PATH`/`Path`/`PATHEXT` và giữ nhánh `.cmd`/`.bat` hiện có.
 - **Renderer**: `contextIsolation`, `sandbox`, không `nodeIntegration`, CSP chặt, nạp từ `agentduo://app/`. Tái dùng `createUi`/`reduce`/`render`/`markdown`/`uploads` của webview VS Code qua một adapter `Actions` riêng (không giả lập `acquireVsCodeApi`). Theme ánh xạ token sáng/tối sang `--vscode-*`.
@@ -33,7 +34,7 @@ Ngoài phạm vi: tự cài CLI, quản lý credential, terminal nhúng, telemet
 
 ## 5. Settings
 
-Ba lớp engine: defaults ← global (`~/.agentduo/config.yaml`) ← project (`<project>/.agentduo/config.yaml`), cộng session override; preferences riêng của desktop (theme, cỡ chữ, recipient mặc định) ở `userData`.
+Ba lớp engine: defaults ← global (`~/.agentduo/config.yaml`) ← project (`<project>/.agentduo/config.yaml`), cộng session override; preferences riêng của desktop (theme, cỡ chữ, recipient mặc định, độ rộng sidebar) ở `userData`.
 
 - `readConfiguration`/`updateConfiguration`/`clearConfiguration` (`src/core/configuration.ts`) là thao tác file: không cần conversation, không lấy workspace lock, không tạo Chat; worker trả lời chúng cả trước `initialize` (protocol 9). Không có project thì chỉ đọc/ghi global.
 - Ghi: candidate được merge và `validateConfig` trước, ghi atomic, giữ comment YAML. YAML không parse được: hiện lỗi và vị trí, mở đúng file, không ghi đè. Reset dùng `deleteIn` (không ghi `null` để kế thừa). `args` là mảng thay nguyên key; `role_args`, `role_models`, `role_efforts` theo từng role.

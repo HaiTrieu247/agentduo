@@ -202,6 +202,8 @@ class Controller implements vscode.Disposable, PanelHost {
           return c.cycleMode();
         case "usage":
           return c.usage();
+        case "findFiles":
+          return c.findFiles(message.seq, message.query);
         case "decision":
           return c.answerDecision(message.generation, message.id, message.decision, message.note);
         case "permission":

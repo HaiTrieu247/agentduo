@@ -6,6 +6,7 @@ import {
 } from "../../../src/core/commands.js";
 import { ATTACHMENT_LIMITS, attachmentDetail, formatBytes, type Attachment } from "../../../src/core/attachment-types.js";
 import { needsInput } from "../../../src/core/decisions.js";
+import { insertMention, mentionAt, type MentionRange, type PathEntry } from "../../../src/core/mention-text.js";
 import type { UsageReport } from "../../../src/core/usage.js";
 import type { Activity, Agent, Message, ModelIdentity, Party, PermissionAnswer } from "../../../src/events.js";
 import {
@@ -44,7 +45,18 @@ export interface Actions {
   /** Copy: the host puts `text` on the clipboard. */
   copy(text: string): void;
   draft(text: string): void;
+  /** An @ in the composer: the workspace's paths for `query`; they come back through `fileMatches` with `seq`. */
+  findFiles(seq: number, query: string): void;
 }
+
+/** A path as the @ list shows it: its own name (a folder's with its `/`), then the folder it is in. */
+function splitPath(path: string): { name: string; dir: string } {
+  const at = (path.endsWith("/") ? path.slice(0, -1) : path).lastIndexOf("/");
+  return { name: path.slice(at + 1), dir: path.slice(0, at + 1) };
+}
+
+/** How long typing after an @ may pause before the paths are asked for. */
+const FIND_MS = 50;
 
 function button(label: string, onClick: () => void, o: { class?: string; title?: string; disabled?: boolean } = {}): HTMLButtonElement {
   const b = h("button", { class: o.class ?? "btn", title: o.title, attrs: { type: "button" } }, label);
@@ -678,6 +690,8 @@ function menuKeys(menu: HTMLElement, close: () => void): void {
 /** Builds the sidebar once, then updates it in place, re-creating only what changed (by identity, the reducer is immutable). */
 export function createUi(root: HTMLElement, actions: Actions, initialDraft = ""): {
   update(s: ViewState): void; focusComposer(): void; showSettings(): void; tick(): void; setUris(uris: Record<string, string | null>): void;
+  /** The host's answer to `findFiles`: only the latest query's is shown. */
+  fileMatches(seq: number, matches: PathEntry[]): void;
   /** The host is to reload the page: `done` once the files read here are all with the host (none is lost with it). */
   release(done: () => void): void;
 } {
@@ -768,6 +782,15 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   let lastSettings: unknown[] = [];
   const prefs: SettingsPrefs = { save: false, global: false, yes: false };
   let completions: Completion[] = [];
+  /** The @ the caret is in (null: none, or the list is closed for this text), and the paths the host last found for one. */
+  let mention: MentionRange | null = null;
+  let found: PathEntry[] = [];
+  /** The query last asked for, and its seq: an answer to an earlier one is dropped. */
+  let asked: string | null = null;
+  let findSeq = 0;
+  let findTimer: ReturnType<typeof setTimeout> | undefined;
+  /** How many rows the list has: paths for an @, else commands. */
+  const choices = () => (mention ? found.length : completions.length);
   let selected = 0;
   /** The text the list was closed for (Esc, or a pick with Enter): it stays closed until the text changes. */
   let closedFor: string | null = null;
@@ -993,26 +1016,68 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
     if (focused) modeMenu.querySelector<HTMLButtonElement>(`[data-mode="${focused}"]`)?.focus();
   }
 
+  /** Asks the host for the paths of what follows the @, once typing pauses; a new @ asks again (files come and go). */
+  function findFiles(query: string | null): void {
+    if (query === asked) return;
+    asked = query;
+    clearTimeout(findTimer);
+    // The @ word ended: its paths go with it, so the next @ never shows them (nor puts one in) before its own come.
+    if (query === null) found = [];
+    else findTimer = setTimeout(() => actions.findFiles(++findSeq, query), FIND_MS);
+  }
+
   function renderCompletions(): void {
     const text = input.value;
-    completions = composing || text === closedFor ? [] : complete(text);
-    if (selected >= completions.length) selected = 0;
-    menu.replaceChildren(...completions.map((c, i) => {
-      const li = h("li", { class: `completion${i === selected ? " selected" : ""}${c.insert ? "" : " hint-only"}`, role: "option", attrs: { id: `agentduo-completion-${i}`, "aria-selected": String(i === selected) } },
-        h("span", { class: "completion-label" }, c.label), h("span", { class: "completion-desc" }, c.description));
+    const closed = composing || text === closedFor;
+    const caret = input.selectionStart === input.selectionEnd ? input.selectionStart : null;
+    mention = closed || caret === null ? null : mentionAt(text, caret);
+    completions = closed || mention ? [] : complete(text);
+    findFiles(mention?.query ?? null);
+    const rows = choices();
+    if (selected >= rows) selected = 0;
+    const row = (i: number, cls: string, ...children: Child[]) => {
+      const li = h("li", { class: `completion${i === selected ? " selected" : ""}${cls}`, role: "option", attrs: { id: `agentduo-completion-${i}`, "aria-selected": String(i === selected) } }, ...children);
       li.addEventListener("mousedown", (e) => e.preventDefault()); // keep the focus in the input
-      li.addEventListener("click", () => pick(i, false));
+      li.addEventListener("click", () => pick(i, "click"));
       return li;
-    }));
-    menu.hidden = !completions.length;
-    input.setAttribute("aria-expanded", String(!!completions.length));
-    if (completions.length) input.setAttribute("aria-activedescendant", `agentduo-completion-${selected}`);
+    };
+    menu.setAttribute("aria-label", mention ? "Files and folders" : "Commands");
+    menu.replaceChildren(...(mention
+      ? found.map((e, i) => {
+        const { name, dir } = splitPath(e.path);
+        const li = row(i, " mention", icon(e.kind === "folder" ? "folder" : "file", "completion-icon"), h("span", { class: "completion-label" }, name), h("span", { class: "completion-desc" }, dir));
+        li.dataset.path = e.path;
+        li.title = e.path;
+        return li;
+      })
+      : completions.map((c, i) => row(i, c.insert ? "" : " hint-only", h("span", { class: "completion-label" }, c.label), h("span", { class: "completion-desc" }, c.description)))));
+    menu.hidden = !rows;
+    input.setAttribute("aria-expanded", String(!!rows));
+    if (rows) input.setAttribute("aria-activedescendant", `agentduo-completion-${selected}`);
     else input.removeAttribute("aria-activedescendant");
     menu.querySelector(".selected")?.scrollIntoView?.({ block: "nearest" });
   }
 
-  /** Fills the input with a suggestion; `close`: Enter picked it, so the next Enter sends. */
-  function pick(i: number, close: boolean): boolean {
+  /**
+   * Fills the input with a suggestion. A path replaces the @ word: Tab or a click opens a folder (its entries are
+   * listed next), Enter puts it in with a space and closes the list. A command fills the input; after Enter the list
+   * stays closed, so the next Enter sends.
+   */
+  function pick(i: number, how: "Enter" | "Tab" | "click"): boolean {
+    if (mention) {
+      const entry = found[i];
+      if (!entry) return false;
+      const next = insertMention(input.value, mention, entry, how !== "Enter");
+      input.value = next.text;
+      actions.draft(input.value);
+      input.focus();
+      input.setSelectionRange(next.caret, next.caret);
+      selected = 0;
+      renderCompletions();
+      if (state) renderSend(state);
+      return true;
+    }
+    const close = how === "Enter";
     const c = completions[i];
     if (!c?.insert || c.insert === input.value) return false;
     input.value = c.insert;
@@ -1048,10 +1113,10 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
       actions.cycleMode();
       return;
     }
-    if (completions.length) {
+    if (choices()) {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
-        selected = (selected + (e.key === "ArrowDown" ? 1 : completions.length - 1)) % completions.length;
+        selected = (selected + (e.key === "ArrowDown" ? 1 : choices() - 1)) % choices();
         renderCompletions();
         return;
       }
@@ -1062,7 +1127,7 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
         return;
       }
       if ((e.key === "Tab" || e.key === "Enter") && plain) {
-        if (pick(selected, e.key === "Enter") || e.key === "Tab") {
+        if (pick(selected, e.key) || e.key === "Tab") {
           e.preventDefault();
           return;
         }
@@ -1089,6 +1154,11 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
     input.setAttribute("aria-expanded", "false");
   });
   input.addEventListener("focus", () => renderCompletions());
+  // The caret moved without typing (a click, the arrows, Home, End): it may have gone into an @ word or out of one.
+  input.addEventListener("click", () => renderCompletions());
+  input.addEventListener("keyup", (e) => {
+    if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) renderCompletions();
+  });
 
   sendBtn.addEventListener("click", () => (stopMode() ? actions.interrupt() : submit()));
   commandsBtn.addEventListener("click", () => setPanel(panel === "commands" ? null : "commands", true));
@@ -1310,6 +1380,12 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
       for (const thumb of root.querySelectorAll<HTMLElement>(".file-thumb[data-attachment]")) if (thumb.dataset.attachment! in uris) paintThumb(thumb);
     },
     showSettings: () => setPanel("settings", false),
+    fileMatches(seq: number, matches: PathEntry[]): void {
+      if (seq !== findSeq) return;
+      found = matches;
+      selected = 0;
+      if (document.activeElement === input) renderCompletions();
+    },
     release: (done) => reads.release(done),
     tick(): void {
       if (state?.current || state?.turn || state?.discussion) {

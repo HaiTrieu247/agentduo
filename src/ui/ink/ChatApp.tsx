@@ -4,6 +4,7 @@ import { useEffect, useReducer, useRef, useState } from "react";
 import type { ChatStatus } from "../../chat.js";
 import { attachmentDetail, type Attachment } from "../../core/attachment-types.js";
 import { AGENT_NAMES, complete, modeLabel, type Backend, type Completion } from "../../core/commands.js";
+import { insertMention, mentionAt, type PathEntry } from "../../core/mention-text.js";
 import type { UsageReport } from "../../core/usage.js";
 import type { Decision, EventBus, ModelMap, PermissionAnswer } from "../../events.js";
 import { modelText, PROVIDERS } from "../format.js";
@@ -86,13 +87,15 @@ export interface ChatAppProps {
   onPermission(id: string, answer: PermissionAnswer): void;
   views(): ViewKind[];
   readView(kind: ViewKind): Promise<string | null>;
+  /** An @ in the input: the workspace's paths for what follows it, best first (src/core/mentions.ts). */
+  findFiles?(query: string): Promise<PathEntry[]>;
 }
 
 function placeholder(status: ChatStatus, to: Backend): string {
   const name = AGENT_NAMES[to];
   switch (status) {
     case "idle":
-      return `Ask ${name}… (/pipeline <task> runs the workflow; / lists commands)`;
+      return `Ask ${name}… (/pipeline <task> runs the workflow; / lists commands; @ to tag files)`;
     case "running":
       return "A note for the agents: they get it from the next step";
     case "answering":
@@ -109,9 +112,13 @@ const HINTS: Record<ChatStatus, string> = {
   paused: "Enter ask · /resume continue the run · /new leave it · Ctrl-C twice quit",
 };
 const MENU_ROWS = 8;
+/** How long typing after an @ may pause before the paths are looked up. */
+const FIND_MS = 50;
+const COMMAND_KEYS = "↑↓ choose · Tab/Enter fill in · Esc close";
+const PATH_KEYS = "↑↓ choose · Tab opens a folder · Enter puts it in · Esc close";
 
-/** The completion list under the input: commands, then their words, each with what it does. */
-function Suggestions({ items, selected }: { items: Completion[]; selected: number }) {
+/** The completion list under the input: commands, then their words, each with what it does; or the paths for an @. */
+function Suggestions({ items, selected, keys }: { items: Completion[]; selected: number; keys: string }) {
   const start = Math.max(0, Math.min(selected - Math.floor(MENU_ROWS / 2), items.length - MENU_ROWS));
   const shown = items.slice(start, start + MENU_ROWS);
   return (
@@ -125,7 +132,7 @@ function Suggestions({ items, selected }: { items: Completion[]; selected: numbe
           </Text>
         );
       })}
-      <Text dimColor>{`  ↑↓ choose · Tab/Enter fill in · Esc close${items.length > MENU_ROWS ? ` · ${items.length} in all` : ""}`}</Text>
+      <Text dimColor>{`  ${keys}${items.length > MENU_ROWS ? ` · ${items.length} in all` : ""}`}</Text>
     </Box>
   );
 }
@@ -146,16 +153,31 @@ function Attachments({ files }: { files: Attachment[] }) {
   );
 }
 
-function ChatInput({ status, mode, to, models, files, onSubmit, onEscape, onCycleMode }: {
+function ChatInput({ status, mode, to, models, files, onSubmit, onEscape, onCycleMode, findFiles }: {
   status: ChatStatus; mode: string | null; to: Backend; models: ModelMap | null; files: Attachment[]; onSubmit(text: string): void; onEscape(): void; onCycleMode?(): void;
+  findFiles?(query: string): Promise<PathEntry[]>;
 }) {
   const [text, setText] = useState("");
   const [selected, setSelected] = useState(0);
   /** The text the list was closed for (Esc, or filled in with Enter): it stays closed until the text changes. */
   const [closedFor, setClosedFor] = useState<string | null>(null);
-  const suggestions = text === closedFor ? [] : complete(text);
+  const open = text !== closedFor;
+  /** The @ the input ends in (the caret is always at its end), and the paths last found for one. */
+  const mention = open && findFiles ? mentionAt(text) : null;
+  const query = mention?.query ?? null;
+  const [found, setFound] = useState<PathEntry[]>([]);
+  useEffect(() => {
+    if (query === null || !findFiles) return setFound([]);
+    let live = true;
+    const timer = setTimeout(() => void findFiles(query).then((matches) => live && setFound(matches), () => undefined), FIND_MS);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [query, findFiles]);
+  const suggestions: Completion[] = mention ? found.map((e) => ({ insert: e.path, label: e.path, description: e.kind })) : open ? complete(text) : [];
   const menu = suggestions.length > 0;
-  useEffect(() => setSelected(0), [text]);
+  useEffect(() => setSelected(0), [text, found]);
   const send = (value: string) => {
     onSubmit(value);
     setText("");
@@ -173,6 +195,8 @@ function ChatInput({ status, mode, to, models, files, onSubmit, onEscape, onCycl
       if (key.upArrow) return setSelected((i) => (i - 1 + suggestions.length) % suggestions.length);
       if (key.downArrow) return setSelected((i) => (i + 1) % suggestions.length);
       if (key.escape) return setClosedFor(text);
+      // A path replaces the @ word: Tab opens a folder (its entries come next), Enter puts it in with a space.
+      if (mention && (key.tab || key.return)) return setText(insertMention(text, mention, found[Math.min(selected, found.length - 1)]!, key.tab).text);
       if (key.tab || key.return) {
         if (choice.insert && choice.insert !== text) {
           setText(choice.insert);
@@ -209,7 +233,7 @@ function ChatInput({ status, mode, to, models, files, onSubmit, onEscape, onCycl
           <Text inverse> </Text>
         </Text>
       </Box>
-      {menu ? <Suggestions items={suggestions} selected={Math.min(selected, suggestions.length - 1)} /> : null}
+      {menu ? <Suggestions items={suggestions} selected={Math.min(selected, suggestions.length - 1)} keys={mention ? PATH_KEYS : COMMAND_KEYS} /> : null}
       <Text dimColor wrap="truncate-end">
         {"  to: "}
         <Text bold>{AGENT_NAMES[to]}</Text>
@@ -288,7 +312,7 @@ export function ChatApp(p: ChatAppProps) {
               setUsage(null);
             }} />
           ) : (
-            <ChatInput status={status} mode={mode} to={to} models={models} files={files} onSubmit={p.onSubmit} onEscape={p.onEscape} onCycleMode={p.onCycleMode} />
+            <ChatInput status={status} mode={mode} to={to} models={models} files={files} onSubmit={p.onSubmit} onEscape={p.onEscape} onCycleMode={p.onCycleMode} findFiles={p.findFiles} />
           )}
         </>
       )}

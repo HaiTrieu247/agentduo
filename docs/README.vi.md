@@ -88,6 +88,16 @@ Code và Codex; pipeline đầy đủ chỉ chạy khi bạn yêu cầu:
     riêng), nên mỗi lần đều tốn thêm token và thời gian. Câu hỏi sau chỉ liệt kê đường dẫn file của tin trước.
   - Lúc cần quyết định HUMAN_REVIEW, file đang chờ không đi kèm quyết định: hãy gửi chúng trong một tin trước (thành ghi
     chú cho bước kế tiếp của run), hoặc chọn quyết định sau rồi `/resume` kèm ghi chú.
+- **Tag file của workspace bằng @.** Gõ `@` trong ô nhập thì hiện danh sách file và folder của workspace (cấp ngoài
+  cùng, folder trước); gõ thêm thì danh sách thu lại còn những đường dẫn chứa các chữ đó theo đúng thứ tự, khớp nhất
+  lên đầu, giống quick open. ↑↓ để chọn, Tab mở một folder (hiện các mục bên trong) hoặc chèn một file, Enter chèn
+  đường dẫn và đóng danh sách, Esc đóng danh sách. Đường dẫn có dấu cách được viết trong ngoặc kép
+  (`@"my docs/notes.md"`). Danh sách là những gì git liệt kê trong workspace (file đã track và file chưa track mà git
+  không ignore), hoặc khi không có repo thì là thư mục được duyệt, bỏ qua `.git` và `node_modules`; các run của agentduo
+  không bao giờ có trong đó. Extension VS Code và app desktop cũng dùng được y như vậy.
+  - Tin nhắn giữ nguyên `@path` như bạn gõ, và prompt có thêm danh sách các file/folder được tag còn tồn tại trong
+    workspace (đường dẫn không có, hoặc nằm ngoài workspace, bị bỏ qua), để agent tự đọc bằng tool của nó: không chép gì
+    cả, khác với `/attach`. Dùng được trong câu hỏi, `/discuss`, task `/pipeline` (prompt đầu của mỗi role) và ghi chú.
 - **Lệnh:** `/claude`, `/codex`, `/pipeline`, `/discuss`, `/plan`, `/diff`, `/status`, `/usage`, `/attach`,
   `/attachments`, `/detach`, `/resume` (chạy tiếp run đang dừng hoặc đang chờ, kể cả từ phiên trước), `/new`,
   `/settings`, `/config`, `/help`, `/quit`. Bấm Ctrl-C hai lần cũng thoát; run đang chạy sẽ dừng ở bước hiện tại và vẫn
