@@ -2,10 +2,10 @@
 // for the user), its resumable runs, and at the bottom the app's update when it needs the user (restart into it, or
 // download it), both agents' accounts and limits (Account & Usage), and Settings. A project or conversation where an agent works now has a slowly pulsing dot; nothing marks the others.
 // Drawn again whole on each change; it is small.
-import { ACCOUNT_AGENTS, limitRows, updatedText } from "../../../../extensions/vscode/webview/account.js";
-import { providerMark } from "../../../../extensions/vscode/webview/dom.js";
-import type { UsageState } from "../../../../src/core/usage.js";
-import type { Agent } from "../../../../src/events.js";
+import { ACCOUNT_AGENTS, limitRows, updatedText } from "@agentduo/webview/account";
+import { providerMark } from "@agentduo/webview/dom";
+import type { UsageState } from "@agentduo/engine/system/usage";
+import type { Agent } from "@agentduo/engine/events";
 import { CONVERSATIONS_PROJECT_ID } from "../shared/protocol.js";
 import type { AppSnapshot, ConversationItem, RunItem, UpdateState } from "../shared/protocol.js";
 import { button, el, icon, meter, relativeTime } from "./bridge.js";

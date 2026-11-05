@@ -1,6 +1,6 @@
 // The examples the pages show are run, not just printed: the first-task project fails its gate before the fix and
 // passes after it, the setup script creates exactly those files, and every complete config example is one the
-// repository's own `duo doctor` accepts (the built CLI, ../dist/cli.js, from `npm run build` at the repository root).
+// repository's own `duo doctor` accepts (the built CLI, ../apps/cli/dist/cli.js, from `npm run build` at the repository root).
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -12,7 +12,7 @@ import { FIRST_TASK_DIR, FIRST_TASK_FILES, firstTaskConfig, firstTaskFile, first
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const examples = join(root, "examples");
-const cli = join(root, "..", "dist", "cli.js");
+const cli = join(root, "..", "apps", "cli", "dist", "cli.js");
 const temps = [];
 const temp = (name) => {
   const dir = mkdtempSync(join(tmpdir(), `agentduo-${name}-`));

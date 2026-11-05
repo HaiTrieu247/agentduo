@@ -2,7 +2,7 @@
 // each was on, and half-typed drafts. Written atomically; a file that cannot be read gives the defaults (and is kept
 // aside, never overwritten silently). No Electron import, so it is tested as is.
 import { existsSync, readFileSync, renameSync } from "node:fs";
-import { atomicWrite } from "../../../../src/core/state.js";
+import { atomicWrite } from "@agentduo/engine/workflow/state";
 import { DEFAULT_PREFERENCES, parsePreferences, type Preferences } from "../shared/protocol.js";
 
 export interface KnownProject {

@@ -1,14 +1,14 @@
 // What crosses between the desktop's renderer and its main process, and how main checks it. The renderer is isolated
 // (no Node, a sandboxed preload): it names projects, conversations, artifacts and listed changes by the ids main gave
 // it, never by a path, and every request is checked here before main acts on it. Pure, so it is tested as is.
-import type { ConfigScope, ConfigurationView } from "../../../../src/core/configuration.js";
-import type { Backend } from "../../../../src/core/commands.js";
+import type { ConfigScope, ConfigurationView } from "@agentduo/engine/config/configuration";
+import type { Backend } from "@agentduo/engine/chat/commands";
 import {
   ARTIFACTS, BACKENDS, CONFIG_SCOPES, isConversationId, parseWebviewMessage, ProtocolError, type ArtifactContent, type ArtifactName, type Change, type FocusedRun,
   type HostMessage, type SnapshotFile, type WebviewMessage,
-} from "../../../../extensions/vscode/src/protocol.js";
-import type { AccountUsage } from "../../../../extensions/vscode/src/protocol.js";
-import type { Check } from "../../../../src/core/doctor.js";
+} from "@agentduo/host/protocol";
+import type { AccountUsage } from "@agentduo/host/protocol";
+import type { Check } from "@agentduo/engine/system/doctor";
 
 export { ProtocolError };
 

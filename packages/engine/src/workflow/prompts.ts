@@ -1,0 +1,936 @@
+import type { DiscussionStep, Verdict } from "../events.js";
+import { attachmentDetail, type Attachment } from "../inputs/attachment-types.js";
+import { clarificationSection, type ClarificationEntry, type ClarifiedPair } from "../clarification/clarification.js";
+import type { AgentRole, Backend, GateConfig } from "../config/config.js";
+import { MAX_NOTES_PER_TURN } from "./context.js";
+import { describeGates, type GateResult } from "../quality/gates.js";
+import type { PathEntry } from "../inputs/mention-text.js";
+import type { Change } from "../git/git.js";
+import type { FindingItem, ReviewFindings } from "../quality/findings.js";
+import type { Approval, Critique, Implementation, Plan } from "./outputs.js";
+import { issuesMarkdown } from "./render.js";
+import type { ConversationContext, EarlierTask, Exchange, HumanNote, PreexistingFailure, RepoNote, RunProfile, ScopeItem, TrackedFinding } from "./state.js";
+
+/** Where an attachment's copy is, as a prompt names it: its absolute path, or null when its reference is unusable. */
+export type Locate = (a: Attachment) => string | null;
+
+/** The workspace's files and folders a text tags with @ (packages/engine/src/inputs/mentions.ts), for its prompt. */
+export type Tagged = (text: string) => PathEntry[];
+
+export interface PromptContext {
+  repo: string;
+  taskId: string;
+  task: string;
+  agents: Record<AgentRole, Backend>;
+  gates: GateConfig[];
+  notes: HumanNote[];
+  earlier?: EarlierTask[];
+  /** The chat's conversation when the run started; every role sees the same one. */
+  conversation?: ConversationContext;
+  /** Files attached to the task. */
+  attachments?: Attachment[];
+  /** Where attached files are (the task's, the notes', the conversation's); without it no file is listed. */
+  locate?: Locate;
+  /** The paths the task and the notes tag with @; without it none is listed. */
+  tagged?: Tagged;
+  /** The run keeps its snapshots in agentduo's own Git repository, outside the workspace (which may have none). */
+  internalSnapshots?: boolean;
+  /** What earlier agents of the run recorded about the repository, already limited to the notes this role may have that still hold. */
+  repoNotes?: RepoNote[];
+  /**
+   * The call continues the role's own session: its prompt gives only what is new since the session's last turn, and
+   * `notes` and `repoNotes` are only the ones it was not given yet.
+   */
+  continued?: ContinuedTurn;
+  /** The file of the plan the prompt is about, which a continued session that already has the plan is pointed to. */
+  planFile?: string;
+  /** The quality gates before any change (the baseline); null or absent when there is none. */
+  baseline?: GateResult[] | null;
+  /**
+   * What the user answered to the agents' questions (packages/engine/src/clarification/clarification.ts): all of it in a fresh prompt, only what the
+   * session was not given in a continued one. Information about the task, never a change to its scope or an exception.
+   */
+  clarifications?: ClarificationEntry[];
+  /** The user may be asked questions in this run (clarification.enabled): the planner may answer with questions instead of a plan. */
+  mayAsk?: boolean;
+  /** Someone can answer a question now, so a Claude role is offered its AskUserQuestion tool. */
+  canAskNow?: boolean;
+  /** The run's pipeline profile (packages/engine/src/workflow/profiles.ts); absent: standard, as it always was. */
+  profile?: RunProfile;
+}
+
+/** What the code reviewer is asked about the acceptance contract (packages/engine/src/quality/acceptance.ts). */
+export interface ReviewContract {
+  /** Required gates that fail as they did before any change, out of the plan's scope: it attributes each in `gate_failures`. */
+  attribute: string[];
+  /** Pre-existing failures the user accepted for this run. */
+  accepted: PreexistingFailure[];
+  /** Critical findings outside the task's scope that the user decided to keep out of it. */
+  kept: ScopeItem[];
+  /** Findings earlier reviews resolved: one raised again keeps its id (it is reopened, not new). Absent: none. */
+  resolved?: TrackedFinding[];
+}
+
+/** The most resolved findings a review prompt lists, and how much of each one's words. */
+const MAX_RESOLVED_LISTED = 20;
+const MAX_RESOLVED_CHARS = 120;
+
+export interface ContinuedTurn {
+  /** Files of the workspace that changed after the session's last turn ended. */
+  changed: Change[];
+  /** The plan the prompt is about is the one the session's last turn had. */
+  knowsPlan: boolean;
+  /** Code reviewer: the changes since the revision it last reviewed, given instead of the whole diff. */
+  sinceReviewed?: { from: string; stat: string; diff: string; truncated: boolean };
+  /**
+   * The role of the session's last turn, when it was another one (the plan critic and the implementer share a
+   * session): this turn switches roles, and the session's last answer is that role's.
+   */
+  from?: AgentRole;
+  /** The role's own latest answer, which the prompt refers to, is in the session; false: it is given again. Absent: it is. */
+  knowsAnswer?: boolean;
+}
+
+/**
+ * How the plan the implementer works from became final, for an implementer that goes on in the plan critic's
+ * session: what came after the critic's last turn there.
+ */
+export interface PlanHandoff {
+  /** The final plan's version; null when unknown. */
+  version: number | null;
+  /** The sign-off's summary, when the planner signed the plan off. */
+  signOff: string | null;
+  /** The human operator accepted the plan as it was (after the planning rounds ran out). */
+  byHuman: boolean;
+  /** What the user accepted about the plan's contract: contradictions in the requirements, and the scope. */
+  accepted?: { conflicts: string[]; scope?: ScopeItem[] };
+}
+
+const INTERNAL_SNAPSHOTS = "- Snapshots: agentduo keeps this run's snapshots in a Git repository of its own, outside the workspace. The workspace " +
+  "may have no git repository, and `git diff`, `git show` or `git log` there do not see these snapshots.\n";
+
+/** The first line of a conversation prompt: not an orchestrator role, so no schema and no role instructions. */
+export const CONVERSATION_MARKER = "[agentduo-conversation]";
+
+export interface PlanFeedback {
+  critique?: Critique;
+  approval?: Approval;
+}
+
+export const SEVERITY_GUIDE = [
+  "Severity scale:",
+  "- critical: the work cannot succeed as written, or it would cause damage (data loss, security hole, broken build for everyone).",
+  "- high: a significant gap or defect that must be fixed before moving on.",
+  "- medium: should be fixed, but does not block.",
+  "- low: minor improvement or nit.",
+].join("\n");
+
+export const OUTPUT_RULES = "## Output\nYour final message must be a single JSON object matching the provided output schema. No prose outside the JSON.\n";
+
+const NAMES: Record<Backend, string> = { codex: "Codex", claude: "Claude Code" };
+const ROLE_TITLES: Record<AgentRole, string> = { planner: "planner", plan_reviewer: "plan critic", implementer: "implementer", code_reviewer: "code reviewer" };
+/** The most changed files a continued turn lists one by one. */
+const MAX_CHANGED_LISTED = 100;
+
+/** A markdown fence longer than any backtick run inside `text`, so the text cannot close it early. */
+export function fenceFor(text: string): string {
+  const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((m) => m[0].length));
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
+function header(role: string, title: string, ctx: PromptContext): string {
+  const a = ctx.agents;
+  return "[orchestrator-role: " + role + "]\n" +
+    "You are the **" + title + "** in a two-agent software workflow. agentduo only relays structured messages between the agents.\n" +
+    "Roles: planner and plan sign-off: " + NAMES[a.planner] + "; plan critic: " + NAMES[a.plan_reviewer] + "; implementer: " +
+    NAMES[a.implementer] + "; code reviewer: " + NAMES[a.code_reviewer] + ".\n" +
+    "Follow your own configuration and the repository's instructions (AGENTS.md / CLAUDE.md).\n\n" +
+    "- Workspace: `" + ctx.repo + "`\n" +
+    "- Task ID: `" + ctx.taskId + "`\n" +
+    (ctx.internalSnapshots ? INTERNAL_SNAPSHOTS : "");
+}
+
+/**
+ * The opening of a turn that continues a session, which holds everything the first turn of it was given. A turn that
+ * switches roles in it says so first: the earlier role's instructions no longer apply.
+ */
+function continuedHeader(role: string, title: string, ctx: PromptContext): string {
+  const from = ctx.continued?.from;
+  const opening = from
+    ? "You are the **" + title + "** of task `" + ctx.taskId + "` in the same two-agent workflow. This message continues the session in which you " +
+      "were the **" + ROLE_TITLES[from] + "** until now. From this turn on you are the **" + title + "**: what you were asked as " + ROLE_TITLES[from] +
+      " no longer applies, so follow only this message's instructions and give your answer in this role's output format. "
+    : "You are the **" + title + "** of task `" + ctx.taskId + "` in the same two-agent workflow, and this message continues your session. ";
+  return "[orchestrator-role: " + role + "]\n" + opening +
+    "Your earlier turns hold the task, the conversation, the earlier notes, the roles and what you read in the repository; this message " +
+    "gives only what is new since your last turn. Read a file again before you rely on what you remember of it, above all a file listed below.\n" +
+    (ctx.internalSnapshots ? INTERNAL_SNAPSHOTS : "");
+}
+
+/** Whether a continued session holds the role's own latest answer, which the prompt may then point to instead of repeating. */
+const holdsOwnAnswer = (ctx: PromptContext) => !!ctx.continued && ctx.continued.knowsAnswer !== false;
+
+/** Changed files, a line each (at most MAX_CHANGED_LISTED). */
+function changeList(changed: Change[]): string {
+  const shown = changed.slice(0, MAX_CHANGED_LISTED).map(([status, path]) => `- ${status} ${inlineCode(path)}`).join("\n");
+  return shown + (changed.length > MAX_CHANGED_LISTED ? `\n- … and ${changed.length - MAX_CHANGED_LISTED} more` : "");
+}
+
+function changedSection(changed: Change[]): string {
+  const title = "## Files changed since your last turn\n";
+  if (!changed.length) return title + "None: the workspace is as your last turn left it.\n";
+  return title + "Another agent, a quality gate or the user changed these after your last turn ended (A added, M modified, D deleted); " +
+    "what you remember of them is out of date.\n" + changeList(changed) + "\n";
+}
+
+function repoNotesSection(list: RepoNote[] | undefined, continued: boolean): string {
+  if (!list?.length) return "";
+  const title = continued ? "## New repository notes" : "## Repository notes from earlier agents";
+  const intro = (continued ? "Recorded by other agents of this run since your last turn" : "Recorded by earlier agents of this run") +
+    ". Each still holds as far as agentduo can tell: nothing under its path changed since it was written. Use them instead of looking the " +
+    "same things up again, and read the file when a detail matters.";
+  return `\n${title}\n${intro}\n` + list.map((n) => `- ${inlineCode(n.path)}: ${n.note} (${NAMES[n.backend]}, ${ROLE_TITLES[n.role]})`).join("\n") + "\n";
+}
+
+/** What a role that explores the repository leaves for the next ones (the schemas' `repo_notes`). */
+const REPO_NOTES_ASK = "## Repository notes\nIn `repo_notes`, leave the facts about this repository that you checked in its files and that the " +
+  "agents after you would otherwise have to look up again: what a file or folder holds, where something is defined, a convention, the command " +
+  `that runs the tests. One fact per entry, in a sentence, at most ${MAX_NOTES_PER_TURN}, each with the workspace-relative \`path\` of the file ` +
+  "or folder it is about (for a command, the file that defines it, such as package.json): agentduo stops passing a note on as soon as anything " +
+  "under its path changes. Only what the files show, with no plans, opinions or verdicts, and nothing the notes you were given already say; " +
+  "an empty list is fine.\n";
+
+/**
+ * The start of a role's prompt. Fresh: who is who, the task and its files, what came before it, the notes and what
+ * earlier agents recorded. Continued: only the files changed since the session's last turn, and the notes it was not
+ * given yet.
+ */
+function opening(role: string, title: string, ctx: PromptContext, position: string): string[] {
+  if (ctx.continued) {
+    return [
+      continuedHeader(role, title, ctx),
+      position,
+      // A continued session knows the profile it started with: it is told again only once the profile changed.
+      ctx.profile && ctx.profile.name !== ctx.profile.initial ? profileSection(ctx.profile, role) : "",
+      changedSection(ctx.continued.changed),
+      notes(ctx.notes, ctx.locate, true, ctx.tagged),
+      clarificationSection(ctx.clarifications ?? [], "## New answers from the user to questions the agents asked"),
+      repoNotesSection(ctx.repoNotes, true),
+    ].filter(Boolean);
+  }
+  const profile = profileSection(ctx.profile, role);
+  return [header(role, title, ctx), position, ...(profile ? [profile] : []), taskSection(ctx), earlier(ctx), notes(ctx.notes, ctx.locate, false, ctx.tagged),
+    clarificationSection(ctx.clarifications ?? []), repoNotesSection(ctx.repoNotes, false), baselineSection(ctx.baseline)];
+}
+
+/**
+ * When to ask the user, for a role that may. The repository answers most questions, so the agent finds those itself; the user is
+ * asked only for what they alone can say and what would change the scope or the result. The answers are information: they never
+ * widen the agreed scope or waive a check.
+ */
+const ASK_RULES = "Look in the repository first: do not ask what its code, tests, docs or configuration can tell you. Ask only when " +
+  "information that only the user has would materially change the scope or the result, and ask it once, with all its questions " +
+  "together. Never ask for confirmation of a task that is clear.";
+
+/** For Claude in the chat: it may use its AskUserQuestion tool. Codex has none in a turn (it asks in words, and the user answers in the next message). */
+function chatAskSection(): string {
+  return "\n## Questions for the user\n" + ASK_RULES + " You may use the AskUserQuestion tool for that (annotated choices; the user can answer " +
+    "in their own words). Its answers are information for this message only.\n";
+}
+
+/** The asking guidance of a role's prompt (fresh prompts only: a continued session has it). */
+function askingSection(ctx: PromptContext, role: "planner" | "plan_reviewer" | "implementer"): string[] {
+  // A continued session has its role's guidance already; one that changes role (the critic going on as the implementer) gets the new role's.
+  if (ctx.continued && (!ctx.continued.from || ctx.continued.from === role)) return [];
+  const native = !!ctx.canAskNow && ctx.agents[role] === "claude";
+  if (role === "planner") {
+    if (!ctx.mayAsk) {
+      return ["## Questions\nThe user cannot be asked questions in this run: where information is missing, decide on an assumption, state it, and " +
+        "list it in `open_questions`. Return `result.kind` `plan`.\n"];
+    }
+    return ["## Questions for the user\n" + ASK_RULES + " To ask, return `result.kind` `needs_clarification` with only `questions` (no plan): each " +
+      "has a short `header`, the `question`, `multi_select` (true when several options can apply) and 2 to 6 distinct `options`, each with a " +
+      "`label` and a `description` of what choosing it means. The user may also answer in their own words. You are then called again with the " +
+      "answers and write the plan. A clear task goes straight to `result.kind` `plan` with the whole plan in `plan`." +
+      (native ? " Do not use the AskUserQuestion tool in this call: asking is the `needs_clarification` result." : "") +
+      " Do not ask again what the answers given to you already settle.\n"];
+  }
+  if (!native) return [];
+  return ["## Questions for the user\n" + ASK_RULES + " You may use the AskUserQuestion tool for that (annotated choices; the user can answer " +
+    "in their own words). Its answers are information: they do not change the agreed scope or the acceptance contract. If an answer would " +
+    (role === "implementer" ? "change them, do not go on outside them: report `blocked` with that as the blocking reason, so that the user decides.\n"
+      : "change them, raise it as an issue (in the task's scope) rather than assuming it.\n")];
+}
+
+/**
+ * What the run's pipeline profile asks of a role, only where it asks something (packages/engine/src/workflow/profiles.ts). Standard asks
+ * nothing new, unless the run came to it from lightweight. No profile changes what a role checks or may approve.
+ */
+export function profileSection(profile: RunProfile | undefined, role: string): string {
+  if (!profile) return "";
+  const from = profile.changes.at(-1);
+  if (profile.name === "standard") {
+    if (!from) return "";
+    return `## Pipeline profile: standard (escalated from ${from.from})\nThe run started as a ${from.from} task and is now handled with the ` +
+      `standard depth, because ${from.reason}. Plan, critique and review as for any task of this size.\n`;
+  }
+  const text: Partial<Record<string, string>> = profile.name === "lightweight" ? {
+    planner: "The task is expected to be small and clearly specified. Keep the plan short: the fewest steps that do the task, each naming its " +
+      "files, and acceptance criteria a check can verify; no speculative work. A plan the critic approves goes straight to implementation, " +
+      "with no sign-off round. A plan that needs more (many steps or files, a blocking critique) moves the run to the standard profile.",
+    plan_reviewer: "A plan you approve goes straight to implementation: there is no sign-off round after you. Your severities decide as " +
+      "always; a blocking issue sends the plan back and moves the run to the standard profile.",
+  } : {
+    planner: "The task is expected to be complex or risky. Cover the architecture and the alternatives you rejected, the risks with their " +
+      "mitigations, edge cases and failure modes, and a test strategy that exercises them. The plan goes through the critic and your sign-off.",
+    plan_reviewer: "The task is expected to be complex or risky: check the architecture, the risks, edge cases and the test strategy in depth " +
+      "against the code the plan changes.",
+    plan_finalizer: "The task is expected to be complex or risky: sign the plan off only if it covers what its critique raised.",
+    code_reviewer: "The task is expected to be complex or risky: review in depth (edge cases, error handling, concurrency, security, and the " +
+      "tests the change adds), and review even when quality gates fail, with their results.",
+  };
+  const t = text[role];
+  return t ? `## Pipeline profile: ${profile.name}\n${t}\n` : "";
+}
+
+/** The quality gates as they were before any change: what fails there is not the task's doing (fresh prompts only; it never changes). */
+function baselineSection(baseline: GateResult[] | null | undefined): string {
+  if (!baseline?.length) return "";
+  return "\n## Quality gates before any change (baseline)\nagentduo ran the quality gates on the workspace before the first plan, so that " +
+    "what already failed is told apart from what the task changes:\n" + describeGates(baseline) + "\n";
+}
+
+/** The required gates of a baseline that failed. */
+const baselineFailing = (baseline: GateResult[] | null | undefined) => (baseline ?? []).filter((g) => g.required && !g.passed);
+
+/** Never bend the task to make it consistent: the user settles a contradiction in it. */
+const KEEP_THE_TASK = "Never drop, relax or reinterpret what the task asks in order to make the plan consistent. A requirement that " +
+  "contradicts another one, or contradicts what is there before any change (the baseline above), stays as the task states it: the user " +
+  "settles that contradiction.";
+
+/** The plan section of a prompt about a plan the session may already have: a pointer then, and the whole plan otherwise. */
+function planSection(title: string, planMd: string, ctx: PromptContext, had: string): string {
+  if (ctx.continued?.knowsPlan) return `## ${title}\n${had}` + (ctx.planFile ? ` It is also in \`${ctx.planFile}\`.` : "") + "\n";
+  return `## ${title}${ctx.continued ? " (new since your last turn)" : ""}\n${planMd}\n`;
+}
+
+function gateList(gates: GateConfig[]): string {
+  return gates.map((g) => "- `" + g.command + "` (" + g.name + ", " + (g.required === false ? "optional" : "required") + ")").join("\n");
+}
+
+/** The pipeline tasks of the chat so far; the one place an outcome is told, in pipeline and conversation prompts alike. */
+export function earlierTasks(list: EarlierTask[] = [], current = true): string {
+  if (!list.length) return "";
+  return "\n## Previous pipeline tasks\nThe user gave these tasks to the pipeline " + (current ? "before this one" : "earlier in this chat") +
+    ", in this workspace; their changes are already in the working tree.\n" + list.map((t, i) => `${i + 1}. ${t.task} — ${t.outcome}`).join("\n") + "\n";
+}
+
+/** `text` as inline code that a backtick of its own cannot close. */
+function inlineCode(text: string): string {
+  const ticks = "`".repeat(Math.max(0, ...[...text.matchAll(/`+/g)].map((m) => m[0].length)) + 1);
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `${ticks}${pad}${text}${pad}${ticks}`;
+}
+
+/** The files of one message, a line each: what each is, and where its copy is. Every prompt lists files with this. */
+export function attachmentLines(list: Attachment[], locate: Locate, indent = ""): string {
+  return list.map((a) => {
+    const file = locate(a);
+    return `${indent}- ${inlineCode(a.name)} (${attachmentDetail(a)}): ${file ? inlineCode(file) : "no longer available"}`;
+  }).join("\n");
+}
+
+const CURRENT_FILES = "agentduo keeps a copy of each file at the path given. The images your CLI can take are also attached to this message as " +
+  "images; read any other file (text, code, PDF…) at its path, and an image there too if you were not shown it. If you cannot read a file, say so.";
+
+/** The files of the message the prompt is about: listed once, where that message is. */
+function filesSection(title: string, list: Attachment[] | undefined, locate: Locate | undefined): string {
+  if (!list?.length || !locate) return "";
+  return `\n### ${title}\n${CURRENT_FILES}\n${attachmentLines(list, locate)}\n`;
+}
+
+const TAGGED = "The user tagged these files and folders of the workspace with @ for you to read (paths relative to the workspace; for a " +
+  "folder, what in it bears on the message).";
+
+/** The workspace paths the message the prompt is about tags with @: listed once, where that message is. */
+function taggedSection(title: string, text: string, tagged: Tagged | undefined): string {
+  const list = tagged?.(text) ?? [];
+  if (!list.length) return "";
+  return `\n### ${title}\n${TAGGED}\n${list.map((e) => `- ${inlineCode(e.path)} (${e.kind})`).join("\n")}\n`;
+}
+
+/** What agents asked the user in a conversation, and what the user answered: information about what they want, nothing more. */
+function pairLines(pairs: ClarifiedPair[]): string {
+  return pairs.map((p) => `- ${NAMES[p.asker]} asked${p.header ? ` [${p.header}]` : ""}: ${p.question.trim()}\n  → The user answered: ${p.answer.trim()}`).join("\n");
+}
+
+function exchangeText(e: Exchange, locate?: Locate): string {
+  const name = NAMES[e.backend];
+  const asked = e.clarified?.length ? `\n\n**Questions asked of the user while that was answered:**\n${pairLines(e.clarified)}` : "";
+  // Files of an earlier message go by path only: they were attached to that message, not to this one.
+  const files = e.attachments?.length && locate
+    ? `\n\nFiles attached to that message (not attached again; read them at their paths if you need them):\n${attachmentLines(e.attachments, locate)}` : "";
+  if (e.unfinished) {
+    const other = e.discussedWith ? ` (discussed with ${NAMES[e.discussedWith]})` : "";
+    return `**User → ${name}${other}:**\n${e.question.trim()}${files}${asked}\n\n**${name}:**\n` +
+      "(That turn did not finish: it was stopped or failed, so nothing written in it is kept. The user's answers above were given and stand.)";
+  }
+  if (e.discussedWith) {
+    const other = NAMES[e.discussedWith];
+    return `**User → ${name} (discussed with ${other}):**\n${e.question.trim()}${files}${asked}\n\n**${name}, after discussing it with ${other}:**\n${e.answer.trim()}`;
+  }
+  return `**User → ${name}:**\n${e.question.trim()}${files}${asked}\n\n**${name}:**\n${e.answer.trim()}`;
+}
+
+/** What was said in the chat, oldest first, and how many older exchanges did not fit. */
+export function conversationSection(conversation: ConversationContext | undefined, title: string, intro: string, locate?: Locate): string {
+  if (!conversation?.exchanges.length) return "";
+  const omitted = conversation.omitted ? `(${conversation.omitted} older exchange(s) are left out.)\n` : "";
+  return `\n## ${title}\n${intro}\n${omitted}\n${conversation.exchanges.map((e) => exchangeText(e, locate)).join("\n\n")}\n`;
+}
+
+function earlier(ctx: PromptContext): string {
+  return earlierTasks(ctx.earlier) + conversationSection(ctx.conversation, "Conversation before this task",
+    "Before giving this task, the user talked about it with Claude Code and Codex in this chat. Use it as context; the task above is what to do.", ctx.locate);
+}
+
+/** The task, then the files attached to it and the paths it tags. */
+function taskSection(ctx: PromptContext): string {
+  return "## Task\n" + ctx.task + "\n" + filesSection("Files the user attached to the task", ctx.attachments, ctx.locate) +
+    taggedSection("Workspace paths the user tagged in the task", ctx.task, ctx.tagged);
+}
+
+/**
+ * A question of the three-way chat for one agent: who is talking, what was said, the pipeline tasks so far, and the
+ * question itself, which appears exactly once, last.
+ */
+export function conversation(o: {
+  workspace: string; backend: Backend; context: ConversationContext; earlier: EarlierTask[]; question: string; attachments?: Attachment[]; locate?: Locate;
+  tagged?: Tagged;
+  /** Claude is offered its AskUserQuestion tool in this call (someone can answer, clarification.enabled). */
+  canAsk?: boolean;
+}): string {
+  const name = NAMES[o.backend];
+  const other = NAMES[o.backend === "codex" ? "claude" : "codex"];
+  return [
+    CONVERSATION_MARKER,
+    `This is a three-way conversation in the workspace \`${o.workspace}\` between the user, Claude Code and Codex; agentduo relays the messages. ` +
+      `You are ${name}. Answer the user's latest message as ${name}; earlier answers may come from ${other}, and the user can read all of them.`,
+    "Follow your own configuration and the repository's instructions (AGENTS.md / CLAUDE.md).",
+    earlierTasks(o.earlier, false) + conversationSection(o.context, "Conversation so far", "Oldest first.", o.locate),
+    `## The user's message to ${name}\n${o.question}\n` + filesSection("Files the user attached to this message", o.attachments, o.locate) +
+      taggedSection("Workspace paths the user tagged", o.question, o.tagged),
+    ...(o.canAsk && o.backend === "claude" ? [chatAskSection()] : []),
+  ].filter(Boolean).join("\n");
+}
+
+/** One message of a discussion so far, as the later prompts of the discussion show it. */
+export interface DiscussionMessage {
+  backend: Backend;
+  step: DiscussionStep;
+  round: number;
+  text: string;
+  verdict: Verdict | null;
+}
+
+const STEP_TITLES: Record<DiscussionStep, (round: number) => string> = {
+  answer: () => "answer, version 1",
+  critique: (round) => `review of version ${round}`,
+  revise: (round) => `answer, version ${round}`,
+  synthesis: () => "final answer (synthesis)",
+  final: (round) => `final answer, version ${round}`,
+};
+
+/** The synthesis turn's ask: how the reviews ended, and what to make of the whole discussion. */
+function synthesisAsk(o: { answerer: string; critic: string; round: number; history: DiscussionMessage[] }): string {
+  const review = o.history.findLast((m) => m.step === "critique");
+  const version = o.history.findLast((m) => m.step !== "critique")?.round ?? 1;
+  const agreed = review?.verdict === "agree";
+  const ended = agreed
+    ? `${o.critic} agreed with version ${version} after ${o.round} review(s).`
+    : `${o.critic} still asked for changes after ${o.round} review(s), the most this discussion allows.`;
+  const disputed = "a short closing section on the points still disputed, titled \"Còn bất đồng\" if you answer in Vietnamese, or the same " +
+    "in the language of your answer: each point, with both positions put neutrally, in a line or two.";
+  return `## Your turn: the final answer (synthesis)\nThe reviews are over: ${ended} You are not defending any version, even one you ` +
+    `wrote: synthesize the whole discussion, ${o.answerer}'s versions and ${o.critic}'s reviews, into the final answer the user gets. ` +
+    "It replaces the last version as the response.\n" +
+    "- Keep what holds up, from both agents.\n" +
+    "- Add the points of the reviews that are right and that the last version still misses.\n" +
+    "- Leave out what the discussion showed to be wrong.\n\n" +
+    "Write one direct answer for the user: do not mention versions, reviews, or who said what. " +
+    (agreed ? `If a point is still disputed all the same, end with ${disputed}\n` : `End with ${disputed}\n`);
+}
+
+function discussionHistory(history: DiscussionMessage[]): string {
+  if (!history.length) return "";
+  return "\n## The discussion so far\nOldest first.\n\n" + history.map((m) => {
+    const verdict = m.step === "critique" ? ` (verdict: ${m.verdict ? m.verdict.toUpperCase() : "none given, taken as REVISE"})` : "";
+    return `### ${NAMES[m.backend]}: ${STEP_TITLES[m.step](m.round)}${verdict}\n${m.text.trim()}`;
+  }).join("\n\n") + "\n";
+}
+
+/**
+ * A turn of /discuss for one agent: the conversation so far, the user's question (once), the discussion so far, and
+ * what this step asks. Its second line names the step, so the agent (and a test's fake agent) can tell it. The
+ * synthesis is always Codex's, whichever agent answered.
+ */
+export function discussion(o: {
+  workspace: string; context: ConversationContext; earlier: EarlierTask[]; question: string; answerer: Backend; critic: Backend; maxRounds: number;
+  step: DiscussionStep; round: number; history: DiscussionMessage[]; historyStart?: number; attachments?: Attachment[]; locate?: Locate;
+  tagged?: Tagged;
+  /** What the user answered to questions asked during this discussion (all of it, or only what the session was not given). */
+  clarified?: ClarifiedPair[];
+  clarifiedNew?: boolean;
+  /** Claude is offered its AskUserQuestion tool in this call. */
+  canAsk?: boolean;
+}): string {
+  const answerer = NAMES[o.answerer];
+  const critic = NAMES[o.critic];
+  const me = o.step === "critique" ? critic : o.step === "synthesis" ? NAMES.codex : answerer;
+  const verdicts = "End your review with one line of its own, exactly `VERDICT: AGREE` if the version is correct and complete enough to give the user " +
+    "as it is, or `VERDICT: REVISE` if it needs changes.";
+  const asks: Record<DiscussionStep, string> = {
+    answer: `## Your turn: answer\nAnswer the user's question as ${answerer}. ${critic} will review your answer before the user gets it, and you can revise it then. ` +
+      "Write it for the user.\n",
+    critique: `## Your turn: review version ${o.round}\nCheck ${answerer}'s latest version for errors, gaps and claims it does not support; read the ` +
+      "code or run what you need when the answer depends on it. Say what is wrong and what should change, briefly and concretely, and say what is right " +
+      `only where it matters. Do not rewrite the answer. ${verdicts}\n`,
+    revise: `## Your turn: version ${o.round}\nWrite version ${o.round} of your answer, taking ${critic}'s latest review into account: fix what it got ` +
+      "right; where you disagree, keep your position and say why in a sentence. Give the whole answer again, for the user, not only the changes.\n",
+    synthesis: synthesisAsk({ answerer, critic, round: o.round, history: o.history }),
+    // Only discussions from before synthesis asked this; kept so the step keeps a prompt.
+    final: `## Your turn: the final answer\n${critic} still asks for changes after ${o.maxRounds} review(s), so this version goes to the user as it is, ` +
+      `with no further review. Write the final answer (version ${o.round}), taking the latest review into account where you agree. End with a short ` +
+      `section on the points you and ${critic} still disagree on: each point, and both positions, in a line or two.\n`,
+  };
+  return [
+    CONVERSATION_MARKER,
+    `[agentduo-discussion: ${o.step}, round ${o.round} of ${o.maxRounds}]`,
+    `This is a three-way conversation in the workspace \`${o.workspace}\` between the user, Claude Code and Codex; agentduo relays the messages. ` +
+      `The user asked for a discussion: ${answerer} answers, ${critic} reviews the answer, and ${answerer} revises it until ${critic} agrees, ` +
+      `for at most ${o.maxRounds} review(s). Then Codex, in a turn of its own, synthesizes the discussion into the final answer. The user reads ` +
+      `the whole discussion and gets that synthesis as the response. You are ${me}.`,
+    "Follow your own configuration and the repository's instructions (AGENTS.md / CLAUDE.md).",
+    earlierTasks(o.earlier, false) + conversationSection(o.context, "Conversation so far", "Oldest first.", o.locate),
+    `## The user's question\n${o.question}\n` + filesSection("Files the user attached to the question", o.attachments, o.locate) +
+      taggedSection("Workspace paths the user tagged", o.question, o.tagged),
+    o.clarified?.length
+      ? `\n## ${o.clarifiedNew ? "New answers" : "Answers"} from the user to questions asked during this discussion\n${pairLines(o.clarified)}\n` +
+        "These answers are information about what the user wants, and apply to the question above, for every step of the discussion.\n"
+      : "",
+    discussionHistory(o.history.slice(o.historyStart ?? 0)),
+    asks[o.step],
+    ...(o.canAsk && o.step !== "synthesis" && (o.step === "critique" ? o.critic : o.answerer) === "claude" ? [chatAskSection()] : []),
+  ].filter(Boolean).join("\n");
+}
+
+const NOTE_FILES = "agentduo keeps a copy of each file that came with a note at the path given. The images your CLI can take are also attached " +
+  "to this message as images; read the other files at their paths.";
+
+function notes(list: HumanNote[], locate?: Locate, onlyNew = false, tagged?: Tagged): string {
+  if (!list.length) return "";
+  const tags = (n: HumanNote) => {
+    const paths = tagged?.(n.note) ?? [];
+    return paths.length ? `\n  Tagged: ${paths.map((e) => inlineCode(e.path)).join(", ")}` : "";
+  };
+  const files = (n: HumanNote) => tags(n) + (n.attachments?.length && locate ? `\n  Files:\n${attachmentLines(n.attachments, locate, "  ")}` : "");
+  const intro = locate && list.some((n) => n.attachments?.length) ? `${NOTE_FILES}\n` : "";
+  return `\n## ${onlyNew ? "New notes" : "Notes"} from the human operator (highest priority)\n` + intro +
+    list.map((n) => `- (${n.at}, during ${n.phase}) ${n.note}${files(n)}`).join("\n") + "\n";
+}
+
+function feedbackSection(feedback: PlanFeedback | null): string {
+  if (!feedback) return "";
+  const parts = ["\n## Feedback to address"];
+  const { critique, approval } = feedback;
+  if (critique) {
+    parts.push(`### Plan critique (status: ${critique.status})\n${critique.summary}\n\n` + issuesMarkdown(critique.issues));
+    if (critique.proposed_changes.length) parts.push("Proposed changes:\n" + critique.proposed_changes.map((c) => `- ${c}`).join("\n"));
+    if (critique.disputed.length) parts.push("Critic still disputes:\n" + critique.disputed.map((c) => `- ${c}`).join("\n"));
+  }
+  if (approval) parts.push(`### Final-approval review (status: ${approval.status})\n${approval.summary}\n\n` + issuesMarkdown(approval.issues));
+  return parts.join("\n\n") + "\n";
+}
+
+export function planner(ctx: PromptContext, round: number, version: number, previousPlan: Plan | null, feedback: PlanFeedback | null): string {
+  const out = [
+    ...opening("planner", "Planner / Architect", ctx, `- Planning round: ${round} · Producing plan version: v${version}\n`),
+    "## Your job\n" +
+      "Study the repository and produce an implementation plan that the implementer can execute without further clarification.\n" +
+      "- Goals and explicit scope (in / out). Keep the scope to what the task needs.\n" +
+      "- Architecture / design decisions that fit the existing code and conventions.\n" +
+      "- Ordered, concrete steps; list the files each step creates or changes.\n" +
+      "- Acceptance criteria that are objective and testable, each with an `id` (`AC1`, `AC2`, ...). With the scope, they are the task's " +
+      "acceptance contract: the reviewers hold the change to them and cannot add to them, so derive them from the task and do not add what it " +
+      "does not need. When you revise the plan, keep each criterion's id, and give a new one the next free number.\n" +
+      "- Risks with mitigations, and a test strategy (which tests to add or update).\n" +
+      "- Open questions only for things you decided on an assumption because the repository cannot settle them; state the assumption you made for each. " +
+      "(Information that only the user has and that would change the scope or the result is asked as `questions` instead: see below.)\n" +
+      "- Acceptance criteria and scope that agree with each other and with the baseline: a criterion must be reachable within the scope. " +
+      KEEP_THE_TASK + " Name such a contradiction in `open_questions`; the critic checks it and agentduo asks the user.\n" +
+      (ctx.gates.length ? "\nAfter implementation agentduo runs these commands and shows their results to the code reviewer:\n" + gateList(ctx.gates) + "\n" : ""),
+    baselineDuty(ctx),
+  ];
+  out.push(...askingSection(ctx, "planner"));
+  if (!previousPlan) {
+    out.push("\nThis is the first version: return `feedback_resolution` as an empty list.\n");
+  } else {
+    if (ctx.continued?.knowsPlan) {
+      // Its own answer, already in its session.
+      out.push(`\n## Previous plan (v${version - 1})\nThe plan you returned earlier in this session.` + (ctx.planFile ? ` It is also in \`${ctx.planFile}\`.` : "") + "\n");
+    } else {
+      const json = JSON.stringify(previousPlan, null, 2);
+      const fence = fenceFor(json);
+      out.push(`\n## Previous plan (v${version - 1}) as JSON\n${fence}json\n${json}\n${fence}\n`);
+    }
+    out.push(feedbackSection(feedback));
+    out.push("\nRevise the plan to address the feedback. In `feedback_resolution`, add one entry per issue id " +
+      "above with decision `accepted`, `partially_accepted` or `disputed` and a rationale. Dispute only " +
+      "with a concrete technical reason; disputed critical/high issues will go back to the critic.\n" +
+      "Issues marked *outside the task's scope* are suggestions beyond what the task asks: do not adopt them (no scope, steps or criteria for " +
+      "them) unless a note from the user asks for it, and answer them `disputed`, giving that reason. Adopting one (`accepted` or " +
+      "`partially_accepted`) widens the task, and agentduo asks the user to approve that before the plan goes on.\n");
+  }
+  out.push(REPO_NOTES_ASK, OUTPUT_RULES, PLANNER_SHAPE);
+  return out.join("\n");
+}
+
+/** The planner's `baseline_failures`: whether the plan fixes each required gate that fails before any change. */
+/** The planner's answer wraps its plan: `result` is the plan or the questions. */
+const PLANNER_SHAPE = "The JSON object has a single property `result`: either `{ \"kind\": \"plan\", \"plan\": <the plan, with all the fields above> }` " +
+  "or, when you must ask the user first, `{ \"kind\": \"needs_clarification\", \"questions\": [...] }`.\n";
+
+function baselineDuty(ctx: PromptContext): string {
+  const failing = baselineFailing(ctx.baseline);
+  if (!failing.length) return "\nNo required gate fails before any change" + (ctx.baseline?.length ? "" : " that agentduo knows of") + ": `baseline_failures` is an empty list.\n";
+  return "\n## Required gates that fail before any change\n" + failing.map((g) => "- `" + g.name + "`").join("\n") + "\n\n" +
+    "In `baseline_failures`, give one entry for each: `in_scope: true` when the plan makes it pass (the task needs it, or the change cannot " +
+    "be verified without it), `false` when fixing it stays out of the task's scope, and the `rationale`. Every required gate must pass for the " +
+    "run to finish, so leaving one out of scope is a contradiction that agentduo puts to the user before any implementation: choose it only " +
+    "when the task itself rules the fix out, and say so.\n";
+}
+
+/** What a plan critic or sign-off is told about each issue's `scope`: only the task's own can hold the plan back. */
+const ISSUE_SCOPE = "Give every issue its `scope`:\n" +
+  "- `task`: about doing the task as it asks: the plan misses or gets wrong something the task needs, would not work in this codebase, or " +
+  "goes beyond the task (unnecessary scope).\n" +
+  "- `out_of_scope`: asks for more than the task needs: an extra feature, test, check, verification or fix that the task does not ask for. " +
+  "It is a suggestion: it never holds the plan back, and the plan does not take it on without the user's approval.\n" +
+  "Never mark an extra `task` to make it block: a plan that does what the task asks is approved, whatever else could be added to it.\n";
+
+/**
+ * `approvedScope`: the suggestions outside the task that the user let a plan adopt (the plan may now include them).
+ */
+export function planReviewer(ctx: PromptContext, round: number, version: number, planMd: string, previousCritique: Critique | null,
+  approvedScope: ScopeItem[] = []): string {
+  const out = [
+    ...opening("plan_reviewer", "Plan Critic", ctx, `- Planning round: ${round} · Plan under review: v${version}\n`),
+    "## Plan under review\n" + planMd + "\n",
+    ...askingSection(ctx, "plan_reviewer"),
+    "## Your job\n" +
+      "Judge whether this plan is feasible in THIS codebase; the implementer must be able to execute it without guessing:\n" +
+      "- Do the files, modules, APIs and commands it relies on actually exist and work as assumed?\n" +
+      "- Missing steps, wrong ordering, hidden dependencies, migration or compatibility concerns.\n" +
+      "- Are the acceptance criteria objective and testable?\n" +
+      "- Risks the planner missed; unnecessary scope; ambiguity that would force guessing.\n" +
+      (ctx.gates.length ? "\nCommands agentduo runs after implementation:\n" + gateList(ctx.gates) + "\n" : "") + "\n" +
+      SEVERITY_GUIDE + "\n\n" +
+      "Decision rules:\n" +
+      "- Set `approved: true` and `status: \"approved\"` only if no critical or high issue of the task's scope remains. " +
+      "Medium/low issues may accompany an approval as suggestions.\n" +
+      "- Give each issue a stable id (`C1`, `C2`, ...). Reuse the same id when you re-raise an issue from a previous round.\n" +
+      "- `accepted`: planner responses (by issue id and short reason) you now agree with. `disputed`: planner responses you " +
+      "still disagree with, with your reasoning; re-raise any still-blocking one in `issues`.\n" +
+      "- `proposed_changes`: concrete edits to the plan you recommend.\n",
+    "## Consistency check\n" +
+      "Before approving, check that the plan can be finished as written: that its acceptance criteria, its scope (in and out), the task's " +
+      "own requirements and what fails before any change (the baseline" + (ctx.continued ? " you were given" : " above") + ", and the plan's " +
+      "'Baseline failures') do not contradict each other. A criterion that needs something the scope excludes, or a required gate the plan " +
+      "leaves failing, is such a contradiction.\n" +
+      "- If the plan can be changed to remove it without changing what the task asks, raise it as an issue.\n" +
+      "- If removing it would change what the task asks (drop or relax a requirement or criterion the task sets, or widen a scope the task " +
+      "limits), list it in `conflicts` (ids `K1`, `K2`, ...), naming in `between` the requirements, criteria, scope items or baseline " +
+      "failures that clash. Only the user can settle these: agentduo stops for their decision before any implementation, so never list a " +
+      "contradiction the plan can resolve on its own, and never suggest settling one by bending the task. Otherwise `conflicts` is empty.\n",
+    "## The task's scope\n" + ISSUE_SCOPE,
+  ];
+  if (approvedScope.length) {
+    out.push("## Scope the user approved\n" + approvedScope.map((i) => `- ${i.kind} \`${i.id}\`: ${i.text}`).join("\n") +
+      "\nThe user approved widening the task's scope for these: the plan may include them, and they are not unnecessary scope.\n");
+  }
+  if (previousCritique && holdsOwnAnswer(ctx)) {
+    // After turns of another role in this session, its last answer is not the critique, which came before them.
+    out.push("\n## Your critique from the previous round\n" + (ctx.continued?.from ? "Your last critique, earlier in this session." : "Your last answer in this session.") +
+      " Check how the new plan version addressed each of its issues (see its 'Response to feedback' section).\n");
+  } else if (previousCritique) {
+    out.push("\n## Your critique from the previous round\n" + issuesMarkdown(previousCritique.issues) +
+      "\n\nCheck how the new plan version addressed each of these (see its 'Response to feedback' section).\n");
+  }
+  out.push(REPO_NOTES_ASK, OUTPUT_RULES);
+  return out.join("\n");
+}
+
+export function planFinalizer(ctx: PromptContext, round: number, version: number, planMd: string, critique: Critique): string {
+  return [
+    ...opening("plan_finalizer", "Planner / Architect (final plan sign-off)", ctx, `- Planning round: ${round} · Plan up for sign-off: v${version}\n`),
+    planSection("Plan", planMd, ctx, `The plan up for sign-off is v${version}, the one you returned in your last turn.`),
+    "## The critic approved this version\n" + critique.summary + "\n\nRemaining suggestions:\n" + issuesMarkdown(critique.issues) + "\n",
+    "## Your job\n" +
+      "Confirm whether this exact plan version is final and ready for implementation. Approve " +
+      "(`approved: true`, `status: \"approved\"`) unless you find a critical or high problem; then return " +
+      "`changes_requested` with issues (ids `A1`, `A2`, ...) and the plan goes through another revision " +
+      "round. Do not request changes for style or wording alone.\n\n" + ISSUE_SCOPE +
+      "\n" + SEVERITY_GUIDE + "\n",
+    OUTPUT_RULES,
+  ].join("\n");
+}
+
+/** An earlier attempt of the round a prompt re-runs: how it ended, and what the round changed so far. */
+export interface EarlierAttempt {
+  /** "blocked" or "completed"; null when it gave no usable report or was stopped. */
+  status: string | null;
+  summary: string | null;
+  blockingReason: string | null;
+  /** Files changed in the round so far: by its attempts, or by the user since. */
+  changes: Change[];
+}
+
+const FILE_CHANGES: Record<string, string> = { D: "its file was deleted since that revision", A: "its file was added since that revision" };
+const fileChangeText = (c: string | null) => (c ? FILE_CHANGES[c] ?? "its file changed since that revision" : null);
+const short = (revision: string | null) => (revision ? "`" + revision.slice(0, 12) + "`" : "an earlier revision");
+
+function findingLine(item: FindingItem, extra: string[]): string {
+  const f = item.finding;
+  const loc = f.file ? f.file + (f.line ? `:${f.line}` : "") : "(general)";
+  return "- `" + f.id + "` [" + f.severity + "] `" + loc + "` — " + f.issue + (f.recommendation ? `  \n  Recommendation: ${f.recommendation}` : "") +
+    extra.filter(Boolean).map((x) => `  \n  ${x}`).join("");
+}
+
+/** A finding that is not the implementer's to fix: there before the task outside the plan's scope, or beyond the task altogether. */
+const outOfScope = (item: FindingItem) => (item.finding.origin === "pre_existing"
+  ? `The reviewer found it there before the task, outside the plan's scope${item.finding.evidence ? ` (${item.finding.evidence})` : ""}: do not fix it ` +
+    "(that would go out of scope); answer it `not_applicable`. The user decides about it."
+  : item.finding.origin === "out_of_scope"
+    ? "The reviewer marks it outside the task's scope (a suggestion, not part of the task): do not act on it, since that would widen the task; " +
+      "answer it `not_applicable`. The user decides about it."
+    : "");
+
+/** The acceptance criteria a finding holds the change to. */
+const criteriaLine = (item: FindingItem) => (item.finding.criteria?.length ? `Fails acceptance criteria: ${item.finding.criteria.join(", ")}` : "");
+
+const answerText = (item: FindingItem) => {
+  const a = item.answer;
+  return a ? `${a.resolution}${a.notes ? `: ${a.notes}` : ""} (round ${a.round}${a.status === "blocked" ? ", in an attempt that ended blocked" : ""})` : "no answer";
+};
+
+/** What changed since the revision the findings were raised on, and what that means for them. */
+function sinceRevision(f: ReviewFindings, who: string): string {
+  if (f.changedSince === null) return `agentduo cannot tell what changed since ${short(f.revision)}: check each finding against ${who} before relying on it.`;
+  if (!f.changedSince.length) return `No file changed since ${short(f.revision)}.`;
+  return `Since ${short(f.revision)} these files changed (A added, M modified, D deleted):\n` + changeList(f.changedSince) +
+    `\nA finding about one of them may be fixed already, or its line may have moved: check it against ${who}.`;
+}
+
+/**
+ * The last review's findings for the implementer: which still need an answer, and which it answered since (claims the
+ * next review verifies, so not to be worked on again), each saying when its file changed since the reviewed revision.
+ */
+function findingsToFix(f: ReviewFindings): string {
+  const open = f.items.filter((i) => !i.answer);
+  const answered = f.items.filter((i) => i.answer);
+  const out = ["### Code review findings (review round " + f.round + ", raised on revision " + short(f.revision) + ")",
+    (f.summary ? f.summary + "\n\n" : "") + sinceRevision(f, "the current code")];
+  if (open.length) {
+    out.push("#### Open: not answered since that review\n" + open.map((i) => findingLine(i, [criteriaLine(i), fileChangeText(i.fileChange) ?? "", outOfScope(i)])).join("\n"));
+  }
+  if (answered.length) {
+    out.push("#### Answered since that review, not verified yet\nThe next review verifies these; leave them as they are unless the current code " +
+      "shows that your answer no longer holds.\n" + answered.map((i) => findingLine(i, [`Your answer: ${answerText(i)}`, fileChangeText(i.fileChange) ?? ""])).join("\n"));
+  }
+  out.push(open.length
+    ? "In `addressed_findings`, answer every open finding: `fixed`, `not_applicable`, or `disputed` with a concrete technical justification" +
+      (answered.length ? "; answer an already answered one again only if your answer changes." : ".")
+    : "Every finding is answered: add an entry to `addressed_findings` only for one whose answer changes.");
+  return out.join("\n\n") + "\n";
+}
+
+function earlierAttemptSection(e: EarlierAttempt, continued: boolean): string {
+  const how = e.status === "blocked" ? `It ended blocked: ${e.blockingReason ?? "(no reason given)"}.`
+    : e.status === "completed" ? "It completed, but the round did not go on from it."
+      : "It did not finish: it failed, or the run was stopped.";
+  const report = e.summary && !continued ? `\nIts report: ${e.summary}` : "";
+  const changes = e.changes.length
+    ? "\nFiles changed in this round so far, by it or by the user since (A added, M modified, D deleted):\n" + changeList(e.changes)
+    : "\nNo file changed in this round so far.";
+  return "\n## An earlier attempt of this round\n" + how + report + changes + "\n\nThese changes are in the working tree: continue from them. " +
+    "Keep what is right and finish what is missing; do not start over or undo them unless they are wrong.\n";
+}
+
+/**
+ * For an implementer that goes on in the plan critic's session: the final plan, whole (it is the implementer's
+ * contract, which the critic's turns only reviewed), and what was decided about it after the critic's last turn.
+ */
+function planHandoff(planMd: string, ctx: PromptContext, h: PlanHandoff | null): string[] {
+  const known = !!ctx.continued?.knowsPlan;
+  const plan = `## Final approved plan${h?.version != null ? ` (v${h.version})` : ""}${known ? "" : " (new since your last turn)"}\n` +
+    (known ? "The version you reviewed in your last turn as plan critic, now final. "
+      : "It changed after your last turn as plan critic: work from this version, not the one you reviewed. ") +
+    "Its scope and acceptance criteria are what you implement and what the code reviewer holds the change to." +
+    (ctx.planFile ? ` It is also in \`${ctx.planFile}\`.` : "") + "\n\n" + planMd + "\n";
+  const decided: string[] = [];
+  if (h) {
+    decided.push(h.byHuman ? "- The human operator accepted the plan as it was, without a further review."
+      : h.signOff ? `- The planner signed the plan off: ${h.signOff}` : "- Your approval made the plan final: there was no sign-off round.");
+  }
+  if (h?.accepted?.conflicts.length) {
+    decided.push("- The user accepted these contradictions in the requirements, so the plan is implemented as it is:\n" + h.accepted.conflicts.map((c) => `  - ${c}`).join("\n"));
+  }
+  const widened = (h?.accepted?.scope ?? []).filter((i) => i.kind === "suggestion");
+  if (widened.length) decided.push("- The user approved widening the task's scope for:\n" + widened.map((i) => `  - ${inlineCode(i.id)}: ${i.text}`).join("\n"));
+  decided.push("- Your critiques' remaining suggestions and proposed changes are not instructions: implement the final plan as it is written.");
+  return [plan, "## Decisions since your last turn as plan critic\n" + decided.join("\n") + "\n"];
+}
+
+/**
+ * `findings`: the last review's open findings, null when there are none. `previous`: the last implementation's report
+ * (its summary), and the earlier attempt of this round when this one re-runs it.
+ */
+export function implementer(ctx: PromptContext, round: number, planMd: string, findings: ReviewFindings | null,
+  failedGates: GateResult[], previous: { summary: string | null; rerun?: EarlierAttempt | null } | null, handoff: PlanHandoff | null = null): string {
+  const rerun = previous?.rerun ?? null;
+  const out = [
+    ...opening("implementer", "Implementer", ctx, `- Implementation round: ${round}\n`),
+    ...(ctx.continued?.from === "plan_reviewer"
+      ? planHandoff(planMd, ctx, handoff)
+      : [planSection("Final approved plan", planMd, ctx, "Unchanged: the final approved plan you were given earlier in this session.")]),
+    ...askingSection(ctx, "implementer"),
+    "## How to work\n" +
+      "- Implement the plan and stay within its scope.\n" +
+      (ctx.gates.length
+        ? "- After your turn agentduo runs these commands and shows the results to the code reviewer; make them pass:\n" + gateList(ctx.gates) + "\n"
+        : "- Run the project's checks yourself, as your configuration and the repository's instructions describe.\n") +
+      "- If you cannot proceed (missing information, contradictory requirements, missing permissions), stop and return " +
+      "`status: \"blocked\"` with a precise `blocking_reason`.\n",
+  ];
+  if (rerun) out.push(earlierAttemptSection(rerun, holdsOwnAnswer(ctx)));
+  if (round === 1 && !findings?.items.length && !failedGates.length) {
+    out.push(`\n${rerun ? "Finish implementing the plan" : "Implement the plan now"}. \`addressed_findings\` should be an empty list.\n`);
+  } else {
+    out.push("\n## This is a fix round\nYour previous implementation is already in the working tree. " +
+      "Address the problems below without redoing unrelated work.\n");
+    if (findings?.items.length) out.push(findingsToFix(findings));
+    if (failedGates.length) out.push("### Failing quality gates (run by agentduo)\n" + describeGates(failedGates) + "\n");
+    // A session that holds its own previous report has it already; a re-run was given the earlier attempt's above.
+    if (previous?.summary && !holdsOwnAnswer(ctx) && !rerun) out.push("### Your previous report\n" + previous.summary + "\n");
+  }
+  out.push(REPO_NOTES_ASK, "## Output\nYour final message must be a single JSON object matching the output schema: summary, files_changed, " +
+    "tests_run (what you actually ran and whether it passed), addressed_findings and repo_notes.\n");
+  return out.join("\n");
+}
+
+/**
+ * `fullDiff`: the file with the whole diff, which a run with agentduo's own snapshot repository names when `diff` is
+ * cut short (git in the workspace cannot reach those snapshots); a native run names the `git diff` to run instead.
+ */
+export function codeReviewer(ctx: PromptContext, round: number, planMd: string, base: string, snapshot: string, gateResults: GateResult[],
+  diffStat: string, diff: string, truncated: boolean, previousFindings: ReviewFindings | null, implReport: Implementation, fullDiff?: string,
+  contract: ReviewContract = { attribute: [], accepted: [], kept: [] }): string {
+  const tests = implReport.tests_run.map((t) => "- `" + t.command + "` passed=" + t.passed + " " + t.notes).join("\n") || "_(none)_";
+  const fence = fenceFor(diff);
+  const stat = diffStat.trimEnd() || "(no changes)";
+  const statFence = fenceFor(stat);
+  const whole = ctx.internalSnapshots && fullDiff ? "read the whole diff in `" + fullDiff + "`" : "run `git diff " + base + " " + snapshot + " -- .` for the full diff";
+  const since = ctx.continued?.sinceReviewed;
+  const out = [
+    ...opening("code_reviewer", "Code Reviewer", ctx, `- Review round: ${round}\n` +
+      "- Revision under review: `" + snapshot + "` (agentduo snapshot of the workspace" +
+      (ctx.internalSnapshots ? ", in agentduo's own repository: review it from the diff below" : "") + ")\n" +
+      "- Base revision: `" + base + "`\n"),
+    planSection("Final approved plan", planMd, ctx, "Unchanged: the final approved plan you were given earlier in this session."),
+    "## Quality gate results (run by agentduo on this revision)\n" + describeGates(gateResults) + "\n",
+    "## Implementer's report\n" + implReport.summary + "\n\nTests the implementer says it ran:\n" + tests + "\n",
+    "## Diff stat (base → revision)\n" + statFence + "\n" + stat + "\n" + statFence + "\n",
+  ];
+  if (since) {
+    // The session reviewed the diff up to `since.from`; it gets what changed after it, and is told where the whole one is.
+    const sinceStat = since.stat.trimEnd() || "(no changes)";
+    const sinceFence = fenceFor(since.diff);
+    out.push("## Changes since the revision you last reviewed (`" + since.from + "` → `" + snapshot + "`)\n" +
+      "You reviewed the diff up to `" + since.from + "` in your last turn; this is what changed after it. Judge the whole change all the same: " +
+      whole + (since.truncated ? ". This diff is TRUNCATED." : ".") + "\n" +
+      fenceFor(sinceStat) + "\n" + sinceStat + "\n" + fenceFor(sinceStat) + "\n\n" + sinceFence + "diff\n" + since.diff + "\n" + sinceFence + "\n");
+  } else {
+    out.push("## Diff" + (truncated ? " (TRUNCATED: " + whole + ")" : "") + "\n" + fence + "diff\n" + diff + "\n" + fence + "\n");
+  }
+  if (previousFindings?.items.length) {
+    const f = previousFindings;
+    // Whether a finding's file changed since it was raised: a `fixed` answer about a file that did not is worth a closer look.
+    const unchanged = f.changedSince ? "its file did not change since that revision" : "";
+    const lines = f.items.map((i) => findingLine(i, [`Implementer: ${answerText(i)}`, i.finding.file ? fileChangeText(i.fileChange) ?? unchanged : ""]));
+    out.push("## Findings from the previous review (round " + f.round + ", raised on revision " + short(f.revision) + ") and the implementer's answers\n" +
+      sinceRevision(f, "the revision under review") + "\n\n" + lines.join("\n") +
+      "\n\nThe answers are the implementer's claims. Verify each finding against the revision under review (`" + snapshot + "`), not the one it " +
+      "was raised on. List ids that are now resolved in `resolved_findings`; re-raise unresolved ones in `findings` with the same id. " +
+      "Accept a dispute only if the justification is technically sound.\n");
+  }
+  out.push(
+    "## Your job\n" +
+    "Review the change against the plan and its acceptance criteria: correctness, edge cases, error " +
+    "handling, security, test adequacy, scope creep, and consistency with the codebase's conventions. " +
+    "The workspace currently equals the revision under review, so you may read files directly.\n\n" +
+    SEVERITY_GUIDE + "\n\n" +
+    "Decision rules:\n" +
+    "- Approve (`approved: true`, `status: \"approved\"`) only if there is no critical or high finding that the task must fix and the " +
+    "acceptance criteria are met" + (ctx.gates.length ? ", and the required quality gates pass (or fail only as they did before the task, " +
+    "outside its scope)" : "") + ".\n" +
+    "- Out-of-scope findings never hold back your approval: if they are all you would report, approve. A review that does not approve must " +
+    "say in its findings what blocks it.\n" +
+    "- Keep a finding's id when you raise it again, even in other words: a new id says the issue is new. A critical or high finding you raise " +
+    "for the first time after an earlier review of this run, about code that did not change since that review, must say in `late_reason` why it " +
+    "was not reported then (agentduo checks this against the files changed since); otherwise `late_reason` is null.\n" +
+    "- `reviewed_commit` must be exactly `" + snapshot + "`.\n" +
+    "- New finding ids continue the sequence `F1`, `F2`, ...; `file` is workspace-relative (empty string if " +
+    "general) and `line` may be null.\n",
+    "## Where each problem stands against the task\n" +
+      "The final plan's acceptance criteria (`AC1`, `AC2`, ...) and its scope are the task's acceptance contract: hold the change to them, never " +
+      "to more. For every finding give its `origin`, the `criteria` it is about (their ids; an empty list when none) and the `evidence` for its " +
+      "origin (required for a critical or high one):\n" +
+      "- `regression`: the change under review causes it: it breaks behaviour that worked, or its own code is wrong or unsafe (a bug, crash, data " +
+      "loss, security hole). Evidence: what in the diff does.\n" +
+      "- `in_scope`: the task must still do it: the change does not meet the acceptance criteria named in `criteria` yet, or it was there before " +
+      "the task and the plan's scope includes fixing it. A critical or high one must name the criteria it fails. The task is not done until it is fixed.\n" +
+      "- `pre_existing`: it was there before the task (the base revision has it; the baseline gates show it), and the plan's scope leaves " +
+      "it out. Evidence: where it is at the base revision, and that the diff does not cause or worsen it. Such a finding does not weigh " +
+      "against your approval of the change: agentduo puts it to the user, and the implementer is not asked to go out of scope for it.\n" +
+      "- `out_of_scope`: an improvement or concern beyond what the task and its criteria ask, which the change does not cause: an extra test, " +
+      "check or verification, hardening, a refactor, a feature or a fix nobody asked for. Report it so the user knows, but it never holds back " +
+      "your approval and the implementer is not asked to do it. Only a critical one blocks completion, and only with a clear justification in " +
+      "`evidence` (why it cannot wait: a correctness or security problem); agentduo then asks the user whether to widen the task.\n" +
+      "- `unclear`: you cannot tell. It counts as the task's.\n" +
+      "Classify honestly: never call a problem pre-existing without that evidence, never stretch a criterion to cover an extra, and never leave " +
+      "a real problem out to approve.\n",
+    contract.attribute.length
+      ? "## Required gates that failed before the task too\n" + contract.attribute.map((g) => "- `" + g + "`").join("\n") + "\n" +
+        "Each failed before any change (see the baseline), and the plan leaves fixing it out of scope. In `gate_failures`, give one entry for " +
+        "each, with its `origin` and `evidence`: `pre_existing` only when its output now shows the same failures as before the change and " +
+        "nothing the change caused; otherwise `regression` (the change adds or worsens a failure) or `unclear`. Leave other gates out." +
+        (contract.accepted.some((f) => f.kind === "gate" && contract.attribute.includes(f.id))
+          ? " A gate the user accepted as failing before the task is listed too: the acceptance holds only while it fails as it did before.\n" : "\n")
+      : "`gate_failures` is an empty list.\n",
+    contract.accepted.length
+      ? "## Pre-existing failures the user accepted for this run\n" + contract.accepted.map((f) => `- ${f.kind === "gate" ? `gate \`${f.id}\`` : `finding \`${f.id}\``}: ${f.text}`).join("\n") +
+        "\nThey no longer weigh against your approval. Re-raise one only if it got worse, under the same id.\n"
+      : "",
+    contract.resolved?.length
+      ? "## Findings earlier reviews resolved\nRaise one again only if it is back, under its id:\n" + contract.resolved.slice(-MAX_RESOLVED_LISTED).map((e) =>
+        `- \`${e.ids.at(-1)}\` (resolved in round ${e.resolvedRound}) ${e.file ? `${e.file}: ` : ""}${e.issue.length > MAX_RESOLVED_CHARS ? `${e.issue.slice(0, MAX_RESOLVED_CHARS - 1)}…` : e.issue}`).join("\n") + "\n"
+      : "",
+    contract.kept.length
+      ? "## Findings the user kept outside the task's scope\n" + contract.kept.map((f) => `- finding \`${f.id}\`: ${f.text}`).join("\n") +
+        "\nThe user decided not to widen the task for them: they no longer weigh against your approval, and the implementer was told not to " +
+        "act on them. Re-raise one only if the change made it worse, under the same id.\n"
+      : "",
+    REPO_NOTES_ASK,
+    OUTPUT_RULES);
+  return out.join("\n");
+}

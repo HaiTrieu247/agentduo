@@ -2,10 +2,10 @@
 // a snapshot, then batches of actions. One mount per open conversation; switching hides the others, so each keeps its
 // state, its scroll and its half-typed message. What a chat sends goes to main with the view it was shown by, so an
 // answer meant for an earlier view is refused there.
-import type { HostMessage, WebviewCommand, WebviewMessage } from "../../../../extensions/vscode/src/protocol.js";
-import { createUi } from "../../../../extensions/vscode/webview/render.js";
-import { reduce, type ViewState } from "../../../../extensions/vscode/webview/state.js";
-import type { CodexCatalog } from "../../../../src/core/models.js";
+import type { HostMessage, WebviewCommand, WebviewMessage } from "@agentduo/host/protocol";
+import { createUi } from "@agentduo/webview/render";
+import { reduce, type ViewState } from "@agentduo/host/viewState";
+import type { CodexCatalog } from "@agentduo/engine/config/models";
 import type { DesktopEvent } from "../shared/protocol.js";
 import { call, el, errorText } from "./bridge.js";
 

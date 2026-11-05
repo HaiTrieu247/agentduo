@@ -1,7 +1,8 @@
 {
-  "name": "agentduo",
+  "name": "agentduo-monorepo",
   "version": "0.12.1",
-  "description": "Two-agent development loop: Codex plans and reviews, Claude Code critiques and implements, with a live terminal UI.",
+  "private": true,
+  "description": "agentduo's repository: the CLI (apps/cli), the VS Code extension (apps/vscode), the desktop app (apps/desktop) and the packages they share (packages/*).",
   "license": "MIT",
   "author": "Thinh Hai Trieu",
   "homepage": "https://agentduo.netlify.app/",
@@ -10,59 +11,32 @@
     "url": "git+https://github.com/HaiTrieu247/agentduo.git"
   },
   "type": "module",
-  "bin": {
-    "agentduo": "dist/cli.js",
-    "duo": "dist/cli.js"
-  },
-  "files": [
-    "dist",
-    "schemas",
-    "README.md",
-    "docs/README.vi.md",
-    "LICENSE"
+  "workspaces": [
+    "packages/engine",
+    "packages/host",
+    "packages/webview",
+    "apps/cli",
+    "apps/vscode"
   ],
   "engines": {
     "node": ">=22.12"
   },
-  "keywords": [
-    "codex",
-    "claude",
-    "claude-code",
-    "ai-agents",
-    "multi-agent",
-    "code-review",
-    "cli"
-  ],
   "scripts": {
-    "build": "tsup",
-    "typecheck": "tsc -p .",
+    "build": "npm run build -w agentduo",
+    "typecheck": "tsc -p . && npm run typecheck --workspaces",
     "test": "vitest run",
-    "test:pack": "node scripts/pack-smoke.mjs",
-    "typecheck:vscode": "tsc -p extensions/vscode",
-    "build:vscode": "node scripts/build-vscode.mjs",
-    "test:vscode": "node scripts/test-vscode.mjs",
-    "package:vscode": "node scripts/build-vscode.mjs --package",
-    "test:pack:vscode": "node scripts/vscode-pack-smoke.mjs",
-    "smoke:real": "npm run build && node scripts/smoke-real.mjs",
-    "prepublishOnly": "npm run typecheck && npm test && npm run build",
-    "demo:ui": "npm run build && node scripts/demo-ui.mjs",
-    "version": "node scripts/sync-vscode-version.mjs && git add extensions/vscode/package.json apps/desktop/package.json apps/desktop/package-lock.json"
-  },
-  "dependencies": {
-    "ajv": "^8.20.0",
-    "commander": "^15.0.0",
-    "ink": "^8.0.0",
-    "react": "^19.3.1",
-    "yaml": "^2.9.1"
+    "test:pack": "npm run test:pack -w agentduo",
+    "typecheck:vscode": "npm run typecheck -w agentduo-vscode",
+    "build:vscode": "npm run build -w agentduo-vscode",
+    "test:vscode": "npm run test:host -w agentduo-vscode",
+    "package:vscode": "npm run package -w agentduo-vscode",
+    "test:pack:vscode": "npm run test:pack -w agentduo-vscode",
+    "smoke:real": "npm run smoke:real -w agentduo",
+    "demo:ui": "npm run demo:ui -w agentduo",
+    "version": "node scripts/sync-versions.mjs && git add package-lock.json apps/cli/package.json apps/vscode/package.json apps/desktop/package.json apps/desktop/package-lock.json packages/engine/package.json packages/host/package.json packages/webview/package.json"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
-    "@types/react": "^19.3.0",
-    "@types/vscode": "~1.95.0",
-    "@vscode/codicons": "^0.0.46-24",
-    "@vscode/test-electron": "^3.1.0",
-    "@vscode/vsce": "^3.9.2",
-    "ink-testing-library": "^4.0.0",
     "tsup": "^9.0.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"

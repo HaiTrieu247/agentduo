@@ -127,14 +127,14 @@ Thay đổi áp dụng từ câu hỏi hoặc lần gọi agent kế tiếp; câ
 
 ## Extension VS Code
 
-`extensions/vscode` đưa chat này vào sidebar của VS Code. Sidebar có timeline của hai agent, phần trả lời HUMAN_REVIEW và quyền của Claude ngay trên ô nhập, cùng các nút mở plan, review, report và xem thay đổi của run bằng diff editor. Extension chạy engine của agentduo bằng Node của bạn (≥ 22.12). Nó dùng chung cấu hình, thư mục run và lock với `duo`, nên run bắt đầu ở bên này có thể tiếp tục ở bên kia.
+`apps/vscode` đưa chat này vào sidebar của VS Code. Sidebar có timeline của hai agent, phần trả lời HUMAN_REVIEW và quyền của Claude ngay trên ô nhập, cùng các nút mở plan, review, report và xem thay đổi của run bằng diff editor. Extension chạy engine của agentduo bằng Node của bạn (≥ 22.12). Nó dùng chung cấu hình, thư mục run và lock với `duo`, nên run bắt đầu ở bên này có thể tiếp tục ở bên kia.
 
 Extension có trên Marketplace (`HaiTrieuThinh.agentduo-vscode`). Để cài bản build tại máy:
 
 ```sh
 npm ci
 npm run package:vscode
-code --install-extension extensions/vscode/agentduo-vscode-*.vsix
+code --install-extension apps/vscode/agentduo-vscode-*.vsix
 ```
 
 Không cần cài gói npm `agentduo`. Máy chỉ cần Node, git, Codex CLI và Claude Code đã đăng nhập. Nếu VS Code mở từ Dock không thấy đúng `PATH`, đặt `agentduo.nodePath` trong settings của VS Code, hoặc `codex.bin` / `claude.bin` trong `.agentduo/config.yaml`.
@@ -147,7 +147,7 @@ Không cần cài gói npm `agentduo`. Máy chỉ cần Node, git, Codex CLI và
 - Reload cửa sổ hay đóng VS Code sẽ dừng bước đang chạy. Quyết định đang chờ được hoãn, yêu cầu quyền chưa trả lời bị từ chối, và run vẫn tiếp tục được. Extension không bao giờ tự chạy lại task; nó hiện nút **Resume** để bạn bấm.
 - Bản đầu chỉ hỗ trợ VS Code desktop với thư mục local (hoặc không mở folder nào, khi đó là thư mục home). Chưa hỗ trợ Remote SSH, WSL, container hay VS Code web.
 
-Chi tiết xem [extensions/vscode/README.md](../extensions/vscode/README.md). Khi phát triển, mở repo trong VS Code rồi nhấn F5 (**Run agentduo extension**).
+Chi tiết xem [apps/vscode/README.md](../apps/vscode/README.md). Khi phát triển, mở repo trong VS Code rồi nhấn F5 (**Run agentduo extension**).
 
 Yêu cầu: Node.js ≥ 22.12, git, Codex CLI và Claude Code. Pipeline (`duo "<task>"`, `/pipeline`) chụp snapshot và tạo diff bằng git: trong git repo của bạn, hoặc với folder chưa có repo thì trong một kho Git riêng của agentduo (xem [Folder chưa có git repo](#folder-chưa-có-git-repo)), nên không cần `git init`. Chat và `/discuss` chạy ở thư mục nào cũng được, kể cả khi máy chưa có git.
 

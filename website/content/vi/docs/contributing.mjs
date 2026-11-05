@@ -1,13 +1,13 @@
 export default ({ c, link, code, ext, p, ul, table, note }) => ({
   title: "Đóng góp",
   description: "Build AgentDuo từ mã nguồn: CLI, extension VS Code, ứng dụng desktop và website này, các quy ước của mã nguồn, và cách báo cáo sự cố một cách an toàn.",
-  lead: p("AgentDuo nằm trong một kho duy nhất: CLI " + c("duo") + " trong " + c("src/") + ", extension VS Code trong " + c("extensions/vscode") + ", ứng dụng desktop trong " + c("apps/desktop") + " và website này trong " + c("website/") + ". Tất cả đều build bằng Node.js ≥ 22.12 và npm."),
+  lead: p("AgentDuo nằm trong một kho duy nhất: CLI " + c("duo") + " trong " + c("apps/cli") + ", extension VS Code trong " + c("apps/vscode") + ", ứng dụng desktop trong " + c("apps/desktop") + ", phần code dùng chung trong " + c("packages/") + " (engine, host chạy engine trong một worker, và trang chat) và website này trong " + c("website/") + ". Tất cả đều build bằng Node.js ≥ 22.12 và npm; npm workspaces ở thư mục gốc liên kết các package."),
   sections: [
     {
       id: "source",
       title: "Build CLI từ mã nguồn",
       html: `${code("git clone https://github.com/HaiTrieu247/agentduo.git\ncd agentduo\nnpm ci\nnpm run build", { lang: "sh", label: "Terminal" })}
-${p(c("npm run build") + " đóng gói CLI vào " + c("dist/") + ". Chạy nó bằng " + c("node dist/cli.js") + ", hoặc " + c("npm link") + " để đưa " + c("duo") + " và " + c("agentduo") + " vào PATH.")}
+${p(c("npm run build") + " đóng gói CLI vào " + c("apps/cli/dist/") + ". Chạy nó bằng " + c("node apps/cli/dist/cli.js") + ", hoặc chạy " + c("npm link") + " trong " + c("apps/cli") + " để đưa " + c("duo") + " và " + c("agentduo") + " vào PATH.")}
 ${table({
   caption: "Các script ở thư mục gốc",
   head: ["Lệnh", "Tác dụng"],
@@ -29,9 +29,9 @@ ${table({
   head: ["Lệnh", "Tác dụng"],
   rows: [
     [c("npm run typecheck:vscode"), "Kiểm tra TypeScript của extension."],
-    [c("npm run build:vscode"), "Build " + c("extensions/vscode/dist") + " (host và webview) và " + c("runtime/") + " (engine worker và các schema)."],
+    [c("npm run build:vscode"), "Build " + c("apps/vscode/dist") + " (host và webview) và " + c("runtime/") + " (engine worker và các schema)."],
     [c("npm run test:vscode"), "Smoke test trong một bản VS Code được tải về; trên Linux, chạy nó dưới " + c("xvfb-run") + "."],
-    [c("npm run package:vscode"), "Tạo " + c("extensions/vscode/agentduo-vscode-<version>.vsix") + ", để cài bằng " + c("code --install-extension") + "."],
+    [c("npm run package:vscode"), "Tạo " + c("apps/vscode/agentduo-vscode-<version>.vsix") + ", để cài bằng " + c("code --install-extension") + "."],
     [c("npm run test:pack:vscode"), "Đóng gói, kiểm tra nội dung VSIX và chạy worker của nó bên ngoài thư mục mã nguồn."],
   ],
 })}
@@ -70,10 +70,10 @@ ${p("Trong lúc viết một trang, " + c("node scripts/check-page.mjs <page id>
       title: "Quy ước",
       html: `${ul([
   `AgentDuo không áp đặt gì. Nó chỉ truyền các cờ giao thức, cộng với ${c("args")} và ${c("role_args")} của bạn; thay đổi bất thường trở thành cảnh báo, không bao giờ chặn. Quy tắc quyền thuộc về cấu hình riêng của từng CLI.`,
-  `Dependency lúc chạy chỉ gồm đúng ${c("ink")}, ${c("react")}, ${c("commander")}, ${c("yaml")} và ${c("ajv")}. Hãy hỏi trước khi thêm một cái mới.`,
+  `Dependency lúc chạy của CLI được phát hành (${c("apps/cli/package.json")}) chỉ gồm đúng ${c("ink")}, ${c("react")}, ${c("commander")}, ${c("yaml")} và ${c("ajv")}; các package trong workspace được đóng gói thẳng vào nó. Hãy hỏi trước khi thêm một cái mới.`,
   `Node ≥ 22.12, ESM, TypeScript strict. Import tương đối kết thúc bằng ${c(".js")}, kể cả với tệp ${c(".ts")} và ${c(".tsx")}.`,
-  `${c("src/core")} và ${c("src/agents")} không bao giờ import từ ${c("src/ui")}: mọi thứ hiện lên màn hình đều là một sự kiện, và quyết định của con người quay lại qua một interface.`,
-  `Một chuyển trạng thái workflow được thay đổi cần có kịch bản trong ${c("test/workflow.test.ts")}. Schema đầu ra của agent phải giữ chuẩn OpenAI-strict (mọi thuộc tính đều required, không có thuộc tính thừa), điều mà ${c("test/schema.test.ts")} kiểm tra.`,
+  `Các package import nhau bằng tên (${c("@agentduo/engine/…")}), theo một chiều: engine, rồi host, rồi webview, rồi các app; ${c("test/boundaries.test.ts")} kiểm tra điều này. Mọi thứ hiện lên màn hình đều là một sự kiện, và quyết định của con người quay lại qua một interface.`,
+  `Một chuyển trạng thái workflow được thay đổi cần có kịch bản trong ${c("packages/engine/test/workflow/workflow.test.ts")}. Schema đầu ra của agent phải giữ chuẩn OpenAI-strict (mọi thuộc tính đều required, không có thuộc tính thừa), điều mà ${c("packages/engine/test/agents/schema.test.ts")} kiểm tra.`,
   `CI chạy test trên Linux, macOS và Windows. Trong test, dựng đường dẫn bằng ${c("join")}, và không bao giờ chỉ dùng ${c("XDG_CONFIG_HOME")} để đặt thư mục cấu hình người dùng: Windows đọc ${c("%APPDATA%")}.`,
 ])}
 ${p("Danh sách đầy đủ nằm trong " + c("AGENTS.md") + " ở thư mục gốc của kho.")}`,

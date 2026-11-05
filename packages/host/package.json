@@ -1,0 +1,18 @@
+{
+  "name": "@agentduo/host",
+  "version": "0.12.1",
+  "private": true,
+  "description": "What an app host needs to run the engine in a worker and show it: the protocol, the worker and its client, a workspace's session and the view state. Shared by the VS Code extension and the desktop app.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./testing/*": "./test/helpers/*.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@agentduo/engine": "*"
+  }
+}

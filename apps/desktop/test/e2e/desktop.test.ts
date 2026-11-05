@@ -16,15 +16,15 @@ import { fileURLToPath } from "node:url";
 import { _electron as electron, type ElectronApplication, type Page } from "playwright";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import YAML from "yaml";
-import { userConfigPath } from "../../../../src/core/config.js";
-import { RunStore, type RunState } from "../../../../src/core/state.js";
-import { approval, critique, finding, impl, plan, review } from "../../../../test/helpers/builders.js";
-import { CHECK_GATE, userDataEnv } from "../../../../test/helpers/config.js";
-import { FakeClis } from "../../../../test/helpers/fake-clis.js";
-import { png } from "../../../../test/helpers/images.js";
-import { makeRepo } from "../../../../test/helpers/repo.js";
-import { tempDir } from "../../../../test/helpers/tmp.js";
-import { waitUntil } from "../../../../test/helpers/vscode.js";
+import { userConfigPath } from "@agentduo/engine/config/config";
+import { RunStore, type RunState } from "@agentduo/engine/workflow/state";
+import { approval, critique, finding, impl, plan, review } from "@agentduo/engine/testing/builders";
+import { CHECK_GATE, userDataEnv } from "@agentduo/engine/testing/config";
+import { FakeClis } from "@agentduo/engine/testing/fake-clis";
+import { png } from "@agentduo/engine/testing/images";
+import { makeRepo } from "@agentduo/engine/testing/repo";
+import { tempDir } from "@agentduo/engine/testing/tmp";
+import { waitUntil } from "@agentduo/engine/testing/wait";
 
 // Without its trailing separator: on Windows Playwright quotes each argument into one command line, where a closing
 // `\"` is an escaped quote, so Electron got a folder that does not exist and waited on its error box.

@@ -15,7 +15,7 @@ export default {
     readme: `${github}/blob/main/README.md`,
     desktopReadme: `${github}/blob/main/apps/desktop/README.md`,
     desktopVerification: `${github}/blob/main/apps/desktop/VERIFICATION.md`,
-    extensionReadme: `${github}/blob/main/extensions/vscode/README.md`,
+    extensionReadme: `${github}/blob/main/apps/vscode/README.md`,
     agents: `${github}/blob/main/AGENTS.md`,
     npm: "https://www.npmjs.com/package/agentduo",
     marketplace: "https://marketplace.visualstudio.com/items?itemName=HaiTrieuThinh.agentduo-vscode",

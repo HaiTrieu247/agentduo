@@ -1,10 +1,10 @@
 // The desktop window: projects and conversations on the left, the active conversation's chat in the middle (the VS
 // Code tab's own UI), its run on the right (plan, changes, checks), Settings and the first-run setup over them. The
 // page has no Node and no Electron: it asks main through the preload, and main pushes what changed.
-import type { WebviewCommand } from "../../../../extensions/vscode/src/protocol.js";
+import type { WebviewCommand } from "@agentduo/host/protocol";
 import { CONVERSATIONS_PROJECT_ID } from "../shared/protocol.js";
 import type { AppSnapshot, ConversationItem, DesktopEvent, Preferences, UpdateState } from "../shared/protocol.js";
-import { updatedText } from "../../../../extensions/vscode/webview/account.js";
+import { updatedText } from "@agentduo/webview/account";
 import { button, call, el, errorText, onEvent } from "./bridge.js";
 import { ChatHost, chatStatus, type Mount } from "./chat.js";
 import { Inspector, type InspectorTab } from "./inspector.js";

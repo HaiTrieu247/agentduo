@@ -2,20 +2,20 @@
 // kept while the user looks at another one, so its conversations go on in the background. A conversation's view is
 // numbered each time it is attached: what the renderer sends names the view it came from, and a stale one is refused.
 // No Electron import (dialogs and the clipboard come in through `DesktopHost`), so it is tested with a real worker.
-import { homeFolder } from "../../../../src/paths.js";
+import { homeFolder } from "@agentduo/engine/paths";
 import { CONVERSATIONS_PROJECT_ID } from "../shared/protocol.js";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { WorkspaceSession, type ConversationHandle } from "../../../../extensions/vscode/src/workspaceSession.js";
-import type { ChangeList, HostMessage, WebviewMessage } from "../../../../extensions/vscode/src/protocol.js";
-import type { NodeLookup } from "../../../../extensions/vscode/src/workerClient.js";
-import type { ConfigScope } from "../../../../src/core/configuration.js";
-import { listConversations } from "../../../../src/core/conversation.js";
-import { RunStore, stamp } from "../../../../src/core/state.js";
-import { safeFileName } from "../../../../src/core/attachments.js";
-import { ATTACHMENT_LIMITS } from "../../../../src/core/attachment-types.js";
-import { shownImages, type ViewState } from "../../../../extensions/vscode/webview/state.js";
+import { WorkspaceSession, type ConversationHandle } from "@agentduo/host/workspaceSession";
+import type { ChangeList, HostMessage, WebviewMessage } from "@agentduo/host/protocol";
+import type { NodeLookup } from "@agentduo/host/workerClient";
+import type { ConfigScope } from "@agentduo/engine/config/configuration";
+import { listConversations } from "@agentduo/engine/chat/conversation";
+import { RunStore, stamp } from "@agentduo/engine/workflow/state";
+import { safeFileName } from "@agentduo/engine/inputs/attachments";
+import { ATTACHMENT_LIMITS } from "@agentduo/engine/inputs/attachment-types";
+import { shownImages, type ViewState } from "@agentduo/host/viewState";
 import type { ConversationItem, DesktopEvent, ProjectSummary, RunItem } from "../shared/protocol.js";
 import type { PreferencesStore } from "./preferences.js";
 import type { ResourceTokens } from "./resources.js";

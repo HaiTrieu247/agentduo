@@ -8,7 +8,7 @@ import { LogBuffer } from "../src/main/diagnostics.js";
 import { PreferencesStore } from "../src/main/preferences.js";
 import { ProjectManager } from "../src/main/projects.js";
 import { ResourceTokens } from "../src/main/resources.js";
-import { userConfigEnv } from "../../../test/helpers/config.js";
+import { userConfigEnv } from "@agentduo/engine/testing/config";
 
 const good: SenderInfo = { senderId: 3, windowId: 3, mainFrame: true, url: "agentduo://app/index.html" };
 

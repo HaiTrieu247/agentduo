@@ -1,5 +1,5 @@
-# Every key agentduo reads, set to its built-in default (src/core/config.ts). You never need all of this:
-# write only the keys you change.
+# Every key agentduo reads, set to its built-in default (packages/engine/src/config/config.ts). You never need all
+# of this: write only the keys you change.
 agents:
   planner: codex
   plan_reviewer: claude

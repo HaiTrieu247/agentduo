@@ -6,8 +6,8 @@
       "name": "Run agentduo extension",
       "type": "extensionHost",
       "request": "launch",
-      "args": ["--extensionDevelopmentPath=${workspaceFolder}/extensions/vscode", "${workspaceFolder}"],
-      "outFiles": ["${workspaceFolder}/extensions/vscode/dist/**/*.cjs"],
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}/apps/vscode", "${workspaceFolder}"],
+      "outFiles": ["${workspaceFolder}/apps/vscode/dist/**/*.cjs"],
       "preLaunchTask": "build:vscode"
     }
   ]

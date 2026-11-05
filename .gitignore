@@ -5,8 +5,14 @@ dist/
 .agentduo/runs/
 *.vsix
 .vscode-test/
-extensions/vscode/runtime/
-extensions/vscode/LICENSE
+
+# Build outputs and copies the builds make (apps/cli: tsup.config.ts and scripts/prepack.mjs; apps/vscode: scripts/build.mjs)
+apps/cli/schemas/
+apps/cli/README.md
+apps/cli/docs/
+apps/cli/LICENSE
+apps/vscode/runtime/
+apps/vscode/LICENSE
 
 apps/desktop/dist/
 apps/desktop/release/

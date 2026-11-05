@@ -1,7 +1,7 @@
 /// <reference path="./global.d.ts" />
 // The page's side of the preload: a typed request that throws on a refusal (so callers show it where they asked), and
 // a few DOM helpers. Text always goes in as text (textContent), never as markup.
-import { meterLevel } from "../../../../extensions/vscode/webview/account.js";
+import { meterLevel } from "@agentduo/webview/account";
 import type { DesktopEvent, DesktopRequest, DesktopResults } from "../shared/protocol.js";
 
 export class RequestError extends Error {

@@ -1,13 +1,13 @@
 export default ({ c, link, code, ext, p, ul, table, note }) => ({
   title: "Contributing",
   description: "Build AgentDuo from source: the CLI, the VS Code extension, the desktop app and this website, the conventions the code follows, and how to report a problem safely.",
-  lead: p("AgentDuo is one repository: the " + c("duo") + " CLI in " + c("src/") + ", the VS Code extension in " + c("extensions/vscode") + ", the desktop app in " + c("apps/desktop") + " and this website in " + c("website/") + ". All of them build with Node.js ≥ 22.12 and npm."),
+  lead: p("AgentDuo is one repository: the " + c("duo") + " CLI in " + c("apps/cli") + ", the VS Code extension in " + c("apps/vscode") + ", the desktop app in " + c("apps/desktop") + ", the code they share in " + c("packages/") + " (the engine, the host that runs it in a worker, and the chat’s page) and this website in " + c("website/") + ". All of them build with Node.js ≥ 22.12 and npm; the root’s npm workspaces link the packages."),
   sections: [
     {
       id: "source",
       title: "Build the CLI from source",
       html: `${code("git clone https://github.com/HaiTrieu247/agentduo.git\ncd agentduo\nnpm ci\nnpm run build", { lang: "sh", label: "Terminal" })}
-${p(c("npm run build") + " bundles the CLI into " + c("dist/") + ". Run it as " + c("node dist/cli.js") + ", or " + c("npm link") + " to put " + c("duo") + " and " + c("agentduo") + " on your PATH.")}
+${p(c("npm run build") + " bundles the CLI into " + c("apps/cli/dist/") + ". Run it as " + c("node apps/cli/dist/cli.js") + ", or run " + c("npm link") + " in " + c("apps/cli") + " to put " + c("duo") + " and " + c("agentduo") + " on your PATH.")}
 ${table({
   caption: "Root scripts",
   head: ["Command", "What it does"],
@@ -29,9 +29,9 @@ ${table({
   head: ["Command", "What it does"],
   rows: [
     [c("npm run typecheck:vscode"), "Checks the extension’s TypeScript."],
-    [c("npm run build:vscode"), "Builds " + c("extensions/vscode/dist") + " (host and webview) and " + c("runtime/") + " (the engine worker and schemas)."],
+    [c("npm run build:vscode"), "Builds " + c("apps/vscode/dist") + " (host and webview) and " + c("runtime/") + " (the engine worker and schemas)."],
     [c("npm run test:vscode"), "A smoke test in a downloaded VS Code; on Linux, run it under " + c("xvfb-run") + "."],
-    [c("npm run package:vscode"), "Writes " + c("extensions/vscode/agentduo-vscode-<version>.vsix") + ", for " + c("code --install-extension") + "."],
+    [c("npm run package:vscode"), "Writes " + c("apps/vscode/agentduo-vscode-<version>.vsix") + ", for " + c("code --install-extension") + "."],
     [c("npm run test:pack:vscode"), "Packages it, checks the VSIX contents and runs its worker outside the checkout."],
   ],
 })}
@@ -70,10 +70,10 @@ ${p("While writing a page, " + c("node scripts/check-page.mjs <page id>") + " ch
       title: "Conventions",
       html: `${ul([
   `AgentDuo enforces nothing. It passes protocol flags only, plus your ${c("args")} and ${c("role_args")}; unexpected changes become warnings, never blocks. Permission rules belong to each CLI’s own configuration.`,
-  `Runtime dependencies are exactly ${c("ink")}, ${c("react")}, ${c("commander")}, ${c("yaml")} and ${c("ajv")}. Ask before adding one.`,
+  `The published CLI’s runtime dependencies (${c("apps/cli/package.json")}) are exactly ${c("ink")}, ${c("react")}, ${c("commander")}, ${c("yaml")} and ${c("ajv")}; the workspace packages are bundled into it. Ask before adding one.`,
   `Node ≥ 22.12, ESM, TypeScript strict. Relative imports end in ${c(".js")}, also for ${c(".ts")} and ${c(".tsx")} files.`,
-  `${c("src/core")} and ${c("src/agents")} never import from ${c("src/ui")}: what reaches the screen is an event, and human decisions come back through an interface.`,
-  `A changed workflow transition gets a scenario in ${c("test/workflow.test.ts")}. Agent output schemas stay OpenAI-strict (every property required, no additional properties), which ${c("test/schema.test.ts")} checks.`,
+  `Packages import each other by name (${c("@agentduo/engine/…")}), in one direction: the engine, then the host, then the webview, then the apps; ${c("test/boundaries.test.ts")} checks it. What reaches the screen is an event, and human decisions come back through an interface.`,
+  `A changed workflow transition gets a scenario in ${c("packages/engine/test/workflow/workflow.test.ts")}. Agent output schemas stay OpenAI-strict (every property required, no additional properties), which ${c("packages/engine/test/agents/schema.test.ts")} checks.`,
   `CI runs the tests on Linux, macOS and Windows. Build paths with ${c("join")} in tests, and never name the user config folder with ${c("XDG_CONFIG_HOME")} alone: Windows reads ${c("%APPDATA%")}.`,
 ])}
 ${p("The full list is in " + c("AGENTS.md") + " at the root of the repository.")}`,

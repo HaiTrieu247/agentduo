@@ -2,15 +2,15 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { initialState } from "../../../extensions/vscode/webview/state.js";
+import { initialState } from "@agentduo/host/viewState";
 import { chatStatus } from "../src/renderer/chat.js";
 import { activityOf } from "../src/main/projects.js";
-import type { ClarificationRequest } from "../../../src/core/clarification.js";
+import type { ClarificationRequest } from "@agentduo/engine/clarification/clarification";
 import { gateActivities } from "../src/renderer/inspector.js";
 import { needsSignIn, readyToGo } from "../src/renderer/onboarding.js";
-import { readConfiguration } from "../../../src/core/configuration.js";
-import { checkSettingValue, settingKey } from "../../../src/core/settings.js";
-import { CLAUDE_MODELS } from "../../../src/core/commands.js";
+import { readConfiguration } from "@agentduo/engine/config/configuration";
+import { checkSettingValue, settingKey } from "@agentduo/engine/config/settings";
+import { CLAUDE_MODELS } from "@agentduo/engine/chat/commands";
 import { addableOptions, argumentRows, argumentTokens } from "../src/renderer/argumentOptions.js";
 import {
   ABOUT_LINKS, aboutFacts, CHOICES, cliAccount, cliStateWord, editorKind, effortChoices, formatValue, groupOf, modelChoices, parseEditorValue, settingLabel, settingUnit, sourceText,
@@ -18,12 +18,12 @@ import {
 } from "../src/renderer/settings.js";
 import { accountRefreshTitle, projectBusy } from "../src/renderer/sidebar.js";
 import { turnEnded, UsageStore } from "../src/renderer/usage.js";
-import type { AccountUsage } from "../../../extensions/vscode/src/protocol.js";
+import type { AccountUsage } from "@agentduo/host/protocol";
 import { sidebarWidth } from "../src/renderer/resizer.js";
 import { clampFontSize, resolveTheme } from "../src/renderer/theme.js";
 import { restartQuestion, updateAction, updateLine, updateNotice } from "../src/renderer/update.js";
 import { LINKS, type CliStatus, type ConversationItem } from "../src/shared/protocol.js";
-import type { UsageState } from "../../../src/core/usage.js";
+import type { UsageState } from "@agentduo/engine/system/usage";
 
 const temps: string[] = [];
 afterEach(() => {

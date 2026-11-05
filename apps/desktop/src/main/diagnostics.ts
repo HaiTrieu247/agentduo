@@ -2,7 +2,7 @@
 // the configuration files' problems and the host's recent log lines. Never credentials, attachments, prompts or the
 // environment; the home folder is written as ~. The renderer shows this exact text before it is saved.
 import { homedir } from "node:os";
-import type { ConfigurationView } from "../../../../src/core/configuration.js";
+import type { ConfigurationView } from "@agentduo/engine/config/configuration";
 import type { CliStatus, LauncherInfo } from "../shared/protocol.js";
 
 const MAX_LOG_LINES = 400;

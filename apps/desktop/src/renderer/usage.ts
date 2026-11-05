@@ -1,7 +1,7 @@
 // Both agents' accounts and limits, as the sidebar's Account & Usage box and Settings → Claude & Codex show them:
 // one latest answer, for the project it was looked up with, and at most one lookup at a time for a project. No DOM,
 // so it is tested as is.
-import type { AccountUsage } from "../../../../extensions/vscode/src/protocol.js";
+import type { AccountUsage } from "@agentduo/host/protocol";
 import type { ConversationItem } from "../shared/protocol.js";
 import { errorText } from "./bridge.js";
 

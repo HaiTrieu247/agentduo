@@ -3,8 +3,8 @@
 // never as exceptions across IPC. No Electron import: the window's dialogs and the shell come in as `DesktopShell`.
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
-import { userConfigPath } from "../../../../src/core/config.js";
-import { configFiles, type ConfigurationView } from "../../../../src/core/configuration.js";
+import { userConfigPath } from "@agentduo/engine/config/config";
+import { configFiles, type ConfigurationView } from "@agentduo/engine/config/configuration";
 import {
   LINKS, parseDesktopRequest, ProtocolError, trustedSender, type Answer, type AppSnapshot, type CliStatus, type DesktopRequest, type DesktopResults,
   type LauncherInfo, type SenderInfo, type UpdateState,

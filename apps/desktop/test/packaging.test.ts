@@ -100,8 +100,14 @@ describe("the desktop package", () => {
   });
 
   it("leaves agentduo's five runtime dependencies as they are", () => {
-    expect(Object.keys(rootPkg.dependencies).sort()).toEqual(["ajv", "commander", "ink", "react", "yaml"]);
-    expect(rootPkg.files).not.toContain("apps");
+    const cli = json(join(root, "apps", "cli", "package.json"));
+    expect(Object.keys(cli.dependencies).sort()).toEqual(["ajv", "commander", "ink", "react", "yaml"]);
+    expect(cli.files).not.toContain("apps");
+  });
+
+  it("stays out of the root's workspaces, with its own lockfile", () => {
+    expect(rootPkg.workspaces).not.toContain("apps/desktop");
+    expect(rootPkg.workspaces.some((w: string) => w.includes("*") && "apps/desktop".startsWith(w.replace("*", "")))).toBe(false);
   });
 });
 
