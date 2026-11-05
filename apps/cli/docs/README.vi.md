@@ -1,0 +1,347 @@
+<img src="../apps/desktop/resources/icon.png" alt="" width="96">
+
+# agentduo (tiếng Việt)
+
+agentduo là kênh giao tiếp giữa hai agent lập trình. **Codex** lập kế hoạch và review. **Claude Code** phản biện kế hoạch rồi implement. agentduo chuyển các thông điệp có cấu trúc giữa hai bên, điều phối vòng lặp, và hiển thị live trên terminal từng hành động của mỗi agent cùng những gì hai agent chuyển cho nhau.
+
+agentduo **không có luật riêng**. Quyền, sandbox và quy ước đều lấy từ config của từng CLI và từ `AGENTS.md`/`CLAUDE.md` của repo.
+
+Website: [agentduo.netlify.app](https://agentduo.netlify.app/vi/)
+
+## Cài đặt và bắt đầu
+
+```bash
+npm i -g agentduo
+cd my-project            # hoặc bất kỳ thư mục con nào: thư mục đó là workspace
+duo init                 # tạo .agentduo/config.yaml (mọi mục đều tuỳ chọn) và .agentduo/.gitignore
+duo doctor               # kiểm tra CLI và config, không gọi model
+duo                      # mở chat
+```
+
+## Chat
+
+Gõ `duo` (hoặc `agentduo`) mà không kèm task trong một terminal. Chat là cuộc trò chuyện ba người giữa bạn, Claude
+Code và Codex; pipeline đầy đủ chỉ chạy khi bạn yêu cầu:
+
+- **Gõ một tin** sẽ gửi cho agent ghi dưới ô nhập: Codex khi mới mở chat, sau đó là agent bạn chọn gần nhất.
+  `/claude <câu hỏi>` và `/codex <câu hỏi>` hỏi thẳng một agent; `/claude` hoặc `/codex` đứng một mình thì chuyển người
+  nhận cho các tin tiếp theo. Mỗi câu trả lời hiện đầy đủ, đúng một lần, kèm dấu nhà cung cấp (Anthropic / OpenAI) và
+  model đã dùng. Cả hai agent đều thấy toàn bộ cuộc trò chuyện (tối đa 120.000 ký tự; các lượt cũ bị bỏ nguyên lượt và
+  chat sẽ báo).
+- **`/pipeline <yêu cầu>`** chạy cả workflow (plan → critique → finalize → implement → verify → review). Mọi vai trò
+  đều được biết cuộc trò chuyện trước khi giao việc và các việc pipeline trước trong phiên chat đã làm gì.
+- **`/discuss <câu hỏi>`** cho hai agent cùng đi tới một câu trả lời. Agent ghi dưới ô nhập trả lời, agent kia phản
+  biện và kết thúc bằng `VERDICT: AGREE` hoặc `VERDICT: REVISE`, rồi agent thứ nhất sửa cho tới khi bên phản biện đồng
+  ý, tối đa `limits.max_discussion_rounds` lần phản biện (mặc định 3; phản biện thiếu verdict tính là REVISE). Sau đó
+  Codex, trong một lần gọi riêng, tổng hợp toàn bộ cuộc thảo luận thành câu trả lời cuối. Câu tổng hợp giữ những gì
+  đứng vững từ cả hai agent, thêm các ý đúng trong phản biện mà phiên bản cuối còn thiếu, và bỏ những gì cuộc thảo luận
+  đã chỉ ra là sai. Nếu lần phản biện cuối vẫn chưa đồng ý, câu trả lời kết bằng một mục ngắn "Còn bất đồng". Người
+  tổng hợp luôn là Codex, nên khi Codex cũng là bên trả lời thì câu tổng hợp đến từ cùng một model, trong một lần gọi
+  tiếp tục session cũ và được yêu cầu giữ trung lập. Mỗi cuộc thảo luận tốn từ 3 đến 2N+1 lần gọi agent, với N là số lần phản biện tối đa,
+  cộng thêm một lần cho mỗi bước phải hỏi lại trong session mới (xem phần session hội thoại bên dưới).
+  Mỗi lượt hiện ra khi xong (ở terminal là vài dòng đầu; `--verbose` hiện đầy đủ), rồi tới câu trả lời cuối, đầy đủ.
+  Chỉ câu trả lời đó được đưa vào cuộc trò chuyện, như câu trả lời của Codex đã thảo luận với Claude. Nếu bước tổng hợp
+  bị lỗi, agentduo báo một warning và câu trả lời là phiên bản gần nhất, ghi tên agent đã viết nó.
+- **Gõ trong lúc pipeline đang chạy** thì tin đó thành ghi chú cho các bước kế tiếp. `/claude`, `/codex`,
+  `/pipeline` và `/discuss` khi đó sẽ báo workspace đang bận; mỗi lúc chỉ có một lần gọi agent.
+- **Esc** dừng việc đang chạy. Câu trả lời hay cuộc thảo luận bị dừng thì kết thúc ở đó, và không phần nào của nó được
+  đưa vào cuộc trò chuyện. Bước pipeline bị dừng vẫn resume được:
+  `/resume [ghi chú]` chạy lại bước đó (Enter trống chỉ nhắc `/resume`). `/pipeline` khi có run đang dừng sẽ tạo run
+  mới; run cũ giữ ID và vẫn resume được. `/new` xóa cuộc trò chuyện và bắt đầu lại.
+- **Model.** Ô nhập luôn hiện model của cả hai agent. Trước câu trả lời đầu tiên, agentduo tra cứu local mà không gọi
+  model: Codex qua `codex doctor --json` (giữ các `-c`/`--enable`/`--disable`; doctor không nhận `--profile`, nên khi
+  đó model hiện là chưa xác định kèm lý do), Claude qua `--model`, `ANTHROPIC_MODEL` và các file settings của Claude
+  Code. Alias trong settings hiện là `default → sonnet (configured alias)` cho tới khi câu trả lời đầu tiên của Claude
+  xác nhận tên model thật. Mỗi câu hỏi và mỗi run đều tra cứu lại, nên khi bạn sửa `~/.codex/config.toml` hoặc file
+  settings của Claude thì model mới hiện từ lượt kế tiếp.
+- **Gõ `/`** sẽ hiện danh sách lệnh kèm chú thích, lọc dần theo những gì bạn gõ: Up/Down để chọn, Tab hoặc Enter để
+  điền, Enter lần nữa để gửi, Esc để đóng danh sách.
+- **Prompt hỏi quyền và các quyết định** hiện ra thay cho ô nhập.
+- **`/usage`** mở một popup thay cho ô nhập, giống `/usage` của Claude Code. Popup cho biết tài khoản của mỗi agent (gói
+  và email), và mỗi agent đã dùng bao nhiêu phần trăm hạn mức của gói. Mỗi hạn mức có một thanh tiến độ và thời điểm
+  reset. Bên dưới là phần "What's contributing to your limits usage?" của Claude. Cả hai đều không gọi model. Phía
+  Claude là `claude -p /usage`, cùng `claude auth status` để lấy tài khoản. Phía Codex lấy từ
+  `codex app-server` (`account/read` và `account/rateLimits/read`, giống cách extension IDE của Codex hỏi, kèm các
+  `-c`/`--enable`/`--disable` của bạn), vì `/status` của Codex chỉ có trong giao diện TUI của nó. Popup hiện ngay, và
+  phần của mỗi agent được điền khi agent đó trả lời (khoảng 2 giây, tối đa 15 giây). Bên nào lỗi thì chỉ phần của bên
+  đó ghi lý do. ↑↓ để cuộn, `r` để lấy lại số liệu, Esc chỉ đóng popup, còn câu trả lời đang chạy vẫn chạy tiếp.
+  `/status` giữ nguyên như cũ.
+- **Đính kèm file.** `/attach <đường dẫn>` đính kèm một file thuộc bất kỳ loại nào (ảnh, PDF, text, code…) vào tin kế
+  tiếp của bạn: câu hỏi, `/discuss`, task `/pipeline` hoặc ghi chú. Đường dẫn có dấu cách thì đặt trong nháy hoặc escape,
+  theo cách shell đọc một từ: `/attach "~/Desktop/Ghi chú.pdf"`, `/attach shots/loi\ 2.png`. Dấu nháy đơn literal thì
+  đặt trong nháy kép (`"it's.png"`); `'it''s'` được đọc thành `its`, giống shell. Đường dẫn tương đối tính từ workspace,
+  `~/` tính từ thư mục home, dù có nằm trong nháy hay không (thư mục tên `~` thì viết `\~` hoặc `./~`); agentduo không
+  glob hay mở rộng biến. Trên Windows, dấu `\` là dấu phân cách thư mục chứ không dùng để escape, nên đường dẫn có dấu
+  cách phải đặt trong nháy (`/attach "C:\Users\me\Ghi chú.pdf"`), và `~\` cũng là thư mục home. `/attachments` liệt kê các file đang chờ, `/detach
+  <n|all>` bỏ file. Enter trên dòng trống sẽ gửi riêng các file (cho agent ghi dưới ô nhập, hoặc thành ghi chú khi
+  pipeline đang chạy). Terminal không đọc ảnh từ clipboard: hãy lưu ảnh ra file rồi `/attach`.
+  - agentduo chép nguyên bytes của từng file vào `.agentduo/runs/conversations/<id>/attachments/` (file của task pipeline
+    được chép vào `attachments/` của run, nên `/resume` không cần file gốc hay cuộc trò chuyện), và không bao giờ đưa vào
+    snapshot. Giới hạn: 20 file, 20 MB mỗi file và 50 MB mỗi tin. File đang chờ gửi sẽ bị bỏ khi `/new` hoặc khi đóng
+    chat; file đã gửi thì được giữ.
+  - Mọi prompt đều liệt kê các file kèm đường dẫn bản sao, nên cả hai agent đọc được bằng tool của chính mình (agent có
+    hiểu được một file nhị phân cụ thể hay không là tùy agent). Ảnh PNG, JPEG, GIF và WebP còn được gửi thẳng cho model
+    dưới dạng ảnh: cho Claude là image block trong tin `stream-json`, cho Codex là `--image=<đường dẫn>`. Mỗi lần gọi,
+    Claude nhận tối đa 20 ảnh, mỗi ảnh tối đa 8000 pixel mỗi cạnh và 5 MB sau khi mã hóa base64, tổng cộng 20 MB. Ảnh
+    vượt các mức đó (hoặc ảnh agentduo không đọc được kích thước, hoặc SVG) chỉ được gửi dưới dạng đường dẫn, kèm warning.
+  - Ảnh được gửi lại ở mọi lần gọi của `/discuss` và của pipeline (mỗi bước, mỗi lần retry hay repair là một lần gọi
+    riêng), nên mỗi lần đều tốn thêm token và thời gian. Câu hỏi sau chỉ liệt kê đường dẫn file của tin trước.
+  - Lúc cần quyết định HUMAN_REVIEW, file đang chờ không đi kèm quyết định: hãy gửi chúng trong một tin trước (thành ghi
+    chú cho bước kế tiếp của run), hoặc chọn quyết định sau rồi `/resume` kèm ghi chú.
+- **Tag file của workspace bằng @.** Gõ `@` trong ô nhập thì hiện danh sách file và folder của workspace (cấp ngoài
+  cùng, folder trước); gõ thêm thì danh sách thu lại còn những đường dẫn chứa các chữ đó theo đúng thứ tự, khớp nhất
+  lên đầu, giống quick open. ↑↓ để chọn, Tab mở một folder (hiện các mục bên trong) hoặc chèn một file, Enter chèn
+  đường dẫn và đóng danh sách, Esc đóng danh sách. Đường dẫn có dấu cách được viết trong ngoặc kép
+  (`@"my docs/notes.md"`). Danh sách là những gì git liệt kê trong workspace (file đã track và file chưa track mà git
+  không ignore), hoặc khi không có repo thì là thư mục được duyệt, bỏ qua `.git` và `node_modules`; các run của agentduo
+  không bao giờ có trong đó. Extension VS Code và app desktop cũng dùng được y như vậy.
+  - Tin nhắn giữ nguyên `@path` như bạn gõ, và prompt có thêm danh sách các file/folder được tag còn tồn tại trong
+    workspace (đường dẫn không có, hoặc nằm ngoài workspace, bị bỏ qua), để agent tự đọc bằng tool của nó: không chép gì
+    cả, khác với `/attach`. Dùng được trong câu hỏi, `/discuss`, task `/pipeline` (prompt đầu của mỗi role) và ghi chú.
+- **Lệnh:** `/claude`, `/codex`, `/pipeline`, `/discuss`, `/plan`, `/diff`, `/status`, `/usage`, `/attach`,
+  `/attachments`, `/detach`, `/resume` (chạy tiếp run đang dừng hoặc đang chờ, kể cả từ phiên trước), `/new`,
+  `/settings`, `/config`, `/help`, `/quit`. Bấm Ctrl-C hai lần cũng thoát; run đang chạy sẽ dừng ở bước hiện tại và vẫn
+  resume được.
+
+Mỗi cuộc trò chuyện giữ một session Codex và một session Claude, dùng chung cho chat thường và mọi bước `/discuss`,
+kể cả tổng hợp. Mở lại cùng cuộc trò chuyện sẽ resume hai session đó; `/new` hoặc cuộc trò chuyện mới tạo session mới.
+Khi resume, agent chỉ nhận phần hội thoại mới (nếu phần đó vượt quá giới hạn của prompt, prompt ghi rõ bao nhiêu lượt bị
+bỏ). Lượt resume bị lỗi được hỏi lại một lần trong session mới với prompt đầy đủ, kèm một warning; lượt bị timeout hoặc
+im lặng quá lâu thì chỉ báo lỗi. Câu trả lời lỗi hoặc bị dừng không để lại session nào để tiếp tục, và một cuộc thảo
+luận kết thúc mà không có câu trả lời cũng vậy, với cả hai agent: không phần nào của nó được tiếp tục.
+Pipeline vẫn giữ session riêng theo role. Cờ `--ephemeral` hoặc `--no-session-persistence` trong `args` của backend
+sẽ tắt việc dùng lại session hội thoại cho backend đó.
+
+**Đổi cấu hình ngay trong chat.** Cú pháp chuẩn là `/settings claude …` và `/settings codex …`; sai cú pháp thì
+agentduo trả về usage. `/claude model …` và các lệnh tương tự là lối tắt, chỉ được hiểu là cấu hình khi đúng hình dạng
+(`/claude model opus`); còn lại, ví dụ `/claude model nào phù hợp nhất cho repo này?`, được gửi nguyên văn cho Claude
+như một câu hỏi, kể cả `--save`. `/claude -- <câu hỏi>` luôn là câu hỏi.
+- Shift+Tab hoặc `/mode manual|acceptEdits|auto`: chế độ quyền của Claude, cả trong chat lẫn khi làm implementer của pipeline, giống Shift+Tab trong Claude Code. Manual hỏi trước mỗi lần sửa; Edit automatically (`acceptEdits`) tự sửa file mà không hỏi; Auto tự duyệt những việc qua được bước kiểm tra an toàn của Claude Code và dừng lại hỏi khi có việc rủi ro.
+- `/claude model …`, `/claude effort …`, `/claude permissions allow|deny|remove <rule>`, `/claude add-dir <path>`.
+- `/codex model <tên> [effort]`, `/codex permissions read-only|auto|full-access|default`. Riêng `full-access` phải xác nhận thêm bằng `--yes`.
+- `/config` để xem cấu hình mà hai agent đang chạy.
+
+Thay đổi áp dụng từ câu hỏi hoặc lần gọi agent kế tiếp; câu trả lời đang chạy giữ model lúc nó bắt đầu. Thay đổi chỉ giữ trong phiên chat, trừ khi lệnh kết thúc bằng `--save`: khi đó agentduo ghi vào `.agentduo/config.yaml` và giữ nguyên các comment trong file. Với `--global`, agentduo ghi vào `~/.config/agentduo/config.yaml` để áp dụng cho mọi workspace. Thay đổi được tính trên riêng file đó, nên config của workspace hiện tại không bị chép theo. Nếu config của workspace cũng đặt đúng key đó thì nó vẫn thắng ở workspace này: chat sẽ báo, và `--save --global` ghi cả hai file. `/help` liệt kê mọi lệnh kèm giải thích. Ngoài chat, `duo --accept-edits "<task>"` có tác dụng giống `/mode acceptEdits`.
+
+`duo "<task>"` và `duo run "<task>"` vẫn chạy pipeline cho một việc rồi thoát; đây là cách dùng cho script và CI.
+
+## Extension VS Code
+
+`apps/vscode` đưa chat này vào sidebar của VS Code. Sidebar có timeline của hai agent, phần trả lời HUMAN_REVIEW và quyền của Claude ngay trên ô nhập, cùng các nút mở plan, review, report và xem thay đổi của run bằng diff editor. Extension chạy engine của agentduo bằng Node của bạn (≥ 22.12). Nó dùng chung cấu hình, thư mục run và lock với `duo`, nên run bắt đầu ở bên này có thể tiếp tục ở bên kia.
+
+Extension có trên Marketplace (`HaiTrieuThinh.agentduo-vscode`). Để cài bản build tại máy:
+
+```sh
+npm ci
+npm run package:vscode
+code --install-extension apps/vscode/agentduo-vscode-*.vsix
+```
+
+Không cần cài gói npm `agentduo`. Máy chỉ cần Node, git, Codex CLI và Claude Code đã đăng nhập. Nếu VS Code mở từ Dock không thấy đúng `PATH`, đặt `agentduo.nodePath` trong settings của VS Code, hoặc `codex.bin` / `claude.bin` trong `.agentduo/config.yaml`.
+
+- Bấm icon agentduo trên Activity Bar sẽ thấy hai mục. **Account & Usage** hiện tài khoản của cả Claude Code lẫn Codex (gói, email) và hạn mức đã dùng, mỗi hạn mức một thanh tiến độ và giờ reset. **Conversations** liệt kê các cuộc trò chuyện. Số liệu được lấy khi mục hiện ra (lấy lại nếu đã cũ hơn 1 phút), khi bấm ↻, 5 phút một lần khi mục đang mở, và sau mỗi câu trả lời hay mỗi run (tối đa 1 lần mỗi phút). Mỗi lần lấy mất khoảng 2 giây và không gọi model. Mục bị thu gọn hay bị ẩn thì không lấy gì. **View details** mở khung Usage đầy đủ trong tab.
+- Mở sidebar không chạy gì cả. Run chỉ bắt đầu khi bạn gửi task. Với workspace nhiều thư mục, bạn chọn thư mục trước (**agentduo: Choose Workspace Folder**); trong lúc chưa chọn, mục Account & Usage dùng config của thư mục home.
+- Không mở folder nào thì agentduo làm việc trong thư mục home, giống khi chạy `duo` ở đó: cuộc trò chuyện và config nằm trong `~/.agentduo`. Hỏi đáp, `/discuss`, `/usage` và mục Account & Usage đều chạy được. Pipeline cần một folder dự án (không cần git repo), nên ở thư mục home nó nhắc bạn mở folder dự án.
+- Enter để gửi, Shift+Enter để xuống dòng. Khi agent đang chạy, nội dung bạn gửi là ghi chú cho bước kế tiếp. **Stop** (hoặc Esc trong ô nhập) dừng bước hiện tại; gửi lại sẽ chạy lại bước đó. Các lệnh `/new`, `/resume`, `/mode`, `/claude …`, `/codex …` giống hệt trong terminal. Nút chế độ dưới ô nhập mở menu Modes giống Claude Code (Manual, Edit automatically, Auto); Shift+Tab trong ô nhập chuyển sang chế độ kế tiếp.
+- **Đính kèm file:** nút kẹp giấy dưới ô nhập chọn được nhiều file bất kỳ. Bạn cũng có thể dán ảnh (Cmd/Ctrl+V), hoặc **giữ Shift** khi kéo file từ Finder/Explorer của hệ điều hành vào ô nhập (VS Code cần Shift mới cho webview nhận file thả vào). Kéo từ Explorer của chính VS Code hay từ editor thì tab không đọc được file, nên hãy dùng nút kẹp giấy. File chờ hiện phía trên ô nhập (ảnh có thumbnail), có ✕ để bỏ; gửi với ô nhập trống thì chỉ gửi file. File chờ gửi bị bỏ khi `/new` hoặc khi đóng tab. Giới hạn và cách gửi ảnh giống chat trên terminal.
+- Reload cửa sổ hay đóng VS Code sẽ dừng bước đang chạy. Quyết định đang chờ được hoãn, yêu cầu quyền chưa trả lời bị từ chối, và run vẫn tiếp tục được. Extension không bao giờ tự chạy lại task; nó hiện nút **Resume** để bạn bấm.
+- Bản đầu chỉ hỗ trợ VS Code desktop với thư mục local (hoặc không mở folder nào, khi đó là thư mục home). Chưa hỗ trợ Remote SSH, WSL, container hay VS Code web.
+
+Chi tiết xem [apps/vscode/README.md](../apps/vscode/README.md). Khi phát triển, mở repo trong VS Code rồi nhấn F5 (**Run agentduo extension**).
+
+Yêu cầu: Node.js ≥ 22.12, git, Codex CLI và Claude Code. Pipeline (`duo "<task>"`, `/pipeline`) chụp snapshot và tạo diff bằng git: trong git repo của bạn, hoặc với folder chưa có repo thì trong một kho Git riêng của agentduo (xem [Folder chưa có git repo](#folder-chưa-có-git-repo)), nên không cần `git init`. Chat và `/discuss` chạy ở thư mục nào cũng được, kể cả khi máy chưa có git.
+
+## App desktop
+
+`apps/desktop` là AgentDuo, tức agentduo dưới dạng app Electron cho macOS, Windows và Linux, dùng chung engine với `duo` và extension: sidebar chứa project và hội thoại, chat ba bên, panel bên phải xem plan, diff thay đổi và kết quả kiểm tra, Settings với phạm vi global/project/phiên, và bước kiểm tra hai CLI khi mở lần đầu. App chạy engine bằng Node đi kèm Electron nên không cần cài Node riêng, nhưng vẫn cần Claude Code và Codex CLI đã cài và đăng nhập. Build từ source: `npm ci`, rồi `npm ci --prefix apps/desktop`, rồi `npm --prefix apps/desktop run dev`. Push một tag `v*` sẽ build bộ cài trên cả ba hệ điều hành và phát hành thành một GitHub Release; app đã cài tự cập nhật từ đó (bản macOS chỉ tự cài khi được ký bằng Developer ID, bản ký ad-hoc chỉ báo có bản mới để tải về). Cách đóng gói, cập nhật, phát hành, ký ứng dụng (cần chứng chỉ riêng) và nền tảng nào đã được kiểm chứng xem ở [apps/desktop/README.md](../apps/desktop/README.md).
+
+## Workspace
+
+`duo` làm việc ở thư mục bạn gọi nó, hoặc ở `--dir PATH`:
+- hai agent chạy ở đó;
+- `.agentduo/` nằm ở đó;
+- diff gửi cho reviewer chỉ gồm thay đổi trong thư mục đó.
+
+Nếu agent sửa file ngoài workspace (trong cùng repo), agentduo cảnh báo trên màn hình và trong report, với đường dẫn tính từ workspace (`../shared/x.ts`), nhưng không dừng run.
+
+### Folder chưa có git repo
+
+Workspace nằm trong git repo thì run lưu snapshot ngay trong repo đó (commit không gắn nhánh, dưới `refs/agentduo/<run-id>/`; index, HEAD và nhánh của bạn không bị đụng tới). Folder chưa có git repo thì run lưu snapshot trong một kho Git bare riêng do agentduo tạo cho run đó, và báo rõ khi bắt đầu:
+
+- Vị trí: `<data>/agentduo/repositories/<id>.git`, với `<data>` là `$XDG_DATA_HOME` hoặc `~/.local/share` trên Linux và macOS, `%LOCALAPPDATA%` (không có thì `%APPDATA%`) trên Windows. Không có gì được tạo trong folder của bạn: không `.git`, không index. Run ghi kho này vào `state.json` và kiểm tra lại mỗi lần mở (đúng vị trí dưới thư mục đó, và marker ghi run và workspace), rồi trước khi chạy tiếp, kiểm tra các snapshot của nó còn nguyên vẹn.
+- Nội dung: mọi file trong workspace như `git add` sẽ lấy: tôn trọng các file `.gitignore` (kể cả trong thư mục con), bỏ dữ liệu run, `.claude/settings.local.json` và mọi `.git`. File trong repo lồng nhau được chụp như file thường (đã commit hay chưa), nên thay đổi bên trong vẫn có trong diff; index, HEAD và `info/exclude` của repo đó không được dùng và giữ nguyên.
+- Resume, diff stat trong report, `/diff`, và Changes trong extension và app đều đọc kho riêng của run, kể cả khi folder được `git init` sau đó; run không bao giờ đổi sang kho khác. Nếu kho đó mất, run báo lỗi và chờ: `--decision abort` vẫn kết thúc được run.
+- Codex khởi động ngoài git repo nên các lần gọi Codex nhận cờ giao thức `--skip-git-repo-check`.
+- Reviewer nhận diff trong prompt; toàn bộ diff được lưu thành `diff.r<round>.patch` trong thư mục run, và report ghi lệnh `git --git-dir … diff` để xem snapshot từ bất kỳ đâu.
+
+Giới hạn: không chạy pipeline ngay tại thư mục home (hãy mở folder dự án), hay trong folder chứa thư mục dữ liệu của agentduo. Folder lớn mà thiếu `.gitignore` (`node_modules`, file build) sẽ bị chụp toàn bộ, tốn thời gian và dung lượng; run dùng lại stat cache giữa các lần chụp. Kho được giữ lại sau run để còn đọc lịch sử; khi không cần run đó nữa thì tự xóa `<data>/agentduo/repositories/<id>.git`. Mỗi workspace chỉ chạy một pipeline một lúc.
+
+Thư mục runs có `.gitignore` riêng, nên dữ liệu run không lọt vào `git status` hay commit, kể cả khi bạn chưa chạy `duo init`.
+
+## Quyền
+
+agentduo chỉ truyền các flag giao thức, và không flag nào cấp quyền.
+
+**Khi Claude xin quyền, agentduo hỏi bạn.** Nếu Claude cần một tool mà settings chưa cho phép, run tạm dừng và hiện đúng câu hỏi của Claude:
+- **Cho lần này**.
+- **Luôn cho**: Claude tự lưu rule nó đề xuất vào `.claude/settings.local.json`, giống như khi bạn trả lời Claude trực tiếp. File này không bao giờ nằm trong snapshot hay trong diff gửi reviewer.
+- **Từ chối**, hoặc **từ chối kèm lời nhắn** cho Claude.
+
+Trong lúc chờ bạn trả lời, timeout của agent tạm dừng. Ở chế độ `--plain` trong terminal, các lựa chọn hiện dưới dạng một câu hỏi một dòng.
+
+Khi không ai trả lời được (CI, chạy nền, output bị chuyển hướng), Claude chạy với `--permission-prompts none` và tự từ chối. Đặt `claude.permission_prompts: deny` nếu muốn luôn tự từ chối như vậy.
+
+- **Claude Code** lấy quyền từ settings của bạn. Khi chạy không tương tác, Claude chỉ dùng được tool mà settings cho phép:
+  - `"permissions": { "defaultMode": "acceptEdits" }` cho phép sửa file, nhưng không cho chạy lệnh;
+  - muốn chạy lệnh thì thêm allow rule, ví dụ `"permissions": { "allow": ["Bash(npm test:*)"] }`. Khi không có gate, implementer tự chạy test của dự án, nên hãy cho phép các lệnh đó.
+
+  Lần gọi tool nào bị từ chối sẽ hiện `⊘ denied`, kèm một cảnh báo ghi rõ tên tool.
+- **Codex** lấy quyền từ `~/.codex/config.toml`. Theo mặc định `codex exec` chỉ được đọc. Nếu Codex làm implementer, nó cần `sandbox_mode = "workspace-write"` hoặc `codex.role_args.implementer: [--sandbox, workspace-write]`.
+- **Muốn đặt riêng cho từng vai trò** khi chạy qua agentduo, dùng `role_args`:
+
+```yaml
+claude:
+  role_args:
+    implementer: [--permission-mode, acceptEdits]
+codex:
+  role_args:
+    code_reviewer: [--sandbox, read-only]
+```
+
+agentduo không chặn gì. Nó chỉ cảnh báo khi agent lập kế hoạch hoặc review sửa file, và khi có file ngoài workspace bị sửa. agentduo không bao giờ commit hay push.
+
+## Câu hỏi từ các agent
+
+Khi thiếu một thông tin chỉ bạn biết và nó làm đổi phạm vi hoặc kết quả, agent hỏi bạn trước khi làm tiếp, kèm các lựa chọn có chú thích. Điều tìm được trong repository thì agent tự tìm; yêu cầu rõ ràng đi thẳng tới plan, không có lượt kiểm tra yêu cầu riêng. Khả năng của từng backend khác nhau:
+
+| Ở đâu | Điều xảy ra |
+|---|---|
+| **Claude, ngay trong lượt** (chat, `/discuss`, lượt phản biện hoặc implement) | Công cụ `AskUserQuestion` của Claude mở một form: header và nội dung từng câu hỏi, mọi lựa chọn kèm mô tả, chọn một hoặc nhiều, và ô nhập ý khác. Không có gì được chọn sẵn; chỉ gửi được khi mọi câu đã có đáp án. Claude tiếp tục đúng lượt đó với đáp án của bạn. Timeout của agent tạm dừng lúc chờ, và thời gian chờ không tính vào số phút của run. Không có "always allow": đáp án là thông tin, không phải quyền. |
+| **Planner** (pipeline) | Planner có thể kết thúc lượt bằng danh sách câu hỏi thay vì plan. agentduo hiện ngay, trước critic, sign-off hay implementer, rồi gọi lại planner kèm đáp án. Một câu hỏi không phải vòng sửa plan thất bại: không tăng phiên bản plan và không tạo tín hiệu planning stalled, nhưng mọi lần gọi vẫn được tính ngân sách. Mỗi run planner hỏi tối đa ba lần. |
+| **Codex trong chat hoặc `/discuss`** | Không có form. `codex exec` không hỏi được giữa lượt, nên Codex hỏi bằng văn bản và bạn trả lời ở tin nhắn sau. |
+
+Trong `/discuss` chỉ các lượt của Claude có form; lựa chọn của bạn vẫn đến Codex ở bước sửa và tổng hợp.
+
+**Đáp án** được lưu cùng run hoặc cuộc trò chuyện ngay khi bạn trả lời, hiện lại khi mở lại, và được đưa vào prompt của các agent liên quan (cả khi session được tiếp tục). Đáp án không mở rộng phạm vi, không bỏ qua gate hay review, không nâng giới hạn và không chấp nhận finding nào. Nếu đáp án đòi đổi phạm vi đã chốt, agent báo lại và run đi qua `revise` cùng cơ chế chấp nhận phạm vi như trước.
+
+**Khi không ai trả lời được** (CI, chạy nền, output bị pipe), Claude không được cấp công cụ hỏi và các câu hỏi của planner được lưu lại: run dừng với lý do `clarification_required` và exit code 2. Không có gì được chọn thay bạn.
+
+```bash
+duo status                          # in câu hỏi, id các lựa chọn và mẫu file đáp án
+duo resume                          # trong terminal: hỏi lại các câu đã lưu
+duo resume --answers answers.json   # có cấu trúc: file ghi requestId và id lựa chọn của từng câu
+```
+
+```json
+{ "requestId": "clar-…", "answers": { "q1": { "options": ["q1o2"], "other": null }, "q2": { "options": [], "other": "chỉ API" } } }
+```
+
+`--answers` bị từ chối nếu file trả lời request khác, ghi lựa chọn không có trong câu hỏi, hoặc bỏ sót câu nào; khi đó run vẫn chờ. `--note` không bao giờ được hiểu là đáp án. Đóng ứng dụng hoặc terminal sẽ kết thúc lời gọi Claude đang chờ câu hỏi; agentduo không giữ sống lời gọi tool. Trong chat, câu hỏi được lưu là bị gián đoạn và lượt đó không tự chạy lại, nhưng các đáp án bạn đã đưa ra trong lượt rồi bị lỗi, bị dừng hoặc mất tiến trình vẫn được giữ trong cuộc trò chuyện và vẫn đến cả hai agent. Trong một run pipeline, câu hỏi của Claude đã bị hoãn (*Answer later*, đóng ứng dụng, Esc, tiến trình bị kill) vẫn là việc bạn phải trả lời: run dừng với `clarification_required` (giống câu hỏi của planner), không gọi agent nào và `resume` thường không đi qua được; bạn trả lời trong terminal hoặc bằng `--answers`, rồi bước đó chạy lại với câu hỏi và đáp án trong prompt (tool call cũ không được trả lời). Câu hỏi đang chờ của planner được giữ và hỏi lại ở `resume`.
+
+**Cài đặt.** `clarification.enabled` (mặc định `true`, đặt trong file config hoặc Settings của app desktop, áp dụng từ lần gọi agent kế tiếp) bật hoặc tắt các câu hỏi. Nó độc lập với `claude.permission_prompts`: khi câu hỏi bật và quyền là `deny`, Claude vẫn được hiện form, còn các yêu cầu công cụ khác vẫn bị từ chối như cũ. agentduo không thêm permission mode, rule hay flag nào cho việc này.
+
+## Lệnh
+
+| Lệnh | Tác dụng |
+|---|---|
+| `duo` | Mở [chat](#chat) (trong terminal) |
+| `duo "<task>"` | Tạo run mới (`--task-file`; task bắt đầu bằng `-` thì gõ `duo -- "-x …"`) |
+| `duo resume [id]` | Chạy tiếp với config lúc run bắt đầu (thêm `--reload-config` để dùng config hiện tại); `--decision resume\|revise\|abort [--note "..."]` để trả lời quyết định đang chờ; `--answers F` để trả lời [câu hỏi của agent](#câu-hỏi-từ-các-agent) |
+| `duo status`, `duo list` | Xem tiến độ |
+| `duo doctor`, `duo init` | Kiểm tra môi trường, tạo config (và hỏi có `git init` không; pipeline không cần) |
+
+Giao diện:
+- **Trong terminal:** giao diện live. Phím `v` bật/tắt chi tiết, `q` dừng sau bước hiện tại, `Ctrl-C` dừng ngay. Tại menu quyết định, `Ctrl-C` nghĩa là "Để sau".
+- **Log dạng dòng:** khi có `--plain`, khi chạy trong CI, khi stdout không phải TTY, hoặc khi chạy nền (`duo … &`).
+
+Mọi lệnh đều nhận `--dir`, `--config`, `--plain`, `-v` và `--no-color`, đặt trước hay sau tên lệnh đều được.
+
+## Gộp config
+
+Thứ tự gộp là: mặc định, rồi `~/.config/agentduo/config.yaml`, rồi `.agentduo/config.yaml` của workspace (hoặc `--config`). Nguồn sau thắng nguồn trước.
+- **Mapping** được gộp theo từng khoá, và `role_args` được gộp theo từng vai trò.
+- **List** (`args`, `gates`, `blocking_severities`) thay hẳn giá trị trước. Ví dụ, `claude.args: [--strict-mcp-config]` ở workspace sẽ bỏ mất các flag mà `claude.args` trong user config đã ghi, nếu bạn không ghi lại chúng.
+
+## Quality gates
+
+Gate là tuỳ chọn. Mặc định không có gate: Claude tự chạy test theo config của nó, và run DONE khi Codex approve. Nếu bạn khai báo `gates`, agentduo chạy chúng sau mỗi vòng implement và chuyển kết quả cho Codex. `duo init` gợi ý sẵn các gate tìm được, dưới dạng comment.
+
+## Ngữ cảnh giữa các agent
+
+Mỗi vai trò (planner, plan critic, implementer, code reviewer) giữ một session CLI riêng suốt cả run. Khi cùng một CLI
+đảm nhận cả plan critic lẫn implementer (mặc định là Claude), hai vai trò này dùng chung một session.
+
+- **Lần gọi đầu:** nhận đủ bối cảnh, gồm task, đoạn chat trước task, các note của bạn và những gì agent trước đã ghi lại.
+- **Các lần gọi sau:** tiếp tục đúng session đó (`claude --resume`, `codex exec resume`) và chỉ nhận phần mới: các file
+  đã đổi từ lượt trước của vai trò đó, note mới của bạn, và việc cần làm. Ví dụ, reviewer chỉ nhận diff kể từ revision nó
+  đã review. Nhờ vậy vòng sửa không phải đọc lại repo từ đầu.
+- **Bước chốt plan** tiếp tục session của planner.
+- **Implementer tiếp tục session của plan critic**, nên bắt đầu từ những gì critic đã đọc và đánh giá. Lượt đầu của nó
+  được báo rằng giờ nó là implementer, và nhận bản plan cuối đã duyệt đầy đủ, cách plan được chốt, cùng những gì đã đổi
+  sau lượt cuối của critic. Nếu hai vai trò chạy trên hai CLI khác nhau, hoặc một trong hai tắt session trong
+  `role_args`, mỗi bên giữ session riêng (hoặc không giữ).
+- **Ngoài trường hợp đó, session không chuyển giữa các vai trò**, nên reviewer không thấy lập luận của implementer.
+
+Planner, critic, implementer và reviewer còn để lại các ghi chú ngắn về repo: file nào chứa gì, quy ước, lệnh chạy test.
+Mỗi ghi chú gắn với một file hoặc thư mục. Vai trò sau chỉ nhận những ghi chú còn đúng: chỉ cần có gì dưới đường dẫn đó
+thay đổi là ghi chú bị bỏ. Một vai trò không bao giờ nhận ghi chú của agent mà nó đang thẩm định: plan critic không nhận
+ghi chú của planner, code reviewer không nhận ghi chú của implementer.
+
+Nếu CLI đã mất session, lần gọi đó chạy một session mới với prompt đầy đủ và không bị tính là một lần retry. Các session
+được giữ sẽ hiện trong danh sách session của từng CLI. Muốn mọi lần gọi đều bắt đầu mới, thêm `--no-session-persistence`
+vào `claude.args` hoặc `--ephemeral` vào `codex.args` (hoặc vào `role_args` cho một vai trò). Thiết kế chi tiết ở
+[2026-11-03-agentduo-context-sharing-design.md](superpowers/specs/2026-11-03-agentduo-context-sharing-design.md).
+
+## Ngân sách cho mỗi run
+
+Giới hạn vòng (`max_planning_rounds`, `max_review_rounds`) chặn từng vòng lặp. Ngân sách chặn cả một run pipeline,
+cộng dồn qua mọi pha, mọi vòng và mọi lần retry. Mỗi giới hạn chỉ có hiệu lực khi bạn đặt nó:
+
+```yaml
+limits:
+  max_run_tokens: 2000000      # token của mọi lần gọi agent
+  max_run_cost_usd: 10         # chi phí mà các CLI báo
+  max_run_agent_calls: 40      # số lần gọi CLI của agent, tính cả retry
+  max_run_minutes: 90          # thời gian làm việc, không tính lúc chờ bạn
+```
+
+- Màn hình hiện ngân sách ở mỗi bước (`budget 1.2M/2M tok · 31/40 calls`), `duo status` và report cũng vậy. Khi một
+  giới hạn dùng tới 80%, run cảnh báo một lần.
+- Khi chạm giới hạn, run không bắt đầu bước hay lần gọi agent nào nữa và chờ bạn quyết định, với lý do
+  `budget_exhausted`. Mọi thứ được giữ nguyên: plan, review, file của bạn, report. `resume` cấp thêm một lượt cho mỗi
+  giới hạn đã chạm (bằng đúng mức config đặt) rồi chạy tiếp từ bước đã dừng. Chạy trong CI thì run thoát với code 2
+  cho tới khi bạn gõ `duo resume --decision resume`.
+- **Giới hạn cứng và giới hạn tương đối.** `max_run_agent_calls` chính xác: không lần gọi nào bắt đầu khi đã chạm nó.
+  Với `max_run_minutes`, không bước hay lần gọi nào bắt đầu khi đã hết giờ, nhưng lần gọi đang chạy vẫn chạy xong (tối
+  đa `agent_timeout_sec`). Token chỉ biết được khi một lần gọi kết thúc, nên lần gọi vượt `max_run_tokens` vẫn chạy
+  xong.
+- **Chi phí.** Chỉ Claude báo chi phí. Codex không báo, và chi phí của Codex không bao giờ bị coi là 0: run đếm các lần
+  gọi đó là chưa có giá, và hiện chi phí như một cận dưới (`$1.20+/$10.00 (3 calls unpriced)`). Hãy giới hạn Codex bằng
+  token hoặc số lần gọi. Mỗi lần gọi Claude được chính Claude chặn ở số tiền run còn lại (`--max-budget-usd`, hoặc
+  `claude.max_budget_usd` nếu thấp hơn), nên phần chi phí của Claude dừng sát giới hạn.
+- Run giữ ngân sách lúc nó bắt đầu, giống giới hạn vòng. Run bắt đầu khi chưa có ngân sách sẽ lấy ngân sách từ config
+  của lần chạy kế tiếp (`duo resume --reload-config`).
+
+## Exit code
+
+| Code | Ý nghĩa |
+|---|---|
+| 0 | DONE |
+| 1 | lỗi cấu hình hoặc môi trường |
+| 2 | đang chờ bạn quyết định |
+| 3 | đã huỷ |
+| 130 | đã dừng (resume được) |
+
+## Xử lý sự cố
+
+- **Tool bị từ chối:** khi chạy trong terminal, Claude sẽ hỏi bạn trước (xem phần [Quyền](#quyền)). Run không có người trông thì cần cấp quyền từ trước; cảnh báo sẽ ghi tên các tool bị từ chối.
+  - Sửa file (`Edit`, `Write`): đặt `permissions.defaultMode` thành `"acceptEdits"` trong settings của Claude Code, hoặc thêm `claude.role_args.implementer: [--permission-mode, acceptEdits]`.
+  - Chạy lệnh (`Bash`): thêm allow rule, ví dụ `"Bash(npm test:*)"`.
+  - Nếu Codex làm implementer, xem mục **Codex** ở phần [Quyền](#quyền).
+- **Sửa `config.yaml` rồi `duo resume` mà không có tác dụng:** run giữ config lúc nó bắt đầu. Dùng `duo resume --reload-config` để áp dụng config mới. Thay đổi trong settings của Claude Code hay Codex thì không cần lệnh này.
+- **Task bắt đầu bằng `-`** bị hiểu nhầm là option. Đặt `--` trước nó: `duo -- "-x bị lỗi"`.
+- **"Git is not installed"** khi bắt đầu run: cài git (chat và `/discuss` vẫn chạy không cần git). **"cannot use its snapshot repository"** hoặc **"the snapshots of run … are damaged"** khi resume: kho riêng của run đã bị di chuyển hoặc xóa, hoặc có file trong kho bị xóa (xem [Folder chưa có git repo](#folder-chưa-có-git-repo)); hãy abort run đó và tạo run mới.
+- **Terminal hiển thị lạ sau khi agentduo bị `kill -9`:** gõ `reset`.
+- **Giảm chi phí:** đặt `claude.args: [--strict-mcp-config]` để agentduo không nạp các MCP server của bạn. Tiếp tục session tiết kiệm nhiều nhất, nên đừng thêm `--no-session-persistence` hay `--ephemeral` vào args.
+- **Bước nào cũng bắt đầu lại từ đầu** (không có `--resume` hay `resume` trong `logs/*.cmd.json`): `args` hoặc `role_args` của bạn có `--no-session-persistence` (Claude) hoặc `--ephemeral` (Codex), hoặc run bắt đầu với config như vậy; `duo resume --reload-config` sẽ nhận thay đổi.
+- **Windows** ở mức thử nghiệm.
