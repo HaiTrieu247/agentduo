@@ -353,6 +353,54 @@ async function runChecks({ page, app, base }) {
     assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).scrollBehavior), "smooth");
   });
 
+  await check("the workflow figure's dot runs the pipeline in order, pauses, and keeps still with reduced motion", async () => {
+    const cycle = ["1", "2", "back", "1", "2", "3", "handoff", "4", "5", "6", "back", "4", "5", "6", "done"];
+    // What the dot lights, in order: a step by its number, else the way back, the handoff or the done line.
+    const record = () =>
+      page.evaluate(() => {
+        const fig = document.querySelector(".flow");
+        const steps = [...fig.querySelectorAll(".flow-step")];
+        const name = (el) => (steps.includes(el) ? String(steps.indexOf(el) + 1) : el.className.split(" ")[0].replace("flow-", ""));
+        window.__flowLit = [];
+        new MutationObserver((records) => {
+          for (const r of records) if (r.target.classList.contains("is-active")) window.__flowLit.push(name(r.target));
+        }).observe(fig, { subtree: true, attributes: true, attributeFilter: ["class"] });
+      });
+    const lit = () => page.evaluate(() => window.__flowLit);
+    const inOrder = (seen) => ` ${[...cycle, ...cycle].join(" ")} `.includes(` ${seen.join(" ")} `);
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    for (const [width, count] of [[375, 4], [1440, 8]]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto(`${base}/`);
+      await record();
+      await page.waitForFunction((n) => window.__flowLit.length >= n, count, { timeout: 20_000 });
+      const seen = await lit();
+      assert.ok(inOrder(seen), `${width}px lit ${seen.join(" ")}`);
+    }
+
+    const button = page.locator(".flow .flow-motion");
+    assert.equal(await button.getAttribute("aria-label"), "Pause the animation");
+    await button.click();
+    assert.equal(await button.getAttribute("aria-label"), "Play the animation");
+    const token = page.locator(".flow .flow-token");
+    const seen = (await lit()).length;
+    const at = await token.evaluate((t) => t.style.transform);
+    await page.waitForTimeout(2500);
+    assert.equal((await lit()).length, seen, "nothing lights while paused");
+    assert.equal(await token.evaluate((t) => t.style.transform), at, "the dot stays where it was");
+    await page.reload();
+    assert.equal(await button.getAttribute("aria-label"), "Play the animation", "the pause is remembered");
+    await button.click();
+    assert.equal(await page.evaluate(() => localStorage.getItem("agentduo-flow-motion")), null);
+
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.goto(`${base}/`);
+    await page.waitForTimeout(1800);
+    assert.equal(await page.locator(".flow-motion:visible, .flow-token:visible").count(), 0, "no dot or button");
+    assert.equal(await page.locator(".flow .is-active").count(), 0, "no step lit");
+    await page.emulateMedia({ reducedMotion: null });
+  });
+
   await check("with JavaScript off: content, downloads and navigation work, and no dead controls show", async () => {
     const opened = app.waitForEvent("window");
     await app.evaluate(({ BrowserWindow }, url) => {
@@ -371,6 +419,8 @@ async function runChecks({ page, app, base }) {
     await nojs.goto(`${base}/search/?q=gates`);
     assert.ok((await nojs.textContent("main")).includes("JavaScript"), "search explains it needs JavaScript");
     assert.ok(await nojs.locator("main a[href='/docs/pipeline/']").count() > 0, "search lists pages to browse");
+    await nojs.goto(`${base}/`);
+    assert.equal(await nojs.locator(".flow-motion, .flow-token").count(), 0, "the workflow figure stays still, with no button");
     await nojs.setViewportSize({ width: 375, height: 800 });
     await nojs.goto(`${base}/docs/`);
     await nojs.locator(".mobile-menu summary").click();

@@ -1185,6 +1185,8 @@ html.has-dialog {
    the stages sit side by side and the handoff is the arrow between them. */
 .flow {
   --dot-size: 2.6rem;
+  position: relative;
+  isolation: isolate;
   margin: 0;
   padding: clamp(1.25rem, 3vw, 2.25rem);
   background: var(--surface);
@@ -1257,6 +1259,8 @@ html.has-dialog {
   font-weight: 700;
   font-size: 0.95rem;
   line-height: 1;
+  z-index: 2;
+  transition: background-color 0.35s ease, box-shadow 0.35s ease;
 }
 
 .flow-step + .flow-step::after {
@@ -1399,6 +1403,108 @@ html.has-dialog {
   border: 2px dashed var(--gates);
 }
 
+/* The work in progress (site.js): a dot that runs the steps in a run's order. It passes under each step's circle,
+   which lights while that step works, and over the lines between them. */
+.flow-token {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  width: 0.7rem;
+  height: 0.7rem;
+  margin: -0.35rem 0 0 -0.35rem;
+  border-radius: 50%;
+  background: var(--dot, var(--gates));
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--dot, var(--gates)) 28%, transparent),
+    0 0 14px 3px color-mix(in srgb, var(--dot, var(--gates)) 50%, transparent);
+  pointer-events: none;
+  opacity: 0;
+  will-change: transform, opacity;
+}
+
+.flow-step.is-active::before {
+  background: color-mix(in srgb, var(--dot, var(--gates)) 30%, var(--surface));
+  box-shadow:
+    0 0 0 5px var(--surface),
+    0 0 0 7.5px color-mix(in srgb, var(--dot, var(--gates)) 45%, transparent),
+    0 0 26px 8px color-mix(in srgb, var(--dot, var(--gates)) 32%, transparent);
+}
+
+.flow-back,
+.flow-back::before,
+.flow-handoff,
+.flow-handoff::before,
+.flow-done {
+  transition: color 0.35s ease, border-color 0.35s ease, box-shadow 0.35s ease, background-color 0.35s ease;
+}
+
+.flow-back.is-active,
+.flow-handoff.is-active {
+  color: var(--text);
+}
+
+.flow-back.is-active {
+  border-color: var(--muted);
+}
+
+.flow-back.is-active::before {
+  border-bottom-color: var(--muted);
+}
+
+.flow-handoff.is-active::before {
+  background-color: var(--muted);
+}
+
+.flow-done.is-active {
+  box-shadow: inset 0 0 0 1.5px var(--gates);
+}
+
+.flow-motion {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.flow-motion:hover {
+  color: var(--text);
+  border-color: var(--control-line);
+}
+
+.flow-motion:focus-visible {
+  border-radius: 50%;
+}
+
+/* Two bars while it runs; a triangle once paused. */
+.flow-motion::before {
+  content: "";
+  box-sizing: border-box;
+  width: 0.6rem;
+  height: 0.7rem;
+  border-left: 2.5px solid currentColor;
+  border-right: 2.5px solid currentColor;
+}
+
+.flow-motion[data-paused]::before {
+  width: 0;
+  height: 0;
+  margin-left: 0.15rem;
+  border-style: solid;
+  border-width: 0.38rem 0 0.38rem 0.62rem;
+  border-color: transparent transparent transparent currentColor;
+}
+
 @media (min-width: 1100px) {
   .flow {
     display: grid;
@@ -1445,13 +1551,21 @@ html.has-dialog {
     border-right: 0;
   }
 
+  .flow-handoff.is-active::before {
+    background: repeating-linear-gradient(to right, var(--muted) 0 6px, transparent 6px 11px);
+  }
+
+  .flow-handoff.is-active::after {
+    border-left-color: var(--muted);
+  }
+
   .flow-done,
   .flow figcaption {
     grid-column: 1 / -1;
   }
 }
 
-/* One moment of motion: the steps light up in the order a run takes them. */
+/* The steps light up in the order a run takes them; then the dot (site.js) starts. */
 @media (prefers-reduced-motion: no-preference) {
   .flow-step::before {
     animation: flow-step-in 0.45s cubic-bezier(0.2, 0.7, 0.3, 1.2) both;

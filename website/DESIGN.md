@@ -40,8 +40,14 @@ works without JavaScript.
   wide and put it on top.
 - The workflow figure (Plan → Critique → Finalize → Implement → Verify → Review, numbered, with the two loops back) is
   the one distinctive visual: the two stages side by side on wide screens with the handoff as the arrow between
-  them, stacked on tablets, vertical on phones. Its steps light up in order once when the page loads; that is the
-  only animation, and `prefers-reduced-motion` turns it off. No stock illustrations, no testimonial or logo walls.
+  them, stacked on tablets, vertical on phones. Its steps light up in order once when the page loads; then a dot
+  carries the work through it in a run's order (Plan, Critique, back to Plan once, Critique, Finalize, the handoff,
+  Implement, Verify, Review, back to Implement once, Verify, Review, done) and starts again. The dot keeps to the
+  drawn lines of each layout, passes under each step's circle, which lights while that step works, and takes the
+  colour of the agent whose work it carries (`site.js` measures the route from the layout). A button in the figure's
+  corner pauses it, and the pause is remembered; it does not run off screen or in a hidden tab. That is the only
+  animation: `prefers-reduced-motion` keeps the figure still, with no dot and no button, as does JavaScript being
+  off. No stock illustrations, no testimonial or logo walls.
 
 ## Behaviour
 

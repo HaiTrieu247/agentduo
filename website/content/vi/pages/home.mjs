@@ -8,6 +8,7 @@ export const FLOW = {
   handoff: "kế hoạch cuối cùng được chuyển cho bên triển khai",
   done: "Được duyệt, không còn phát hiện chặn, các gate bắt buộc đạt: xong. Bạn review và commit.",
   legend: ["Codex", "Claude Code", "lệnh của bạn (tùy chọn)"],
+  motion: ["Tạm dừng hiệu ứng", "Chạy hiệu ứng"],
 };
 
 export default ({ c, link, btn, code, table }, d) => ({

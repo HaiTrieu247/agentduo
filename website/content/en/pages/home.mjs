@@ -8,6 +8,7 @@ export const FLOW = {
   handoff: "the final plan goes to the implementer",
   done: "Approved, no blocking finding, required gates pass: done. You review and commit.",
   legend: ["Codex", "Claude Code", "your commands (optional)"],
+  motion: ["Pause the animation", "Play the animation"],
 };
 
 export default ({ c, link, btn, code, table }, d) => ({
