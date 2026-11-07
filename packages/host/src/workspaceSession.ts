@@ -1,17 +1,21 @@
 // One workspace folder's session in the extension host: its worker, and what each conversation's tab shows. The
 // worker outlives the tabs (hiding or recreating a webview never stops a run); a reattached tab gets a snapshot, and a
-// tab reopened after a reload gets what it showed then (view.json beside the conversation). No `vscode` import, so it
-// is tested against a real worker.
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+// tab reopened after a reload gets what it showed then (view.json beside the conversation). Other agentduo windows
+// (`duo`, the extension, the desktop) may continue a conversation while its tab is idle here: the tab follows what they
+// write (the conversation's record, their view.json), and never saves a view over one that shows more. No `vscode`
+// import, so it is tested against a real worker.
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Attachment } from "@agentduo/engine/inputs/attachment-types";
 import { attachmentFile } from "@agentduo/engine/inputs/attachments";
-import type { ClarificationEntry } from "@agentduo/engine/clarification/clarification";
 import type { Backend } from "@agentduo/engine/chat/commands";
+import { conversationFile, readConversation } from "@agentduo/engine/chat/conversation";
 import type { PathEntry } from "@agentduo/engine/inputs/mention-text";
-import { atomicWrite } from "@agentduo/engine/workflow/state";
+import { atomicWrite, workspaceLockHolder } from "@agentduo/engine/workflow/state";
+import { conversationHolder } from "@agentduo/engine/workflow/lease";
 import type { PermissionAnswer } from "@agentduo/engine/events";
-import { initialState, reduce, uploading, withLedger, type ViewAction, type ViewState } from "./viewState.js";
+import { hasPending, initialState, reduce, showsAllOf, uploading, withRecord, type ViewAction, type ViewState } from "./viewState.js";
 import type { ClarificationReplyPayload, DecisionChoice, HostMessage, Problem, Route, SettingRequest, WorkerRequest, WorkerResults } from "./protocol.js";
 import { WorkerClient, WorkerError, type NodeLookup } from "./workerClient.js";
 
@@ -19,6 +23,8 @@ import { WorkerClient, WorkerError, type NodeLookup } from "./workerClient.js";
 const FLUSH_MS = 16;
 /** What a tab shows is saved at most this often while it changes (and when the tab or the session goes). */
 const SAVE_MS = 1000;
+/** How often idle tabs look at what other agentduo windows wrote, and who holds the workspace. */
+const FOLLOW_MS = 1500;
 const VIEW_FILE = "view.json";
 const PROBLEM_CODES = new Set<string>(["environment", "config", "not_repo", "git", "missing_cli", "locked"]);
 
@@ -55,6 +61,14 @@ export function restoredView(saved: ViewState, now: ViewState): ViewState {
   };
 }
 
+/**
+ * What another window saved of a tab: shown in place of this one's (keeping this window's own workspace state, and the
+ * composer's files), as the view of a restored tab is.
+ */
+export function adoptedView(saved: ViewState, now: ViewState): ViewState {
+  return { ...restoredView(saved, now), status: now.status, usage: now.usage, attachments: now.attachments, recipient: now.recipient };
+}
+
 /** A conversation's tab as the host keeps it: what it shows, and where that goes while the tab is open. */
 interface TabView {
   state: ViewState;
@@ -64,6 +78,21 @@ interface TabView {
   saveTimer: NodeJS.Timeout | null;
   /** Opened before the worker said where conversations live: what it showed before a reload is loaded then. */
   restore: boolean;
+  /** The conversation's record and its view.json as this window last read or wrote them (time and size). */
+  seenRecord: string | null;
+  seenView: string | null;
+  /** Its view.json as this window last wrote it: another window's since then is never written over blindly. */
+  wroteView: string | null;
+}
+
+/** A file's time and size, to tell when another process wrote it; null when there is none. */
+function fileStamp(file: string): string | null {
+  try {
+    const st = statSync(file);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return null;
+  }
 }
 
 /** The requests and state of one conversation's tab. */
@@ -114,6 +143,8 @@ export interface WorkspaceSessionOptions {
   log(line: string): void;
   /** A tab's state changed (its title, its questions); the host updates the tab, the list and the badge. */
   onChange?(conversation: string, state: ViewState): void;
+  /** The workspace's saved conversations changed (another window started or continued one): the host lists them again. */
+  onConversationsChanged?(): void;
   /** A question arrived in a tab; the host may tell the user when that tab is not visible. */
   onQuestion?(conversation: string, kind: "decision" | "permission" | "question", text: string): void;
   /** /new in a tab: the host opens a new tab with a new conversation; the old one keeps its own. */
@@ -146,6 +177,14 @@ export class WorkspaceSession {
   private disposed = false;
   /** Conversations whose worker named an attachment root other than their own: their tab is granted none. */
   private readonly untrusted = new Set<string>();
+  /** This window's name in the view.json files it writes, so it knows those another window wrote. */
+  private readonly writer = randomBytes(6).toString("hex");
+  /** Looks at what other windows wrote, while there are tabs. */
+  private following: NodeJS.Timeout | null = null;
+  /** Another live process working in the workspace (its pid), as last seen. */
+  private elsewhere: number | null = null;
+  /** The saved conversations as last listed (names, times), to tell when another window changed them. */
+  private listed = "";
 
   constructor(private readonly o: WorkspaceSessionOptions) {
     this.base = initialState("starting", o.workspace, 0);
@@ -228,9 +267,10 @@ export class WorkspaceSession {
   private view(id: string): TabView {
     let view = this.views.get(id);
     if (view) return view;
-    const saved = this.runsDir ? this.loadView(id) : null;
-    view = { state: saved ? this.restored(id, saved) : this.base, post: null, queue: [], timer: null, saveTimer: null, restore: !this.runsDir };
+    view = { state: this.base, post: null, queue: [], timer: null, saveTimer: null, restore: !this.runsDir, seenRecord: null, seenView: null, wroteView: null };
+    if (this.runsDir) view.state = this.restored(id, view);
     this.views.set(id, view);
+    this.startFollowing();
     return view;
   }
 
@@ -238,34 +278,45 @@ export class WorkspaceSession {
     return this.runsDir ? join(this.runsDir, "conversations", id, VIEW_FILE) : null;
   }
 
-  /** The conversation's questions and answers as its record keeps them (the source of truth, also when the saved view lacks the last ones). */
-  private loadLedger(id: string): ClarificationEntry[] {
-    if (!this.runsDir) return [];
-    const file = join(this.runsDir, "conversations", id, "conversation.json");
-    try {
-      const record = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as { clarifications?: ClarificationEntry[] }) : null;
-      return Array.isArray(record?.clarifications) ? record!.clarifications : [];
-    } catch {
-      return [];
-    }
+  /**
+   * What the tab of `id` shows as it opens (`now`: what it shows so far, its composer's files included): what it (or
+   * another window) showed before, as it can show it now, with what its conversation's record holds that this does not
+   * show (the questions asked, exchanges said in `duo` or elsewhere).
+   */
+  private restored(id: string, view: TabView, now: ViewState = this.base): ViewState {
+    const saved = this.loadView(id, view);
+    const base = saved ? { ...restoredView(saved.state, now), attachments: now.attachments } : now;
+    return this.withRecordOf(id, view, base);
   }
 
-  /** A saved view as the tab shows it now, with the questions its conversation asked that the view does not show yet. */
-  private restored(id: string, saved: ViewState): ViewState {
-    return withLedger(restoredView(saved, this.base), this.loadLedger(id));
+  /** `state`, with what the conversation's record holds that it does not show yet (withRecord). */
+  private withRecordOf(id: string, view: TabView, state: ViewState): ViewState {
+    if (!this.runsDir) return state;
+    view.seenRecord = fileStamp(conversationFile(this.runsDir, id));
+    const record = readConversation(this.runsDir, id);
+    return record ? withRecord(state, record) : state;
   }
 
-  private loadView(id: string): ViewState | null {
+  /** The tab's saved view, and which window saved it (none: an older agentduo). */
+  private loadView(id: string, view: TabView): { state: ViewState; writer: string | null } | null {
     const file = this.viewFile(id);
+    if (!file) return null;
+    view.seenView = fileStamp(file);
     try {
-      return file && existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as ViewState) : null;
+      if (!existsSync(file)) return null;
+      const { writer, ...state } = JSON.parse(readFileSync(file, "utf8")) as ViewState & { writer?: unknown };
+      return { state: state as ViewState, writer: typeof writer === "string" ? writer : null };
     } catch (e) {
       this.o.log(`could not read ${file}: ${(e as Error).message}`);
       return null;
     }
   }
 
-  /** Saves what a tab shows, once it shows something: an empty tab leaves no file. */
+  /**
+   * Saves what a tab shows, once it shows something: an empty tab leaves no file. Another window may have saved the
+   * conversation's view since this one last did: one that shows every exchange, discussion and run this tab shows stays
+   * (it is as new as this, or newer), so closing an idle tab never puts an older view over it.
+   */
   private saveView(id: string): void {
     const view = this.views.get(id);
     if (!view) return;
@@ -274,8 +325,13 @@ export class WorkspaceSession {
     const file = this.viewFile(id);
     if (!file || !view.state.timeline.length) return;
     try {
+      if (fileStamp(file) !== view.wroteView) {
+        const disk = this.loadView(id, view);
+        if (disk && disk.writer !== this.writer && showsAllOf(disk.state, view.state)) return;
+      }
       mkdirSync(join(file, ".."), { recursive: true });
-      atomicWrite(file, JSON.stringify(view.state));
+      atomicWrite(file, JSON.stringify({ ...view.state, writer: this.writer }));
+      view.seenView = view.wroteView = fileStamp(file);
     } catch (e) {
       this.o.log(`could not save ${file}: ${(e as Error).message}`);
     }
@@ -286,13 +342,114 @@ export class WorkspaceSession {
     for (const [id, view] of this.views) {
       if (!view.restore) continue;
       view.restore = false;
-      const saved = this.loadView(id);
-      if (!saved || view.state.timeline.length) continue;
-      view.state = this.restored(id, saved);
-      view.queue = [];
-      view.post?.({ type: "snapshot", state: view.state, conversation: id });
-      this.o.onChange?.(id, view.state);
+      if (view.state.timeline.length) continue;
+      const restored = this.restored(id, view, view.state);
+      if (restored === view.state) continue;
+      this.replace(id, view, restored);
     }
+    this.startFollowing();
+  }
+
+  /** The tab shows `state` from now on: its page gets it whole. */
+  private replace(id: string, view: TabView, state: ViewState): void {
+    view.state = state;
+    view.queue = [];
+    view.post?.({ type: "snapshot", state: view.state, conversation: id });
+    this.o.onChange?.(id, view.state);
+  }
+
+  // ------------------------------------------------------------------ other agentduo windows
+  private startFollowing(): void {
+    if (this.following || this.disposed || !this.runsDir || !this.views.size) return;
+    this.following = setInterval(() => this.lookAround(), FOLLOW_MS);
+    this.following.unref?.();
+  }
+
+  /** Who works in the workspace, what other windows wrote to the open conversations, and whether the list changed. */
+  private lookAround(): void {
+    if (this.disposed || !this.runsDir) return;
+    try {
+      this.checkHolder();
+      for (const [id, view] of this.views) this.follow(id, view);
+      this.checkList();
+    } catch (e) {
+      this.o.log(`could not follow the workspace's conversations: ${(e as Error).message}`);
+    }
+  }
+
+  /**
+   * Another agentduo works in the workspace now: every tab says so (what is sent here is refused until it is done, and
+   * nothing there is interrupted from here); the banner goes once it is done. Other problems are left as they are.
+   */
+  private checkHolder(): void {
+    const pid = workspaceLockHolder(this.runsDir!);
+    const other = pid && pid !== this.spawned?.pid ? pid : null;
+    if (other === this.elsewhere) return;
+    this.elsewhere = other;
+    const problem = this.base.problem;
+    if (other) {
+      if (problem && problem.kind !== "locked") return;
+      const where = this.workingIn(other);
+      this.dispatch({
+        type: "problem", problem: {
+          kind: "locked",
+          message: `Another agentduo (pid ${other}) is working in this workspace${where ? `, in «${where}»` : ""}. You can read and write here meanwhile; ` +
+            "a message sent now is given back to you, to send again once that work is done. Nothing there is interrupted from here.",
+        },
+      }, null);
+    } else if (problem?.kind === "locked") this.dispatch({ type: "problem", problem: null }, null);
+  }
+
+  /** The title of the conversation process `pid` works in, if it says. */
+  private workingIn(pid: number): string | null {
+    const dir = join(this.runsDir!, "conversations");
+    try {
+      for (const id of readdirSync(dir)) {
+        if (conversationHolder(this.runsDir!, id) !== pid) continue;
+        return readConversation(this.runsDir!, id)?.title || "a new conversation";
+      }
+    } catch {
+      // no conversations yet: a run started by `duo run`
+    }
+    return null;
+  }
+
+  /**
+   * An idle tab takes what another window wrote to its conversation: a view it saved that shows all this tab shows (and
+   * more) in place of this one's, and what the record holds that the tab does not show. A tab whose own work runs (or
+   * waits for the user) follows its own events instead. `force`: look even if the files seem unchanged.
+   */
+  private follow(id: string, view: TabView, force = false): void {
+    const st = view.state;
+    if (!this.runsDir || st.status === "running" || st.status === "answering" || st.turn || st.discussion || st.current || hasPending(st)) return;
+    const viewFile = this.viewFile(id)!;
+    const viewChanged = fileStamp(viewFile) !== view.seenView;
+    const recordChanged = fileStamp(conversationFile(this.runsDir, id)) !== view.seenRecord;
+    if (!force && !viewChanged && !recordChanged) return;
+    let next = st;
+    if (viewChanged) {
+      const disk = this.loadView(id, view);
+      if (disk && disk.writer !== this.writer && showsAllOf(disk.state, st)) next = adoptedView(disk.state, st);
+    }
+    next = this.withRecordOf(id, view, next);
+    if (next !== st) this.replace(id, view, next);
+  }
+
+  /** The saved conversations changed (another window started one, or continued one): the host lists them again. */
+  private checkList(): void {
+    if (!this.o.onConversationsChanged) return;
+    const dir = join(this.runsDir!, "conversations");
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      names = [];
+    }
+    const listed = names.sort().map((n) => `${n}:${fileStamp(join(dir, n, "conversation.json")) ?? "-"}:${conversationHolder(this.runsDir!, n) ?? ""}`).join("|");
+    if (listed === this.listed) return;
+    const first = !this.listed;
+    this.listed = listed;
+    if (!first) this.o.onConversationsChanged();
   }
 
   /** The tab (re)appeared: it gets its whole state, then batches of actions. */
@@ -407,6 +564,8 @@ export class WorkspaceSession {
           break;
         case "ui":
           this.dispatch({ type: "ui", update: m.update }, m.conversation);
+          // Not sent: another agentduo works here. The message goes back to the composer, to send again.
+          if (m.update.type === "refused" && m.conversation) this.views.get(m.conversation)?.post?.({ type: "restoreDraft", text: m.update.text });
           break;
         case "decision":
           this.dispatch({ type: "decision.open", id: m.requestId, review: m.review, views: m.views }, m.conversation);
@@ -495,6 +654,8 @@ export class WorkspaceSession {
       return;
     }
     const command = typed.startsWith("/");
+    // What another window said in this conversation meanwhile comes first, so the message follows it.
+    this.follow(conversation, this.view(conversation), true);
     // Files alone are a message too; the worker says which went with it (`sent`), and they join it then.
     if (typed || attachments.length) {
       this.dispatch({ type: "user", text: typed, ...(route === "pipeline" && !command ? { pipeline: true } : {}), ...(route === "discuss" && !command ? { discuss: true } : {}) }, conversation);
@@ -618,6 +779,8 @@ export class WorkspaceSession {
   /** Bounded by the worker's shutdown grace, whatever the worker is doing, starting included. */
   async dispose(): Promise<void> {
     this.disposed = true;
+    if (this.following) clearInterval(this.following);
+    this.following = null;
     for (const [id, view] of this.views) {
       this.saveView(id);
       if (view.timer) clearTimeout(view.timer);

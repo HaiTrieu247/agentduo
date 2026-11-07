@@ -34,7 +34,7 @@ npm ci --prefix apps/desktop    # Electron, electron-builder, @electron/fuses, e
 | `npm run dev` | builds, then opens the app from the build output (`dist/`) |
 | `npm run build` | bundles main, preload, renderer and the engine worker into `dist/` |
 | `npm run typecheck` / `npm test` | the desktop's TypeScript check and unit/integration tests |
-| `npm run test:e2e` | the Electron E2E (`test/e2e`, Playwright): the real app with fake CLIs in a scratch git project, driven as a user: first run, Settings, chat, a permission prompt, attached files, `/discuss`, a pipeline with its gate, review and decision, the inspector's diff, Stop, IME, a narrow window, light/dark, a newer version on a local update feed, quit mid-run and `/resume` after a restart |
+| `npm run test:e2e` | the Electron E2E (`test/e2e`, Playwright): the real app with fake CLIs in a scratch git project, driven as a user: first run, Settings, chat, a permission prompt, attached files, `/discuss`, a pipeline with its gate, review and decision, the inspector's diff, Stop, IME, a narrow window, light/dark, a newer version on a local update feed, taking turns with another process holding the project and a conversation `duo` saved, quit mid-run and `/resume` after a restart |
 | `npm run pack:dir` | an unpacked app for this OS under `release/` |
 | `npm run test:pack` | checks that unpacked app away from the checkout: runtime outside ASAR, fuses, bundled Node, worker hello, and the app starting and showing its window |
 | `npm run package:mac` | `release/AgentDuo-<version>-mac-{arm64,x64}.{dmg,zip}` (on macOS) |
@@ -67,7 +67,9 @@ copies the app's PNG to `dist/main` for the window on Windows and Linux and the 
    Codex sum it up; `/pipeline <task>` (or the route picker) runs the full plan → critique → implement → review workflow.
    Chat and discuss work in any folder; pipeline and resume need a git repository.
 4. **Resume**: the sidebar lists the project's stopped or waiting runs; one click sends `/resume <id>`. Conversations come
-   back after a restart with what they showed.
+   back after a restart with what they showed. Conversations and runs started in `duo` or VS Code are listed too, and go
+   on here; the app holds a project's lock only while its work runs, so they can go on there while it is idle (see
+   "Working from several windows" in the main README).
 5. **Inspector**: Plan, Changes (a line diff of each changed file between the run's snapshots, kept as you look at it even
    when a new round starts), Checks (gate runs) and the review and report.
 6. **Questions from the agents**: when something only you know would change the result, Claude (inside any Claude turn)
@@ -80,7 +82,8 @@ copies the app's PNG to `dist/main` for the window on Windows and Linux and the 
    keeps a tool call alive; a pipeline step's stays pending like a planner's, and the step runs again with the answer); reopening shows the history, and `/resume` asks the pending
    one again.
 7. **Stop** (or Esc) stops what runs; quitting stops every run's process tree, answers open questions as the engine does
-   on shutdown, and frees each project's lock. A run that was going stays resumable.
+   on shutdown, and frees each project's lock. A run that was going stays resumable. While another window works in the
+   project, a banner says so, and a message you send comes back to the composer to send again once it is done.
 
 ### Settings
 

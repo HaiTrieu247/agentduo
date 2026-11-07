@@ -272,6 +272,29 @@ describe("Ink components", () => {
     app.unmount();
   });
 
+  it("chat: shows what was said in a conversation it opens (or another window said), and gives back a line that could not be sent", async () => {
+    const channel = new ChatChannel();
+    const sent: string[] = [];
+    const app = render(<ChatApp bus={new EventBus()} channel={channel} version="0.2.0" workspace="/ws" verbose={false} onSubmit={(text) => sent.push(text)}
+      onEscape={noop} onCtrlC={noop} onDecision={noop} onPermission={noop} views={() => []} readView={async () => null} />);
+    channel.history([
+      { id: "c-t1", backend: "codex", question: "Asked in VS Code", answer: "Codex answered there" },
+      { id: "c-d1-1", backend: "codex", question: "Which queue?", answer: "Postgres, as agreed", discussedWith: "claude" },
+    ], [{ task: "Fix the queue", outcome: "done; files: queue.ts", runId: "r1" }]);
+    await wait();
+    const frame = app.lastFrame()!;
+    for (const text of ["› Asked in VS Code", "Codex answered there", "› /discuss Which queue?", "Postgres, as agreed", "Pipeline task «Fix the queue»: done; files: queue.ts"]) {
+      expect(frame).toContain(text);
+    }
+    channel.restore("/claude Try again");
+    await wait();
+    expect(app.lastFrame()).toContain("› /claude Try again");
+    app.stdin.write("\r");
+    await wait();
+    expect(sent).toEqual(["/claude Try again"]);
+    app.unmount();
+  });
+
   it("chat: Shift+Tab switches Claude's permission mode, which the hint line shows by Claude Code's name", async () => {
     const channel = new ChatChannel();
     let cycles = 0;

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, extname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { ATTACHMENT_LIMITS, formatBytes, isAttachmentId, type Attachment, type ImageFormat } from "./attachment-types.js";
 import { atomicWrite } from "../workflow/state.js";
@@ -10,8 +10,26 @@ export class AttachmentError extends Error {
 
 /** How much of a file is read to tell what it is (a JPEG's size can come after a long EXIF block). */
 const HEAD_BYTES = 512 * 1024;
-const PENDING = "pending.json";
+/** The list of an older agentduo, which kept one for the whole conversation: its process is gone. */
+const LEGACY_PENDING = "pending.json";
+/** Each process's (each store's) own list: pending-<pid>-<nonce>.json, so another process's waiting files are never touched. */
+const PENDING = /^pending-(\d+)-([0-9a-f]+)\.json$/;
 const PARTIAL = ".partial-";
+/** A copy left unfinished this long ago was a process's that is gone (another may be copying a large file now). */
+const PARTIAL_MS = 60 * 60 * 1000;
+/** The stores of this process that have files waiting: their lists are not left by a process that is gone. */
+const liveOwners = new Set<string>();
+
+/** Whether the store that wrote a pending list still has its files waiting (in this process or another one). */
+function ownerAlive(pid: number, nonce: string): boolean {
+  if (pid === process.pid) return liveOwners.has(nonce);
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
 
 const u16be = (b: Buffer, at: number) => (at + 2 <= b.length ? b.readUInt16BE(at) : null);
 const u16le = (b: Buffer, at: number) => (at + 2 <= b.length ? b.readUInt16LE(at) : null);
@@ -165,6 +183,15 @@ export function existingAttachmentFile(runsDir: string, a: Attachment): string {
   throw new AttachmentError(`${a.name} is no longer where agentduo kept it (${file}); attach it again`);
 }
 
+function readIds(file: string): string[] {
+  try {
+    const ids = JSON.parse(readFileSync(file, "utf8")) as unknown;
+    return Array.isArray(ids) ? ids.filter(isAttachmentId) : [];
+  } catch {
+    return [];
+  }
+}
+
 function readHead(file: string): Buffer {
   const fd = openSync(file, "r");
   try {
@@ -178,14 +205,21 @@ function readHead(file: string): Buffer {
 
 /**
  * The copies of the files attached in one place (a conversation, or a run): `<owner>/attachments/<id>/<name>`, each
- * the bytes as they were. A conversation also lists there the files waiting to be sent (pending.json), so the next
- * time it opens it can remove those a crash left behind without touching any that were sent.
+ * the bytes as they were. A conversation also lists there the files waiting to be sent, one list per process that has
+ * some (several agentduo windows may have the conversation open), so the next time it opens it can remove those a
+ * crash left behind without touching any that were sent, or that another live process still has waiting.
  */
 export class AttachmentStore {
   readonly root: string;
+  /** This store's own name for its pending list (a process may have several stores of one conversation, in tests). */
+  private readonly nonce = randomBytes(4).toString("hex");
 
   constructor(private readonly runsDir: string, ownerDir: string) {
     this.root = join(ownerDir, "attachments");
+  }
+
+  private get pendingFile(): string {
+    return join(this.root, `pending-${process.pid}-${this.nonce}.json`);
   }
 
   /** A copy of the regular file at `source` (a symlink to one is copied as a file), named `name` (default: its own). */
@@ -237,39 +271,64 @@ export class AttachmentStore {
     if (isAttachmentId(id)) rmSync(join(this.root, id), { recursive: true, force: true });
   }
 
-  /** The ids of the files waiting to be sent, as last saved. */
+  /** The ids of this store's files waiting to be sent, as last saved. */
   pending(): string[] {
-    try {
-      const ids = JSON.parse(readFileSync(join(this.root, PENDING), "utf8")) as unknown;
-      return Array.isArray(ids) ? ids.filter(isAttachmentId) : [];
-    } catch {
-      return [];
-    }
+    return readIds(this.pendingFile);
   }
 
+  /** This store's files waiting to be sent; none: its list goes. */
   setPending(ids: string[]): void {
-    if (!ids.length && !existsSync(join(this.root, PENDING))) return;
-    atomicWrite(join(this.root, PENDING), `${JSON.stringify(ids)}\n`);
+    if (!ids.length) {
+      liveOwners.delete(this.nonce);
+      try {
+        unlinkSync(this.pendingFile);
+      } catch {
+        // there was none
+      }
+      return;
+    }
+    liveOwners.add(this.nonce);
+    atomicWrite(this.pendingFile, `${JSON.stringify(ids)}\n`);
   }
 
   /**
-   * What an earlier process left behind: the files it had waiting (never sent), and copies it did not finish. Files
-   * that were sent stay. Returns how many it removed.
+   * What processes that are gone left behind: the files they had waiting (never sent), and copies they did not finish.
+   * Files that were sent stay, and so do those another live process (another agentduo window) has waiting, and copies
+   * it may be making now. Returns how many it removed.
    */
   recover(): number {
     if (!existsSync(this.root)) return 0;
     let removed = 0;
-    for (const id of this.pending()) {
-      if (existsSync(join(this.root, id))) removed++;
-      this.remove(id);
+    const kept = new Set<string>();
+    for (const name of readdirSync(this.root)) {
+      const m = PENDING.exec(name);
+      if (name !== LEGACY_PENDING && !m) continue;
+      const ids = readIds(join(this.root, name));
+      if (m && ownerAlive(Number(m[1]), m[2]!)) {
+        for (const id of ids) kept.add(id);
+        continue;
+      }
+      for (const id of ids) {
+        if (existsSync(join(this.root, id))) removed++;
+        this.remove(id);
+      }
+      rmSync(join(this.root, name), { force: true });
     }
-    this.setPending([]);
     for (const entry of readdirSync(this.root, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !isAttachmentId(entry.name)) continue;
+      if (!entry.isDirectory() || !isAttachmentId(entry.name) || kept.has(entry.name)) continue;
       const dir = join(this.root, entry.name);
       const files = readdirSync(dir);
-      for (const f of files.filter((f) => f.startsWith(PARTIAL))) rmSync(join(dir, f), { force: true });
-      if (!files.some((f) => !f.startsWith(PARTIAL))) {
+      const old = (f: string) => {
+        try {
+          return Date.now() - statSync(join(dir, f)).mtimeMs > PARTIAL_MS;
+        } catch {
+          return false;
+        }
+      };
+      const partial = files.filter((f) => f.startsWith(PARTIAL));
+      const stale = partial.filter(old);
+      for (const f of stale) rmSync(join(dir, f), { force: true });
+      if (!files.some((f) => !f.startsWith(PARTIAL)) && stale.length === partial.length) {
         rmSync(dir, { recursive: true, force: true });
         removed++;
       }

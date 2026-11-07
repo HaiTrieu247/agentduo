@@ -8,7 +8,10 @@ import { isDeepStrictEqual } from "node:util";
 import YAML from "yaml";
 import { configErrors, ConfigError, configFromLayers, defaultConfig, userConfigPath, type ConfigData } from "./config.js";
 import { expandHome } from "../system/environment.js";
-import { checkSettingValue, configDocument, configText, removeKeys, SETTING_KEYS, settingKey, valueAt, type SettingKey, type SettingKind, type SettingLive } from "./settings.js";
+import {
+  checkSettingValue, configDocument, configText, removeKeys, SETTING_KEYS, settingKey, settings, valueAt, type SettingChange, type SettingKey, type SettingKind,
+  type SettingLive,
+} from "./settings.js";
 import { atomicWrite, workspaceLockHolder } from "../workflow/state.js";
 
 /** Where a Settings change goes: the user config (every workspace), the workspace's config file, or this session only. */
@@ -54,7 +57,7 @@ export interface ConfigurationView {
   warnings: string[];
   /** Where runs and conversations live (and the workspace lock): shown, never changed from Settings. */
   storage: { runsDir: string | null; value: string; source: "default" | "global" | "project" };
-  /** Another process holds the workspace lock: it reads the files again only once it restarts. */
+  /** Another process works in the workspace now (it holds the lock); it reads the files again before its next work. */
   lockedBy: number | null;
 }
 
@@ -150,6 +153,45 @@ function load(o: ConfigurationOptions, replace?: { scope: "global" | "project"; 
 /** The files' configuration, as the next process to start would read it (broken files left out). */
 export function filesConfiguration(o: ConfigurationOptions): ConfigData {
   return load(o).cfg;
+}
+
+/**
+ * What a session follows once the config files went from `before` to `after` (another window, or `duo`, saved a
+ * setting): each key whose value in the files moved, unless the session has a value of its own for it, which wins (one
+ * set in its chat without --save, or a project's override that keeps a user config change from moving the merged
+ * value). A value edited by hand that is not one is left out: the files' problems say so, and the session keeps its own.
+ */
+export function fileChanges(before: ConfigData, after: ConfigData, session: ConfigData): SettingChange[] {
+  const out: SettingChange[] = [];
+  for (const k of SETTING_KEYS) {
+    const was = valueAt(before, k.path);
+    const now = valueAt(after, k.path);
+    if (isDeepStrictEqual(was, now) || !isDeepStrictEqual(valueAt(session, k.path), was)) continue;
+    try {
+      out.push(settings.value(k.key, now));
+    } catch (e) {
+      if (e instanceof ConfigError) continue;
+      throw e;
+    }
+  }
+  return out;
+}
+
+/** A session's view of the config files: what it last read, and what changed there since. */
+export class ConfigFiles {
+  private seen: ConfigData;
+
+  constructor(private readonly o: ConfigurationOptions) {
+    this.seen = filesConfiguration(o);
+  }
+
+  /** The changes `session` follows since the files were last read here (fileChanges); they count as read now. */
+  changes(session: ConfigData): SettingChange[] {
+    const after = filesConfiguration(this.o);
+    const out = fileChanges(this.seen, after, session);
+    this.seen = after;
+    return out;
+  }
 }
 
 function layerValue(raw: Record<string, unknown>, path: string[]): LayerValue {

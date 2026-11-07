@@ -70,6 +70,8 @@ export function startChatInk(o: ChatInkOptions): ChatInkSession {
     usage: (report) => channel.usage(report),
     setAttachments: (files) => channel.attachments(files),
     sent: (files) => channel.info(`📎 sent with ${files.length === 1 ? "it" : `${files.length} files`}: ${attachmentsText(files)}`),
+    refused: (text) => channel.restore(text),
+    history: (exchanges, earlier) => channel.history(exchanges, earlier),
     exit: () => exit(),
   };
   let lastCtrlC = 0;

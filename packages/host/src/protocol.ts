@@ -32,8 +32,11 @@ import type { ViewAction, ViewState } from "./viewState.js";
  * 11: the agents' structured questions: `clarificationAnswer` (the user's reply to a question, naming its conversation, request
  *    and call, so it is applied only there) and the webview's `question` message; the questions themselves travel as
  *    `clarification.*` events.
+ * 12: windows take turns in a workspace: the worker holds the workspace lock only while one of its chats works (`session`
+ *    active, then dormant), a line that could not run because another agentduo works there comes back as `refused` (the
+ *    host gives it back to the composer: `restoreDraft`), and the host follows what other windows write to a conversation.
  */
-export const PROTOCOL_VERSION = 11;
+export const PROTOCOL_VERSION = 12;
 
 export const BACKENDS = ["codex", "claude"] as const;
 /** How the composer's text is meant: a message (to the recipient, or a slash command), a pipeline task, or a question to discuss. */
@@ -281,8 +284,13 @@ export type UiUpdate =
   | { type: "attachments"; files: Attachment[] }
   /** The files that went with the message just accepted. */
   | { type: "sent"; files: Attachment[] }
-  /** dormant: no lock held; active: a chat session holds the workspace lock; ended: /quit released it. */
+  /** dormant: no lock held; active: one of the worker's chats works, holding the workspace lock; ended: /quit stopped them all. */
   | { type: "session"; session: "dormant" | "active" | "ended" }
+  /**
+   * A line of the conversation could not run now: another agentduo (`duo`, another window) works in the workspace or in
+   * this conversation. Nothing was sent and its files still wait; `text` is the line as typed, to send again.
+   */
+  | { type: "refused"; text: string }
   | { type: "pipeline"; pipeline: PipelineStep[] };
 
 export type WorkerMessage =
@@ -349,7 +357,9 @@ export type HostMessage =
    */
   | { type: "prepareReload" }
   /** The answer to `findFiles`: workspace-relative paths, best first (none when they could not be listed). */
-  | { type: "fileMatches"; seq: number; matches: PathEntry[] };
+  | { type: "fileMatches"; seq: number; matches: PathEntry[] }
+  /** A message that could not be sent now (another agentduo works here): back to the composer, unless it has new text. */
+  | { type: "restoreDraft"; text: string };
 
 // ------------------------------------------------------------------ Account & Usage view ↔ host
 /** What the Account & Usage view shows; the host keeps it, so a view shown again has it at once. */

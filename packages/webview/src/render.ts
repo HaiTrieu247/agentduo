@@ -751,7 +751,8 @@ const PROBLEM_ACTIONS: Record<string, Array<{ command: WebviewCommand; label: st
   not_repo: [{ command: "doctor", label: "Doctor" }],
   git: [{ command: "doctor", label: "Doctor" }],
   environment: [{ command: "chooseWorkspace", label: "Choose folder" }],
-  locked: [{ command: "restart", label: "Check again" }],
+  // Another agentduo works in the workspace: the banner goes by itself once it is done.
+  locked: [],
 };
 
 /** Where the composer's next message goes: an agent, or the pipeline for this one message. */
@@ -789,6 +790,8 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
   fileMatches(seq: number, matches: PathEntry[]): void;
   /** The host is to reload the page: `done` once the files read here are all with the host (none is lost with it). */
   release(done: () => void): void;
+  /** A message that could not be sent now comes back to the composer, unless something new was typed there meanwhile. */
+  restoreDraft(text: string): void;
 } {
   const stages = h("ol", { class: "stages" });
   const progressMeta = h("span", { class: "progress-meta" });
@@ -1488,6 +1491,15 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
       if (document.activeElement === input) renderCompletions();
     },
     release: (done) => reads.release(done),
+    restoreDraft(text: string): void {
+      if (input.value.trim() || !text.trim()) return;
+      input.value = text;
+      actions.draft(text);
+      closedFor = text;
+      if (state) renderComposer(state);
+      input.focus();
+      input.setSelectionRange(text.length, text.length);
+    },
     tick(): void {
       if (state?.current || state?.turn || state?.discussion) {
         renderLive(state);

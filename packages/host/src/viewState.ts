@@ -7,6 +7,7 @@ import { AGENT_NAMES, CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS, type Backend
 import type { CodexCatalog } from "@agentduo/engine/config/models";
 import type { SettingsView } from "@agentduo/engine/config/settings";
 import type { UsageReport } from "@agentduo/engine/system/usage";
+import type { EarlierTask, Exchange } from "@agentduo/engine/workflow/state";
 import type {
   Activity, Agent, BudgetView, DiscussionPlace, DiscussionStatus, DuoEvent, HistoryEntry, HumanReview, Message, ModelIdentity, ModelMap, Party, PermissionAnswer, PermissionRequest,
   Phase, Role, RoundInfo, TurnStatus, Verdict,
@@ -515,7 +516,84 @@ function onUi(s: ViewState, u: UiUpdate): ViewState {
       return { ...s, pipeline: u.pipeline };
     case "session":
       return { ...s, session: u.session, ...(u.session === "active" ? { problem: null } : {}) };
+    case "refused":
+      return unsent(s, u.text);
   }
+}
+
+/** What a line says, whichever way it was sent: typed as /pipeline or /discuss, or with the composer's route. */
+const said = (text: string) => text.trim().replace(/^\/(pipeline|discuss)(\s+|$)/, "").trim();
+
+/**
+ * The message that could not run (another agentduo works here) leaves the timeline: nothing was sent, and it goes back
+ * to the composer. Only the last message, as sent, with nothing after it that answered it.
+ */
+function unsent(s: ViewState, text: string): ViewState {
+  const i = s.timeline.findLastIndex((x) => x.kind === "user");
+  const item = s.timeline[i];
+  if (!item || item.kind !== "user" || item.attachments?.length || said(item.text) !== said(text)) return s;
+  if (s.timeline.slice(i + 1).some((x) => x.kind === "answer" || x.kind === "discussion" || x.kind === "run")) return s;
+  return { ...s, timeline: s.timeline.filter((_, n) => n !== i) };
+}
+
+// ------------------------------------------------------------------ a conversation another window continued
+/** The exchanges, discussions and runs a view shows, by id (packages/engine/src/chat/conversation.ts gives each exchange its turn's). */
+export function shownIds(s: ViewState): Set<string> {
+  const ids = new Set<string>();
+  for (const i of s.timeline) {
+    if (i.kind === "answer") ids.add(i.turn.turnId);
+    else if (i.kind === "discussion") ids.add(i.discussion.id);
+    else if (i.kind === "run") ids.add(i.runId);
+  }
+  return ids;
+}
+
+/** `a` shows every exchange, discussion and run `b` shows (and maybe more). */
+export function showsAllOf(a: ViewState, b: ViewState): boolean {
+  const ids = shownIds(a);
+  return [...shownIds(b)].every((id) => ids.has(id));
+}
+
+/** The model of an answer given in another window: its record does not say which. */
+const modelElsewhere = (backend: Backend): ModelIdentity => ({
+  backend, requested: null, configured: null, resolved: null, source: null, isDefault: true, status: "unresolved", reason: "answered in another agentduo window",
+});
+
+/** The record of a conversation, as far as a view shows it (ConversationRecord). */
+export interface RecordView {
+  recipient: Backend | null;
+  exchanges: Exchange[];
+  earlier: EarlierTask[];
+  clarifications?: ClarificationEntry[];
+}
+
+/**
+ * The view with what its conversation's record holds that it does not show: answers and discussions given in another
+ * window (`duo`, the extension, the desktop), as a message and its answer, and pipeline runs started there, after the
+ * last one it shows, in the record's order; the questions asked (withLedger), and the recipient. By id only: what has
+ * none (saved before ids), or scrolled out of a view that dropped items, is never added again, so nothing shows twice.
+ */
+export function withRecord(s: ViewState, record: RecordView): ViewState {
+  const shown = shownIds(s);
+  const after = <T>(list: T[], id: (x: T) => string | undefined): T[] => {
+    const last = list.findLastIndex((x) => { const k = id(x); return !!k && shown.has(k); });
+    if (last < 0 && s.dropped > 0) return [];
+    return list.slice(last + 1).filter((x) => { const k = id(x); return !!k && !shown.has(k); });
+  };
+  let next = s;
+  for (const e of after(record.exchanges.filter((x) => !x.unfinished), (x) => x.id)) {
+    next = push(next, { kind: "user", text: e.question, ...(e.discussedWith ? { discuss: true } : { to: e.backend }), ...(e.attachments?.length ? { attachments: e.attachments } : {}) });
+    next = push(next, {
+      kind: "answer", turn: { turnId: e.id!, backend: e.backend, model: modelElsewhere(e.backend), startedAt: 0, activities: [], dropped: 0, status: "success", answer: e.answer },
+    });
+  }
+  for (const t of after(record.earlier, (x) => x.runId)) {
+    next = push(next, { kind: "run", runId: t.runId!, task: t.task });
+    next = push(next, { kind: "info", text: `Run ${t.runId} ran in another agentduo window: ${t.outcome}.`, tone: "info" });
+  }
+  next = withLedger(next, record.clarifications ?? []);
+  if (record.recipient && record.recipient !== next.recipient) next = { ...next, recipient: record.recipient };
+  return next;
 }
 
 export function reduce(s: ViewState, a: ViewAction): ViewState {

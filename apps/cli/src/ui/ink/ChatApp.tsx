@@ -7,6 +7,7 @@ import { AGENT_NAMES, complete, modeLabel, type Backend, type Completion } from 
 import { insertMention, mentionAt, type PathEntry } from "@agentduo/engine/inputs/mention-text";
 import type { UsageReport } from "@agentduo/engine/system/usage";
 import type { Decision, EventBus, ModelMap, PermissionAnswer } from "@agentduo/engine/events";
+import type { EarlierTask, Exchange } from "@agentduo/engine/workflow/state";
 import { modelText, PROVIDERS } from "@agentduo/engine/format";
 import { StaticItemView } from "./App.js";
 import { HumanReviewPrompt, VIEWS, type ViewKind } from "./HumanReviewPrompt.js";
@@ -24,7 +25,9 @@ type ChatLine =
   | { type: "recipient"; backend: Backend }
   | { type: "models"; models: ModelMap }
   | { type: "usage"; report: UsageReport }
-  | { type: "attachments"; files: Attachment[] };
+  | { type: "attachments"; files: Attachment[] }
+  | { type: "restore"; text: string }
+  | { type: "history"; exchanges: Exchange[]; earlier: EarlierTask[] };
 
 /** What the chat controller shows besides the agents' own events: your messages, its lines, and its state. */
 export class ChatChannel {
@@ -62,6 +65,16 @@ export class ChatChannel {
   /** The files waiting to go with the next message. */
   attachments(files: Attachment[]): void {
     this.emitter.emit("line", { type: "attachments", files });
+  }
+
+  /** A line that could not run now (another agentduo works here): back to the input, to send again. */
+  restore(text: string): void {
+    this.emitter.emit("line", { type: "restore", text });
+  }
+
+  /** What was said in the conversation that this screen has not shown (a saved one opened, or another window's). */
+  history(exchanges: Exchange[], earlier: EarlierTask[]): void {
+    this.emitter.emit("line", { type: "history", exchanges, earlier });
   }
 
   on(listener: (line: ChatLine) => void): () => void {
@@ -157,11 +170,16 @@ function Attachments({ files }: { files: Attachment[] }) {
   );
 }
 
-function ChatInput({ status, mode, to, models, files, onSubmit, onEscape, onCycleMode, findFiles }: {
+function ChatInput({ status, mode, to, models, files, onSubmit, onEscape, onCycleMode, findFiles, restore }: {
   status: ChatStatus; mode: string | null; to: Backend; models: ModelMap | null; files: Attachment[]; onSubmit(text: string): void; onEscape(): void; onCycleMode?(): void;
   findFiles?(query: string): Promise<PathEntry[]>;
+  /** A line that could not run now, given back (unless something new was typed meanwhile). */
+  restore?: { text: string; seq: number } | null;
 }) {
   const [text, setText] = useState("");
+  useEffect(() => {
+    if (restore) setText((t) => (t.trim() ? t : restore.text));
+  }, [restore]);
   const [selected, setSelected] = useState(0);
   /** The text the list was closed for (Esc, or filled in with Enter): it stays closed until the text changes. */
   const [closedFor, setClosedFor] = useState<string | null>(null);
@@ -258,6 +276,7 @@ export function ChatApp(p: ChatAppProps) {
   const [usage, setUsage] = useState<UsageReport | null>(null);
   const [usageTop, setUsageTop] = useState(0);
   const [files, setFiles] = useState<Attachment[]>([]);
+  const [restore, setRestore] = useState<{ text: string; seq: number } | null>(null);
   /** The report the usage panel shows, and the one it was closed on: what still arrives for that one stays closed. */
   const shownUsage = useRef(0);
   const closedUsage = useRef(0);
@@ -271,6 +290,8 @@ export function ChatApp(p: ChatAppProps) {
     else if (line.type === "recipient") setTo(line.backend);
     else if (line.type === "models") setModels(line.models);
     else if (line.type === "attachments") setFiles(line.files);
+    else if (line.type === "restore") setRestore((r) => ({ text: line.text, seq: (r?.seq ?? 0) + 1 }));
+    else if (line.type === "history") dispatch({ type: "history", exchanges: line.exchanges, earlier: line.earlier });
     else if (line.type === "usage") {
       if (line.report.id <= closedUsage.current) return;
       // A new report (a refresh) starts at its top.
@@ -320,7 +341,8 @@ export function ChatApp(p: ChatAppProps) {
               setUsage(null);
             }} />
           ) : (
-            <ChatInput status={status} mode={mode} to={to} models={models} files={files} onSubmit={p.onSubmit} onEscape={p.onEscape} onCycleMode={p.onCycleMode} findFiles={p.findFiles} />
+            <ChatInput status={status} mode={mode} to={to} models={models} files={files} onSubmit={p.onSubmit} onEscape={p.onEscape} onCycleMode={p.onCycleMode} findFiles={p.findFiles}
+              restore={restore} />
           )}
         </>
       )}

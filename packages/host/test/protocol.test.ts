@@ -37,8 +37,8 @@ describe("worker requests", () => {
     expect([init({}), init({ discover: true }), init({ discover: false })].map((r) => r.type === "initialize" && r.discover)).toEqual([true, true, false]);
   });
 
-  it("is protocol 11 (the agents' questions); takes only the permission modes the chat offers", () => {
-    expect(PROTOCOL_VERSION).toBe(11);
+  it("is protocol 12 (windows taking turns in a workspace); takes only the permission modes the chat offers", () => {
+    expect(PROTOCOL_VERSION).toBe(12);
     const setting = (s: unknown) => parseRequestEnvelope(envelope({ type: "setting", conversation: "c-1", setting: s })).request;
     for (const mode of ["manual", "acceptEdits", "auto"]) expect(setting({ target: "mode", mode })).toMatchObject({ setting: { target: "mode", mode } });
     expect(setting({ target: "mode" })).toMatchObject({ setting: { target: "mode" } });

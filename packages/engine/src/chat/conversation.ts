@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { ATTACHMENT_LIMITS, formatBytes, type Attachment } from "../inputs/attachment-types.js";
 import { AttachmentError, attachmentFile, AttachmentStore } from "../inputs/attachments.js";
@@ -10,6 +10,7 @@ import type { Backend } from "../config/config.js";
 import { taggedPaths } from "../inputs/mentions.js";
 import * as prompts from "../workflow/prompts.js";
 import { atomicWrite, ensureRunsDir, stamp, type ConversationContext, type EarlierTask, type Exchange } from "../workflow/state.js";
+import { conversationHolder } from "../workflow/lease.js";
 import type { DiscussionPlace, DiscussionStep, TurnStatus, Verdict } from "../events.js";
 
 /** How much of the conversation (questions and answers) a prompt carries; older exchanges go first, whole. */
@@ -70,14 +71,27 @@ export interface ConversationRecord {
    * and when answered). Absent in a conversation from before questions: none were asked.
    */
   clarifications?: ClarificationEntry[];
+  /** The process that saved it last (`duo`, an extension's or the desktop's worker); absent in older conversations. */
+  writer?: number;
 }
 
-export type ConversationSummary = Pick<ConversationRecord, "id" | "title" | "createdAt" | "updatedAt">;
+export type ConversationSummary = Pick<ConversationRecord, "id" | "title" | "createdAt" | "updatedAt"> & {
+  /** The live process working in it now (an answer, a discussion, a run), or null. */
+  inUseBy: number | null;
+};
 
 const RECORD = "conversation.json";
 /** What an exchange recovered from a turn that never ended says its question was (the turn itself was not saved). */
 const UNFINISHED_QUESTION = "(the message of a turn that did not finish; it was not kept)";
 const conversationsDir = (runsDir: string) => join(runsDir, "conversations");
+
+/** Where conversation `id` keeps its record. */
+export const conversationFile = (runsDir: string, id: string): string => join(conversationsDir(runsDir), id, RECORD);
+
+/** The record of conversation `id` as saved, or null (none, or not one agentduo can read). Only reads. */
+export function readConversation(runsDir: string, id: string): ConversationRecord | null {
+  return readRecord(conversationFile(runsDir, id));
+}
 
 function readRecord(file: string): ConversationRecord | null {
   try {
@@ -94,11 +108,14 @@ export function listConversations(runsDir: string): ConversationSummary[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir).flatMap((name) => {
     const r = readRecord(join(dir, name, RECORD));
-    return r ? [{ id: r.id, title: r.title, createdAt: r.createdAt, updatedAt: r.updatedAt }] : [];
+    return r ? [{ id: r.id, title: r.title, createdAt: r.createdAt, updatedAt: r.updatedAt, inUseBy: conversationHolder(runsDir, r.id) }] : [];
   }).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
 
 let counter = 0;
+
+/** An exchange as prompts and runs carry it: its id is only for the windows that show the conversation. */
+const withoutId = ({ id: _id, ...e }: Exchange): Exchange => e;
 
 /**
  * The chat's conversation with both agents. Only answered turns are context for later prompts; failed and stopped
@@ -145,19 +162,77 @@ export class Conversation {
   /** The conversation `id` of this workspace as it was saved, or a new one by that id. Only reads. */
   static open(runsDir: string, id: string, clock?: () => Date): Conversation {
     const c = new Conversation(runsDir, { id, clock });
-    const r = readRecord(join(c.dir, RECORD));
-    if (!r) return c;
-    c.name = r.title;
-    c.to = r.recipient;
-    c.before = r.turns;
-    c.createdAt = r.createdAt;
-    c.exchanges.push(...r.exchanges);
-    c.done.push(...r.earlier);
-    c.sessions = r.sessions ?? {};
-    // A question still open was asked by a process that is gone: its call ended, and nobody can answer it now.
-    c.asked.push(...(r.clarifications ?? []).map((e): ClarificationEntry => (e.status === "pending" ? { ...e, status: "interrupted", closedAt: e.at } : e)));
-    c.recoverAnswers();
+    const r = c.read();
+    // While another agentduo works in it, a question it asks is still open there.
+    if (r) c.load(r, !conversationHolder(runsDir, id));
     return c;
+  }
+
+  /** The record's file as this process last read or wrote it (time and size), to tell when another process saved it. */
+  private seen: string | null = null;
+
+  private fileStamp(): string | null {
+    try {
+      const st = statSync(join(this.dir, RECORD));
+      return `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The saved record; what it was is noted first, so a save that lands while it is read is seen as a change next time. */
+  private read(): ConversationRecord | null {
+    this.seen = this.fileStamp();
+    return readRecord(join(this.dir, RECORD));
+  }
+
+  /**
+   * Takes on a saved record. `settle`: nobody else works in the conversation, so a question still open was asked by a
+   * process that is gone (its call ended, nobody can answer it now), and answers given in a turn that never ended are
+   * passed on.
+   */
+  private load(r: ConversationRecord, settle: boolean): void {
+    this.name = r.title;
+    this.to = r.recipient;
+    this.before = r.turns;
+    this.createdAt = r.createdAt;
+    this.exchanges.splice(0, this.exchanges.length, ...r.exchanges);
+    this.done.splice(0, this.done.length, ...r.earlier);
+    this.sessions = r.sessions ?? {};
+    this.asked.splice(0, this.asked.length, ...(r.clarifications ?? []).map((e): ClarificationEntry => (settle && e.status === "pending" ? { ...e, status: "interrupted", closedAt: e.at } : e)));
+    if (settle) this.recoverAnswers();
+  }
+
+  /** Another process saved the conversation since this one last read or wrote it. */
+  changedOnDisk(): boolean {
+    return this.fileStamp() !== this.seen;
+  }
+
+  /**
+   * Reads the conversation again, as another agentduo (`duo`, an extension's or the desktop's) may have saved it since:
+   * its exchanges, tasks, title, recipient, sessions and questions. The files waiting to be sent from here stay.
+   * `settle`: this process holds the conversation now (packages/engine/src/workflow/lease.ts), as before new work.
+   * Returns the answered exchanges it did not have; nothing while a turn or a discussion of it runs here.
+   */
+  reload(o: { settle?: boolean } = {}): Exchange[] {
+    if (this.turns.some((t) => t.status === "running") || this.discussions.size) return [];
+    const r = this.read();
+    if (!r || r.id !== this.id) return [];
+    const ids = new Set(this.exchanges.flatMap((e) => (e.id ? [e.id] : [])));
+    const count = this.exchanges.length;
+    this.turns.length = 0;
+    this.load(r, !!o.settle);
+    return this.exchanges.filter((e, i) => !e.unfinished && (e.id ? !ids.has(e.id) : i >= count));
+  }
+
+  /** The agents' sessions the next calls continue: at least one is kept. */
+  get sessionsKept(): boolean {
+    return Object.keys(this.sessions).length > 0;
+  }
+
+  /** What was answered in the conversation so far, oldest first (a reopened conversation shows it). */
+  get history(): Exchange[] {
+    return this.exchanges.filter((e) => !e.unfinished);
   }
 
   /** What the conversation is about, for its tab and the list: its first question, task or discussion. */
@@ -195,11 +270,12 @@ export class Conversation {
     const record: ConversationRecord = {
       version: 1, id: this.id, title: this.name, createdAt: this.createdAt, updatedAt: this.clock().toISOString(), recipient: this.to,
       turns: this.before + this.turns.length, exchanges: this.exchanges, earlier: this.done, sessions: this.sessions,
-      ...(this.asked.length ? { clarifications: this.asked } : {}),
+      ...(this.asked.length ? { clarifications: this.asked } : {}), writer: process.pid,
     };
     ensureRunsDir(this.runsDir);
     mkdirSync(this.dir, { recursive: true });
     atomicWrite(join(this.dir, RECORD), `${JSON.stringify(record, null, 2)}\n`);
+    this.seen = this.fileStamp();
   }
 
   /**
@@ -233,7 +309,7 @@ export class Conversation {
   /** The exchanges `session` has not seen, within the budget; omitted counts those it never saw that do not fit. */
   private newContext(session: ConversationSession): ConversationContext {
     const context = this.context();
-    return { exchanges: this.exchanges.slice(Math.max(session.exchanges, context.omitted)), omitted: Math.max(0, context.omitted - session.exchanges) };
+    return { exchanges: this.exchanges.slice(Math.max(session.exchanges, context.omitted)).map(withoutId), omitted: Math.max(0, context.omitted - session.exchanges) };
   }
 
   get logDir(): string {
@@ -301,7 +377,7 @@ export class Conversation {
     for (const e of this.asked) if (e.status === "answered" && !e.settled) groups.set(e.discussionId ?? e.turnId ?? e.id, groups.get(e.discussionId ?? e.turnId ?? e.id) ?? e);
     for (const [key, first] of groups) {
       const clarified = this.settle((e) => (e.discussionId ?? e.turnId ?? e.id) === key);
-      this.exchanges.push({ backend: first.agent, question: UNFINISHED_QUESTION, answer: "", unfinished: true, clarified });
+      this.exchanges.push({ id: key, backend: first.agent, question: UNFINISHED_QUESTION, answer: "", unfinished: true, clarified });
     }
   }
 
@@ -381,7 +457,7 @@ export class Conversation {
       size += length;
       keep--;
     }
-    return { exchanges: answered.slice(keep), omitted: keep };
+    return { exchanges: answered.slice(keep).map(withoutId), omitted: keep };
   }
 
   /**
@@ -426,13 +502,13 @@ export class Conversation {
     if (turn.answer === null) {
       if (!clarified.length) return;
       this.exchanges.push({
-        backend: turn.backend, question: turn.question, answer: "", unfinished: true, ...(turn.attachments ? { attachments: turn.attachments } : {}), clarified,
+        id: turn.id, backend: turn.backend, question: turn.question, answer: "", unfinished: true, ...(turn.attachments ? { attachments: turn.attachments } : {}), clarified,
       });
       this.save();
       return;
     }
     this.exchanges.push({
-      backend: turn.backend, question: turn.question, answer: turn.answer, ...(turn.attachments ? { attachments: turn.attachments } : {}),
+      id: turn.id, backend: turn.backend, question: turn.question, answer: turn.answer, ...(turn.attachments ? { attachments: turn.attachments } : {}),
       ...(clarified.length ? { clarified } : {}),
     });
     this.save();
@@ -497,7 +573,7 @@ export class Conversation {
       for (const party of [d.answerer, d.critic]) if (this.sessions[party]?.discussion?.id === id) delete this.sessions[party];
       if (clarified.length) {
         this.exchanges.push({
-          backend: d.answerer, question: d.question, answer: "", unfinished: true, discussedWith: d.critic, ...(d.attachments.length ? { attachments: d.attachments } : {}), clarified,
+          id: d.id, backend: d.answerer, question: d.question, answer: "", unfinished: true, discussedWith: d.critic, ...(d.attachments.length ? { attachments: d.attachments } : {}), clarified,
         });
       }
       this.save();
@@ -505,7 +581,7 @@ export class Conversation {
     }
     const by = backend ?? d.answerer;
     this.exchanges.push({
-      backend: by, question: d.question, answer, discussedWith: by === d.answerer ? d.critic : d.answerer, ...(d.attachments.length ? { attachments: d.attachments } : {}),
+      id: d.id, backend: by, question: d.question, answer, discussedWith: by === d.answerer ? d.critic : d.answerer, ...(d.attachments.length ? { attachments: d.attachments } : {}),
       ...(clarified.length ? { clarified } : {}),
     });
     this.save();

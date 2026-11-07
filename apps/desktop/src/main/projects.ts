@@ -191,6 +191,8 @@ export class ProjectManager {
         this.o.host.notify?.(kind === "decision" ? "AgentDuo needs your decision" : kind === "question" ? "An agent asks you a question" : "Claude asks for permission", text.slice(0, 160));
       },
       onNewConversation: () => this.o.post({ type: "menu", command: "newConversation" }),
+      // Another window (`duo`, VS Code) started or continued a conversation of this project.
+      onConversationsChanged: () => this.scheduleList(p),
       // `/codex model … --global` (or the chat's settings menu with Global) in this project: the others read it too.
       onConfigWritten: (scope) => void this.syncConfiguration(scope, p.id, p.id),
     });
@@ -433,17 +435,19 @@ export class ProjectManager {
     const runsDir = session?.runsDirectory ?? null;
     const saved = runsDir ? listConversations(runsDir) : [];
     const live = new Set(session?.conversations ?? []);
-    const item = (id: string, title: string, updatedAt: string | null): ConversationItem => {
+    const item = (id: string, title: string, updatedAt: string | null, inUseBy: number | null = null): ConversationItem => {
       const st = session && live.has(id) ? session.conversation(id).state : null;
+      // Another agentduo window (`duo`, VS Code) works in it now: it can be read here, and continued once that is done.
+      const elsewhere = !!inUseBy && inUseBy !== session?.workerPid;
       return {
         id, title: st && st.timeline.length ? titleOf(st) : title || "New conversation", updatedAt,
         running: !!st && (st.status === "running" || st.status === "answering"), waiting: st ? (st.decision ? 1 : 0) + st.permissions.length + (st.questions ?? []).length : 0,
-        activity: st ? activityOf(st) : null,
+        activity: (st ? activityOf(st) : null) ?? (elsewhere ? "In use in another agentduo window" : null),
       };
     };
     const known = new Set(saved.map((c) => c.id));
     const unsaved = [...p.views.keys()].filter((id) => !known.has(id)).reverse().map((id) => item(id, "", null));
-    return [...unsaved, ...saved.map((c) => item(c.id, c.title, c.updatedAt))];
+    return [...unsaved, ...saved.map((c) => item(c.id, c.title, c.updatedAt, c.inUseBy))];
   }
 
   /** Runs of the project that stopped or wait for a decision: /resume <id> continues one. */

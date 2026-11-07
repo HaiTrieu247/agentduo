@@ -6,7 +6,7 @@ import { AttachmentError } from "@agentduo/engine/inputs/attachments";
 import { parseInput, type Backend } from "@agentduo/engine/chat/commands";
 import { ConfigError, type ConfigData } from "@agentduo/engine/config/config";
 import {
-  ConfigurationError, filesConfiguration, readConfiguration, clearConfiguration, updateConfiguration, type ConfigScope, type ConfigurationView,
+  ConfigurationError, fileChanges, filesConfiguration, readConfiguration, clearConfiguration, updateConfiguration, type ConfigScope, type ConfigurationView,
 } from "@agentduo/engine/config/configuration";
 import { Conversation } from "@agentduo/engine/chat/conversation";
 import type { Check } from "@agentduo/engine/system/doctor";
@@ -20,7 +20,8 @@ import { openRunGit, RunGitError } from "@agentduo/engine/git/run-git";
 import {
   permissionMode, SETTING_KEYS, settings, settingsView, valueAt, withChange, type SettingChange, type SettingsView,
 } from "@agentduo/engine/config/settings";
-import { acquireWorkspaceLock, LockError, RunStore, workspaceBusy, workspaceLockHolder, type RunState } from "@agentduo/engine/workflow/state";
+import { RunStore, workspaceBusy, workspaceLockHolder, type RunState } from "@agentduo/engine/workflow/state";
+import { WorkspaceLease } from "@agentduo/engine/workflow/lease";
 import { readClaudeUsage, readCodexUsage } from "@agentduo/engine/system/usage";
 import { verificationLines } from "@agentduo/engine/quality/verification";
 import { EventBus, type DuoEvent, type HumanReview, type ModelMap, type PermissionAnswer } from "@agentduo/engine/events";
@@ -118,14 +119,17 @@ const isBinary = (data: Buffer) => data.subarray(0, 8000).includes(0);
 
 /**
  * The engine side of the sidebar, in the worker: the CLI's Chat, the workspace lock, and the brokers that carry
- * decisions and permission prompts to the user. Opening the sidebar only reads; the lock is taken when the user
- * first acts (as `duo` does when its chat opens) and held until /quit or shutdown.
+ * decisions and permission prompts to the user. Opening the sidebar only reads. The chats share one lease of the
+ * workspace lock (packages/engine/src/workflow/lease.ts): it is held while one of them works (an answer, a discussion, a
+ * run, its waits for the user included) and given back as soon as none does, so `duo` and other windows can work in the
+ * workspace while this one is idle.
  */
 export class RuntimeSession {
   private env: WorkspaceEnv | null = null;
   /** The conversations that have a chat in this worker, by id. */
   private readonly tabs = new Map<string, Tab>();
-  private release: (() => void) | null = null;
+  /** The workspace lock as this worker's chats take it, once there is a chat. */
+  private lease: WorkspaceLease | null = null;
   private chain: Promise<unknown> = Promise.resolve();
   /** Snapshots this worker has listed ("runId commit" → tree), so a diff of an earlier round stays readable. */
   private readonly listed = new Map<string, string>();
@@ -170,6 +174,7 @@ export class RuntimeSession {
       usage: (report) => sink.ui({ type: "usage", report }, conversation),
       setAttachments: (files) => conversation && sink.ui({ type: "attachments", files }, conversation),
       sent: (files) => conversation && sink.ui({ type: "sent", files }, conversation),
+      refused: (text) => conversation && sink.ui({ type: "refused", text }, conversation),
       // /quit: leave the chat as `duo` does, which here means giving the workspace back.
       exit: () => void this.serial(() => this.endSession()),
     };
@@ -195,8 +200,9 @@ export class RuntimeSession {
     if (!this.closing) this.models?.refresh();
   }
 
+  /** One of this worker's chats works in the workspace now (it holds the lock). */
   get active(): boolean {
-    return !!this.release;
+    return !!this.lease?.held;
   }
 
   /** The folder this worker works in. */
@@ -243,12 +249,12 @@ export class RuntimeSession {
   }
 
   /**
-   * The workspace, taken on first use: the config is read again, then the workspace lock is taken, once for every tab.
-   * `needs` names the agents the work that opens it calls, so a missing CLI is refused before the lock is taken for nothing.
+   * The workspace for a first chat: the config is read again (no lock is taken; each piece of work takes it). `needs`
+   * names the agents the work that opens it calls, so a missing CLI is said before a chat is made for nothing.
    */
-  private async lockedEnv(conversation: string, needs: (cfg: ConfigData) => readonly Backend[]): Promise<WorkspaceEnv> {
+  private async chatEnv(conversation: string, needs: (cfg: ConfigData) => readonly Backend[]): Promise<WorkspaceEnv> {
     if (this.closing) throw new SessionError("shutting_down", "agentduo is shutting down");
-    if (this.release && this.env) return this.env;
+    if (this.tabs.size && this.env) return this.env;
     let env: WorkspaceEnv;
     try {
       env = await this.prepare();
@@ -262,30 +268,29 @@ export class RuntimeSession {
     // question checks its own agent's CLI.
     const problem = runnableProblem(env, env.cfg, env.sources.join(", "), this.o.env, { backends: needs(env.cfg), repo: false });
     if (problem) throw new SessionError(problem.kind, problem.message);
-    let release: () => void;
-    try {
-      release = acquireWorkspaceLock(env.runsDir);
-    } catch (e) {
-      if (e instanceof LockError) throw new SessionError("locked", e.message);
-      throw e;
+    if (this.closing) throw new SessionError("shutting_down", "agentduo is shutting down");
+    if (this.lease?.runsDir !== env.runsDir && !this.lease?.held) {
+      this.lease = new WorkspaceLease(env.runsDir, (held) => this.o.sink.ui({ type: "session", session: held ? "active" : "dormant" }, null));
     }
-    if (this.closing) {
-      release();
-      throw new SessionError("shutting_down", "agentduo is shutting down");
-    }
-    this.release = release;
     this.o.sink.ui({ type: "pipeline", pipeline: pipelineOf(env.cfg) }, null);
     this.o.sink.ui({ type: "mode", mode: permissionMode(env.cfg) }, null);
     this.o.sink.ui({ type: "settings", settings: settingsView(env.cfg) }, null);
-    this.o.sink.ui({ type: "session", session: "active" }, null);
     return env;
+  }
+
+  /**
+   * Before a chat's new work, once it holds the workspace: the config files are read again (another window or `duo`
+   * may have saved a setting), and every tab follows each key they changed, unless this session has a value of its own.
+   */
+  private beforeWork(): void {
+    if (this.seen) this.followFiles(this.seen, this.sessionConfig());
   }
 
   /** The chat of `conversation`, opened on first use: a conversation saved earlier (a tab after a reload) carries on. */
   private async ensureSession(conversation: string, needs: (cfg: ConfigData) => readonly Backend[] = () => []): Promise<Chat> {
     const open = this.tabs.get(conversation);
     if (open) return open.chat;
-    const env = await this.lockedEnv(conversation, needs);
+    const env = await this.chatEnv(conversation, needs);
     const bus = new EventBus();
     bus.on((event) => this.o.sink.event(conversation, event));
     const decisions = new DecisionBroker({
@@ -299,6 +304,7 @@ export class RuntimeSession {
     const chat = new Chat({
       cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, userConfigFile: env.userConfigFile, bus, decider: decisions, permissions, clarifier: clarifications, ui, env: this.o.env, models,
       conversationId: conversation, busyElsewhere: () => this.runningElsewhere(conversation), changed: (change, wrote) => this.changedIn(conversation, change, wrote),
+      lease: this.lease!, beforeWork: () => this.beforeWork(),
     });
     // The settings changed in the other tabs of this session and in Settings (already said and saved there).
     for (const change of this.changed) chat.follow(change);
@@ -333,8 +339,8 @@ export class RuntimeSession {
    */
   submit(conversation: string, text: string, route: Route = "message", attachments: string[] = []): Promise<void> {
     return this.serial(async () => {
-      if (!this.release && /^\/(quit|exit)\b/.test(text.trim())) {
-        this.uiFor(conversation).info("No session is open; the workspace is not locked.");
+      if (!this.tabs.size && /^\/(quit|exit)\b/.test(text.trim())) {
+        this.uiFor(conversation).info("Nothing runs here, and the workspace is free: `duo` and other agentduo windows can work in it.");
         return;
       }
       const chat = await this.ensureSession(conversation, (cfg) => agentsFor(text || (attachments.length ? "files" : ""), route, cfg, this.recipientOf(conversation)));
@@ -510,21 +516,7 @@ export class RuntimeSession {
   private followFiles(before: ConfigData, session: ConfigData): void {
     const after = filesConfiguration(this.configurationOptions(null));
     this.seen = after;
-    for (const k of SETTING_KEYS) {
-      const was = valueAt(before, k.path);
-      const now = valueAt(after, k.path);
-      // A key the session has a value of its own for keeps it; one that did not change needs nothing.
-      if (isDeepStrictEqual(was, now) || !isDeepStrictEqual(valueAt(session, k.path), was)) continue;
-      let change: SettingChange;
-      try {
-        change = settings.value(k.key, now);
-      } catch (e) {
-        // A value edited by hand that is not one: the files' problems say so; the chats keep what they had.
-        if (e instanceof ConfigError) continue;
-        throw e;
-      }
-      this.follow(null, change);
-    }
+    for (const change of fileChanges(before, after, session)) this.follow(null, change);
   }
 
   /** The configuration as it is now; the tabs (also those with no chat yet) show its settings, mode and pipeline. */
@@ -640,14 +632,12 @@ export class RuntimeSession {
     for (const [id] of tabs) this.o.sink.ui({ type: "status", status: "idle" }, id);
   }
 
-  /** /quit: running runs stop at their step and stay resumable; the lock goes back. */
+  /** /quit: what runs in every tab stops (a run at its step, resumable); the workspace lock goes with the last of it. */
   private async endSession(): Promise<void> {
-    if (!this.release) return;
+    if (!this.tabs.size) return;
     await this.stopTabs(false);
-    this.release?.();
-    this.release = null;
     this.o.sink.ui({ type: "session", session: "ended" }, null);
-    this.ui.info("Session ended: the workspace is free for `duo` again. Send a message to start a new session.");
+    this.ui.info("Session ended: nothing runs here, and the workspace is free for `duo` and other agentduo windows. Send a message to go on.");
   }
 
   /**
@@ -664,8 +654,6 @@ export class RuntimeSession {
         await this.stopTabs(true);
       } finally {
         clearTimeout(hard);
-        this.release?.();
-        this.release = null;
       }
     })();
     return this.stopped;

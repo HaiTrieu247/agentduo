@@ -60,6 +60,7 @@ window.addEventListener("message", (e: MessageEvent<HostMessage>) => {
   else if (m.type === "attachmentUris") ui.setUris(m.uris);
   else if (m.type === "fileMatches") ui.fileMatches(m.seq, m.matches);
   else if (m.type === "prepareReload") ui.release(() => vscode.postMessage({ type: "readyToReload" }));
+  else if (m.type === "restoreDraft") ui.restoreDraft(m.text);
   schedule();
 });
 

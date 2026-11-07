@@ -152,6 +152,7 @@ export class ChatHost {
     else if (m.type === "attachmentUris") mount.ui.setUris(m.uris);
     else if (m.type === "fileMatches") return mount.ui.fileMatches(m.seq, m.matches);
     else if (m.type === "prepareReload") mount.ui.release(() => undefined);
+    else if (m.type === "restoreDraft") return mount.ui.restoreDraft(m.text);
     this.schedule(mount);
   }
 

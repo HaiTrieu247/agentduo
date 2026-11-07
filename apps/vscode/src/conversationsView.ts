@@ -9,6 +9,8 @@ export interface ConversationEntry {
   running: boolean;
   /** Decisions, permission prompts and questions waiting in its tab. */
   waiting: number;
+  /** Another agentduo window (`duo`, the desktop, another VS Code window) works in it now. */
+  elsewhere: boolean;
 }
 
 /** "just now", "12 min ago", "14:05", "yesterday", "28 Oct": when a conversation last changed. */
@@ -44,10 +46,10 @@ export class ConversationsView implements vscode.TreeDataProvider<ConversationEn
   getTreeItem(e: ConversationEntry): vscode.TreeItem {
     const item = new vscode.TreeItem(e.title || "New conversation", vscode.TreeItemCollapsibleState.None);
     item.id = e.id;
-    const state = e.waiting ? "needs you" : e.running ? "working…" : e.open ? "open" : "";
+    const state = e.waiting ? "needs you" : e.running ? "working…" : e.elsewhere ? "in use in another window" : e.open ? "open" : "";
     item.description = [state, when(e.updatedAt)].filter(Boolean).join(" · ");
     item.tooltip = e.title || "New conversation";
-    item.iconPath = new vscode.ThemeIcon(e.waiting ? "bell-dot" : e.running ? "loading~spin" : e.open ? "comment-discussion" : "comment");
+    item.iconPath = new vscode.ThemeIcon(e.waiting ? "bell-dot" : e.running || e.elsewhere ? "loading~spin" : e.open ? "comment-discussion" : "comment");
     item.command = { command: "agentduo.openConversation", title: "Open conversation", arguments: [e.id] };
     item.contextValue = e.open ? "conversation.open" : "conversation";
     return item;

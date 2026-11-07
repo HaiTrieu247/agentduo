@@ -14958,7 +14958,7 @@ function configErrors(cfg) {
 }
 
 // packages/engine/src/system/environment.ts
-import { existsSync as existsSync8, statSync as statSync2 } from "fs";
+import { existsSync as existsSync8, statSync as statSync3 } from "fs";
 import { isAbsolute as isAbsolute4, join as join9, resolve as resolve4 } from "path";
 
 // packages/engine/src/agents/resolve.ts
@@ -15448,11 +15448,11 @@ var Git = class {
 // packages/engine/src/git/run-git.ts
 import { execFile as execFile2 } from "child_process";
 import { randomUUID as randomUUID2 } from "crypto";
-import { accessSync as accessSync2, constants as constants2, existsSync as existsSync6, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync5, rmSync, statSync } from "fs";
+import { accessSync as accessSync2, constants as constants2, existsSync as existsSync6, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync5, rmSync, statSync as statSync2 } from "fs";
 import { dirname as dirname3, join as join7, resolve as resolve3 } from "path";
 
 // packages/engine/src/workflow/state.ts
-import { appendFileSync, closeSync, existsSync as existsSync5, mkdirSync, openSync, readdirSync as readdirSync2, readFileSync as readFileSync4, renameSync, unlinkSync, writeFileSync } from "fs";
+import { appendFileSync, closeSync, existsSync as existsSync5, mkdirSync, openSync, readdirSync as readdirSync2, readFileSync as readFileSync4, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { basename as basename2, dirname as dirname2, join as join6 } from "path";
 var STATE_VERSION = 1;
 var pad = (n) => String(Math.floor(Math.abs(n))).padStart(2, "0");
@@ -15478,20 +15478,98 @@ function atomicWrite(path, text3) {
 var LockError = class extends Error {
   name = "LockError";
 };
-function acquireLock(path, busy) {
-  const take = () => {
-    const fd = openSync(path, "wx");
-    writeFileSync(fd, String(process.pid));
-    closeSync(fd);
-  };
+var UNWRITTEN_LOCK_MS = 5e3;
+var RECLAIM_GUARD_MS = 1e4;
+var SETTLE_MS = 1e3;
+function pause(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+function lockOwner(path) {
+  let raw;
+  let mtime;
   try {
-    take();
+    raw = readFileSync4(path, "utf8");
+    mtime = statSync(path).mtimeMs;
+  } catch (e) {
+    if (e.code === "ENOENT") return { kind: "gone" };
+    throw e;
+  }
+  const pid = Number(raw.trim());
+  if (Number.isSafeInteger(pid) && pid > 0) return pidAlive(pid) ? { kind: "live", pid } : { kind: "stale", raw };
+  return Date.now() - mtime < UNWRITTEN_LOCK_MS ? { kind: "writing" } : { kind: "stale", raw };
+}
+function createLock(path) {
+  let fd;
+  try {
+    fd = openSync(path, "wx");
+  } catch (e) {
+    if (e.code === "EEXIST") return false;
+    throw e;
+  }
+  try {
+    writeFileSync(fd, String(process.pid));
+  } catch (e) {
+    closeSync(fd);
+    unlinkSync(path);
+    throw e;
+  }
+  closeSync(fd);
+  return true;
+}
+function reclaimLock(path, stale) {
+  const guard2 = `${path}.reclaim`;
+  let fd;
+  try {
+    fd = openSync(guard2, "wx");
   } catch (e) {
     if (e.code !== "EEXIST") throw e;
-    const pid = Number(readFileSync4(path, "utf8").trim());
-    if (pid && pidAlive(pid)) throw new LockError(busy(pid));
-    unlinkSync(path);
-    take();
+    try {
+      if (Date.now() - statSync(guard2).mtimeMs > RECLAIM_GUARD_MS) unlinkSync(guard2);
+    } catch {
+    }
+    return;
+  }
+  closeSync(fd);
+  try {
+    if (readFileSync4(path, "utf8") === stale) unlinkSync(path);
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  } finally {
+    try {
+      unlinkSync(guard2);
+    } catch {
+    }
+  }
+}
+function acquireLock(path, busy) {
+  const deadline = Date.now() + SETTLE_MS;
+  for (; ; ) {
+    if (createLock(path)) return;
+    const owner = lockOwner(path);
+    if (owner.kind === "live") throw new LockError(busy(owner.pid));
+    if (owner.kind === "stale") reclaimLock(path, owner.raw);
+    if (owner.kind === "gone" || owner.kind === "stale") {
+      if (createLock(path)) return;
+    }
+    if (Date.now() > deadline) {
+      const now = lockOwner(path);
+      throw new LockError(busy(now.kind === "live" ? now.pid : null));
+    }
+    pause(15);
+  }
+}
+function releaseLock(path) {
+  try {
+    if (readFileSync4(path, "utf8").trim() === String(process.pid)) unlinkSync(path);
+  } catch {
+  }
+}
+function lockHolder(path) {
+  try {
+    const owner = lockOwner(path);
+    return owner.kind === "live" ? owner.pid : null;
+  } catch {
+    return null;
   }
 }
 function ensureRunsDir(runsDir) {
@@ -15499,25 +15577,20 @@ function ensureRunsDir(runsDir) {
   const ignore = join6(runsDir, ".gitignore");
   if (!existsSync5(ignore)) writeFileSync(ignore, "*\n");
 }
-var workspaceBusy = (pid) => `another agentduo run is active in this workspace (pid ${pid}); wait for it to finish or stop it first`;
+var workspaceBusy = (pid) => pid ? `another agentduo is working in this workspace (pid ${pid}); wait for it to finish or stop it there first` : "another agentduo is starting work in this workspace; try again in a moment";
 function acquireWorkspaceLock(runsDir) {
   ensureRunsDir(runsDir);
   const path = join6(runsDir, ".lock");
   acquireLock(path, workspaceBusy);
-  return () => {
-    try {
-      unlinkSync(path);
-    } catch {
-    }
-  };
+  return () => releaseLock(path);
 }
 function workspaceLockHolder(runsDir) {
-  try {
-    const pid = Number(readFileSync4(join6(runsDir, ".lock"), "utf8").trim());
-    return pid && pidAlive(pid) ? pid : null;
-  } catch {
-    return null;
-  }
+  return lockHolder(join6(runsDir, ".lock"));
+}
+function acquireLockFile(path, busy) {
+  mkdirSync(dirname2(path), { recursive: true });
+  acquireLock(path, busy);
+  return () => releaseLock(path);
 }
 function pidAlive(pid) {
   try {
@@ -15605,15 +15678,12 @@ var RunStore = class _RunStore {
     });
   }
   lock() {
-    acquireLock(this.path("lock"), (pid) => `run ${this.taskId} is already being processed by pid ${pid}`);
+    acquireLock(this.path("lock"), (pid) => pid ? `run ${this.taskId} is already being processed by pid ${pid}` : `run ${this.taskId} is being taken by another process`);
     this.locked = true;
   }
   unlock() {
     if (!this.locked) return;
-    try {
-      unlinkSync(this.path("lock"));
-    } catch {
-    }
+    releaseLock(this.path("lock"));
     this.locked = false;
   }
   loadState() {
@@ -15697,7 +15767,7 @@ function unusable(root2) {
     if (parent === dir) return "no folder of it exists";
     dir = parent;
   }
-  if (!statSync(dir).isDirectory()) return `${dir} is not a folder`;
+  if (!statSync2(dir).isDirectory()) return `${dir} is not a folder`;
   try {
     accessSync2(dir, constants2.W_OK);
   } catch {
@@ -15907,7 +15977,7 @@ function expandHome(path, env) {
 async function prepareEnvironment(o) {
   const workspace = resolve4(o.cwd, o.dir ?? ".");
   if (!existsSync8(workspace)) throw new EnvironmentError(`no such directory: ${workspace}`);
-  if (!statSync2(workspace).isDirectory()) throw new EnvironmentError(`not a directory: ${workspace}`);
+  if (!statSync3(workspace).isDirectory()) throw new EnvironmentError(`not a directory: ${workspace}`);
   const git = new Git(workspace);
   const snapshots = await preflightSnapshots(workspace, o.env);
   const isRepo = snapshots.mode === "native";
@@ -16353,6 +16423,21 @@ function load(o, replace) {
 function filesConfiguration(o) {
   return load(o).cfg;
 }
+function fileChanges(before, after, session2) {
+  const out = [];
+  for (const k of SETTING_KEYS) {
+    const was = valueAt(before, k.path);
+    const now = valueAt(after, k.path);
+    if (isDeepStrictEqual2(was, now) || !isDeepStrictEqual2(valueAt(session2, k.path), was)) continue;
+    try {
+      out.push(settings.value(k.key, now));
+    } catch (e) {
+      if (e instanceof ConfigError) continue;
+      throw e;
+    }
+  }
+  return out;
+}
 function layerValue(raw, path) {
   let at = raw;
   for (const key of path) {
@@ -16779,7 +16864,7 @@ function rankPaths(query, entries, limit = MENTION_LIMITS.results) {
 }
 
 // packages/host/src/protocol.ts
-var PROTOCOL_VERSION = 11;
+var PROTOCOL_VERSION = 12;
 var BACKENDS = ["codex", "claude"];
 var ROUTES = ["message", "pipeline", "discuss"];
 var ARTIFACTS = ["plan", "review", "feedback", "report"];
@@ -17039,12 +17124,12 @@ function parseRequestEnvelope(v) {
 }
 
 // packages/host/src/runtimeSession.ts
-import { join as join19, resolve as resolve11 } from "path";
+import { join as join20, resolve as resolve11 } from "path";
 import { isDeepStrictEqual as isDeepStrictEqual3 } from "util";
 
 // packages/engine/src/chat/chat.ts
 import { homedir as homedir5 } from "os";
-import { join as join18, resolve as resolve10 } from "path";
+import { join as join19, resolve as resolve10 } from "path";
 
 // packages/engine/src/agents/runner.ts
 import { randomUUID as randomUUID3 } from "crypto";
@@ -17053,14 +17138,26 @@ import { join as join13 } from "path";
 
 // packages/engine/src/inputs/attachments.ts
 import { randomBytes } from "crypto";
-import { closeSync as closeSync2, copyFileSync, existsSync as existsSync11, mkdirSync as mkdirSync3, openSync as openSync2, readdirSync as readdirSync3, readFileSync as readFileSync8, readSync, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync3, writeFileSync as writeFileSync2 } from "fs";
+import { closeSync as closeSync2, copyFileSync, existsSync as existsSync11, mkdirSync as mkdirSync3, openSync as openSync2, readdirSync as readdirSync3, readFileSync as readFileSync8, readSync, renameSync as renameSync2, rmSync as rmSync2, statSync as statSync4, unlinkSync as unlinkSync2, writeFileSync as writeFileSync2 } from "fs";
 import { basename as basename3, extname as extname2, isAbsolute as isAbsolute6, join as join11, posix as posix3, relative as relative3, resolve as resolve6, sep as sep2 } from "path";
 var AttachmentError = class extends Error {
   name = "AttachmentError";
 };
 var HEAD_BYTES = 512 * 1024;
-var PENDING = "pending.json";
+var LEGACY_PENDING = "pending.json";
+var PENDING = /^pending-(\d+)-([0-9a-f]+)\.json$/;
 var PARTIAL = ".partial-";
+var PARTIAL_MS = 60 * 60 * 1e3;
+var liveOwners = /* @__PURE__ */ new Set();
+function ownerAlive(pid, nonce) {
+  if (pid === process.pid) return liveOwners.has(nonce);
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
 var u16be = (b, at) => at + 2 <= b.length ? b.readUInt16BE(at) : null;
 var u16le = (b, at) => at + 2 <= b.length ? b.readUInt16LE(at) : null;
 var u24le = (b, at) => at + 3 <= b.length ? b[at] | b[at + 1] << 8 | b[at + 2] << 16 : null;
@@ -17215,10 +17312,18 @@ function existingAttachmentFile(runsDir, a) {
   const file = attachmentFile(runsDir, a);
   if (!file) throw new AttachmentError(`${a.name}: its reference (${a.path}) is not inside ${runsDir}`);
   try {
-    if (statSync3(file).isFile()) return file;
+    if (statSync4(file).isFile()) return file;
   } catch {
   }
   throw new AttachmentError(`${a.name} is no longer where agentduo kept it (${file}); attach it again`);
+}
+function readIds(file) {
+  try {
+    const ids = JSON.parse(readFileSync8(file, "utf8"));
+    return Array.isArray(ids) ? ids.filter(isAttachmentId) : [];
+  } catch {
+    return [];
+  }
 }
 function readHead(file) {
   const fd = openSync2(file, "r");
@@ -17237,11 +17342,16 @@ var AttachmentStore = class {
   }
   runsDir;
   root;
+  /** This store's own name for its pending list (a process may have several stores of one conversation, in tests). */
+  nonce = randomBytes(4).toString("hex");
+  get pendingFile() {
+    return join11(this.root, `pending-${process.pid}-${this.nonce}.json`);
+  }
   /** A copy of the regular file at `source` (a symlink to one is copied as a file), named `name` (default: its own). */
   importFile(source, name2 = basename3(source)) {
     let size;
     try {
-      const st = statSync3(source);
+      const st = statSync4(source);
       if (st.isDirectory()) throw new AttachmentError(`${source} is a directory: attach the files in it one by one`);
       if (!st.isFile()) throw new AttachmentError(`${source} is not a regular file`);
       size = st.size;
@@ -17265,7 +17375,7 @@ var AttachmentStore = class {
     if (!isAttachmentId(a.id)) throw new AttachmentError(`${a.name}: not an attachment of agentduo's`);
     const target = join11(this.root, a.id, safeFileName(a.name));
     const ref = { ...a, path: this.ref(target) };
-    if (existsSync11(target) && statSync3(target).size === a.size) return ref;
+    if (existsSync11(target) && statSync4(target).size === a.size) return ref;
     const source = existingAttachmentFile(this.runsDir, a);
     mkdirSync3(join11(this.root, a.id), { recursive: true });
     const tmp = join11(this.root, a.id, `${PARTIAL}${randomBytes(4).toString("hex")}`);
@@ -17282,38 +17392,62 @@ var AttachmentStore = class {
   remove(id) {
     if (isAttachmentId(id)) rmSync2(join11(this.root, id), { recursive: true, force: true });
   }
-  /** The ids of the files waiting to be sent, as last saved. */
+  /** The ids of this store's files waiting to be sent, as last saved. */
   pending() {
-    try {
-      const ids = JSON.parse(readFileSync8(join11(this.root, PENDING), "utf8"));
-      return Array.isArray(ids) ? ids.filter(isAttachmentId) : [];
-    } catch {
-      return [];
-    }
+    return readIds(this.pendingFile);
   }
+  /** This store's files waiting to be sent; none: its list goes. */
   setPending(ids) {
-    if (!ids.length && !existsSync11(join11(this.root, PENDING))) return;
-    atomicWrite(join11(this.root, PENDING), `${JSON.stringify(ids)}
+    if (!ids.length) {
+      liveOwners.delete(this.nonce);
+      try {
+        unlinkSync2(this.pendingFile);
+      } catch {
+      }
+      return;
+    }
+    liveOwners.add(this.nonce);
+    atomicWrite(this.pendingFile, `${JSON.stringify(ids)}
 `);
   }
   /**
-   * What an earlier process left behind: the files it had waiting (never sent), and copies it did not finish. Files
-   * that were sent stay. Returns how many it removed.
+   * What processes that are gone left behind: the files they had waiting (never sent), and copies they did not finish.
+   * Files that were sent stay, and so do those another live process (another agentduo window) has waiting, and copies
+   * it may be making now. Returns how many it removed.
    */
   recover() {
     if (!existsSync11(this.root)) return 0;
     let removed = 0;
-    for (const id of this.pending()) {
-      if (existsSync11(join11(this.root, id))) removed++;
-      this.remove(id);
+    const kept = /* @__PURE__ */ new Set();
+    for (const name2 of readdirSync3(this.root)) {
+      const m = PENDING.exec(name2);
+      if (name2 !== LEGACY_PENDING && !m) continue;
+      const ids = readIds(join11(this.root, name2));
+      if (m && ownerAlive(Number(m[1]), m[2])) {
+        for (const id of ids) kept.add(id);
+        continue;
+      }
+      for (const id of ids) {
+        if (existsSync11(join11(this.root, id))) removed++;
+        this.remove(id);
+      }
+      rmSync2(join11(this.root, name2), { force: true });
     }
-    this.setPending([]);
     for (const entry of readdirSync3(this.root, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !isAttachmentId(entry.name)) continue;
+      if (!entry.isDirectory() || !isAttachmentId(entry.name) || kept.has(entry.name)) continue;
       const dir = join11(this.root, entry.name);
       const files = readdirSync3(dir);
-      for (const f of files.filter((f2) => f2.startsWith(PARTIAL))) rmSync2(join11(dir, f), { force: true });
-      if (!files.some((f) => !f.startsWith(PARTIAL))) {
+      const old = (f) => {
+        try {
+          return Date.now() - statSync4(join11(dir, f)).mtimeMs > PARTIAL_MS;
+        } catch {
+          return false;
+        }
+      };
+      const partial = files.filter((f) => f.startsWith(PARTIAL));
+      const stale = partial.filter(old);
+      for (const f of stale) rmSync2(join11(dir, f), { force: true });
+      if (!files.some((f) => !f.startsWith(PARTIAL)) && stale.length === partial.length) {
         rmSync2(dir, { recursive: true, force: true });
         removed++;
       }
@@ -17337,7 +17471,7 @@ var AttachmentStore = class {
     try {
       mkdirSync3(dir, { recursive: true });
       fill(tmp);
-      const size = statSync3(tmp).size;
+      const size = statSync4(tmp).size;
       this.checkSize(name2, size);
       renameSync2(tmp, target);
       const head = readHead(target);
@@ -18352,11 +18486,11 @@ Return ONLY a JSON object that matches the required schema exactly.
 };
 
 // packages/engine/src/chat/conversation.ts
-import { existsSync as existsSync15, mkdirSync as mkdirSync6, readdirSync as readdirSync5, readFileSync as readFileSync11 } from "fs";
-import { join as join16 } from "path";
+import { existsSync as existsSync15, mkdirSync as mkdirSync6, readdirSync as readdirSync5, readFileSync as readFileSync11, statSync as statSync6 } from "fs";
+import { join as join17 } from "path";
 
 // packages/engine/src/inputs/mentions.ts
-import { readdirSync as readdirSync4, statSync as statSync4 } from "fs";
+import { readdirSync as readdirSync4, statSync as statSync5 } from "fs";
 import { relative as relative5, resolve as resolve7, sep as sep3 } from "path";
 var MAX_LISTED = 2e4;
 var SKIPPED = /* @__PURE__ */ new Set([".git", "node_modules"]);
@@ -18418,7 +18552,7 @@ function walk(dir, exclude, max) {
 }
 function isFolder(path) {
   try {
-    return statSync4(path).isDirectory();
+    return statSync5(path).isDirectory();
   } catch {
     return false;
   }
@@ -18466,7 +18600,7 @@ function taggedPaths(text3, workspace) {
       if (!rel || !isWithin(full, workspace)) continue;
       let folder;
       try {
-        folder = statSync4(full).isDirectory();
+        folder = statSync5(full).isDirectory();
       } catch {
         continue;
       }
@@ -19861,11 +19995,83 @@ function codeReviewer(ctx, round2, planMd, base, snapshot, gateResults, diffStat
   return out.join("\n");
 }
 
+// packages/engine/src/workflow/lease.ts
+import { join as join16 } from "path";
+var conversationLockPath = (runsDir, id) => join16(runsDir, "conversations", id, ".lock");
+var conversationBusy = (pid) => pid ? `this conversation is in use by another agentduo (pid ${pid}); wait for it to finish there, or continue it there` : "another agentduo is starting work in this conversation; try again in a moment";
+function conversationHolder(runsDir, id) {
+  return lockHolder(conversationLockPath(runsDir, id));
+}
+var WorkspaceLease = class {
+  /** `onChange`: this process starts holding the workspace (true), or gives it back (false). */
+  constructor(runsDir, onChange) {
+    this.runsDir = runsDir;
+    this.onChange = onChange;
+  }
+  runsDir;
+  onChange;
+  workspace = null;
+  conversations = /* @__PURE__ */ new Map();
+  /** This process holds the workspace for some work now. */
+  get held() {
+    return !!this.workspace;
+  }
+  /** This process holds conversation `id` now. */
+  holds(id) {
+    return this.conversations.has(id);
+  }
+  /** Another live process that holds the workspace now, or null (nobody, or this lease). */
+  holder() {
+    const pid = workspaceLockHolder(this.runsDir);
+    return pid && !(pid === process.pid && this.held) ? pid : null;
+  }
+  /**
+   * Takes the workspace for one piece of work, and with `conversation` that conversation too. Throws LockError when
+   * another process holds either; nothing is held then. The release is idempotent, and the locks go once the last
+   * piece of work that holds them is released.
+   */
+  take(conversation2) {
+    const first = !this.workspace;
+    const workspace = this.workspace ?? { count: 0, release: acquireWorkspaceLock(this.runsDir) };
+    let held;
+    if (conversation2) {
+      held = this.conversations.get(conversation2);
+      if (!held) {
+        try {
+          held = { count: 0, release: acquireLockFile(conversationLockPath(this.runsDir, conversation2), conversationBusy) };
+        } catch (e) {
+          if (first) workspace.release();
+          throw e;
+        }
+        this.conversations.set(conversation2, held);
+      }
+      held.count++;
+    }
+    workspace.count++;
+    this.workspace = workspace;
+    if (first) this.onChange?.(true);
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      if (conversation2 && held && --held.count === 0) {
+        this.conversations.delete(conversation2);
+        held.release();
+      }
+      if (--workspace.count === 0 && this.workspace === workspace) {
+        this.workspace = null;
+        workspace.release();
+        this.onChange?.(false);
+      }
+    };
+  }
+};
+
 // packages/engine/src/chat/conversation.ts
 var CONTEXT_CHARS = 12e4;
 var RECORD = "conversation.json";
 var UNFINISHED_QUESTION = "(the message of a turn that did not finish; it was not kept)";
-var conversationsDir = (runsDir) => join16(runsDir, "conversations");
+var conversationsDir = (runsDir) => join17(runsDir, "conversations");
 function readRecord(file) {
   try {
     const r = JSON.parse(readFileSync11(file, "utf8"));
@@ -19875,13 +20081,14 @@ function readRecord(file) {
   }
 }
 var counter2 = 0;
+var withoutId = ({ id: _id, ...e }) => e;
 var Conversation = class _Conversation {
   constructor(runsDir, o = {}) {
     this.runsDir = runsDir;
     this.clock = o.clock ?? (() => /* @__PURE__ */ new Date());
     const now = this.clock();
     this.id = o.id ?? `${stamp(now)}-chat-${process.pid}-${++counter2}`;
-    this.dir = join16(conversationsDir(runsDir), this.id);
+    this.dir = join17(conversationsDir(runsDir), this.id);
     this.createdAt = now.toISOString();
     this.files = new AttachmentStore(runsDir, this.dir);
     this.locate = (a) => attachmentFile(runsDir, a);
@@ -19913,18 +20120,68 @@ var Conversation = class _Conversation {
   /** The conversation `id` of this workspace as it was saved, or a new one by that id. Only reads. */
   static open(runsDir, id, clock) {
     const c = new _Conversation(runsDir, { id, clock });
-    const r = readRecord(join16(c.dir, RECORD));
-    if (!r) return c;
-    c.name = r.title;
-    c.to = r.recipient;
-    c.before = r.turns;
-    c.createdAt = r.createdAt;
-    c.exchanges.push(...r.exchanges);
-    c.done.push(...r.earlier);
-    c.sessions = r.sessions ?? {};
-    c.asked.push(...(r.clarifications ?? []).map((e) => e.status === "pending" ? { ...e, status: "interrupted", closedAt: e.at } : e));
-    c.recoverAnswers();
+    const r = c.read();
+    if (r) c.load(r, !conversationHolder(runsDir, id));
     return c;
+  }
+  /** The record's file as this process last read or wrote it (time and size), to tell when another process saved it. */
+  seen = null;
+  fileStamp() {
+    try {
+      const st = statSync6(join17(this.dir, RECORD));
+      return `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return null;
+    }
+  }
+  /** The saved record; what it was is noted first, so a save that lands while it is read is seen as a change next time. */
+  read() {
+    this.seen = this.fileStamp();
+    return readRecord(join17(this.dir, RECORD));
+  }
+  /**
+   * Takes on a saved record. `settle`: nobody else works in the conversation, so a question still open was asked by a
+   * process that is gone (its call ended, nobody can answer it now), and answers given in a turn that never ended are
+   * passed on.
+   */
+  load(r, settle) {
+    this.name = r.title;
+    this.to = r.recipient;
+    this.before = r.turns;
+    this.createdAt = r.createdAt;
+    this.exchanges.splice(0, this.exchanges.length, ...r.exchanges);
+    this.done.splice(0, this.done.length, ...r.earlier);
+    this.sessions = r.sessions ?? {};
+    this.asked.splice(0, this.asked.length, ...(r.clarifications ?? []).map((e) => settle && e.status === "pending" ? { ...e, status: "interrupted", closedAt: e.at } : e));
+    if (settle) this.recoverAnswers();
+  }
+  /** Another process saved the conversation since this one last read or wrote it. */
+  changedOnDisk() {
+    return this.fileStamp() !== this.seen;
+  }
+  /**
+   * Reads the conversation again, as another agentduo (`duo`, an extension's or the desktop's) may have saved it since:
+   * its exchanges, tasks, title, recipient, sessions and questions. The files waiting to be sent from here stay.
+   * `settle`: this process holds the conversation now (packages/engine/src/workflow/lease.ts), as before new work.
+   * Returns the answered exchanges it did not have; nothing while a turn or a discussion of it runs here.
+   */
+  reload(o = {}) {
+    if (this.turns.some((t) => t.status === "running") || this.discussions.size) return [];
+    const r = this.read();
+    if (!r || r.id !== this.id) return [];
+    const ids = new Set(this.exchanges.flatMap((e) => e.id ? [e.id] : []));
+    const count = this.exchanges.length;
+    this.turns.length = 0;
+    this.load(r, !!o.settle);
+    return this.exchanges.filter((e, i) => !e.unfinished && (e.id ? !ids.has(e.id) : i >= count));
+  }
+  /** The agents' sessions the next calls continue: at least one is kept. */
+  get sessionsKept() {
+    return Object.keys(this.sessions).length > 0;
+  }
+  /** What was answered in the conversation so far, oldest first (a reopened conversation shows it). */
+  get history() {
+    return this.exchanges.filter((e) => !e.unfinished);
   }
   /** What the conversation is about, for its tab and the list: its first question, task or discussion. */
   get title() {
@@ -19963,12 +20220,14 @@ var Conversation = class _Conversation {
       exchanges: this.exchanges,
       earlier: this.done,
       sessions: this.sessions,
-      ...this.asked.length ? { clarifications: this.asked } : {}
+      ...this.asked.length ? { clarifications: this.asked } : {},
+      writer: process.pid
     };
     ensureRunsDir(this.runsDir);
     mkdirSync6(this.dir, { recursive: true });
-    atomicWrite(join16(this.dir, RECORD), `${JSON.stringify(record, null, 2)}
+    atomicWrite(join17(this.dir, RECORD), `${JSON.stringify(record, null, 2)}
 `);
+    this.seen = this.fileStamp();
   }
   /**
    * The session `backend`'s call continues, taken off the record until keepSession says what the call ended with: a
@@ -20001,10 +20260,10 @@ var Conversation = class _Conversation {
   /** The exchanges `session` has not seen, within the budget; omitted counts those it never saw that do not fit. */
   newContext(session2) {
     const context = this.context();
-    return { exchanges: this.exchanges.slice(Math.max(session2.exchanges, context.omitted)), omitted: Math.max(0, context.omitted - session2.exchanges) };
+    return { exchanges: this.exchanges.slice(Math.max(session2.exchanges, context.omitted)).map(withoutId), omitted: Math.max(0, context.omitted - session2.exchanges) };
   }
   get logDir() {
-    return join16(this.dir, "logs");
+    return join17(this.dir, "logs");
   }
   // ------------------------------------------------------------------ questions the agents asked the user
   /** The questions asked in this conversation, with their answers, oldest first. */
@@ -20060,7 +20319,7 @@ var Conversation = class _Conversation {
     for (const e of this.asked) if (e.status === "answered" && !e.settled) groups.set(e.discussionId ?? e.turnId ?? e.id, groups.get(e.discussionId ?? e.turnId ?? e.id) ?? e);
     for (const [key, first] of groups) {
       const clarified = this.settle((e) => (e.discussionId ?? e.turnId ?? e.id) === key);
-      this.exchanges.push({ backend: first.agent, question: UNFINISHED_QUESTION, answer: "", unfinished: true, clarified });
+      this.exchanges.push({ id: key, backend: first.agent, question: UNFINISHED_QUESTION, answer: "", unfinished: true, clarified });
     }
   }
   // ------------------------------------------------------------------ attachments
@@ -20132,7 +20391,7 @@ var Conversation = class _Conversation {
       size += length;
       keep--;
     }
-    return { exchanges: answered.slice(keep), omitted: keep };
+    return { exchanges: answered.slice(keep).map(withoutId), omitted: keep };
   }
   /**
    * Starts a turn: the prompt for `backend` carries the conversation so far within the budget and the pipeline tasks
@@ -20184,6 +20443,7 @@ var Conversation = class _Conversation {
     if (turn.answer === null) {
       if (!clarified.length) return;
       this.exchanges.push({
+        id: turn.id,
         backend: turn.backend,
         question: turn.question,
         answer: "",
@@ -20195,6 +20455,7 @@ var Conversation = class _Conversation {
       return;
     }
     this.exchanges.push({
+      id: turn.id,
       backend: turn.backend,
       question: turn.question,
       answer: turn.answer,
@@ -20285,6 +20546,7 @@ var Conversation = class _Conversation {
       for (const party of [d.answerer, d.critic]) if (this.sessions[party]?.discussion?.id === id) delete this.sessions[party];
       if (clarified.length) {
         this.exchanges.push({
+          id: d.id,
           backend: d.answerer,
           question: d.question,
           answer: "",
@@ -20299,6 +20561,7 @@ var Conversation = class _Conversation {
     }
     const by = backend ?? d.answerer;
     this.exchanges.push({
+      id: d.id,
       backend: by,
       question: d.question,
       answer,
@@ -20330,7 +20593,7 @@ function parseVerdict(answer) {
 import { createHash as createHash2 } from "crypto";
 import { existsSync as existsSync16, readFileSync as readFileSync12 } from "fs";
 import { homedir as homedir4 } from "os";
-import { dirname as dirname5, join as join17, resolve as resolve8 } from "path";
+import { dirname as dirname5, join as join18, resolve as resolve8 } from "path";
 var DISCOVERY_TIMEOUT_MS = 1e4;
 var blank = (backend) => ({
   backend,
@@ -20366,10 +20629,10 @@ function codexDoctorArgs(args) {
   return out;
 }
 function codexConfigFiles(workspace, env) {
-  const home = env.CODEX_HOME || join17(env.HOME || homedir4(), ".codex");
-  const files = [join17(home, "config.toml"), "/etc/codex/config.toml", "/etc/codex/managed_config.toml"];
+  const home = env.CODEX_HOME || join18(env.HOME || homedir4(), ".codex");
+  const files = [join18(home, "config.toml"), "/etc/codex/config.toml", "/etc/codex/managed_config.toml"];
   for (let dir = resolve8(workspace); ; dir = dirname5(dir)) {
-    files.push(join17(dir, ".codex", "config.toml"));
+    files.push(join18(dir, ".codex", "config.toml"));
     if (dirname5(dir) === dir) return files;
   }
 }
@@ -20452,7 +20715,7 @@ function claudeSettingsSources(o) {
   const enabled = listed === void 0 ? SOURCES : listed.split(",").map((s) => s.trim()).filter(Boolean);
   const unknown = enabled.find((s) => !SOURCES.includes(s));
   if (unknown) return { reason: `--setting-sources names '${unknown}', which agentduo cannot read` };
-  const configDir = o.env.CLAUDE_CONFIG_DIR || join17(o.env.HOME || homedir4(), ".claude");
+  const configDir = o.env.CLAUDE_CONFIG_DIR || join18(o.env.HOME || homedir4(), ".claude");
   const candidates = [
     ...(o.managed ?? managedSettingsPaths()).map((p) => ({ where: p, read: () => readJsonFile(p) })),
     // A later --settings wins over an earlier one.
@@ -20463,9 +20726,9 @@ function claudeSettingsSources(o) {
         return { error: e.message };
       }
     } } : { where: resolve8(o.workspace, v), read: () => readJsonFile(resolve8(o.workspace, v)) }),
-    ...(enabled.includes("local") ? [join17(o.workspace, ".claude", "settings.local.json")] : []).map((p) => ({ where: p, read: () => readJsonFile(p) })),
-    ...(enabled.includes("project") ? [join17(o.workspace, ".claude", "settings.json")] : []).map((p) => ({ where: p, read: () => readJsonFile(p) })),
-    ...(enabled.includes("user") ? [join17(configDir, "settings.json")] : []).map((p) => ({ where: p, read: () => readJsonFile(p) }))
+    ...(enabled.includes("local") ? [join18(o.workspace, ".claude", "settings.local.json")] : []).map((p) => ({ where: p, read: () => readJsonFile(p) })),
+    ...(enabled.includes("project") ? [join18(o.workspace, ".claude", "settings.json")] : []).map((p) => ({ where: p, read: () => readJsonFile(p) })),
+    ...(enabled.includes("user") ? [join18(configDir, "settings.json")] : []).map((p) => ({ where: p, read: () => readJsonFile(p) }))
   ];
   return { candidates };
 }
@@ -23176,6 +23439,7 @@ var Chat = class {
     this.o = o;
     this.cfg = structuredClone(o.cfg);
     this.env = o.env ?? process.env;
+    this.lease = o.lease ?? new WorkspaceLease(o.runsDir);
     this.conversation = o.conversationId ? Conversation.open(o.runsDir, o.conversationId) : new Conversation(o.runsDir);
     if (o.conversationId) this.conversation.recoverFiles();
     this.recipient = this.conversation.recipient ?? "codex";
@@ -23212,6 +23476,11 @@ var Chat = class {
   /** What stops the latest /usage's lookups: a refresh, or the chat stopping. */
   usageAbort = null;
   offBus;
+  lease;
+  /** The recipient was chosen while another agentduo held the conversation: it is saved with it once this chat holds it. */
+  unsavedRecipient = false;
+  /** The line being handled, as typed (a route's text as its command): what goes back to the input if it cannot run now. */
+  line = null;
   /** The config the next agent call gets. */
   get config() {
     return this.cfg;
@@ -23255,6 +23524,12 @@ var Chat = class {
     this.o.ui.setSettings?.(settingsView(this.cfg));
     this.o.ui.setModels(this.models.current());
     this.models.refresh();
+    const said2 = this.conversation.history;
+    const earlier2 = this.conversation.earlier;
+    if (said2.length || earlier2.length) {
+      this.o.ui.history?.(said2, earlier2);
+      this.o.ui.info(`Continuing \xAB${this.conversation.title || "untitled"}\xBB (${this.conversation.id}): the agents see what was said in it${this.conversation.sessionsKept ? ", and go on in their sessions" : ""}.`);
+    }
     const note = snapshotNote(await preflightSnapshots(this.o.workspace, this.env));
     if (note) this.o.ui.info(note);
     const hint = resumeHint(this.o.runsDir, this.o.workspace);
@@ -23265,6 +23540,7 @@ var Chat = class {
    * run. A line that sends something takes the waiting files with it, once it is accepted; anything else leaves them.
    */
   async submit(raw, o = {}) {
+    this.line = raw;
     const input = parseInput(raw, process.platform);
     const ui = this.o.ui;
     switch (input.kind) {
@@ -23287,7 +23563,7 @@ var Chat = class {
       case "discuss":
         return this.withFiles(o, (files) => this.discuss(input.question, files));
       case "attach":
-        return this.attachTyped(input.home ? join18(homedir5(), input.path) : resolve10(this.o.workspace, input.path));
+        return this.attachTyped(input.home ? join19(homedir5(), input.path) : resolve10(this.o.workspace, input.path));
       case "detach":
         return this.detach(input.target);
       case "setting":
@@ -23306,6 +23582,7 @@ var Chat = class {
   async submitPipeline(raw, o = {}) {
     const text3 = raw.trim();
     if (text3.startsWith("/")) return this.submit(text3, o);
+    this.line = `/pipeline ${text3}`;
     if (!text3) {
       this.o.ui.info("usage: /pipeline <task>, e.g. /pipeline Add JWT auth");
       return;
@@ -23317,6 +23594,7 @@ var Chat = class {
   async submitDiscuss(raw, o = {}) {
     const text3 = raw.trim();
     if (text3.startsWith("/")) return this.submit(text3, o);
+    this.line = text3 ? `/discuss ${text3}` : "";
     this.withFiles(o, (files) => {
       if (!text3 && !files.length) {
         this.o.ui.info("usage: /discuss <question>, e.g. /discuss Redis or Postgres for the job queue?");
@@ -23431,8 +23709,90 @@ var Chat = class {
   selectRecipient(backend) {
     if (this.recipient === backend) return;
     this.recipient = backend;
-    this.conversation.recipient = backend;
     this.o.ui.setRecipient(backend);
+    this.saveRecipient();
+  }
+  /**
+   * The recipient is saved with the conversation, which only the process holding it writes: this chat while it works, or
+   * for the moment it takes to write it. While another agentduo holds it, the choice stays here, and is saved with this
+   * chat's next work (another window's choice made meanwhile then gives way to it).
+   */
+  saveRecipient() {
+    if (this.lease.holds(this.conversation.id)) {
+      this.conversation.recipient = this.recipient;
+      this.unsavedRecipient = false;
+      return;
+    }
+    let release;
+    try {
+      release = this.lease.take(this.conversation.id);
+    } catch (e) {
+      if (!(e instanceof LockError)) throw e;
+      this.unsavedRecipient = true;
+      return;
+    }
+    try {
+      this.conversation.reload({ settle: true });
+      this.conversation.recipient = this.recipient;
+      this.unsavedRecipient = false;
+    } finally {
+      release();
+    }
+  }
+  // ------------------------------------------------------------------ the workspace, shared with other agentduo windows
+  /**
+   * Takes the workspace and this conversation for new work, then reads both again as other agentduo windows (`duo`, the
+   * extension, the desktop) may have left them: the conversation's record, and the config files (`beforeWork`). Null,
+   * and said, when another process holds either: nothing starts, its files stay waiting, and the line goes back to the
+   * input. Nothing that runs elsewhere is interrupted.
+   */
+  takeWorkspace() {
+    let release;
+    try {
+      release = this.lease.take(this.conversation.id);
+    } catch (e) {
+      if (!(e instanceof LockError)) throw e;
+      const what = e.message.charAt(0).toUpperCase() + e.message.slice(1);
+      this.o.ui.info(`${what}. Nothing was sent, and nothing there is interrupted: send it again once that work is done.`, "error");
+      if (this.line !== null) this.o.ui.refused?.(this.line);
+      return null;
+    }
+    try {
+      this.o.beforeWork?.();
+      this.catchUp(true);
+    } catch (e) {
+      release();
+      throw e;
+    }
+    return release;
+  }
+  /**
+   * The conversation as it is on disk now; `held`: this chat holds it (before new work). A recipient chosen here while
+   * another window held it is saved now; otherwise one chosen there is followed. A run this chat stopped that another
+   * window has finished meanwhile is no longer this chat's to resume. Returns the exchanges said elsewhere.
+   */
+  catchUp(held) {
+    const fresh = this.conversation.reload({ settle: held });
+    if (this.unsavedRecipient && held) {
+      this.conversation.recipient = this.recipient;
+      this.unsavedRecipient = false;
+    } else if (!this.unsavedRecipient && this.conversation.recipient && this.conversation.recipient !== this.recipient) {
+      this.recipient = this.conversation.recipient;
+      this.o.ui.setRecipient(this.recipient);
+    }
+    if (this.paused && !resumableRun(this.o.runsDir, this.o.workspace, this.paused.taskId)) this.paused = null;
+    return fresh;
+  }
+  /**
+   * While nothing runs in this chat: what another agentduo window said in its conversation since this chat last looked
+   * (shown through `history`), its title and recipient, read without taking anything. The CLI's chat looks every few
+   * seconds; the extension and the desktop follow the conversation's files themselves (packages/host/src/workspaceSession.ts).
+   */
+  refresh() {
+    if (this.active || !this.conversation.changedOnDisk()) return [];
+    const fresh = this.catchUp(false);
+    if (fresh.length) this.o.ui.history?.(fresh, []);
+    return fresh;
   }
   /** Esc: stop what runs. An answer or a discussion ends there; a pipeline's step stops and /resume continues it. */
   escape() {
@@ -23499,14 +23859,22 @@ var Chat = class {
   }
   ask(backend, question, hint, files = []) {
     if (this.active) return this.busy();
+    const release = this.takeWorkspace();
+    if (!release) return;
     const problem = missingCli(this.cfg, [backend], this.env);
     if (problem) {
+      release();
       this.o.ui.info(problem.message, "error");
       return;
     }
-    this.selectRecipient(backend);
-    if (hint) this.o.ui.info(hint);
-    this.startTurn(backend, question, files);
+    try {
+      this.selectRecipient(backend);
+      if (hint) this.o.ui.info(hint);
+      this.startTurn(backend, question, files, release);
+    } catch (e) {
+      if (!this.runsWith(release)) release();
+      throw e;
+    }
   }
   /** Claude may ask the user in this chat's turns: someone can answer, and the setting allows it (checked per call, so a change applies at once). */
   canAsk() {
@@ -23526,19 +23894,30 @@ var Chat = class {
     }
     this.omitted = omitted;
   }
-  /** Starts the answer in the background: the active record exists before anything can finish, and only it clears itself. */
-  startTurn(backend, question, files) {
+  /**
+   * Starts the answer in the background, holding the workspace (`release`): the active record exists before anything
+   * can finish, and only it clears itself.
+   */
+  startTurn(backend, question, files, release) {
     this.entitle(this.titleOf(question, files));
     const { turn, prompt, omitted } = this.conversation.begin(backend, question, this.conversation.earlier, this.o.workspace, files, this.canAsk());
     this.sentFiles(files);
     this.noteOmitted(omitted);
-    const exec = { kind: "conversation", turnId: turn.id, backend, abort: new AbortController(), done: Promise.resolve() };
+    const exec = { kind: "conversation", turnId: turn.id, backend, abort: new AbortController(), done: Promise.resolve(), release };
     this.active = exec;
     this.o.ui.setStatus("answering");
     exec.done = this.callTurn(turn, prompt, exec.abort.signal).then(() => void 0).finally(() => this.settled(exec));
   }
-  /** Whatever ran is over: unless something else started meanwhile, the chat is idle (or a run stays stopped). */
+  /** Work holding `release` has started (it gives the workspace back itself when it is over). */
+  runsWith(release) {
+    return this.active?.release === release;
+  }
+  /**
+   * Whatever ran is over, all it wrote saved and its agents gone: the workspace is given back, and unless something else
+   * started meanwhile, the chat is idle (or a run stays stopped).
+   */
   settled(exec) {
+    exec.release();
     if (this.active === exec) this.active = null;
     if (!this.active) this.o.ui.setStatus(this.paused ? "paused" : "idle");
   }
@@ -23610,10 +23989,21 @@ var Chat = class {
    */
   discuss(question, files = []) {
     if (this.active) return this.busy();
+    const release = this.takeWorkspace();
+    if (!release) return;
+    try {
+      this.discussHeld(question, files, release);
+    } catch (e) {
+      if (!this.runsWith(release)) release();
+      throw e;
+    }
+  }
+  discussHeld(question, files, release) {
     const answerer = this.recipient;
     const critic = other(answerer);
     const problem = missingCli(this.cfg, [answerer, critic], this.env);
     if (problem) {
+      release();
       this.o.ui.info(problem.message, "error");
       return;
     }
@@ -23625,7 +24015,7 @@ var Chat = class {
     const d = conversation2.beginDiscussion(answerer, critic, question, maxRounds, files);
     this.sentFiles(files);
     this.noteOmitted(d.context.omitted);
-    const exec = { kind: "discussion", id: d.id, answerer, critic, abort: new AbortController(), done: Promise.resolve() };
+    const exec = { kind: "discussion", id: d.id, answerer, critic, abort: new AbortController(), done: Promise.resolve(), release };
     this.active = exec;
     this.o.ui.setStatus("answering");
     const ids = { conversationId: conversation2.id, discussionId: d.id };
@@ -23726,8 +24116,19 @@ var Chat = class {
   startPipeline(task, files = [], profile) {
     if (this.active) return this.busy();
     if (this.elsewhere()) return;
+    const release = this.takeWorkspace();
+    if (!release) return;
+    try {
+      this.startPipelineHeld(task, files, profile, release);
+    } catch (e) {
+      if (!this.runsWith(release)) release();
+      throw e;
+    }
+  }
+  startPipelineHeld(task, files, profile, release) {
     const problem = missingCli(this.cfg, Object.values(this.cfg.agents), this.env);
     if (problem) {
+      release();
       this.o.ui.info(problem.message, "error");
       return;
     }
@@ -23740,11 +24141,12 @@ var Chat = class {
       run = newRun(this.o.runsDir, this.o.workspace, task, cfg, this.conversation.earlier, context, files);
     } catch (e) {
       if (!(e instanceof AttachmentError)) throw e;
+      release();
       this.o.ui.info(e.message, "error");
       return;
     }
     const { store, state } = run;
-    if (!this.start(store, state, cfg)) return;
+    if (!this.start(store, state, cfg, release)) return;
     this.sentFiles(files);
     if (files.length) this.o.ui.info(`The task goes to the agents with ${files.length} file${files.length === 1 ? "" : "s"}, copied into run ${store.taskId}.`);
     this.entitle(task);
@@ -23753,18 +24155,23 @@ var Chat = class {
       this.o.ui.info(`Run ${left.taskId} stays stopped and resumable: /resume ${left.taskId} continues it (or duo resume ${left.taskId}).`);
     }
   }
-  /** Locks and runs `store`'s run in the background; false when it cannot be locked. */
-  start(store, state, cfg) {
+  /**
+   * Locks and runs `store`'s run in the background, holding the workspace (`release`) until it stops or waits no more:
+   * through its steps and its waits for a decision or an answer, until its state is saved, its agents are gone and the
+   * conversation has its outcome. False (and the workspace given back) when the run cannot be locked.
+   */
+  start(store, state, cfg, release) {
     try {
       store.lock();
     } catch (e) {
+      release();
       this.o.ui.info(e.message, "error");
       return false;
     }
     this.models.refresh();
     const workflow = new Workflow({ cfg, repo: this.o.workspace, store, state, bus: this.o.bus, decider: this.o.decider, permissions: this.o.permissions, clarifier: this.o.clarifier, env: this.env });
     this.escaped = false;
-    const exec = { kind: "pipeline", store, workflow, cfg, done: Promise.resolve() };
+    const exec = { kind: "pipeline", store, workflow, cfg, done: Promise.resolve(), release };
     const conversation2 = this.conversation;
     this.active = exec;
     this.o.ui.setStatus("running");
@@ -23796,11 +24203,8 @@ var Chat = class {
       if (code === EXIT.HUMAN_REVIEW) {
         this.o.ui.info(st.humanReview?.reason === "clarification_required" ? "The run is waiting for your answers to an agent's questions; type /resume to answer them." : "The run is waiting for your decision; type /resume to decide.");
       }
-      conversation2.addEarlier(await this.outcome(st));
-    })().finally(() => {
-      if (this.active === exec) this.active = null;
-      if (!this.active) this.o.ui.setStatus(this.paused ? "paused" : "idle");
-    });
+      conversation2.addEarlier({ ...await this.outcome(st), runId: store.taskId });
+    })().finally(() => this.settled(exec));
     return true;
   }
   async outcome(st) {
@@ -23835,11 +24239,22 @@ var Chat = class {
   resume(arg, o = {}) {
     if (this.active) return this.busy();
     if (this.elsewhere()) return;
+    const release = this.takeWorkspace();
+    if (!release) return;
+    try {
+      this.resumeHeld(arg, o, release);
+    } catch (e) {
+      if (!this.runsWith(release)) release();
+      throw e;
+    }
+  }
+  resumeHeld(arg, o, release) {
     let files;
     try {
       files = this.conversation.select(o.attachments);
     } catch (e) {
       if (!(e instanceof AttachmentError)) throw e;
+      release();
       this.o.ui.info(e.message, "error");
       return;
     }
@@ -23848,19 +24263,24 @@ var Chat = class {
     if (byId) note = "";
     const target = byId ?? this.paused ?? latestResumable(this.o.runsDir, this.o.workspace);
     if (!target) {
+      release();
       this.o.ui.info("Nothing to resume.");
       return;
     }
     const cfg = this.configOf(target);
     const problem = missingCli(cfg, Object.values(cfg.agents), this.env, target.exists("config.json"));
     if (problem) {
+      release();
       this.o.ui.info(problem.message, "error");
       return;
     }
     const state = target.loadState();
     if (note || files.length) {
       const copies = this.copyInto(target, files);
-      if (!copies) return;
+      if (!copies) {
+        release();
+        return;
+      }
       state.humanNotes.push({ at: nowIso(), phase: state.inProgress?.phase ?? state.phase, note: note || FILES_NOTE, ...copies.length ? { attachments: copies } : {} });
       target.saveState(state);
       this.sentFiles(files);
@@ -23868,7 +24288,7 @@ var Chat = class {
     const paused = this.paused;
     this.paused = null;
     const saved = target.exists("config.json");
-    if (!this.start(target, state, cfg)) this.paused = paused;
+    if (!this.start(target, state, cfg, release)) this.paused = paused;
     else if (saved) target.writeJson("config.json", cfg);
   }
   /** /new: forget the conversation and the earlier tasks; a stopped run keeps its files and stays resumable. */
@@ -23885,6 +24305,7 @@ var Chat = class {
       this.o.ui.info(`Removed ${unsent.length} attached file${unsent.length === 1 ? "" : "s"} that ${unsent.length === 1 ? "was" : "were"} not sent: ${attachmentsText(unsent)}.`);
     }
     this.conversation = new Conversation(this.o.runsDir);
+    this.unsavedRecipient = false;
     this.runner = null;
     this.omitted = 0;
     this.selectRecipient("codex");
@@ -24278,7 +24699,8 @@ var RuntimeSession = class {
   env = null;
   /** The conversations that have a chat in this worker, by id. */
   tabs = /* @__PURE__ */ new Map();
-  release = null;
+  /** The workspace lock as this worker's chats take it, once there is a chat. */
+  lease = null;
   chain = Promise.resolve();
   /** Snapshots this worker has listed ("runId commit" → tree), so a diff of an earlier round stays readable. */
   listed = /* @__PURE__ */ new Map();
@@ -24318,6 +24740,7 @@ var RuntimeSession = class {
       usage: (report) => sink.ui({ type: "usage", report }, conversation2),
       setAttachments: (files) => conversation2 && sink.ui({ type: "attachments", files }, conversation2),
       sent: (files) => conversation2 && sink.ui({ type: "sent", files }, conversation2),
+      refused: (text3) => conversation2 && sink.ui({ type: "refused", text: text3 }, conversation2),
       // /quit: leave the chat as `duo` does, which here means giving the workspace back.
       exit: () => void this.serial(() => this.endSession())
     };
@@ -24342,8 +24765,9 @@ var RuntimeSession = class {
   startDiscovery() {
     if (!this.closing) this.models?.refresh();
   }
+  /** One of this worker's chats works in the workspace now (it holds the lock). */
   get active() {
-    return !!this.release;
+    return !!this.lease?.held;
   }
   /** The folder this worker works in. */
   get workspace() {
@@ -24404,12 +24828,12 @@ var RuntimeSession = class {
     return next;
   }
   /**
-   * The workspace, taken on first use: the config is read again, then the workspace lock is taken, once for every tab.
-   * `needs` names the agents the work that opens it calls, so a missing CLI is refused before the lock is taken for nothing.
+   * The workspace for a first chat: the config is read again (no lock is taken; each piece of work takes it). `needs`
+   * names the agents the work that opens it calls, so a missing CLI is said before a chat is made for nothing.
    */
-  async lockedEnv(conversation2, needs) {
+  async chatEnv(conversation2, needs) {
     if (this.closing) throw new SessionError("shutting_down", "agentduo is shutting down");
-    if (this.release && this.env) return this.env;
+    if (this.tabs.size && this.env) return this.env;
     let env;
     try {
       env = await this.prepare();
@@ -24421,29 +24845,27 @@ var RuntimeSession = class {
     for (const warning of env.warnings) this.uiFor(conversation2).info(`warning: ${warning}`);
     const problem = runnableProblem(env, env.cfg, env.sources.join(", "), this.o.env, { backends: needs(env.cfg), repo: false });
     if (problem) throw new SessionError(problem.kind, problem.message);
-    let release;
-    try {
-      release = acquireWorkspaceLock(env.runsDir);
-    } catch (e) {
-      if (e instanceof LockError) throw new SessionError("locked", e.message);
-      throw e;
+    if (this.closing) throw new SessionError("shutting_down", "agentduo is shutting down");
+    if (this.lease?.runsDir !== env.runsDir && !this.lease?.held) {
+      this.lease = new WorkspaceLease(env.runsDir, (held) => this.o.sink.ui({ type: "session", session: held ? "active" : "dormant" }, null));
     }
-    if (this.closing) {
-      release();
-      throw new SessionError("shutting_down", "agentduo is shutting down");
-    }
-    this.release = release;
     this.o.sink.ui({ type: "pipeline", pipeline: pipelineOf(env.cfg) }, null);
     this.o.sink.ui({ type: "mode", mode: permissionMode(env.cfg) }, null);
     this.o.sink.ui({ type: "settings", settings: settingsView(env.cfg) }, null);
-    this.o.sink.ui({ type: "session", session: "active" }, null);
     return env;
+  }
+  /**
+   * Before a chat's new work, once it holds the workspace: the config files are read again (another window or `duo`
+   * may have saved a setting), and every tab follows each key they changed, unless this session has a value of its own.
+   */
+  beforeWork() {
+    if (this.seen) this.followFiles(this.seen, this.sessionConfig());
   }
   /** The chat of `conversation`, opened on first use: a conversation saved earlier (a tab after a reload) carries on. */
   async ensureSession(conversation2, needs = () => []) {
     const open = this.tabs.get(conversation2);
     if (open) return open.chat;
-    const env = await this.lockedEnv(conversation2, needs);
+    const env = await this.chatEnv(conversation2, needs);
     const bus = new EventBus();
     bus.on((event) => this.o.sink.event(conversation2, event));
     const decisions = new DecisionBroker({
@@ -24469,7 +24891,9 @@ var RuntimeSession = class {
       models,
       conversationId: conversation2,
       busyElsewhere: () => this.runningElsewhere(conversation2),
-      changed: (change, wrote) => this.changedIn(conversation2, change, wrote)
+      changed: (change, wrote) => this.changedIn(conversation2, change, wrote),
+      lease: this.lease,
+      beforeWork: () => this.beforeWork()
     });
     for (const change of this.changed) chat.follow(change);
     const chosen = this.chosen.get(conversation2);
@@ -24500,8 +24924,8 @@ var RuntimeSession = class {
    */
   submit(conversation2, text3, route2 = "message", attachments = []) {
     return this.serial(async () => {
-      if (!this.release && /^\/(quit|exit)\b/.test(text3.trim())) {
-        this.uiFor(conversation2).info("No session is open; the workspace is not locked.");
+      if (!this.tabs.size && /^\/(quit|exit)\b/.test(text3.trim())) {
+        this.uiFor(conversation2).info("Nothing runs here, and the workspace is free: `duo` and other agentduo windows can work in it.");
         return;
       }
       const chat = await this.ensureSession(conversation2, (cfg) => agentsFor(text3 || (attachments.length ? "files" : ""), route2, cfg, this.recipientOf(conversation2)));
@@ -24660,19 +25084,7 @@ var RuntimeSession = class {
   followFiles(before, session2) {
     const after = filesConfiguration(this.configurationOptions(null));
     this.seen = after;
-    for (const k of SETTING_KEYS) {
-      const was = valueAt(before, k.path);
-      const now = valueAt(after, k.path);
-      if (isDeepStrictEqual3(was, now) || !isDeepStrictEqual3(valueAt(session2, k.path), was)) continue;
-      let change;
-      try {
-        change = settings.value(k.key, now);
-      } catch (e) {
-        if (e instanceof ConfigError) continue;
-        throw e;
-      }
-      this.follow(null, change);
-    }
+    for (const change of fileChanges(before, after, session2)) this.follow(null, change);
   }
   /** The configuration as it is now; the tabs (also those with no chat yet) show its settings, mode and pipeline. */
   configured() {
@@ -24778,14 +25190,12 @@ var RuntimeSession = class {
     await Promise.all(tabs.map(([, tab]) => tab.chat.stop()));
     for (const [id] of tabs) this.o.sink.ui({ type: "status", status: "idle" }, id);
   }
-  /** /quit: running runs stop at their step and stay resumable; the lock goes back. */
+  /** /quit: what runs in every tab stops (a run at its step, resumable); the workspace lock goes with the last of it. */
   async endSession() {
-    if (!this.release) return;
+    if (!this.tabs.size) return;
     await this.stopTabs(false);
-    this.release?.();
-    this.release = null;
     this.o.sink.ui({ type: "session", session: "ended" }, null);
-    this.ui.info("Session ended: the workspace is free for `duo` again. Send a message to start a new session.");
+    this.ui.info("Session ended: nothing runs here, and the workspace is free for `duo` and other agentduo windows. Send a message to go on.");
   }
   /**
    * Leaves nothing behind: waiting decisions are deferred and permission prompts denied (interrupting a run does
@@ -24801,8 +25211,6 @@ var RuntimeSession = class {
         await this.stopTabs(true);
       } finally {
         clearTimeout(hard);
-        this.release?.();
-        this.release = null;
       }
     })();
     return this.stopped;
@@ -24970,7 +25378,7 @@ ${findingsMarkdown(r.findings)}
    */
   async findFiles(query) {
     if (this.closing) throw new SessionError("shutting_down", "the worker is shutting down");
-    const runsDir = this.env?.runsDir ?? join19(this.workspace, ".agentduo", "runs");
+    const runsDir = this.env?.runsDir ?? join20(this.workspace, ".agentduo", "runs");
     if (this.paths?.runsDir !== runsDir) this.paths = { runsDir, paths: new WorkspacePaths(this.workspace, { exclude: workspaceExcludes(this.workspace, [runsDir]) }) };
     return this.paths.paths.find(query);
   }

@@ -1,4 +1,4 @@
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { PermissionDenial } from "../agents/types.js";
 import type { BudgetKey, HistoryEntry, HumanReview, Phase, Role } from "../events.js";
@@ -23,6 +23,8 @@ export interface HumanNote {
 export interface EarlierTask {
   task: string;
   outcome: string;
+  /** The run it was; absent in conversations saved before agentduo recorded it. */
+  runId?: string;
 }
 
 /**
@@ -346,6 +348,11 @@ export interface PlanCycle {
 
 /** One question of the chat and the answer it got. */
 export interface Exchange {
+  /**
+   * The turn (or discussion) it came from, so a view that shows the conversation knows which exchanges it shows already
+   * (another agentduo may have continued it). Absent in conversations saved before agentduo recorded it.
+   */
+  id?: string;
   backend: "codex" | "claude";
   question: string;
   answer: string;
@@ -517,21 +524,133 @@ export class LockError extends Error {
   override name = "LockError";
 }
 
-/** Create `path` exclusively holding our pid; a lock left by a dead process is reclaimed. */
-function acquireLock(path: string, busy: (pid: number) => string): void {
-  const take = () => {
-    const fd = openSync(path, "wx");
-    writeFileSync(fd, String(process.pid));
-    closeSync(fd);
-  };
+/** How long a lock file may hold no pid yet (its creator is writing it) before it counts as left by a crash. */
+const UNWRITTEN_LOCK_MS = 5_000;
+/** A reclaim guard older than this was left by a process that died while it took a stale lock over. */
+const RECLAIM_GUARD_MS = 10_000;
+/** How long one acquisition waits, at most, for a lock being created or taken over by another process to settle. */
+const SETTLE_MS = 1_000;
+
+/** A short synchronous pause (lock files are taken synchronously, between two writes of the same process). */
+function pause(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+type LockOwner =
+  | { kind: "gone" }
+  | { kind: "live"; pid: number }
+  /** Just created: its pid is being written. */
+  | { kind: "writing" }
+  /** Left by a process that is gone (or half written by one that crashed): `raw` is what it held. */
+  | { kind: "stale"; raw: string };
+
+function lockOwner(path: string): LockOwner {
+  let raw: string;
+  let mtime: number;
   try {
-    take();
+    raw = readFileSync(path, "utf8");
+    mtime = statSync(path).mtimeMs;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { kind: "gone" };
+    throw e;
+  }
+  const pid = Number(raw.trim());
+  if (Number.isSafeInteger(pid) && pid > 0) return pidAlive(pid) ? { kind: "live", pid } : { kind: "stale", raw };
+  return Date.now() - mtime < UNWRITTEN_LOCK_MS ? { kind: "writing" } : { kind: "stale", raw };
+}
+
+/** Creates `path` holding our pid, only if it does not exist (it is the lock's whole content, as every agentduo reads it). */
+function createLock(path: string): boolean {
+  let fd: number;
+  try {
+    fd = openSync(path, "wx");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw e;
+  }
+  try {
+    writeFileSync(fd, String(process.pid));
+  } catch (e) {
+    closeSync(fd);
+    unlinkSync(path);
+    throw e;
+  }
+  closeSync(fd);
+  return true;
+}
+
+/**
+ * A stale lock goes, under a guard only one process holds at a time, and only if it still holds what was found stale:
+ * two processes that both found it stale never both take it (the second sees the first's lock, alive).
+ */
+function reclaimLock(path: string, stale: string): void {
+  const guard = `${path}.reclaim`;
+  let fd: number;
+  try {
+    fd = openSync(guard, "wx");
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    const pid = Number(readFileSync(path, "utf8").trim());
-    if (pid && pidAlive(pid)) throw new LockError(busy(pid));
-    unlinkSync(path);
-    take();
+    // Another process takes it over now; a guard left by one that died doing so is old.
+    try {
+      if (Date.now() - statSync(guard).mtimeMs > RECLAIM_GUARD_MS) unlinkSync(guard);
+    } catch {
+      // gone meanwhile
+    }
+    return;
+  }
+  closeSync(fd);
+  try {
+    if (readFileSync(path, "utf8") === stale) unlinkSync(path);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  } finally {
+    try {
+      unlinkSync(guard);
+    } catch {
+      // already gone
+    }
+  }
+}
+
+/**
+ * Creates `path` exclusively, holding our pid. A lock whose process is gone is taken over (never simply ignored); one
+ * being created or taken over by another process is waited for briefly. Throws LockError naming the live holder (null:
+ * another process is taking it right now).
+ */
+function acquireLock(path: string, busy: (pid: number | null) => string): void {
+  const deadline = Date.now() + SETTLE_MS;
+  for (;;) {
+    if (createLock(path)) return;
+    const owner = lockOwner(path);
+    if (owner.kind === "live") throw new LockError(busy(owner.pid));
+    if (owner.kind === "stale") reclaimLock(path, owner.raw);
+    if (owner.kind === "gone" || owner.kind === "stale") {
+      if (createLock(path)) return;
+    }
+    if (Date.now() > deadline) {
+      const now = lockOwner(path);
+      throw new LockError(busy(now.kind === "live" ? now.pid : null));
+    }
+    pause(15);
+  }
+}
+
+/** Removes a lock this process holds; one that names another process (taken over meanwhile) stays. */
+function releaseLock(path: string): void {
+  try {
+    if (readFileSync(path, "utf8").trim() === String(process.pid)) unlinkSync(path);
+  } catch {
+    // already removed
+  }
+}
+
+/** The live process holding the lock at `path`, or null; only looks, never takes or reclaims it. */
+export function lockHolder(path: string): number | null {
+  try {
+    const owner = lockOwner(path);
+    return owner.kind === "live" ? owner.pid : null;
+  } catch {
+    return null;
   }
 }
 
@@ -542,31 +661,31 @@ export function ensureRunsDir(runsDir: string): void {
   if (!existsSync(ignore)) writeFileSync(ignore, "*\n");
 }
 
-export const workspaceBusy = (pid: number): string =>
-  `another agentduo run is active in this workspace (pid ${pid}); wait for it to finish or stop it first`;
+export const workspaceBusy = (pid: number | null): string => pid
+  ? `another agentduo is working in this workspace (pid ${pid}); wait for it to finish or stop it there first`
+  : "another agentduo is starting work in this workspace; try again in a moment";
 
-/** One active run per workspace: concurrent runs in one directory would review each other's edits. */
+/**
+ * One piece of work at a time per workspace, whatever runs it (`duo`, the extension, the desktop): concurrent runs in
+ * one directory would review each other's edits. Held only while work runs (packages/engine/src/workflow/lease.ts).
+ */
 export function acquireWorkspaceLock(runsDir: string): () => void {
   ensureRunsDir(runsDir);
   const path = join(runsDir, ".lock");
   acquireLock(path, workspaceBusy);
-  return () => {
-    try {
-      unlinkSync(path);
-    } catch {
-      // already removed
-    }
-  };
+  return () => releaseLock(path);
 }
 
 /** The live process holding the workspace lock, or null; only looks, never takes or reclaims it. */
 export function workspaceLockHolder(runsDir: string): number | null {
-  try {
-    const pid = Number(readFileSync(join(runsDir, ".lock"), "utf8").trim());
-    return pid && pidAlive(pid) ? pid : null;
-  } catch {
-    return null;
-  }
+  return lockHolder(join(runsDir, ".lock"));
+}
+
+/** Takes the lock file at `path` (its directory is created), held by this process until the release. */
+export function acquireLockFile(path: string, busy: (pid: number | null) => string): () => void {
+  mkdirSync(dirname(path), { recursive: true });
+  acquireLock(path, busy);
+  return () => releaseLock(path);
 }
 
 function pidAlive(pid: number): boolean {
@@ -639,17 +758,13 @@ export class RunStore {
   }
 
   lock(): void {
-    acquireLock(this.path("lock"), (pid) => `run ${this.taskId} is already being processed by pid ${pid}`);
+    acquireLock(this.path("lock"), (pid) => pid ? `run ${this.taskId} is already being processed by pid ${pid}` : `run ${this.taskId} is being taken by another process`);
     this.locked = true;
   }
 
   unlock(): void {
     if (!this.locked) return;
-    try {
-      unlinkSync(this.path("lock"));
-    } catch {
-      // already removed
-    }
+    releaseLock(this.path("lock"));
     this.locked = false;
   }
 

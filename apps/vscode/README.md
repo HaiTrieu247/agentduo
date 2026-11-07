@@ -2,7 +2,9 @@
 
 The [agentduo](https://agentduo.netlify.app/) channel in a VS Code sidebar. Codex plans and reviews
 the code, and Claude Code critiques the plan and implements it. The extension runs the same engine as the `duo` CLI and
-uses the same configuration, run directory and lock. A run started in one can be resumed in the other.
+uses the same configuration, run directory, conversations and lock. `duo`, this extension and the desktop app can be open
+on one workspace together: each takes the workspace only while its work runs, and a conversation or a run started in one
+goes on in another (see "Working from several windows" in the main README).
 
 ## Requirements
 
@@ -138,15 +140,18 @@ does not turn the other off.
 
 Reloading the window or closing VS Code stops the current step, as Esc does in the terminal. Pending decisions are
 deferred, unanswered permission requests are denied, an open Claude question ends its call (a chat turn's is saved as interrupted;
-a pipeline step's, like a planner's, stays pending, to be asked again), the lock is released, and the run stays resumable. The engine
+a pipeline step's, like a planner's, stays pending, to be asked again), the lock is released (it is held only while work
+runs anyway), and the run stays resumable. The engine
 gets 4 seconds to do this, even when it is still starting, and is then stopped outright. The extension never restarts
 a task on its own. It offers **Resume** instead.
 
 ## Limits of this version
 
 Desktop VS Code with a local folder (or none, for your home folder) only. There is no web build, and Remote SSH, WSL and containers are not
-supported. Each window has one session; its tabs answer side by side, but run one pipeline at a time. There is no
-browser for older runs: **Resume** continues the latest run, as `/resume` does in the CLI.
+supported. Each window has one session; its tabs answer side by side, but run one pipeline at a time. While `duo` or
+another window works in the workspace, a banner says so and a message you send comes back to the composer, to send again
+once it is done; work that is running is never moved between windows. There is no browser for older runs: **Resume**
+continues the latest run, as `/resume` does in the CLI.
 
 ## Credits
 

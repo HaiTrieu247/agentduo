@@ -10,7 +10,8 @@ import { SHUTDOWN_GRACE_MS, WorkerClient } from "../src/workerClient.js";
 import { emptyState, pickWorkspace, WorkspaceSession } from "../src/workspaceSession.js";
 import { reduce, type ViewState } from "../src/viewState.js";
 import { NOT_REPO_NOTE } from "@agentduo/engine/chat/chat";
-import { RunStore } from "@agentduo/engine/workflow/state";
+import { acquireLockFile, acquireWorkspaceLock, RunStore } from "@agentduo/engine/workflow/state";
+import { conversationBusy, conversationLockPath } from "@agentduo/engine/workflow/lease";
 import { approval, critique, finding, impl, plan, plannerAsk, review } from "@agentduo/engine/testing/builders";
 import { type ConfigOverrides, userConfigEnv } from "@agentduo/engine/testing/config";
 import { FakeClis } from "@agentduo/engine/testing/fake-clis";
@@ -67,9 +68,12 @@ function session(o: { overrides?: ConfigOverrides; node?: boolean; script?: stri
 /** A webview: applies the snapshot and then the action batches, as webview/main.ts does. */
 class FakeView {
   state: ViewState | null = null;
+  /** What came back to its composer (a message that could not be sent). */
+  readonly drafts: string[] = [];
   readonly post = (m: HostMessage) => {
     if (m.type === "snapshot") this.state = m.state;
     else if (m.type === "actions" && this.state) for (const a of m.actions) this.state = reduce(this.state, a);
+    else if (m.type === "restoreDraft") this.drafts.push(m.text);
   };
 }
 
@@ -90,7 +94,8 @@ describe("WorkspaceSession: a tab per conversation", () => {
     await s.conversation("tab-b").submit("/claude Question B");
     await waitUntil(() => said(a.state).length === 2 && said(b.state).length === 2, 25_000, "both answers");
     expect([said(a.state), said(b.state)]).toEqual([["Question A", "for A"], ["/claude Question B", "for B"]]);
-    expect([a.state!.session, b.state!.session]).toEqual(["active", "active"]);
+    // The workspace lock went back once both answers were in: other windows can work here now.
+    expect([a.state!.session, b.state!.session]).toEqual(["dormant", "dormant"]);
     expect(a.state!.settings).toEqual(b.state!.settings);
     expect([a.state!.recipient, b.state!.recipient]).toEqual(["codex", "claude"]);
     expect(s.conversations.sort()).toEqual(["tab-a", "tab-b"]);
@@ -166,7 +171,7 @@ describe("WorkspaceSession", () => {
     await s.conversation(C).submit("Make app.txt fixed", "pipeline");
     await until(s, (st) => finishes(st).includes("DONE") && st.status === "idle", "DONE");
     const st = s.conversation(C).state;
-    expect(st.session).toBe("active");
+    expect(st.session).toBe("dormant"); // the run is over: the workspace lock went back with it
     expect(st.timeline.map((i) => i.kind)).toEqual(expect.arrayContaining(["user", "run", "step", "finish"]));
     const steps = st.timeline.flatMap((i) => (i.kind === "step" ? [i.step] : []));
     // The first step runs the gates before any change (the baseline), then the planner's turn is a step of its own.
@@ -287,7 +292,7 @@ describe("WorkspaceSession", () => {
     await Promise.all([s.conversation(C).submit("Make app.txt fixed", "pipeline"), s.conversation(C).cycleMode(), started]);
     await until(s, (st) => finishes(st).includes("DONE") && st.status === "idle", "DONE");
     expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["initialize", "(initialized)", "submit", "cycleMode"]);
-    expect(s.conversation(C).state.session).toBe("active");
+    expect(s.conversation(C).state.session).toBe("dormant");
     expect(s.conversation(C).state.mode).toBe("acceptEdits");
     expect(s.conversation(C).state.timeline.filter((i) => i.kind === "info" && i.tone === "error")).toEqual([]);
   });
@@ -372,7 +377,7 @@ describe("WorkspaceSession", () => {
       await submitted;
       await until(s, (st) => finishes(st).includes("DONE") && st.status === "idle", "DONE");
       expect(worker.requests()).toEqual([`${first} initialize`, `${first} shutdown`, `${second} initialize`, `${second} submit`]);
-      expect(s.conversation(C).state.session).toBe("active");
+      expect(s.conversation(C).state.session).toBe("dormant");
       expect(s.conversation(C).state.problem).toBeNull();
       expect(s.conversation(C).state.timeline.filter((i) => i.kind === "info" && i.tone === "error")).toEqual([]);
     });
@@ -529,5 +534,109 @@ describe("WorkspaceSession: attached files", () => {
     const a = tab.state.attachments[0]!.attachment!;
     expect(realpathSync(s.attachmentRoot(C)!)).toBe(realpathSync(join(outside, "conversations", C, "attachments")));
     expect(s.attachmentPath(C, a) && existsSync(s.attachmentPath(C, a)!)).toBe(true);
+  });
+});
+
+describe("WorkspaceSession: other agentduo windows on the workspace", () => {
+  /** What a tab shows of its conversation: messages and answers, in order. */
+  const said = (st: ViewState | null) => (st?.timeline ?? []).flatMap((i) => (i.kind === "user" ? [i.text] : i.kind === "answer" ? [i.turn.answer ?? ""] : []));
+  const userFile = (name: string) => {
+    mkdirSync(join(t.path, "home"), { recursive: true });
+    writeFileSync(join(t.path, "home", name), png(8, 8));
+    return join(t.path, "home", name);
+  };
+  const viewFile = () => join(repo, ".agentduo", "runs", "conversations", C, "view.json");
+
+  it("follows a conversation another window continues while its tab is idle, keeps its composer's files, and shows nothing twice", async () => {
+    fake.setScenario({ chat_codex: [{ answer: "ANS-1" }, { answer: "ANS-2" }, { answer: "ANS-3" }] });
+    const a = session();
+    const b = session();
+    const [va, vb] = [new FakeView(), new FakeView()];
+    a.conversation(C).attach(va.post);
+    b.conversation(C).attach(vb.post);
+    await Promise.all([a.start(), b.start()]);
+    await a.conversation(C).submit("Q1");
+    await waitUntil(() => said(b.conversation(C).state).includes("ANS-1"), 10_000, "the other window to follow");
+    // A file waits in the idle window's composer while the other one goes on.
+    await b.conversation(C).stage({ key: "w1", path: userFile("shot.png"), name: "shot.png" });
+    await a.conversation(C).submit("Q2");
+    await waitUntil(() => said(b.conversation(C).state).includes("ANS-2"), 10_000, "the other window to follow again");
+    expect(b.conversation(C).state.attachments.map((c) => [c.key, c.status])).toEqual([["w1", "ready"]]);
+    // The idle window sends next, with its file; the first one follows it in turn.
+    const file = b.conversation(C).state.attachments[0]!.attachment!.id;
+    await b.conversation(C).submit("Q3", "message", [file]);
+    await waitUntil(() => said(a.conversation(C).state).includes("ANS-3"), 15_000, "the first window to follow");
+    for (const [s, v] of [[a, va], [b, vb]] as const) {
+      expect(said(s.conversation(C).state)).toEqual(["Q1", "ANS-1", "Q2", "ANS-2", "Q3", "ANS-3"]);
+      expect(said(v.state)).toEqual(["Q1", "ANS-1", "Q2", "ANS-2", "Q3", "ANS-3"]);
+    }
+    expect(fake.calls("chat_codex")[2]!.images?.map((i) => basename(i.file!))).toEqual(["shot.png"]);
+  });
+
+  it("closing an idle tab never puts its older view over the one another window saved", async () => {
+    fake.setScenario({ chat_codex: [{ answer: "NEWER" }] });
+    const a = session();
+    const b = session();
+    a.conversation(C).attach(new FakeView().post);
+    b.conversation(C).attach(new FakeView().post);
+    await Promise.all([a.start(), b.start()]);
+    await b.conversation(C).submit("/help");
+    await a.conversation(C).submit("A question");
+    await until(a, (st) => said(st).includes("NEWER"), "the answer");
+    await waitUntil(() => existsSync(viewFile()) && readFileSync(viewFile(), "utf8").includes("NEWER"), 5000, "the view to be saved");
+    await b.conversation(C).close();
+    const saved = JSON.parse(readFileSync(viewFile(), "utf8")) as ViewState;
+    expect(said(saved)).toEqual(["A question", "NEWER"]);
+    // Opened again in the window that closed it, the conversation has it all, once.
+    const again = b.conversation(C);
+    expect(said(again.state)).toEqual(["A question", "NEWER"]);
+  });
+
+  it("opens a conversation `duo` had, with no view of its own, with what was said in it", async () => {
+    const dir = join(repo, ".agentduo", "runs", "conversations", "from-cli");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "conversation.json"), JSON.stringify({
+      version: 1, id: "from-cli", title: "From the terminal", createdAt: "2026-11-07T00:00:00.000Z", updatedAt: "2026-11-07T00:00:00.000Z", recipient: "claude", turns: 2,
+      exchanges: [
+        { id: "from-cli-t1", backend: "codex", question: "Asked in duo", answer: "Answered in duo" },
+        { id: "from-cli-d1-1", backend: "codex", question: "Discussed in duo", answer: "Synthesis in duo", discussedWith: "claude" },
+      ],
+      earlier: [{ task: "A task", outcome: "done; fixed it", runId: "20261107-000000-a-task" }], sessions: {},
+    }));
+    const s = session();
+    const view = new FakeView();
+    await s.start();
+    s.conversation("from-cli").attach(view.post);
+    expect(said(view.state)).toEqual(["Asked in duo", "Answered in duo", "Discussed in duo", "Synthesis in duo"]);
+    expect(view.state!.recipient).toBe("claude");
+    expect(view.state!.timeline.some((i) => i.kind === "run" && i.runId === "20261107-000000-a-task")).toBe(true);
+    expect(view.state!.timeline.find((i) => i.kind === "user" && i.text === "Discussed in duo")).toMatchObject({ discuss: true });
+  });
+
+  it("says when another agentduo works in the workspace, gives a message sent meanwhile back, and sends it once that is done", async () => {
+    fake.setScenario({ chat_codex: [{ answer: "Now it went." }] });
+    const s = session();
+    const view = new FakeView();
+    s.conversation(C).attach(view.post);
+    await s.start();
+    // As `duo` holds them while it answers in another conversation.
+    const runsDir = join(repo, ".agentduo", "runs");
+    const release = acquireWorkspaceLock(runsDir);
+    const conversation = acquireLockFile(conversationLockPath(runsDir, "in-duo"), conversationBusy);
+    try {
+      await until(s, (st) => st.problem?.kind === "locked", "the banner", 10_000);
+      expect(s.conversation(C).state.problem!.message).toContain(`Another agentduo (pid ${process.pid}) is working in this workspace`);
+      await s.conversation(C).submit("Hello there");
+      await waitUntil(() => view.drafts.includes("Hello there"), 10_000, "the message back in the composer");
+      expect(said(s.conversation(C).state)).toEqual([]);
+      expect(s.conversation(C).state.timeline.some((i) => i.kind === "info" && i.tone === "error" && i.text.includes("Nothing was sent"))).toBe(true);
+    } finally {
+      conversation();
+      release();
+    }
+    await until(s, (st) => st.problem === null, "the banner to go", 10_000);
+    await s.conversation(C).submit("Hello there");
+    await until(s, (st) => said(st).includes("Now it went."), "the answer");
+    expect(said(s.conversation(C).state)).toEqual(["Hello there", "Now it went."]);
   });
 });

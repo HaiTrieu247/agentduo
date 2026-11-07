@@ -17,7 +17,8 @@ import {
   type SettingsView,
 } from "../config/settings.js";
 import { openRunGit, preflightSnapshots, RunGitError, type SnapshotPreflight } from "../git/run-git.js";
-import { nowIso, RunStore, type ConversationContext, type EarlierTask, type RunState } from "../workflow/state.js";
+import { LockError, nowIso, RunStore, type ConversationContext, type EarlierTask, type Exchange, type RunState } from "../workflow/state.js";
+import { WorkspaceLease } from "../workflow/lease.js";
 import { readClaudeUsage, readCodexUsage, type UsageReport, type UsageState } from "../system/usage.js";
 import { EXIT, Workflow } from "../workflow/workflow.js";
 import type {
@@ -50,6 +51,16 @@ export interface ChatUi {
   setAttachments?(files: Attachment[]): void;
   /** The files that went with the message just accepted; the screen shows them with it. */
   sent?(files: Attachment[]): void;
+  /**
+   * A line that could not run now, because another agentduo (another window, `duo`) works in this workspace or this
+   * conversation: nothing was sent, its files still wait, and the screen gives the line back to the input to send again.
+   */
+  refused?(text: string): void;
+  /**
+   * What was said in this conversation that the screen has not shown: all of it as a saved conversation opens, then
+   * what another agentduo said in it meanwhile (`refresh`). Oldest first.
+   */
+  history?(exchanges: Exchange[], earlier: EarlierTask[]): void;
   exit(): void;
 }
 
@@ -104,6 +115,16 @@ export interface ChatOptions {
    * files it was written to: the host has its other chats follow it, and tells whoever else reads a file written.
    */
   changed?: (change: SettingChange, wrote: SaveFlags) => void;
+  /**
+   * The workspace lock work takes (packages/engine/src/workflow/lease.ts), shared by every chat of the process (the
+   * extension's tabs); by default this chat's own. It is held only while work runs, never while the chat waits for input.
+   */
+  lease?: WorkspaceLease;
+  /**
+   * Once this chat holds the workspace, before new work starts: the host reads the config files again (another window
+   * may have saved a setting), and its chats follow what changed, the session's own values still winning.
+   */
+  beforeWork?: () => void;
 }
 
 /**
@@ -170,11 +191,15 @@ export function snapshotNote(plan: SnapshotPreflight): string | null {
   return plan.problem.kind === "not_repo" ? HOME_NOTE : plan.problem.message;
 }
 
-/** The one thing agents do for this chat at a time: a pipeline run, the answer to a question, or a discussion. */
+/**
+ * The one thing agents do for this chat at a time: a pipeline run, the answer to a question, or a discussion. Each holds
+ * the workspace and the conversation (`release` gives them back) from before it starts until all it wrote is saved and
+ * its agents are gone, waits for the user included.
+ */
 type Execution =
-  | { kind: "pipeline"; store: RunStore; workflow: Workflow; cfg: ConfigData; done: Promise<void> }
-  | { kind: "conversation"; turnId: string; backend: Backend; abort: AbortController; done: Promise<void> }
-  | { kind: "discussion"; id: string; answerer: Backend; critic: Backend; abort: AbortController; done: Promise<void> };
+  | { kind: "pipeline"; store: RunStore; workflow: Workflow; cfg: ConfigData; done: Promise<void>; release: () => void }
+  | { kind: "conversation"; turnId: string; backend: Backend; abort: AbortController; done: Promise<void>; release: () => void }
+  | { kind: "discussion"; id: string; answerer: Backend; critic: Backend; abort: AbortController; done: Promise<void>; release: () => void };
 
 /** How one agent call of the conversation ended; a review's answer comes without its VERDICT line. */
 interface TurnOutcome {
@@ -224,10 +249,16 @@ export class Chat {
   /** What stops the latest /usage's lookups: a refresh, or the chat stopping. */
   private usageAbort: AbortController | null = null;
   private readonly offBus: () => void;
+  private readonly lease: WorkspaceLease;
+  /** The recipient was chosen while another agentduo held the conversation: it is saved with it once this chat holds it. */
+  private unsavedRecipient = false;
+  /** The line being handled, as typed (a route's text as its command): what goes back to the input if it cannot run now. */
+  private line: string | null = null;
 
   constructor(private readonly o: ChatOptions) {
     this.cfg = structuredClone(o.cfg);
     this.env = o.env ?? process.env;
+    this.lease = o.lease ?? new WorkspaceLease(o.runsDir);
     this.conversation = o.conversationId ? Conversation.open(o.runsDir, o.conversationId) : new Conversation(o.runsDir);
     // Files an earlier process left waiting (it crashed) were never sent, and no screen shows them any more.
     if (o.conversationId) this.conversation.recoverFiles();
@@ -295,6 +326,13 @@ export class Chat {
     this.o.ui.setSettings?.(settingsView(this.cfg));
     this.o.ui.setModels(this.models.current());
     this.models.refresh();
+    // A saved conversation (from this terminal, the extension or the desktop) opens with what was said in it.
+    const said = this.conversation.history;
+    const earlier = this.conversation.earlier;
+    if (said.length || earlier.length) {
+      this.o.ui.history?.(said, earlier);
+      this.o.ui.info(`Continuing «${this.conversation.title || "untitled"}» (${this.conversation.id}): the agents see what was said in it${this.conversation.sessionsKept ? ", and go on in their sessions" : ""}.`);
+    }
     const note = snapshotNote(await preflightSnapshots(this.o.workspace, this.env));
     if (note) this.o.ui.info(note);
     const hint = resumeHint(this.o.runsDir, this.o.workspace);
@@ -306,6 +344,7 @@ export class Chat {
    * run. A line that sends something takes the waiting files with it, once it is accepted; anything else leaves them.
    */
   async submit(raw: string, o: SubmitOptions = {}): Promise<void> {
+    this.line = raw;
     const input = parseInput(raw, process.platform);
     const ui = this.o.ui;
     switch (input.kind) {
@@ -349,6 +388,7 @@ export class Chat {
   async submitPipeline(raw: string, o: SubmitOptions = {}): Promise<void> {
     const text = raw.trim();
     if (text.startsWith("/")) return this.submit(text, o);
+    this.line = `/pipeline ${text}`;
     if (!text) {
       this.o.ui.info("usage: /pipeline <task>, e.g. /pipeline Add JWT auth");
       return;
@@ -361,6 +401,7 @@ export class Chat {
   async submitDiscuss(raw: string, o: SubmitOptions = {}): Promise<void> {
     const text = raw.trim();
     if (text.startsWith("/")) return this.submit(text, o);
+    this.line = text ? `/discuss ${text}` : "";
     this.withFiles(o, (files) => {
       if (!text && !files.length) {
         this.o.ui.info("usage: /discuss <question>, e.g. /discuss Redis or Postgres for the job queue?");
@@ -485,8 +526,94 @@ export class Chat {
   selectRecipient(backend: Backend): void {
     if (this.recipient === backend) return;
     this.recipient = backend;
-    this.conversation.recipient = backend;
     this.o.ui.setRecipient(backend);
+    this.saveRecipient();
+  }
+
+  /**
+   * The recipient is saved with the conversation, which only the process holding it writes: this chat while it works, or
+   * for the moment it takes to write it. While another agentduo holds it, the choice stays here, and is saved with this
+   * chat's next work (another window's choice made meanwhile then gives way to it).
+   */
+  private saveRecipient(): void {
+    if (this.lease.holds(this.conversation.id)) {
+      this.conversation.recipient = this.recipient;
+      this.unsavedRecipient = false;
+      return;
+    }
+    let release: () => void;
+    try {
+      release = this.lease.take(this.conversation.id);
+    } catch (e) {
+      if (!(e instanceof LockError)) throw e;
+      this.unsavedRecipient = true;
+      return;
+    }
+    try {
+      this.conversation.reload({ settle: true });
+      this.conversation.recipient = this.recipient;
+      this.unsavedRecipient = false;
+    } finally {
+      release();
+    }
+  }
+
+  // ------------------------------------------------------------------ the workspace, shared with other agentduo windows
+  /**
+   * Takes the workspace and this conversation for new work, then reads both again as other agentduo windows (`duo`, the
+   * extension, the desktop) may have left them: the conversation's record, and the config files (`beforeWork`). Null,
+   * and said, when another process holds either: nothing starts, its files stay waiting, and the line goes back to the
+   * input. Nothing that runs elsewhere is interrupted.
+   */
+  private takeWorkspace(): (() => void) | null {
+    let release: () => void;
+    try {
+      release = this.lease.take(this.conversation.id);
+    } catch (e) {
+      if (!(e instanceof LockError)) throw e;
+      const what = e.message.charAt(0).toUpperCase() + e.message.slice(1);
+      this.o.ui.info(`${what}. Nothing was sent, and nothing there is interrupted: send it again once that work is done.`, "error");
+      if (this.line !== null) this.o.ui.refused?.(this.line);
+      return null;
+    }
+    try {
+      this.o.beforeWork?.();
+      this.catchUp(true);
+    } catch (e) {
+      release();
+      throw e;
+    }
+    return release;
+  }
+
+  /**
+   * The conversation as it is on disk now; `held`: this chat holds it (before new work). A recipient chosen here while
+   * another window held it is saved now; otherwise one chosen there is followed. A run this chat stopped that another
+   * window has finished meanwhile is no longer this chat's to resume. Returns the exchanges said elsewhere.
+   */
+  private catchUp(held: boolean): Exchange[] {
+    const fresh = this.conversation.reload({ settle: held });
+    if (this.unsavedRecipient && held) {
+      this.conversation.recipient = this.recipient;
+      this.unsavedRecipient = false;
+    } else if (!this.unsavedRecipient && this.conversation.recipient && this.conversation.recipient !== this.recipient) {
+      this.recipient = this.conversation.recipient;
+      this.o.ui.setRecipient(this.recipient);
+    }
+    if (this.paused && !resumableRun(this.o.runsDir, this.o.workspace, this.paused.taskId)) this.paused = null;
+    return fresh;
+  }
+
+  /**
+   * While nothing runs in this chat: what another agentduo window said in its conversation since this chat last looked
+   * (shown through `history`), its title and recipient, read without taking anything. The CLI's chat looks every few
+   * seconds; the extension and the desktop follow the conversation's files themselves (packages/host/src/workspaceSession.ts).
+   */
+  refresh(): Exchange[] {
+    if (this.active || !this.conversation.changedOnDisk()) return [];
+    const fresh = this.catchUp(false);
+    if (fresh.length) this.o.ui.history?.(fresh, []);
+    return fresh;
   }
 
   /** Esc: stop what runs. An answer or a discussion ends there; a pipeline's step stops and /resume continues it. */
@@ -564,14 +691,23 @@ export class Chat {
 
   private ask(backend: Backend, question: string, hint: string | null, files: Attachment[] = []): void {
     if (this.active) return this.busy();
+    const release = this.takeWorkspace();
+    if (!release) return;
+    // Checked with the config as it is now (another window may have changed the agent's binary).
     const problem = missingCli(this.cfg, [backend], this.env);
     if (problem) {
+      release();
       this.o.ui.info(problem.message, "error");
       return;
     }
-    this.selectRecipient(backend);
-    if (hint) this.o.ui.info(hint);
-    this.startTurn(backend, question, files);
+    try {
+      this.selectRecipient(backend);
+      if (hint) this.o.ui.info(hint);
+      this.startTurn(backend, question, files, release);
+    } catch (e) {
+      if (!this.runsWith(release)) release();
+      throw e;
+    }
   }
 
   /** Claude may ask the user in this chat's turns: someone can answer, and the setting allows it (checked per call, so a change applies at once). */
@@ -596,20 +732,32 @@ export class Chat {
     this.omitted = omitted;
   }
 
-  /** Starts the answer in the background: the active record exists before anything can finish, and only it clears itself. */
-  private startTurn(backend: Backend, question: string, files: Attachment[]): void {
+  /**
+   * Starts the answer in the background, holding the workspace (`release`): the active record exists before anything
+   * can finish, and only it clears itself.
+   */
+  private startTurn(backend: Backend, question: string, files: Attachment[], release: () => void): void {
     this.entitle(this.titleOf(question, files));
     const { turn, prompt, omitted } = this.conversation.begin(backend, question, this.conversation.earlier, this.o.workspace, files, this.canAsk());
     this.sentFiles(files);
     this.noteOmitted(omitted);
-    const exec: Extract<Execution, { kind: "conversation" }> = { kind: "conversation", turnId: turn.id, backend, abort: new AbortController(), done: Promise.resolve() };
+    const exec: Extract<Execution, { kind: "conversation" }> = { kind: "conversation", turnId: turn.id, backend, abort: new AbortController(), done: Promise.resolve(), release };
     this.active = exec;
     this.o.ui.setStatus("answering");
     exec.done = this.callTurn(turn, prompt, exec.abort.signal).then(() => undefined).finally(() => this.settled(exec));
   }
 
-  /** Whatever ran is over: unless something else started meanwhile, the chat is idle (or a run stays stopped). */
+  /** Work holding `release` has started (it gives the workspace back itself when it is over). */
+  private runsWith(release: () => void): boolean {
+    return this.active?.release === release;
+  }
+
+  /**
+   * Whatever ran is over, all it wrote saved and its agents gone: the workspace is given back, and unless something else
+   * started meanwhile, the chat is idle (or a run stays stopped).
+   */
   private settled(exec: Execution): void {
+    exec.release();
     if (this.active === exec) this.active = null;
     if (!this.active) this.o.ui.setStatus(this.paused ? "paused" : "idle");
   }
@@ -671,10 +819,22 @@ export class Chat {
    */
   private discuss(question: string, files: Attachment[] = []): void {
     if (this.active) return this.busy();
+    const release = this.takeWorkspace();
+    if (!release) return;
+    try {
+      this.discussHeld(question, files, release);
+    } catch (e) {
+      if (!this.runsWith(release)) release();
+      throw e;
+    }
+  }
+
+  private discussHeld(question: string, files: Attachment[], release: () => void): void {
     const answerer = this.recipient;
     const critic = other(answerer);
     const problem = missingCli(this.cfg, [answerer, critic], this.env);
     if (problem) {
+      release();
       this.o.ui.info(problem.message, "error");
       return;
     }
@@ -688,7 +848,7 @@ export class Chat {
     const d = conversation.beginDiscussion(answerer, critic, question, maxRounds, files);
     this.sentFiles(files);
     this.noteOmitted(d.context.omitted);
-    const exec: Extract<Execution, { kind: "discussion" }> = { kind: "discussion", id: d.id, answerer, critic, abort: new AbortController(), done: Promise.resolve() };
+    const exec: Extract<Execution, { kind: "discussion" }> = { kind: "discussion", id: d.id, answerer, critic, abort: new AbortController(), done: Promise.resolve(), release };
     this.active = exec;
     this.o.ui.setStatus("answering");
     const ids = { conversationId: conversation.id, discussionId: d.id };
@@ -784,8 +944,20 @@ export class Chat {
   private startPipeline(task: string, files: Attachment[] = [], profile?: ProfileName): void {
     if (this.active) return this.busy();
     if (this.elsewhere()) return;
+    const release = this.takeWorkspace();
+    if (!release) return;
+    try {
+      this.startPipelineHeld(task, files, profile, release);
+    } catch (e) {
+      if (!this.runsWith(release)) release();
+      throw e;
+    }
+  }
+
+  private startPipelineHeld(task: string, files: Attachment[], profile: ProfileName | undefined, release: () => void): void {
     const problem = missingCli(this.cfg, Object.values(this.cfg.agents), this.env);
     if (problem) {
+      release();
       this.o.ui.info(problem.message, "error");
       return;
     }
@@ -799,11 +971,12 @@ export class Chat {
       run = newRun(this.o.runsDir, this.o.workspace, task, cfg, this.conversation.earlier, context, files);
     } catch (e) {
       if (!(e instanceof AttachmentError)) throw e;
+      release();
       this.o.ui.info(e.message, "error");
       return;
     }
     const { store, state } = run;
-    if (!this.start(store, state, cfg)) return;
+    if (!this.start(store, state, cfg, release)) return;
     this.sentFiles(files);
     if (files.length) this.o.ui.info(`The task goes to the agents with ${files.length} file${files.length === 1 ? "" : "s"}, copied into run ${store.taskId}.`);
     this.entitle(task);
@@ -813,18 +986,23 @@ export class Chat {
     }
   }
 
-  /** Locks and runs `store`'s run in the background; false when it cannot be locked. */
-  private start(store: RunStore, state: RunState, cfg: ConfigData): boolean {
+  /**
+   * Locks and runs `store`'s run in the background, holding the workspace (`release`) until it stops or waits no more:
+   * through its steps and its waits for a decision or an answer, until its state is saved, its agents are gone and the
+   * conversation has its outcome. False (and the workspace given back) when the run cannot be locked.
+   */
+  private start(store: RunStore, state: RunState, cfg: ConfigData, release: () => void): boolean {
     try {
       store.lock();
     } catch (e) {
+      release();
       this.o.ui.info((e as Error).message, "error");
       return false;
     }
     this.models.refresh();
     const workflow = new Workflow({ cfg, repo: this.o.workspace, store, state, bus: this.o.bus, decider: this.o.decider, permissions: this.o.permissions, clarifier: this.o.clarifier, env: this.env });
     this.escaped = false;
-    const exec: Extract<Execution, { kind: "pipeline" }> = { kind: "pipeline", store, workflow, cfg, done: Promise.resolve() };
+    const exec: Extract<Execution, { kind: "pipeline" }> = { kind: "pipeline", store, workflow, cfg, done: Promise.resolve(), release };
     const conversation = this.conversation;
     this.active = exec;
     this.o.ui.setStatus("running");
@@ -863,11 +1041,8 @@ export class Chat {
           : "The run is waiting for your decision; type /resume to decide.");
       }
       // The conversation that started it keeps what came of it.
-      conversation.addEarlier(await this.outcome(st));
-    })().finally(() => {
-      if (this.active === exec) this.active = null;
-      if (!this.active) this.o.ui.setStatus(this.paused ? "paused" : "idle");
-    });
+      conversation.addEarlier({ ...(await this.outcome(st)), runId: store.taskId });
+    })().finally(() => this.settled(exec));
     return true;
   }
 
@@ -906,11 +1081,23 @@ export class Chat {
   private resume(arg: string, o: SubmitOptions = {}): void {
     if (this.active) return this.busy();
     if (this.elsewhere()) return;
+    const release = this.takeWorkspace();
+    if (!release) return;
+    try {
+      this.resumeHeld(arg, o, release);
+    } catch (e) {
+      if (!this.runsWith(release)) release();
+      throw e;
+    }
+  }
+
+  private resumeHeld(arg: string, o: SubmitOptions, release: () => void): void {
     let files: Attachment[];
     try {
       files = this.conversation.select(o.attachments);
     } catch (e) {
       if (!(e instanceof AttachmentError)) throw e;
+      release();
       this.o.ui.info(e.message, "error");
       return;
     }
@@ -919,19 +1106,24 @@ export class Chat {
     if (byId) note = "";
     const target = byId ?? this.paused ?? latestResumable(this.o.runsDir, this.o.workspace);
     if (!target) {
+      release();
       this.o.ui.info("Nothing to resume.");
       return;
     }
     const cfg = this.configOf(target);
     const problem = missingCli(cfg, Object.values(cfg.agents), this.env, target.exists("config.json"));
     if (problem) {
+      release();
       this.o.ui.info(problem.message, "error");
       return;
     }
     const state = target.loadState();
     if (note || files.length) {
       const copies = this.copyInto(target, files);
-      if (!copies) return;
+      if (!copies) {
+        release();
+        return;
+      }
       state.humanNotes.push({ at: nowIso(), phase: state.inProgress?.phase ?? state.phase, note: note || FILES_NOTE, ...(copies.length ? { attachments: copies } : {}) });
       target.saveState(state);
       this.sentFiles(files);
@@ -939,7 +1131,7 @@ export class Chat {
     const paused = this.paused;
     this.paused = null;
     const saved = target.exists("config.json");
-    if (!this.start(target, state, cfg)) this.paused = paused;
+    if (!this.start(target, state, cfg, release)) this.paused = paused;
     // The chat's agent options it resumed with are the run's now: a later resume starts from them.
     else if (saved) target.writeJson("config.json", cfg);
   }
@@ -958,6 +1150,7 @@ export class Chat {
       this.o.ui.info(`Removed ${unsent.length} attached file${unsent.length === 1 ? "" : "s"} that ${unsent.length === 1 ? "was" : "were"} not sent: ${attachmentsText(unsent)}.`);
     }
     this.conversation = new Conversation(this.o.runsDir);
+    this.unsavedRecipient = false;
     this.runner = null;
     this.omitted = 0;
     this.selectRecipient("codex");

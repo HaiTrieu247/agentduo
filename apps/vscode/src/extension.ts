@@ -120,6 +120,8 @@ class Controller implements vscode.Disposable, PanelHost {
     return new WorkspaceSession({
       ...this.engine(path),
       onChange: (conversation, state) => this.onState(conversation, state),
+      // Another window (`duo`, the desktop) started or continued a conversation of this folder.
+      onConversationsChanged: () => this.refreshList(),
       onQuestion: (conversation, kind, text) => this.onQuestion(conversation, kind, text),
       onNewConversation: () => void this.openConversation(null),
     });
@@ -362,16 +364,17 @@ class Controller implements vscode.Disposable, PanelHost {
     const runsDir = session?.runsDirectory ?? null;
     const saved = runsDir ? listConversations(runsDir) : [];
     const state = (id: string) => (session && (this.panels.has(id) || session.conversations.includes(id)) ? session.conversation(id).state : null);
-    const entry = (id: string, title: string, updatedAt: string | null): ConversationEntry => {
+    const entry = (id: string, title: string, updatedAt: string | null, inUseBy: number | null = null): ConversationEntry => {
       const st = state(id);
       return {
         id, title: st && st.timeline.length ? titleOf(st) : title, updatedAt, open: this.panels.has(id),
         running: !!st && (st.status === "running" || st.status === "answering"), waiting: st ? (st.decision ? 1 : 0) + st.permissions.length + (st.questions ?? []).length : 0,
+        elsewhere: !!inUseBy && inUseBy !== session?.workerPid,
       };
     };
     const known = new Set(saved.map((c) => c.id));
     const unsaved = [...this.panels.keys()].filter((id) => !known.has(id)).reverse().map((id) => entry(id, "", null));
-    return [...unsaved, ...saved.map((c) => entry(c.id, c.title, c.updatedAt))];
+    return [...unsaved, ...saved.map((c) => entry(c.id, c.title, c.updatedAt, c.inUseBy))];
   }
 
   /** The list follows the tabs, at most every 300 ms while answers stream in. */

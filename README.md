@@ -301,8 +301,9 @@ Outside the chat, `duo --accept-edits "<task>"` does what `/mode acceptEdits` do
 `apps/vscode` holds the same chat as a VS Code sidebar. It has a timeline of both agents, the HUMAN_REVIEW and
 permission prompts above the composer, and buttons that open the plan, review and report, plus the run's changes in
 the diff editor. Its Activity Bar view shows both agents' accounts and limits (**Account & Usage**) above the
-workspace's conversations. It runs this package's engine with your Node (≥ 22.12) and shares the configuration, runs and lock with
-`duo`, so a run started in one can be resumed in the other. With no folder open, it works in your home folder, as `duo`
+workspace's conversations. It runs this package's engine with your Node (≥ 22.12) and shares the configuration, runs,
+conversations and lock with `duo` and the desktop app, so work started in one goes on in another
+([Working from several windows](#working-from-several-windows)). With no folder open, it works in your home folder, as `duo`
 started there does. Install it from the Marketplace
 (`HaiTrieuThinh.agentduo-vscode`), or build a VSIX with `npm run package:vscode` and install it with
 `code --install-extension apps/vscode/agentduo-vscode-*.vsix`.
@@ -319,6 +320,43 @@ Build it from source (`npm ci`, then `npm ci --prefix apps/desktop`, then `npm -
 `v*` tag builds its installers on all three systems and publishes them as a GitHub Release, which installed apps update
 from. Packaging, updates, releasing, signing and what has been verified on which OS are in
 [apps/desktop/README.md](apps/desktop/README.md).
+
+## Working from several windows
+
+`duo`, the VS Code extension and the desktop app can all be open on one workspace at the same time, and you can move
+from one to another without quitting the first.
+
+- **One piece of work at a time, held only while it runs.** A window takes the workspace (the lock in
+  `.agentduo/runs/.lock`) and the conversation it works in (`.agentduo/runs/conversations/<id>/.lock`) when work starts,
+  and gives them back as soon as it is over: an answer from the moment you send it until it is saved, a `/discuss` until
+  its last turn, and a pipeline run from its start until it finishes or stops. A question to you or a permission prompt
+  inside that work keeps them held, and so does a run waiting for your decision. *Decide later*, Esc or Stop end that
+  wait: the run's state is saved and its agents stopped, then the workspace goes back. An idle window holds nothing,
+  so you never need `/quit` to work elsewhere.
+- **While another window works**, you can read, scroll, type and attach files here. A banner says which process works
+  (and in which conversation). A message you send is not sent: the window says so, and gives the message back to the
+  composer with its files, so you can send it again once that work is done. Nothing in the other window is interrupted.
+  `duo "<task>"` and `duo resume` say the same and exit with code 1.
+- **Going on with a conversation elsewhere.** The VS Code list, the desktop sidebar and `duo chat --list` show every
+  conversation of the workspace, wherever it was started. Opening one continues it: what was said, the questions you
+  answered, the recipient, and the agents' own sessions, so each agent goes on where it left off and is told only what
+  it has not seen. Switching back and forth keeps each exchange once. A tab that stays open and idle follows what
+  another window says in its conversation (within about two seconds), without touching what you are typing or the
+  files waiting in its composer. Answers given in the terminal appear without their tool activity, which only the
+  window that ran them shows.
+- **From the terminal:** `duo chat --list` lists the saved conversations, newest first (one in use elsewhere is marked
+  with its pid); `duo chat <id>` (or the start of an id, or `latest`) opens one. `duo` alone still opens a new
+  conversation. An unknown id, or a conversation another window is working in, is refused with the reason.
+- **Runs** stopped or waiting for you can be resumed in any window: `/resume`, the desktop's *Resumable runs*, or
+  `duo resume`.
+- **Settings.** A setting saved to a file (`--save`, `--global`, the desktop's Settings) reaches every window before its
+  next agent call or new work, with the usual timing (*next call* settings reach a run that is going, *next run* ones
+  only new work). A setting changed without saving it stays in the window that changed it, and wins there over the
+  files.
+- **Limits.** Work that is running is never moved to another window: stop it where it runs. Two windows never work in
+  one workspace at once (within one VS Code window or the desktop app, several tabs can still answer side by side, and
+  run one pipeline at a time). A window that crashed or was killed leaves its locks behind; the next window to start
+  work sees that their process is gone and takes them over.
 
 ## The workspace
 
@@ -438,7 +476,8 @@ duo resume --answers answers.json   # structured: the file names the request and
 
 | Command | What it does |
 |---|---|
-| `duo` | Open the [chat](#chat) (in a terminal) |
+| `duo` | Open the [chat](#chat) (in a terminal), in a new conversation |
+| `duo chat [id\|latest]`, `duo chat --list` | Continue a saved conversation, also one from VS Code or the desktop app (an id, the start of one, or `latest`); `--list` lists them ([Working from several windows](#working-from-several-windows)) |
 | `duo "<task>"`, `duo run "<task>"` | Start a run (`--task-file F`; `--profile lightweight\|standard\|thorough`; use `duo -- "-x …"` for a task that starts with `-`) |
 | `duo resume [id]` | Continue the latest (or given) run with the config it started with (`--reload-config` to use today's); `--decision resume\|revise\|abort [--note "..."]` answers a pending decision; `--answers F` answers the agents' [questions](#questions-from-the-agents) |
 | `duo status [id]`, `duo list` | Progress, history, what the gates and `DONE` were verified on, and where the files are |
@@ -620,6 +659,10 @@ The runs directory carries its own `.gitignore`, so run data stays out of `git s
   - Commands (`Bash`): add allow rules such as `"Bash(npm test:*)"`.
   - With a Codex implementer, see **Codex** under [Permissions and scope](#permissions-and-scope).
 - **A config change has no effect on `duo resume`.** A run keeps the config it started with. Use `duo resume --reload-config` to apply your `config.yaml` changes. Changes to Claude Code or Codex settings apply without it.
+- **"another agentduo is working in this workspace (pid N)"**: another window (`duo`, VS Code, the desktop app) runs
+  something there now, or waits for your answer or decision in it. Answer or stop it there, or wait; then send again (the
+  extension and the desktop give your message back for that). A lock left by a process that is gone is taken over by
+  itself; `ps -p N` tells whether that process still runs.
 - **A task that starts with `-`** is read as an option. Put `--` before it: `duo -- "-x is broken"`.
 - **"Git is not installed"** when a run starts: install git (the chat and `/discuss` work without it). **"cannot use its
   snapshot repository"** or **"the snapshots of run … are damaged"** on resume: the run's own repository was moved or

@@ -40,7 +40,7 @@ agentduo là **kênh** giữa hai CLI. Nó:
 - **Snapshot và diff** dùng pathspec giới hạn trong `W` (tương đối với `R`; khi `W = R` thì là `.`). Diff gửi cho reviewer, diff stat và danh sách file đổi chỉ gồm thay đổi trong `W`.
 - **Cảnh báo ngoài workspace.** Khi `W ≠ R`, trước và sau mỗi bước agent và mỗi lần chạy gate, agentduo tính tree của toàn repo. File ngoài `W` bị đổi thì phát sự kiện `warning` ("2 file(s) outside the workspace changed during IMPLEMENT: A ../shared/x.ts, …") và ghi vào report. Run không dừng.
 - **Cảnh báo bước chỉ đọc.** Nếu tree trong `W` thay đổi trong bước của planner, plan critic, plan sign-off hoặc code reviewer, agentduo cũng phát `warning` ("Codex (code reviewer) changed files: …") và ghi report. Run không dừng. Snapshot dùng cho review vẫn lấy sau bước implement như cũ.
-- **Lock** theo workspace (`W/.agentduo/runs/.lock`) cộng lock theo run. Hai workspace khác nhau trong cùng một repo có thể chạy song song; khi đó mỗi run thấy thay đổi của run kia qua cảnh báo ngoài workspace.
+- **Lock** theo workspace (`W/.agentduo/runs/.lock`) cộng lock theo run. Hai workspace khác nhau trong cùng một repo có thể chạy song song; khi đó mỗi run thấy thay đổi của run kia qua cảnh báo ngoài workspace. Lock workspace chỉ được giữ trong lúc công việc chạy (chat, `/discuss`, pipeline, kể cả lúc chờ người dùng), cùng lock theo conversation; xem `2026-11-07-agentduo-window-handoff-design.md`.
 
 ## 4. Gọi CLI và config
 

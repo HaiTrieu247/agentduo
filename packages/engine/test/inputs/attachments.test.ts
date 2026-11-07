@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ATTACHMENT_LIMITS, attachmentDetail, base64Size, selectNative, type Attachment } from "../../src/inputs/attachment-types.js";
@@ -133,16 +133,40 @@ describe("AttachmentStore", () => {
   it("recovers from a crash: removes the files that were waiting and half copies, keeps those sent", () => {
     const sent = store.importBytes("sent.txt", Buffer.from("s"));
     const waiting = store.importBytes("waiting.txt", Buffer.from("w"));
-    store.setPending([waiting.id]);
+    // Listed by a process that is gone, and copies it left half done an hour ago.
+    writeFileSync(join(store.root, "pending-999999999-abcd.json"), JSON.stringify([waiting.id]));
     mkdirSync(join(store.root, "lz-partial1"));
-    writeFileSync(join(store.root, "lz-partial1", ".partial-abcd"), "half");
-    writeFileSync(join(store.root, sent.id, ".partial-ffff"), "half");
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    for (const f of [join(store.root, "lz-partial1", ".partial-abcd"), join(store.root, sent.id, ".partial-ffff")]) {
+      writeFileSync(f, "half");
+      utimesSync(f, old, old);
+    }
     expect(store.recover()).toBe(2);
     expect(existsSync(existingAttachmentFile(runsDir, sent))).toBe(true);
     expect(readdirSync(join(store.root, sent.id))).toEqual(["sent.txt"]);
     expect(() => existingAttachmentFile(runsDir, waiting)).toThrow();
     expect(existsSync(join(store.root, "lz-partial1"))).toBe(false);
-    expect(store.pending()).toEqual([]);
+    expect(readdirSync(store.root).filter((f) => f.startsWith("pending"))).toEqual([]);
+  });
+
+  it("never removes what another live window has waiting, or a copy it may be making now", () => {
+    const other = new AttachmentStore(runsDir, join(runsDir, "conversations", "c1"));
+    const theirs = other.importBytes("theirs.txt", Buffer.from("t"));
+    other.setPending([theirs.id]);
+    // A copy being made right now (by any window): its partial file is new.
+    mkdirSync(join(store.root, "lz-copying"));
+    writeFileSync(join(store.root, "lz-copying", ".partial-0001"), "half");
+    // An older agentduo's list (one per conversation): its process is gone.
+    const legacy = store.importBytes("legacy.txt", Buffer.from("l"));
+    writeFileSync(join(store.root, "pending.json"), JSON.stringify([legacy.id]));
+    expect(store.recover()).toBe(1);
+    expect(existsSync(existingAttachmentFile(runsDir, theirs))).toBe(true);
+    expect(other.pending()).toEqual([theirs.id]);
+    expect(existsSync(join(store.root, "lz-copying", ".partial-0001"))).toBe(true);
+    expect(() => existingAttachmentFile(runsDir, legacy)).toThrow();
+    // Once that window has sent them (or let them go), its list goes too.
+    other.setPending([]);
+    expect(readdirSync(store.root).filter((f) => f.startsWith("pending"))).toEqual([]);
   });
 });
 

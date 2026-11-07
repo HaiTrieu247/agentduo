@@ -202,8 +202,11 @@ describe("vscode worker", () => {
     expect(m.kind === "event" && m.event).toMatchObject({ status: "agreed", answerer: "codex", critic: "claude", answer: "Postgres, as agreed.", answerBackend: "codex", rounds: 1 });
     expect(fake.calls().map((c) => `${c.role}:${c.backend}`)).toEqual(["discuss_answer:codex", "discuss_critique:claude", "discuss_synthesis:codex"]);
     expect(h.events().filter((e) => e.type === "turn.finished").map((e) => e.type === "turn.finished" && e.discussion?.step)).toEqual(["answer", "critique", "synthesis"]);
-    expect(existsSync(join(runsDir, ".lock"))).toBe(true); // the chat session holds the workspace, as for any question
-    expect(readdirSync(runsDir).filter((d) => ![".lock", ".gitignore", "conversations"].includes(d))).toEqual([]); // no run
+    // The discussion held the workspace while it ran, and gave it back once it was over: `duo` and other windows can work.
+    await h.waitFor((m) => m.kind === "ui" && m.update.type === "session" && m.update.session === "dormant");
+    expect(h.messages.some((m) => m.kind === "ui" && m.update.type === "session" && m.update.session === "active")).toBe(true);
+    expect(existsSync(join(runsDir, ".lock"))).toBe(false);
+    expect(readdirSync(runsDir).filter((d) => ![".gitignore", "conversations"].includes(d))).toEqual([]); // no run
   });
 
   it("shows a tab's /usage in its usage panel, part by part, and looks it up again on a refresh; no agent answers", async () => {
@@ -522,7 +525,11 @@ describe("vscode worker", () => {
     try {
       const busy = await open({ config: false });
       expect(busy.init.problem).toMatchObject({ kind: "locked", message: expect.stringContaining(`pid ${process.pid}`) });
-      await expect(busy.h.client.request({ type: "submit", conversation: C, text: "Fix", route: "pipeline" })).rejects.toMatchObject({ code: "locked" });
+      // Not sent, and given back to send again; nothing of `duo`'s is interrupted, and no run is made.
+      await busy.h.client.request({ type: "submit", conversation: C, text: "Fix", route: "pipeline" });
+      await busy.h.waitFor((m) => m.kind === "ui" && m.conversation === C && m.update.type === "refused" && m.update.text === "/pipeline Fix");
+      expect(busy.h.messages.some((m) => m.kind === "ui" && m.update.type === "info" && m.update.tone === "error" && m.update.text.includes(`pid ${process.pid}`))).toBe(true);
+      expect(RunStore.list(runsDir)).toEqual([]);
       await busy.h.client.shutdown();
     } finally {
       release();

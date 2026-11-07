@@ -19,7 +19,7 @@ Ngoài phạm vi: tự cài CLI, quản lý credential, terminal nhúng, telemet
 
 ## 3. Kiến trúc
 
-- **Main** sở hữu cửa sổ, project/session, dialog, resource, diagnostics và bridge. Mỗi project (đường dẫn canonical, id là hash 16 hex) có một `WorkspaceSession` và một worker. Chuyển view không đóng conversation; quit/restart lưu view, giải quyết câu hỏi đang chờ theo broker, dừng cây tiến trình và nhả lock.
+- **Main** sở hữu cửa sổ, project/session, dialog, resource, diagnostics và bridge. Mỗi project (đường dẫn canonical, id là hash 16 hex) có một `WorkspaceSession` và một worker. Chuyển view không đóng conversation; quit/restart lưu view, giải quyết câu hỏi đang chờ theo broker, dừng cây tiến trình và nhả lock. Worker chỉ giữ lock khi công việc đang chạy, nên `duo` và VS Code làm việc được khi app rảnh (`2026-11-07-agentduo-window-handoff-design.md`).
 - Sidebar không có nút đóng (✕) cho conversation, và protocol không có `conversation.close` (bỏ ngày 2026-11-04: người dùng tưởng đó là nút xoá, mà đóng conversation đang xem lại tự mở một conversation mới thay chỗ). Conversation không bị xoá từ app.
 - Độ rộng sidebar (thêm ngày 2026-11-04): mép phải là một separator (`renderer/resizer.ts`) kéo được, hoặc dùng ←/→ (Shift: bước lớn), Home, End; double-click về 248px. Độ rộng trong khoảng 180–480px và luôn chừa ≥ 360px cho chat (cửa sổ hẹp thì hiện hẹp hơn mà không ghi lại); chỉ lưu khi thả chuột, vào preference `sidebarWidth`, được `parsePreferences` kiểm tra.
 - **Worker**: `WorkerClient` có launch mode tường minh. Extension giữ Node ngoài; desktop fork bằng `process.execPath` với `ELECTRON_RUN_AS_NODE=1`, kiểm tra Node đi kèm ≥ 22.12, không bao giờ tìm Node hệ thống. Sau khi IPC khởi động, worker bỏ các biến nội bộ của Electron/IPC khỏi môi trường của agent và gate.
@@ -48,7 +48,7 @@ Ba lớp engine: defaults ← global (`~/.agentduo/config.yaml`) ← project (`<
 | `model`, `effort`, permission mode, `rules`, `add_dirs`, `args`, `role_args.<role>`, `role_models.<role>`, `role_efforts.<role>`, `bin`, `max_budget_usd`, `permission_prompts` | `next-call` | từ lần gọi agent kế tiếp, cả run đang chạy (cập nhật `config.json`) và khi resume; subprocess đang chạy không đổi |
 | `agents.*`, mọi `limits.*` | `next-run` | chỉ công việc mới; run đang chạy, discussion đang diễn ra và run resume giữ giá trị đã lưu |
 
-Process khác đang giữ lock vẫn cho lưu file, nhưng chỉ đọc lại khi khởi động lại; Settings nói rõ điều đó.
+Process khác đang giữ lock vẫn cho lưu file; nó đọc lại file trước công việc tiếp theo (`2026-11-07-agentduo-window-handoff-design.md`), và Settings nói rõ điều đó.
 
 **Model và effort theo từng khâu** (bổ sung 2026-11-04, theo yêu cầu của người dùng trong chat; bỏ qua bước duyệt spec/plan riêng):
 

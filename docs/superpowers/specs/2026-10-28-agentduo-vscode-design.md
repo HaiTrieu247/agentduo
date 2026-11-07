@@ -18,14 +18,16 @@ VS Code (extension host, CJS: dist/extension.cjs)
         │ child_process.fork, IPC only, execPath = checked Node ≥ 22.12 (PATH or agentduo.nodePath)
         ▼
 Worker (ESM: runtime/worker.js, every dependency bundled, runtime/package.json named agentduo + runtime/schemas)
-  RuntimeSession ─ prepareEnvironment (src/core/environment.ts), acquireWorkspaceLock (once for every tab), and per
+  RuntimeSession ─ prepareEnvironment (src/core/environment.ts), a WorkspaceLease shared by every tab, and per
                    conversation a Chat, EventBus, ChatUi adapter, DecisionBroker (HUMAN_REVIEW) and PermissionBroker
 ```
 
 - Each message carries the protocol version and the session generation. Each request has an ID. Replies to an
   unknown, stale or already-answered request are ignored.
 - Opening the sidebar starts the worker. The worker only reads: it prepares the environment, inspects the latest run
-  for `greet`/Resume, and does not take the lock. The lock is taken by the first command that starts a session.
+  for `greet`/Resume, and does not take the lock. The lock is taken only while one of its chats works, and given back
+  as soon as none does (amended by `2026-11-07-agentduo-window-handoff-design.md`: before, the first command took it
+  until /quit).
 - On shutdown (deactivate, reload, folder switch, IPC disconnect, SIGTERM), pending decisions are deferred, unanswered
   permission requests are denied, `Chat.stop()` is called, and the lock is released. The host waits a grace period
   (4 s), then kills the worker. This holds for a worker that is still starting, before its hello or while `initialize`
@@ -52,7 +54,7 @@ Worker (ESM: runtime/worker.js, every dependency bundled, runtime/package.json n
   updates and questions. Updates without one (models, settings, edits, the pipeline, the session) are the workspace's:
   every tab gets them, and a new tab starts from them.
 - In the worker, each conversation has its own Chat, made on first use. Questions and discussions of different tabs
-  run side by side. The workspace lock is taken once, and only one pipeline runs at a time: `Chat.busyElsewhere` makes
+  run side by side. The workspace lock is held once for all of them, and only one pipeline runs at a time: `Chat.busyElsewhere` makes
   another tab's `/pipeline` and `/resume` say which conversation runs one. A setting changed in one tab (when it
   changed the config) is applied quietly to the other chats and to chats opened later. The recipient is per tab.
 - `/new` in a tab never reaches the worker: the host opens a new tab (`onNewConversation`). The terminal chat keeps its

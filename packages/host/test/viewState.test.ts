@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { PipelineStep } from "../src/protocol.js";
-import { restoredView } from "../src/workspaceSession.js";
+import { adoptedView, restoredView } from "../src/workspaceSession.js";
 import type { ClarificationEntry, ClarificationRequest } from "@agentduo/engine/clarification/clarification";
 import {
   activityParts, canSubmit, decisionChoices, effortOptions, initialState, MAX_ACTIVITIES, MAX_ANSWER_CHARS, MAX_TIMELINE, modelOptions, permissionChoices, pipelineView,
-  placeholder, reduce, runInProgress, sendStops, withLedger, hasPending, type TimelineItem, type ViewAction, type ViewState,
+  placeholder, reduce, runInProgress, sendStops, withLedger, hasPending, type TimelineItem, type ViewAction, type ViewState, showsAllOf, withRecord,
 } from "../src/viewState.js";
 import type { Activity, DuoEvent, HistoryEntry, HumanReview, ModelIdentity, PermissionRequest } from "@agentduo/engine/events";
 import { CLAUDE_MODELS } from "@agentduo/engine/chat/commands";
@@ -407,5 +407,50 @@ describe("view state", () => {
     expect(items(s)).toEqual(["user:q1", "answer:q1", "user:Which queue?"]);
     s = reduce(s, ev({ type: "discussion.finished", conversationId: "c", discussionId: "d", status: "agreed", answerer: "codex", critic: "claude", rounds: 1, answer: "v1", error: null, durationSec: 2, logDir: "/l" }));
     expect(items(s)).toEqual(["user:Which queue?", "discussion"]);
+  });
+});
+
+describe("a conversation another agentduo window continued", () => {
+  const model: ModelIdentity = { backend: "codex", requested: null, configured: null, resolved: "gpt-6", source: "doctor", isDefault: true, status: "resolved", reason: null };
+  const answered = (s: ViewState, turnId: string, question: string, answer: string) => run(s,
+    { type: "user", text: question },
+    ev({ type: "turn.started", conversationId: "c", turnId, backend: "codex", question, model }),
+    ev({ type: "turn.finished", conversationId: "c", turnId, backend: "codex", status: "success", answer, error: null, model, durationSec: 1, logDir: "/logs" }));
+  const said = (s: ViewState) => s.timeline.flatMap((i) => (i.kind === "user" ? [i.text] : i.kind === "answer" ? [i.turn.answer ?? ""] : []));
+  const exchange = (id: string, question: string, answer: string) => ({ id, backend: "codex" as const, question, answer });
+
+  it("adds what the record holds after the last exchange the view shows, by id, once, in the record's order", () => {
+    const mine = answered(initialState("dormant"), "c-t1", "Q1", "A1");
+    const record = {
+      recipient: "claude" as const, earlier: [{ task: "Fix it", outcome: "done", runId: "20261107-run" }],
+      exchanges: [exchange("c-t1", "Q1", "A1"), exchange("c-t2", "Q2", "A2"), { ...exchange("c-d2-1", "Q3", "A3"), discussedWith: "claude" as const }, { ...exchange("c-t4", "lost", ""), unfinished: true as const }],
+    };
+    const next = withRecord(mine, record);
+    expect(said(next)).toEqual(["Q1", "A1", "Q2", "A2", "Q3", "A3"]);
+    expect(next.timeline.find((i) => i.kind === "user" && i.text === "Q3")).toMatchObject({ discuss: true });
+    expect(next.timeline.some((i) => i.kind === "run" && i.runId === "20261107-run")).toBe(true);
+    expect(next.recipient).toBe("claude");
+    // Nothing twice, however often the record is read again.
+    expect(withRecord(next, record)).toBe(next);
+    // Exchanges saved before ids, and a view that dropped older items, add nothing.
+    expect(withRecord(initialState("dormant"), { recipient: null, earlier: [], exchanges: [{ backend: "codex", question: "old", answer: "old" }] }).timeline).toEqual([]);
+    expect(withRecord({ ...initialState("dormant"), dropped: 3 }, { recipient: null, earlier: [], exchanges: [exchange("c-t1", "Q1", "A1")] }).timeline).toEqual([]);
+  });
+
+  it("takes another window's saved view only when it shows all this one does, keeping this window's composer and workspace", () => {
+    const theirs = answered(answered(initialState("dormant"), "c-t1", "Q1", "A1"), "c-t2", "Q2", "A2");
+    const mine = { ...answered(initialState("active", "/ws", 7), "c-t1", "Q1", "A1"), attachments: [{ key: "k1", status: "uploading" as const, name: "a.png", attachment: null, error: null }] };
+    expect([showsAllOf(theirs, mine), showsAllOf(mine, theirs)]).toEqual([true, false]);
+    const adopted = adoptedView(theirs, mine);
+    expect(said(adopted)).toEqual(["Q1", "A1", "Q2", "A2"]);
+    expect([adopted.generation, adopted.workspace, adopted.attachments]).toEqual([7, "/ws", mine.attachments]);
+  });
+
+  it("takes back a message that could not be sent: it leaves the timeline, unless something answered it", () => {
+    const sent = run(initialState("dormant"), { type: "user", text: "Fix the queue", pipeline: true });
+    expect(run(sent, { type: "ui", update: { type: "refused", text: "/pipeline Fix the queue" } }).timeline).toEqual([]);
+    expect(run(sent, { type: "ui", update: { type: "refused", text: "Something else" } }).timeline).toHaveLength(1);
+    const answeredOne = answered(initialState("dormant"), "c-t1", "Q1", "A1");
+    expect(run(answeredOne, { type: "ui", update: { type: "refused", text: "Q1" } }).timeline).toHaveLength(2);
   });
 });

@@ -5,6 +5,9 @@ import { createInterface } from "node:readline/promises";
 import { Command, CommanderError, Option } from "commander";
 import { killAllActive } from "@agentduo/engine/agents/process";
 import { Chat, newRun } from "@agentduo/engine/chat/chat";
+import { listConversations, readConversation } from "@agentduo/engine/chat/conversation";
+import { ConfigFiles } from "@agentduo/engine/config/configuration";
+import { conversationHolder, WorkspaceLease } from "@agentduo/engine/workflow/lease";
 import { settings } from "@agentduo/engine/config/settings";
 import { answersTemplate, pendingEntry } from "@agentduo/engine/clarification/clarification";
 import { configFromSaved, ConfigError, PROFILES, type ConfigData, type ProfileName } from "@agentduo/engine/config/config";
@@ -117,6 +120,7 @@ function withProfile<T extends ConfigData>(cfg: T, opts: { profile?: ProfileName
   return cfg;
 }
 interface ResumeOptions extends CommonOptions { decision?: Decision["decision"]; note?: string; reloadConfig?: boolean; acceptEdits?: boolean; answers?: string }
+interface ChatCommandOptions extends RunOptions { list?: boolean }
 
 /** --accept-edits: the implementer edits files without asking, like /mode acceptEdits in the chat. */
 function withAcceptEdits<T extends ConfigData>(cfg: T, opts: { acceptEdits?: boolean }): T {
@@ -282,7 +286,7 @@ async function execute(io: CliIO, env: Env, cfg: ConfigData, store: RunStore, st
   }
 }
 
-const COMMANDS = ["run", "resume", "status", "list", "doctor", "init"];
+const COMMANDS = ["run", "resume", "status", "list", "chat", "doctor", "init"];
 const COMMON_KEYS = ["dir", "config", "plain", "verbose", "color", "acceptEdits", "profile"] as const;
 
 /** With positional options, `duo --dir X list` parses --dir as the root's option; give it to the subcommand unless it set its own. */
@@ -334,7 +338,7 @@ async function runCommand(io: CliIO, words: string[], opts: RunOptions, explicit
   }
   if (!task) {
     if (!explicit && !opts.taskFile && chatAvailable(io, opts)) return chatCommand(io, opts);
-    throw new CliExit(EXIT.ERROR, 'a task description is required, e.g. duo "Add JWT auth"; in a terminal, `duo` alone opens a chat (other commands: resume, status, list, doctor, init)');
+    throw new CliExit(EXIT.ERROR, 'a task description is required, e.g. duo "Add JWT auth"; in a terminal, `duo` alone opens a chat (other commands: chat, resume, status, list, doctor, init)');
   }
   const env = await prepare(io, opts);
   requireRunnable(env, env.cfg, env.sources.join(", "), io);
@@ -349,51 +353,113 @@ async function runCommand(io: CliIO, words: string[], opts: RunOptions, explicit
   }
 }
 
+/** How often the chat looks, while it waits for input, at what other agentduo windows said in its conversation. */
+const REFRESH_MS = 2000;
+
 /**
- * `duo` alone: a chat session in this workspace, holding its lock until the user leaves. It opens without either CLI
- * (help and settings need none), and without Git; each question checks its agent's CLI, and /pipeline those of every
- * role and where its snapshots can go.
+ * The saved conversation `wanted` names: its id, a prefix of one id, or `latest` (the one changed last). An unknown or
+ * ambiguous name is an error that says what there is.
  */
-async function chatCommand(io: CliIO, opts: RunOptions): Promise<number> {
+function findConversation(runsDir: string, wanted: string): string {
+  const saved = listConversations(runsDir);
+  const more = "`duo chat --list` lists them";
+  if (wanted === "latest" || wanted === "last") {
+    if (!saved.length) throw new CliExit(EXIT.ERROR, `no saved conversation in ${runsDir} yet: \`duo\` starts one`);
+    return saved[0]!.id;
+  }
+  if (saved.some((c) => c.id === wanted)) return wanted;
+  const matches = saved.filter((c) => c.id.startsWith(wanted));
+  if (matches.length === 1) return matches[0]!.id;
+  if (matches.length > 1) throw new CliExit(EXIT.ERROR, `'${wanted}' is the start of ${matches.length} conversations (${matches.slice(0, 4).map((c) => c.id).join(", ")}${matches.length > 4 ? ", …" : ""}): give more of its id`);
+  throw new CliExit(EXIT.ERROR, `no saved conversation '${wanted}' in ${runsDir} (${more})`);
+}
+
+/** `duo chat --list`: the workspace's saved conversations, from any window (`duo`, VS Code, the desktop), newest first. */
+function listChats(io: CliIO, env: Env): number {
+  const saved = listConversations(env.runsDir);
+  if (!saved.length) {
+    io.stdout.write(`no saved conversations in ${env.runsDir}; \`duo\` starts one\n`);
+    return EXIT.DONE;
+  }
+  for (const c of saved) {
+    const busy = c.inUseBy && c.inUseBy !== process.pid ? `  [in use by pid ${c.inUseBy}]` : "";
+    io.stdout.write(`${c.id}  ${c.updatedAt}  ${(c.title || "untitled").split("\n")[0]!.slice(0, 60)}${busy}\n`);
+  }
+  io.stdout.write("open one with: duo chat <id> (or duo chat latest)\n");
+  return EXIT.DONE;
+}
+
+/**
+ * `duo` alone, and `duo chat [conversation]`: a chat session in this workspace, in a new conversation or a saved one
+ * (also one started in VS Code or the desktop app). It takes the workspace lock only while its work runs (an answer, a
+ * discussion, a run, their waits for you included), so other agentduo windows can work here while it waits for input,
+ * and it shows what they said in its conversation. It opens without either CLI (help and settings need none), and
+ * without Git; each question checks its agent's CLI, and /pipeline those of every role and where its snapshots can go.
+ */
+async function chatCommand(io: CliIO, opts: ChatCommandOptions, wanted?: string): Promise<number> {
   const env = await prepare(io, opts);
+  if (opts.list) return listChats(io, env);
+  let conversationId: string | undefined;
+  if (wanted) {
+    conversationId = findConversation(env.runsDir, wanted);
+    const holder = conversationHolder(env.runsDir, conversationId);
+    if (holder && holder !== process.pid) {
+      const title = readConversation(env.runsDir, conversationId)?.title || "untitled";
+      throw new CliExit(EXIT.ERROR, `conversation ${conversationId} («${title}») is in use by another agentduo (pid ${holder}): ` +
+        "wait until its work there is done (an answer, a discussion or a run, or a question it waits on), then open it again");
+    }
+  }
+  if (!chatAvailable(io, opts)) throw new CliExit(EXIT.ERROR, "the chat needs an interactive terminal (not --plain, CI or the background)");
   requireRunnable(env, env.cfg, env.sources.join(", "), io, { backends: [], repo: false });
   withProfile(withAcceptEdits(env.cfg, opts), opts);
-  const release = lockWorkspace(env.runsDir);
+  applyColorPreference(opts, io.env);
+  pinTerminalSize(io.stdout, io.env);
+  const { startChatInk } = await import("./ui/ink/chat-session.js");
+  const bus = new EventBus();
+  let chat: Chat | undefined;
+  const paths = new WorkspacePaths(env.workspace, { exclude: workspaceExcludes(env.workspace, [env.runsDir]) });
+  const session = startChatInk({
+    bus, version: packageVersion(), verbose: !!opts.verbose, workspace: env.workspace,
+    onSubmit: (text) => void chat?.submit(text), onEscape: () => chat?.escape(), onCycleMode: () => chat?.cycleMode(), onUsageRefresh: () => chat?.usage(),
+    views: () => {
+      const run = chat?.focused();
+      return run ? availableViews(run.store, run.state) : [];
+    },
+    readView: async (kind) => {
+      const run = chat?.focused();
+      return run ? readView(kind, run.store, run.state, env.workspace, io.env) : null;
+    },
+    findFiles: (query) => paths.find(query),
+    stdout: io.stdout as NodeJS.WriteStream, stdin: io.stdin as NodeJS.ReadStream,
+  });
+  // The config files as this chat read them: before each piece of work it follows what another window saved there.
+  const files = new ConfigFiles({ workspace: env.workspace, configPath: env.configFile, env: io.env });
+  chat = new Chat({
+    cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, userConfigFile: env.userConfigFile, bus, decider: session.decider, permissions: session.permissions, clarifier: session.clarifier, ui: session.ui,
+    env: io.env, lease: new WorkspaceLease(env.runsDir), conversationId,
+    beforeWork: () => {
+      for (const change of files.changes(chat!.config)) chat!.follow(change);
+    },
+  });
+  const offSignal = io.onSignal?.(() => session.ui.exit());
+  const refresh = setInterval(() => {
+    try {
+      chat?.refresh();
+    } catch {
+      // a record being written as it is read: the next look gets it
+    }
+  }, REFRESH_MS);
+  refresh.unref?.();
   try {
-    applyColorPreference(opts, io.env);
-    pinTerminalSize(io.stdout, io.env);
-    const { startChatInk } = await import("./ui/ink/chat-session.js");
-    const bus = new EventBus();
-    let chat: Chat | undefined;
-    const paths = new WorkspacePaths(env.workspace, { exclude: workspaceExcludes(env.workspace, [env.runsDir]) });
-    const session = startChatInk({
-      bus, version: packageVersion(), verbose: !!opts.verbose, workspace: env.workspace,
-      onSubmit: (text) => void chat?.submit(text), onEscape: () => chat?.escape(), onCycleMode: () => chat?.cycleMode(), onUsageRefresh: () => chat?.usage(),
-      views: () => {
-        const run = chat?.focused();
-        return run ? availableViews(run.store, run.state) : [];
-      },
-      readView: async (kind) => {
-        const run = chat?.focused();
-        return run ? readView(kind, run.store, run.state, env.workspace, io.env) : null;
-      },
-      findFiles: (query) => paths.find(query),
-      stdout: io.stdout as NodeJS.WriteStream, stdin: io.stdin as NodeJS.ReadStream,
-    });
-    chat = new Chat({
-      cfg: env.cfg, workspace: env.workspace, runsDir: env.runsDir, configFile: env.configFile, userConfigFile: env.userConfigFile, bus, decider: session.decider, permissions: session.permissions, clarifier: session.clarifier, ui: session.ui,
-      env: io.env,
-    });
-    const offSignal = io.onSignal?.(() => session.ui.exit());
     await chat.greet();
     await session.exited;
-    await chat.stop(); // a running run stops at its current step and stays resumable
+    await chat.stop(); // a running run stops at its current step and stays resumable; the workspace goes back with it
+  } finally {
+    clearInterval(refresh);
     offSignal?.();
     await session.close();
-    return EXIT.DONE;
-  } finally {
-    release();
   }
+  return EXIT.DONE;
 }
 
 async function resumeCommand(io: CliIO, runId: string | undefined, opts: ResumeOptions): Promise<number> {
@@ -591,6 +657,12 @@ export async function main(argv: string[], io: CliIO = processIO()): Promise<num
     .option("--accept-edits", acceptEdits))
     .action(async (runId: string | undefined, _opts: ResumeOptions, cmd: Command) => {
       exitCode = await resumeCommand(io, runId, withGlobals<ResumeOptions>(cmd));
+    });
+  common(program.command("chat").description("open the chat in a new conversation, or continue a saved one (also one from VS Code or the desktop app)")
+    .argument("[conversation]", "a saved conversation's id (or the start of it), or latest")
+    .option("--list", "list the saved conversations, newest first").option("--accept-edits", acceptEdits).addOption(profile()))
+    .action(async (conversation: string | undefined, _opts: ChatCommandOptions, cmd: Command) => {
+      exitCode = await chatCommand(io, withGlobals<ChatCommandOptions>(cmd), conversation);
     });
   common(program.command("status").description("show a run's state").argument("[runId]"))
     .action(async (runId: string | undefined, _opts: CommonOptions, cmd: Command) => {

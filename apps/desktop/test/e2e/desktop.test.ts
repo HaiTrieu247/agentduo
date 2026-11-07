@@ -17,7 +17,7 @@ import { _electron as electron, type ElectronApplication, type Page } from "play
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import YAML from "yaml";
 import { userConfigPath } from "@agentduo/engine/config/config";
-import { RunStore, type RunState } from "@agentduo/engine/workflow/state";
+import { acquireWorkspaceLock, RunStore, type RunState } from "@agentduo/engine/workflow/state";
 import { approval, critique, finding, impl, plan, review } from "@agentduo/engine/testing/builders";
 import { CHECK_GATE, userDataEnv } from "@agentduo/engine/testing/config";
 import { FakeClis } from "@agentduo/engine/testing/fake-clis";
@@ -485,6 +485,41 @@ describe("agentduo desktop", () => {
     await expect.poll(() => page.locator(".top-status").getAttribute("class"), { timeout: 10_000 }).toBe("top-status");
     expect(await page.locator(".top-status").textContent()).not.toMatch(/answering|working/);
     await expect.poll(() => dots.count(), { timeout: 10_000 }).toBe(0);
+  });
+
+  it("takes turns with other agentduo windows: idle it holds nothing, says when one works, gives a message back, and lists what `duo` said", async () => {
+    const before = await activeConversation();
+    // Idle: the app holds no lock, so `duo` (or VS Code) can work in the project without it quitting.
+    await expect.poll(() => existsSync(join(runsDir, ".lock")), { timeout: 10_000 }).toBe(false);
+    const banner = page.locator(`${SHOWN} .banner`, { hasText: "Another agentduo" });
+    const input = page.locator(`${SHOWN} .composer-input`);
+    const release = acquireWorkspaceLock(runsDir); // as `duo` holds it while it works
+    try {
+      await banner.waitFor({ timeout: 15_000 });
+      await input.fill("Not just now");
+      await input.press("Enter");
+      // Not sent, and nothing there interrupted: the message comes back to the composer, to send again.
+      await seeInChat("Nothing was sent", 15_000);
+      await expect.poll(() => input.inputValue(), { timeout: 10_000 }).toBe("Not just now");
+    } finally {
+      release();
+    }
+    await banner.waitFor({ state: "hidden", timeout: 15_000 });
+    fake.setScenario({ chat_codex: [{ answer: "Sent at last" }] });
+    await input.press("Enter");
+    await seeInChat("Sent at last");
+    // A conversation `duo` had in the project: it joins the list, and opens with what was said in it.
+    const dir = join(runsDir, "conversations", "from-duo");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "conversation.json"), JSON.stringify({
+      version: 1, id: "from-duo", title: "Asked in the terminal", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), recipient: "codex", turns: 1,
+      exchanges: [{ id: "from-duo-t1", backend: "codex", question: "Asked in the terminal", answer: "Answered in the terminal" }], earlier: [], sessions: {},
+    }));
+    await page.locator(".sidebar .nav-item.conversation .nav-main", { hasText: "Asked in the terminal" }).click({ timeout: 20_000 });
+    await seeInChat("Answered in the terminal", 15_000);
+    // Back to the conversation the next steps go on in.
+    await page.locator(".sidebar .nav-item.conversation .nav-main", { hasText: "Hello Codex" }).click();
+    await expect.poll(async () => (await activeConversation()).conversationId, { timeout: 10_000 }).toBe(before.conversationId);
   });
 
   it("keeps Enter for the IME while it composes, hides the inspector in a narrow window, and draws light and dark", async () => {

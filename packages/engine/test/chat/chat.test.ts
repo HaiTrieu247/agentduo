@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Chat, HOME_NOTE, NOT_REPO_NOTE, type ChatUi } from "../../src/chat/chat.js";
@@ -9,13 +9,15 @@ import { existingAttachmentFile } from "../../src/inputs/attachments.js";
 import { Conversation } from "../../src/chat/conversation.js";
 import type { ConfigData } from "../../src/config/config.js";
 import { listConversations } from "../../src/chat/conversation.js";
-import { RunStore } from "../../src/workflow/state.js";
+import { acquireLockFile, acquireWorkspaceLock, RunStore, type EarlierTask, type Exchange } from "../../src/workflow/state.js";
+import { conversationBusy, conversationLockPath, WorkspaceLease } from "../../src/workflow/lease.js";
+import { ConfigFiles } from "../../src/config/configuration.js";
 import type { UsageReport } from "../../src/system/usage.js";
 import { ClarificationBroker } from "../../src/clarification/broker.js";
 import { EventBus, type ClarificationDecider, type Decider, type Decision, type DuoEvent, type ModelMap } from "../../src/events.js";
 import { approval, critique, finding, impl, plan, review } from "../helpers/builders.js";
 import { GIT_MISSING } from "../../src/git/run-git.js";
-import { testConfig, userDataEnv } from "../helpers/config.js";
+import { testConfig, userConfigEnv, userDataEnv } from "../helpers/config.js";
 import { FakeClis } from "../helpers/fake-clis.js";
 import { pickFirst, ScriptedClarifier, ScriptedDecider } from "../helpers/harness.js";
 import { png } from "../helpers/images.js";
@@ -55,6 +57,16 @@ class FakeUi implements ChatUi {
   }
   setModels(models: ModelMap): void {
     this.models = models;
+  }
+  /** Lines given back to the input, not sent (another agentduo worked here). */
+  readonly refusedLines: string[] = [];
+  refused(text: string): void {
+    this.refusedLines.push(text);
+  }
+  /** What was said in the conversation that the screen had not shown, by answer, each time it was told. */
+  readonly histories: string[][] = [];
+  history(exchanges: Exchange[], earlier: EarlierTask[]): void {
+    this.histories.push([...exchanges.map((e) => e.answer), ...earlier.map((t) => `task: ${t.task}`)]);
   }
   exit(): void {
     this.exited = true;
@@ -384,7 +396,9 @@ describe("Chat: conversation sessions", () => {
     await first.submit("/codex QQ-TWO");
     await waitUntil(() => existsSync(join(repo, "agent.pid")), 10_000, "the answer to start");
     expect(saved(first).sessions.codex).toBeUndefined();
-    // Another process takes the conversation on as its record stands, as after the first one was killed mid-answer.
+    // Another process takes the conversation on as its record stands, as after the first one was killed mid-answer: its
+    // locks name a process that is gone, so they are taken over.
+    for (const lock of [join(runsDir, ".lock"), join(runsDir, "conversations", "crashed", ".lock")]) writeFileSync(lock, "999999999");
     const second = newChat({ conversationId: "crashed" });
     await say(second, "/codex QQ-THREE");
     const three = fake.calls("chat_codex")[2]!;
@@ -529,7 +543,10 @@ describe("Chat: /discuss", () => {
     expect(discussions()[0]).toMatchObject({
       status: "agreed", answerer: "claude", critic: "codex", rounds: 2, answer: "SYNTHESIS: Postgres, since Redis loses jobs on a restart.", answerBackend: "codex",
     });
-    expect(record(chat).exchanges).toEqual([{ backend: "codex", question: "Which queue?", answer: "SYNTHESIS: Postgres, since Redis loses jobs on a restart.", discussedWith: "claude" }]);
+    // The record names the discussion, so a window showing the conversation knows it shows it.
+    expect(record(chat).exchanges).toEqual([{
+      id: discussions()[0]!.discussionId, backend: "codex", question: "Which queue?", answer: "SYNTHESIS: Postgres, since Redis loses jobs on a restart.", discussedWith: "claude",
+    }]);
     await chat.stop();
 
     // Reopened, the conversation carries the synthesis only, as Codex's.
@@ -594,7 +611,7 @@ describe("Chat: /discuss", () => {
       expect.stringMatching(/^Codex could not synthesize the discussion \(.+\), so the response is Claude's version 1\.$/),
     ]);
     expect(discussions()[0]).toMatchObject({ status: "disputed", rounds: 1, answer: "v1 from Claude", answerBackend: "claude", error: null });
-    expect(record(chat).exchanges).toEqual([{ backend: "claude", question: "Which queue?", answer: "v1 from Claude", discussedWith: "codex" }]);
+    expect(record(chat).exchanges).toEqual([{ id: expect.any(String), backend: "claude", question: "Which queue?", answer: "v1 from Claude", discussedWith: "codex" }]);
     await chat.submit("/codex Next?");
     await chat.idle();
     const next = fake.calls("chat_codex")[0]!.prompt;
@@ -1475,6 +1492,10 @@ describe("Chat: attached files", () => {
     const sent = before.stage(userFile("sent.png"));
     before.sent([sent]);
     const left = before.stage(userFile("left.png"));
+    // Its process is gone: its list of waiting files names a pid that no longer runs.
+    const root = join(runsDir, "conversations", "conv-crash", "attachments");
+    const list = readdirSync(root).find((f) => f.startsWith("pending-"))!;
+    renameSync(join(root, list), join(root, "pending-999999999-abcd.json"));
     const chat = newChat({ conversationId: "conv-crash" });
     expect(chat.pending).toEqual([]);
     expect(() => existingAttachmentFile(runsDir, left)).toThrow();
@@ -1689,7 +1710,7 @@ describe("Chat: the questions Claude asks the user", () => {
       expect(answers().at(-1)!.status).toBe("error");
       expect(fake.questionReplies()).toHaveLength(1);
       expect(saved(chat).exchanges).toEqual([{
-        backend: "claude", question: "Build it", answer: "", unfinished: true,
+        id: expect.any(String), backend: "claude", question: "Build it", answer: "", unfinished: true,
         clarified: [{ asker: "claude", header: "Flag", question: "Which flag should the build use?", answer: "--safe" }],
       }]);
       await say(chat, "/codex What did we pick?");
@@ -1849,4 +1870,129 @@ describe("Chat: the questions Claude asks the user", () => {
     expect(saved(chat).exchanges.at(-1).clarified).toHaveLength(1);
   });
 
+});
+
+describe("Chat: other agentduo windows on the workspace", () => {
+  const lockFile = () => join(runsDir, ".lock");
+  const say = async (chat: Chat, ...lines: string[]) => {
+    for (const line of lines) {
+      await chat.submit(line);
+      await chat.idle();
+    }
+  };
+  /** Another window: a chat of its own (its own screen, its own lease), on the same workspace and maybe the same conversation. */
+  const windowChat = (o: { conversationId?: string; screen?: FakeUi; beforeWork?: () => void; env?: NodeJS.ProcessEnv } = {}) => {
+    const chat = new Chat({
+      cfg: testConfig(fake), workspace: repo, runsDir, configFile: join(repo, ".agentduo", "config.yaml"), userConfigFile: userConfig(), bus, decider: new ScriptedDecider(),
+      ui: o.screen ?? new FakeUi(), conversationId: o.conversationId, lease: new WorkspaceLease(runsDir), beforeWork: o.beforeWork, env: o.env,
+    });
+    chats.push(chat);
+    return chat;
+  };
+  const record = (id: string) => JSON.parse(readFileSync(join(runsDir, "conversations", id, "conversation.json"), "utf8"));
+
+  it("holds the workspace and its conversation only while an answer runs, a question to the user included", async () => {
+    const asker = new ScriptedClarifier([(r) => {
+      // While Claude waits for the answer, the chat still holds both.
+      expect([readFileSync(lockFile(), "utf8"), readFileSync(conversationLockPath(runsDir, "held"), "utf8")]).toEqual([String(process.pid), String(process.pid)]);
+      return { kind: "answered" as const, answers: r.questions.map((q) => ({ questionId: q.id, optionIds: [q.options[0]!.id], otherText: null })) };
+    }]);
+    const chat = new Chat({
+      cfg: testConfig(fake), workspace: repo, runsDir, configFile: join(repo, ".agentduo", "config.yaml"), userConfigFile: userConfig(), bus, decider: new ScriptedDecider(), ui,
+      conversationId: "held", clarifier: asker,
+    });
+    chats.push(chat);
+    fake.setScenario({ chat_claude: [{ questions: [{ questions: [{ question: "Which?", header: "Pick", multiSelect: false, options: [{ label: "a", description: "" }, { label: "b", description: "" }] }] }], answer: "done" }] });
+    expect(existsSync(lockFile())).toBe(false);
+    await say(chat, "/claude Do it");
+    expect(answers().at(-1)).toMatchObject({ status: "success", answer: "done" });
+    expect([existsSync(lockFile()), existsSync(conversationLockPath(runsDir, "held"))]).toEqual([false, false]);
+  });
+
+  it("while another process works there, sends nothing: says so, gives the line back, keeps its files, and interrupts nothing", async () => {
+    fake.setScenario({ chat_codex: [{ answer: "finally" }] });
+    const screen = new FakeUi();
+    const chat = windowChat({ screen, conversationId: "busy" });
+    const file = join(t.path, "note.txt");
+    writeFileSync(file, "x");
+    chat.attach(file);
+    const release = acquireWorkspaceLock(runsDir); // as `duo` holds it, working elsewhere
+    try {
+      await say(chat, "/claude Hello?");
+      await chat.submitPipeline("Fix the queue");
+      await chat.submitDiscuss("Redis or Postgres?");
+      await chat.submit("/resume");
+    } finally {
+      release();
+    }
+    expect(screen.refusedLines).toEqual(["/claude Hello?", "/pipeline Fix the queue", "/discuss Redis or Postgres?", "/resume"]);
+    expect(screen.errors.every((e) => e.includes(`pid ${process.pid}`) && e.includes("Nothing was sent"))).toBe(true);
+    expect(chat.pending.map((a) => a.name)).toEqual(["note.txt"]);
+    expect(fake.calls()).toEqual([]);
+    expect(RunStore.list(runsDir)).toEqual([]);
+    expect(existsSync(join(runsDir, "conversations", "busy", "conversation.json"))).toBe(false);
+    await say(chat, "Hello?");
+    expect(answers().at(-1)).toMatchObject({ answer: "finally" });
+    expect(fake.calls("chat_codex")[0]!.prompt).toContain("note.txt");
+  });
+
+  it("goes on with what another window said, in the sessions it left, and never writes over what it saved", async () => {
+    fake.setScenario({ chat_codex: [{ answer: "A1" }, { answer: "B1" }, { answer: "A2" }] });
+    const [screenA, screenB] = [new FakeUi(), new FakeUi()];
+    const a = windowChat({ screen: screenA, conversationId: "shared" });
+    const b = windowChat({ screen: screenB, conversationId: "shared" });
+    await say(a, "Q-A1");
+    await say(b, "Q-B1");
+    await say(a, "Q-A2");
+    const calls = fake.calls("chat_codex");
+    expect([calls[1]!.resumed, calls[2]!.resumed]).toEqual([calls[0]!.session, calls[1]!.session]);
+    expect(calls[2]!.prompt).not.toContain("A1");
+    expect(calls[2]!.prompt).not.toContain("B1");
+    expect(record("shared").exchanges.map((e: Exchange) => [e.question, e.answer])).toEqual([["Q-A1", "A1"], ["Q-B1", "B1"], ["Q-A2", "A2"]]);
+    expect(record("shared").turns).toBe(3);
+    // The other window, idle, is told what was said since it last looked, once.
+    expect(b.refresh().map((e) => e.answer)).toEqual(["A2"]);
+    expect(b.refresh()).toEqual([]);
+    expect(screenB.histories).toEqual([["A2"]]);
+  });
+
+  it("opens a saved conversation with what was said in it, and keeps a recipient chosen while another window held it for its next work", async () => {
+    fake.setScenario({ chat_codex: [{ answer: "kept" }], chat_claude: [{ answer: "to claude" }] });
+    await say(windowChat({ conversationId: "reopened" }), "First");
+    const screen = new FakeUi();
+    const chat = windowChat({ screen, conversationId: "reopened" });
+    await chat.greet();
+    expect(screen.histories).toEqual([["kept"]]);
+    expect(screen.lines.some((l) => l.startsWith("Continuing «First» (reopened)"))).toBe(true);
+    const held = acquireLockFile(conversationLockPath(runsDir, "reopened"), conversationBusy);
+    try {
+      chat.selectRecipient("claude");
+    } finally {
+      held();
+    }
+    // Not written while the other window held the conversation.
+    expect(record("reopened").recipient).not.toBe("claude");
+    await say(chat, "Next");
+    expect(record("reopened").recipient).toBe("claude");
+    expect(answers().at(-1)).toMatchObject({ backend: "claude", answer: "to claude" });
+  });
+
+  it("reads the config files again before new work: a setting saved elsewhere applies, one of its own without --save wins", async () => {
+    fake.setScenario({ chat_claude: [{ answer: "1" }, { answer: "2" }, { answer: "3" }] });
+    const env = { ...process.env, ...userConfigEnv(join(t.path, "xdg")) };
+    const files = new ConfigFiles({ workspace: repo, configPath: null, env });
+    let chat: Chat | null = null;
+    chat = windowChat({ env, beforeWork: () => {
+      for (const change of files.changes(chat!.config)) chat!.follow(change);
+    } });
+    const model = (i: number) => after(argsOf("chat_claude", i), "--model");
+    await say(chat, "/claude one");
+    mkdirSync(join(repo, ".agentduo"), { recursive: true });
+    writeFileSync(join(repo, ".agentduo", "config.yaml"), "claude:\n  model: opus\n");
+    await say(chat, "/claude two");
+    await chat.submit("/claude model haiku");
+    writeFileSync(join(repo, ".agentduo", "config.yaml"), "claude:\n  model: sonnet\n");
+    await say(chat, "/claude three");
+    expect([argsOf("chat_claude", 0).includes("--model"), model(1), model(2)]).toEqual([false, "opus", "haiku"]);
+  });
 });

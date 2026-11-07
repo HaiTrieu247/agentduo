@@ -581,7 +581,7 @@ export class SettingsPanel {
   private drawNotices(): void {
     const view = this.view!;
     const nodes: Node[] = [];
-    if (view.lockedBy) nodes.push(el("p", { class: "notice warn-text", text: `Process ${view.lockedBy} holds this workspace; it reads changes after it restarts.` }));
+    if (view.lockedBy) nodes.push(el("p", { class: "notice warn-text", text: `Another agentduo (pid ${view.lockedBy}) is working in this workspace now; it reads saved changes before its next piece of work.` }));
     for (const f of view.files) {
       if (f.error) nodes.push(el("p", { class: "notice error", text: `${f.path} is not valid YAML${f.error.line ? ` at line ${f.error.line}${f.error.col ? `, column ${f.error.col}` : ""}` : ""}: ${f.error.message}. Settings leaves it alone; fix it in the file, then reopen this section.` }));
     }

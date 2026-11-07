@@ -6,6 +6,7 @@ import { answerSummary, type ClarificationAnswer, type ClarificationRequest, typ
 import type { PipelineProfile } from "@agentduo/engine/chat/commands";
 import { answerActivities, PROVIDERS, withObserved } from "@agentduo/engine/format";
 import type { PermissionAsk } from "./PermissionPrompt.js";
+import type { EarlierTask, Exchange } from "@agentduo/engine/workflow/state";
 
 /** A question of the chat and its answer: live while the agent works, then printed once, whole. */
 export interface TurnView {
@@ -109,7 +110,9 @@ export type ViewAction =
   | { type: "toggleVerbose" }
   | { type: "stopping" }
   | { type: "artifact"; title: string; body: string }
-  | { type: "chat"; kind: "user" | "info"; text: string };
+  | { type: "chat"; kind: "user" | "info"; text: string }
+  /** What was said in the conversation before this screen showed it (a saved one, or another window's), oldest first. */
+  | { type: "history"; exchanges: Exchange[]; earlier: EarlierTask[] };
 
 export function initialView(version: string, verbose = false, chat?: { workspace: string }): ViewState {
   const s: ViewState = {
@@ -159,9 +162,29 @@ export function reduce(s: ViewState, action: ViewAction): ViewState {
       return push(s, { kind: "artifact", title: action.title, body: action.body });
     case "chat":
       return push(s, { kind: action.kind, text: action.text });
+    case "history":
+      return withHistory(s, action.exchanges, action.earlier);
     case "event":
       return onEvent(s, action.event, action.now);
   }
+}
+
+/** The model of an answer the conversation kept: its record does not say which. */
+const keptModel = (backend: Agent): ModelIdentity => ({
+  backend, requested: null, configured: null, resolved: null, source: null, isDefault: true, status: "unresolved", reason: "answered earlier",
+});
+
+/** What was said in the conversation, printed as it would have been: each message, then its answer; then the pipeline tasks. */
+function withHistory(s: ViewState, exchanges: Exchange[], earlier: EarlierTask[]): ViewState {
+  let next = s;
+  for (const e of exchanges) {
+    next = push(next, { kind: "user", text: e.discussedWith ? `/discuss ${e.question}` : e.question });
+    next = push(next, {
+      kind: "answer", turn: { turnId: e.id ?? `kept-${next.seq}`, backend: e.backend, model: keptModel(e.backend), activities: [], startedAt: 0, verbose: s.verbose, status: "success", answer: e.answer },
+    });
+  }
+  for (const t of earlier) next = push(next, { kind: "info", text: `Pipeline task «${t.task.split("\n")[0]}»: ${t.outcome}` });
+  return next;
 }
 
 function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {

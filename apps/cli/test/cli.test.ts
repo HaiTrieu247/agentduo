@@ -165,7 +165,7 @@ describe("cli", () => {
     const release = acquireWorkspaceLock(runsDir);
     try {
       const busy = await cli(["Another task"]);
-      expect([busy.code, busy.err.includes("another agentduo run is active")]).toEqual([1, true]);
+      expect([busy.code, busy.err.includes(`another agentduo is working in this workspace (pid ${process.pid})`)]).toEqual([1, true]);
       writeConfig(repo, { limits: { max_review_rounds: 3 } });
       expect((await cli(["resume", "--reload-config", "--decision", "resume"])).code).toBe(1);
     } finally {
