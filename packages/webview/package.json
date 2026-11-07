@@ -1,6 +1,6 @@
 {
   "name": "@agentduo/webview",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "private": true,
   "description": "The chat's page (browser code, no Node): rendering, markdown, uploads, the account view and the stylesheet. Bundled by the VS Code extension's webviews and the desktop renderer.",
   "license": "MIT",

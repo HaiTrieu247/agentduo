@@ -1,6 +1,6 @@
 {
   "name": "agentduo-monorepo",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "private": true,
   "description": "agentduo's repository: the CLI (apps/cli), the VS Code extension (apps/vscode), the desktop app (apps/desktop) and the packages they share (packages/*).",
   "license": "MIT",
