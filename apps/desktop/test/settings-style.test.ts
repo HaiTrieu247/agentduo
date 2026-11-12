@@ -9,7 +9,8 @@ import { describe, expect, it } from "vitest";
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const renderer = join(desktop, "src", "renderer");
-const read = (p: string) => readFileSync(p, "utf8");
+// Windows checks files out with CRLF line endings: the patterns below read LF.
+const read = (p: string) => readFileSync(p, "utf8").replace(/\r\n/g, "\n");
 const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "");
 const css = (f: string) => (existsSync(join(renderer, "styles", f)) ? strip(read(join(renderer, "styles", f))) : "");
 const ts = (f: string) => read(join(renderer, f));

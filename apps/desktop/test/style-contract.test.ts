@@ -11,7 +11,8 @@ import { describe, expect, it } from "vitest";
 const desktop = fileURLToPath(new URL("..", import.meta.url));
 const root = join(desktop, "..", "..");
 const renderer = join(desktop, "src", "renderer");
-const read = (...p: string[]) => readFileSync(join(renderer, ...p), "utf8");
+// Windows checks files out with CRLF line endings: the patterns below read LF.
+const read = (...p: string[]) => readFileSync(join(renderer, ...p), "utf8").replace(/\r\n/g, "\n");
 const AREAS = ["tokens", "base", "shell", "chat", "work", "settings"];
 const withoutComments = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, "");
 
@@ -61,7 +62,7 @@ describe("tokens", () => {
   });
 
   it("takes none of the names the shared chat styles define for themselves", () => {
-    const webview = readFileSync(join(root, "packages", "webview", "src", "styles.css"), "utf8");
+    const webview = readFileSync(join(root, "packages", "webview", "src", "styles.css"), "utf8").replace(/\r\n/g, "\n");
     const theirs = new Set([...withoutComments(webview).matchAll(/^\s*(--[\w-]+)\s*:/gm)].map((m) => m[1]));
     const ours = [...withoutComments(tokens).matchAll(/^\s*(--[\w-]+)\s*:/gm)].map((m) => m[1]).filter((v) => !v!.startsWith("--vscode-"));
     expect(ours.filter((v) => theirs.has(v))).toEqual([]);

@@ -95,7 +95,9 @@ describe("WorkspaceSession: a tab per conversation", () => {
     await s.conversation("tab-b").submit("/claude Question B");
     await waitUntil(() => said(a.state).length === 2 && said(b.state).length === 2, 25_000, "both answers");
     expect([said(a.state), said(b.state)]).toEqual([["Question A", "for A"], ["/claude Question B", "for B"]]);
-    // The workspace lock went back once both answers were in: other windows can work here now.
+    // The workspace lock goes back once both answers are in (just after they show: the chat saves first, then lets
+    // go): other windows can work here now.
+    await waitUntil(() => a.state?.session === "dormant" && b.state?.session === "dormant", 10_000, "the workspace given back");
     expect([a.state!.session, b.state!.session]).toEqual(["dormant", "dormant"]);
     expect(a.state!.settings).toEqual(b.state!.settings);
     expect([a.state!.recipient, b.state!.recipient]).toEqual(["codex", "claude"]);
@@ -171,8 +173,10 @@ describe("WorkspaceSession", () => {
     fake.setScenario(happy());
     await s.conversation(C).submit("Make app.txt fixed", "pipeline");
     await until(s, (st) => finishes(st).includes("DONE") && st.status === "idle", "DONE");
+    // The run is over: the workspace lock goes back with it (once the chat has saved what it wrote).
+    await until(s, (st) => st.session === "dormant", "the workspace given back", 10_000);
     const st = s.conversation(C).state;
-    expect(st.session).toBe("dormant"); // the run is over: the workspace lock went back with it
+    expect(st.session).toBe("dormant");
     expect(st.timeline.map((i) => i.kind)).toEqual(expect.arrayContaining(["user", "run", "step", "finish"]));
     const steps = st.timeline.flatMap((i) => (i.kind === "step" ? [i.step] : []));
     // The first step runs the gates before any change (the baseline), then the planner's turn is a step of its own.
@@ -293,7 +297,7 @@ describe("WorkspaceSession", () => {
     await Promise.all([s.conversation(C).submit("Make app.txt fixed", "pipeline"), s.conversation(C).cycleMode(), started]);
     await until(s, (st) => finishes(st).includes("DONE") && st.status === "idle", "DONE");
     expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["initialize", "(initialized)", "submit", "cycleMode"]);
-    expect(s.conversation(C).state.session).toBe("dormant");
+    await until(s, (st) => st.session === "dormant", "the workspace given back", 10_000);
     expect(s.conversation(C).state.mode).toBe("acceptEdits");
     expect(s.conversation(C).state.timeline.filter((i) => i.kind === "info" && i.tone === "error")).toEqual([]);
   });
@@ -378,7 +382,7 @@ describe("WorkspaceSession", () => {
       await submitted;
       await until(s, (st) => finishes(st).includes("DONE") && st.status === "idle", "DONE");
       expect(worker.requests()).toEqual([`${first} initialize`, `${first} shutdown`, `${second} initialize`, `${second} submit`]);
-      expect(s.conversation(C).state.session).toBe("dormant");
+      await until(s, (st) => st.session === "dormant", "the workspace given back", 10_000);
       expect(s.conversation(C).state.problem).toBeNull();
       expect(s.conversation(C).state.timeline.filter((i) => i.kind === "info" && i.tone === "error")).toEqual([]);
     });

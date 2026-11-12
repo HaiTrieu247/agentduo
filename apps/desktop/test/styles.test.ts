@@ -13,7 +13,8 @@ const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const root = resolve(desktop, "..", "..");
 const renderer = join(desktop, "src", "renderer");
 const stylesDir = join(renderer, "styles");
-const read = (p: string) => readFileSync(p, "utf8");
+// Windows checks files out with CRLF line endings: the patterns below read LF.
+const read = (p: string) => readFileSync(p, "utf8").replace(/\r\n/g, "\n");
 
 const SPLIT = ["tokens.css", "shell.css", "chat.css", "settings.css", "work.css"] as const;
 const SPEC = join(root, "docs", "superpowers", "specs", "2026-11-12-desktop-ui-redesign.md");

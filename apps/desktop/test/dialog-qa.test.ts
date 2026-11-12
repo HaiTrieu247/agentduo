@@ -12,7 +12,8 @@ import { SIDEBAR_WIDTHS } from "../src/shared/protocol.js";
 
 const desktop = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const renderer = join(desktop, "src", "renderer");
-const read = (p: string) => readFileSync(p, "utf8");
+// Windows checks files out with CRLF line endings: the patterns below read LF.
+const read = (p: string) => readFileSync(p, "utf8").replace(/\r\n/g, "\n");
 const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 
 const dialogPath = join(renderer, "dialog.ts");

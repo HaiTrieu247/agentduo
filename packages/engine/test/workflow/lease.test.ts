@@ -39,11 +39,12 @@ const dirs: Array<{ cleanup(): void }> = [];
 beforeAll(async () => {
   const t = tempDir();
   writeFileSync(join(t.path, "lock-child.ts"), CHILD);
-  await build({ entry: [join(t.path, "lock-child.ts")], outDir: join(t.path, "out"), format: ["esm"], platform: "node", target: "node22", bundle: true, silent: true, config: false });
+  // An entry by name, not a list: tsup reads a list as glob patterns, and a Windows path (backslashes) matches nothing.
+  await build({ entry: { "lock-child": join(t.path, "lock-child.ts") }, outDir: join(t.path, "out"), format: ["esm"], platform: "node", target: "node22", bundle: true, silent: true, config: false });
   const out = join(t.path, "out");
   child = { dir: t.path, cleanup: t.cleanup, script: join(out, readdirSync(out).find((f) => f.startsWith("lock-child"))!) };
 }, 60_000);
-afterAll(() => child.cleanup());
+afterAll(() => child?.cleanup());
 afterEach(() => {
   while (dirs.length) dirs.pop()!.cleanup();
 });
