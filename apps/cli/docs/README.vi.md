@@ -103,6 +103,14 @@ Code và Codex; pipeline đầy đủ chỉ chạy khi bạn yêu cầu:
   `/settings`, `/config`, `/help`, `/quit`. Bấm Ctrl-C hai lần cũng thoát; run đang chạy sẽ dừng ở bước hiện tại và vẫn
   resume được.
 
+**Archive và xoá cuộc trò chuyện.** Archive đưa một cuộc trò chuyện ra khỏi danh sách mà vẫn giữ nguyên mọi thứ: nút
+archive trên dòng của nó (sidebar app desktop, mục Conversations của VS Code), hoặc `duo chat --archive <id>`. Nút archive
+cạnh dấu **+** (desktop, VS Code) mở danh sách các cuộc đã archive: chọn một cuộc để khôi phục và mở, chỉ khôi phục, hoặc
+xoá hẳn cùng log và file đính kèm sau khi xác nhận (`duo chat --list --archived`, `--restore <id>`, `--delete <id>`; lệnh
+xoá hỏi trước, hoặc nhận `--yes`). Run vẫn giữ bản copy riêng những gì nó đã dùng. Cuộc đang có agent làm việc hoặc đang
+chờ bạn thì chưa archive hay xoá được. Làm việc tiếp trong một cuộc đã archive mà còn mở ở cửa sổ nào đó thì nó hiện lại
+trong danh sách; cửa sổ còn mở một cuộc đã bị xoá thì không gửi gì nữa (`/new` để mở cuộc mới) và không bao giờ ghi lại nó.
+
 Mỗi cuộc trò chuyện giữ một session Codex và một session Claude, dùng chung cho chat thường và mọi bước `/discuss`,
 kể cả tổng hợp. Mở lại cùng cuộc trò chuyện sẽ resume hai session đó; `/new` hoặc cuộc trò chuyện mới tạo session mới.
 Khi resume, agent chỉ nhận phần hội thoại mới (nếu phần đó vượt quá giới hạn của prompt, prompt ghi rõ bao nhiêu lượt bị
@@ -124,6 +132,42 @@ như một câu hỏi, kể cả `--save`. `/claude -- <câu hỏi>` luôn là c
 Thay đổi áp dụng từ câu hỏi hoặc lần gọi agent kế tiếp; câu trả lời đang chạy giữ model lúc nó bắt đầu. Thay đổi chỉ giữ trong phiên chat, trừ khi lệnh kết thúc bằng `--save`: khi đó agentduo ghi vào `.agentduo/config.yaml` và giữ nguyên các comment trong file. Với `--global`, agentduo ghi vào `~/.config/agentduo/config.yaml` để áp dụng cho mọi workspace. Thay đổi được tính trên riêng file đó, nên config của workspace hiện tại không bị chép theo. Nếu config của workspace cũng đặt đúng key đó thì nó vẫn thắng ở workspace này: chat sẽ báo, và `--save --global` ghi cả hai file. `/help` liệt kê mọi lệnh kèm giải thích. Ngoài chat, `duo --accept-edits "<task>"` có tác dụng giống `/mode acceptEdits`.
 
 `duo "<task>"` và `duo run "<task>"` vẫn chạy pipeline cho một việc rồi thoát; đây là cách dùng cho script và CI.
+
+## Chế độ Team
+
+`/team <yêu cầu>` trong chat (hoặc `duo team "<yêu cầu>"`, hoặc chọn **Team** trong menu của ô nhập ở VS Code và app
+desktop) giao yêu cầu cho một phòng ban agent. Từ lúc đó bạn chỉ nói chuyện với PM:
+
+- **PM** hỏi cho tới khi mục tiêu, phạm vi và tiêu chí nghiệm thu đã rõ, viết bản yêu cầu và xin bạn duyệt.
+- **Techlead** chia việc thành task: ai làm, ai test, đụng file nào, phục vụ tiêu chí nào. PM soát kế hoạch so với bản
+  yêu cầu trước khi trình bạn duyệt.
+- **Các thành viên** làm song song, mỗi người trong một git worktree riêng dưới thư mục dữ liệu của agentduo. Tester
+  viết test cho mỗi task trong lúc task đang được code (dựa trên kế hoạch, không nhìn code), rồi chạy test. Code của
+  junior/mid do senior review; code của senior do techlead review. Lỗi được chuyển về techlead để giao lại, đổi
+  người, sửa test, hoặc hỏi PM (PM chỉ hỏi bạn những gì team không tự quyết được).
+- **Bạn nghiệm thu.** Khi mọi task đã gộp và toàn bộ qua kiểm tra, PM báo theo từng tiêu chí. Chỉ khi bạn chấp nhận,
+  kết quả mới được ghi vào thư mục của bạn: chỉ các file thay đổi, không commit, có bản dự phòng (`/team undo` để hoàn
+  tác). Nếu bạn đã sửa thư mục trong lúc team làm, phần sửa của bạn được gộp vào và cả bản được kiểm tra lại trước.
+
+Trong lúc team làm, PM trả lời bạn ngay (`/team status` xem bảng task); Esc dừng team, `/resume` chạy tiếp. File bạn
+đính kèm vào yêu cầu hoặc tin nhắn gửi PM (ảnh chụp cần bắt chước, tài liệu…) đến được mọi thành viên, ảnh gửi dạng ảnh,
+như các bước của pipeline. Cơ cấu team
+nằm ở khoá `team:` trong config (cấp độ, chức vụ, thành viên, `max_parallel`, giới hạn, `worktree`), xem
+[README tiếng Anh](../README.md#team-mode).
+
+**Nhiều nhóm.** Gán `group` (frontend, backend…) cho thành viên để chia team lớn. PM không thuộc nhóm nào là PM trưởng,
+người duy nhất nói chuyện với bạn; mỗi nhóm có techlead, dev, QA riêng và tối đa một PM phụ. PM trưởng chia phần việc cho
+từng nhóm, các techlead lập kế hoạch song song, PM phụ soát kế hoạch của nhóm, PM trưởng soát cả bản rồi bạn duyệt một
+lần. Câu hỏi của techlead đi lên PM phụ, rồi PM trưởng, rồi mới tới bạn.
+
+Mỗi thành viên có `IDENTITY.md` của chức vụ, của level và `AGENT.md` riêng. Mỗi file là một nội dung đầy đủ: file của dự
+án (`.agentduo/team/…`) nếu có, không thì file trong `team/` của user config (mọi dự án), không thì nội dung mặc định
+của agentduo. File bắt đầu bằng nội dung mặc định, bạn viết thêm hoặc viết lại. Settings → Team của app desktop hiện
+team thành một danh sách: "Add a member" mở một form chọn chức vụ, level, CLI, model, nhóm và số lượng (tạo được chức vụ,
+level hay nhóm mới ngay trong form), và danh sách nói rõ team còn thiếu gì mới chạy được. Khi bạn chưa lưu team nào,
+`/team` dùng team mặc định của agentduo (PM, techlead, 2 dev, QA); nút "Start from agentduo's team" đưa team đó vào danh
+sách để sửa. Mỗi dòng mở identity của chức vụ, của level và của chính thành viên đó để sửa tại chỗ (lưu cho mọi dự án
+hoặc dự án này, hoặc quay về mặc định), và trang có nút ghi sẵn các file mặc định vào dự án.
 
 ## Extension VS Code
 
@@ -246,6 +290,7 @@ duo resume --answers answers.json   # có cấu trúc: file ghi requestId và id
 |---|---|
 | `duo` | Mở [chat](#chat) (trong terminal) |
 | `duo "<task>"` | Tạo run mới (`--task-file`; task bắt đầu bằng `-` thì gõ `duo -- "-x …"`) |
+| `duo team "<yêu cầu>"` | Mở chat và giao yêu cầu cho [team](#chế-độ-team): bạn nói chuyện với PM |
 | `duo resume [id]` | Chạy tiếp với config lúc run bắt đầu (thêm `--reload-config` để dùng config hiện tại); `--decision resume\|revise\|abort [--note "..."]` để trả lời quyết định đang chờ; `--answers F` để trả lời [câu hỏi của agent](#câu-hỏi-từ-các-agent) |
 | `duo status`, `duo list` | Xem tiến độ |
 | `duo doctor`, `duo init` | Kiểm tra môi trường, tạo config (và hỏi có `git init` không; pipeline không cần) |

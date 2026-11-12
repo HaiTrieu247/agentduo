@@ -296,6 +296,77 @@ Outside the chat, `duo --accept-edits "<task>"` does what `/mode acceptEdits` do
 
 `duo "<task>"` and `duo run "<task>"` still run the pipeline on a single task and exit; that is the form for scripts and CI.
 
+## Team mode
+
+`/team <request>` in the chat (or `duo team "<request>"`, or **Team** in the composer's menu in VS Code and the desktop
+app) hands the request to a department of agents, and from then on you talk to its PM only:
+
+- **The PM** asks until your goal, scope and acceptance criteria are clear, writes a brief, and asks you to approve it.
+- **The techlead** plans the work as tasks, each with an assignee, testers, the files it touches and the criteria it
+  serves. The PM checks the plan against the brief before you approve it.
+- **The members** work in parallel, each in a git worktree of its own under agentduo's data folder: workers take tasks,
+  testers write tests for each task while it is coded (from the plan, not the code), then run them. A junior's or mid's
+  code is reviewed by a senior; a senior's by the techlead. A failure goes to the techlead, who has the task retried,
+  reassigned, its tests fixed, or asks the PM (and the PM asks you only what the team cannot decide).
+- **You accept the result.** Once every task is merged and the whole passes its testers' checks (and your gates), the
+  PM reports each criterion. Only then is the result written into your folder: the changed files, nothing committed,
+  with a backup (`/team undo` takes it back out). If you edited the folder meanwhile, your changes are merged in and the
+  whole is checked again first.
+
+While it works the PM answers you at once (`/team status` shows the board), and Esc stops the team (`/resume` goes on).
+Files you attach to the request or to a message for the PM (a screenshot to imitate, a spec) go to every member, images as
+images, as a pipeline's steps get them.
+Claude's members edit with the permission mode you set (`/mode`, Shift+Tab, `--accept-edits`), as the implementer does;
+with Manual, each of their edits asks you.
+The team is `team:` in the config, layered like every other key:
+
+```yaml
+team:
+  levels:   # lowest first; a level's model and effort per CLI, and whether it reviews others
+    junior: { can_review: false, claude: { model: sonnet, effort: low },  codex: { effort: low } }
+    senior: { can_review: true,  claude: { model: opus,   effort: high }, codex: { effort: high } }
+  roles: { pm: { kind: pm }, techlead: { kind: lead }, dev: { kind: worker }, qa: { kind: checker }, security: { kind: checker } }
+  members:
+    - { role: pm, level: senior, cli: codex }
+    - { role: techlead, level: senior, cli: codex }
+    - { role: dev, level: senior, cli: claude }
+    - { role: dev, level: junior, cli: claude, count: 2 }   # dev-2, dev-3
+    - { role: qa, level: mid, cli: claude }
+  max_parallel: 3
+  limits: { max_review_rounds: 3, max_task_attempts: 3 }
+  worktree: { setup: ["npm ci"], link: [] }   # commands run in each new worktree; ignored folders shared by a symlink
+```
+
+**Groups.** Give members a `group` (frontend, backend…) to split a bigger team: the one PM in no group is the head PM, the
+only one who talks with you; each group has its own techlead, members and testers, and at most one PM of its own. The
+head PM gives each group its part of the brief; the techleads plan their parts at the same time; a group's PM checks its
+plan, the head PM the whole, and you approve it once. A techlead's question goes to its group's PM, then the head PM,
+then you.
+
+```yaml
+  members:
+    - { role: pm, level: senior, cli: codex }                          # the head PM
+    - { role: techlead, level: senior, cli: codex, group: frontend }   # techlead-frontend
+    - { role: dev, level: mid, cli: claude, count: 2, group: frontend } # dev-frontend-1, dev-frontend-2
+    - { role: qa, level: mid, cli: claude, group: frontend }
+    - { role: pm, level: mid, cli: codex, group: backend }             # the backend's own PM
+    - { role: techlead, level: senior, cli: codex, group: backend }
+    - { role: dev, level: senior, cli: claude, group: backend }
+    - { role: qa, level: mid, cli: claude, group: backend }
+```
+
+Each member's prompt carries its role's `IDENTITY.md`, its level's, and its own `AGENT.md`. Each is one whole text: the
+project's file (`.agentduo/team/roles/<role>/IDENTITY.md`, `levels/<level>/IDENTITY.md`, `agents/<name>/AGENT.md`), else
+the user config's `team/` file (every project), else agentduo's own. A file starts as agentduo's text, and you add to it
+or rewrite it. The desktop app's Settings → Team shows the team as one list: "Add a member" opens a form that sets its
+role, level, CLI, model, group and how many (and can make a new role, level or group), and the list says what the team
+still needs before it can start. Until you save a team, `/team` runs agentduo's own (a PM, a techlead, two devs and a
+QA); "Start from agentduo's team" puts it in the list to change. Each row opens its role's, level's and own identity
+text, edited in place (saved for every project or this one, or back to the default), and the page can write the default
+files into the project. Team runs live in
+`<runs>/teams/<id>/`; they need git 2.38 or later (`duo doctor` checks). The design is in
+[docs/superpowers/specs/2026-11-12-agentduo-team-design.md](docs/superpowers/specs/2026-11-12-agentduo-team-design.md).
+
 ## VS Code extension
 
 `apps/vscode` holds the same chat as a VS Code sidebar. It has a timeline of both agents, the HUMAN_REVIEW and
@@ -347,6 +418,14 @@ from one to another without quitting the first.
 - **From the terminal:** `duo chat --list` lists the saved conversations, newest first (one in use elsewhere is marked
   with its pid); `duo chat <id>` (or the start of an id, or `latest`) opens one. `duo` alone still opens a new
   conversation. An unknown id, or a conversation another window is working in, is refused with the reason.
+- **Archiving and deleting.** Archive a conversation to take it out of the list, whole: the archive button on its row
+  (the desktop sidebar, VS Code's Conversations view), or `duo chat --archive <id>`. The archive button beside **+**
+  (desktop, VS Code) lists the archived ones: pick one to restore and open it, restore it, or delete it with its logs
+  and attached files after a confirmation (`duo chat --list --archived`, `--restore <id>`, `--delete <id>`, which asks
+  first or takes `--yes`). Runs keep their own copies of what they used. A conversation an agent works in, or that
+  waits for you, is not archived or deleted until that is done. Working again in an archived conversation that is
+  still open in a window brings it back to the list; a window still showing a deleted one sends nothing more in it
+  (`/new` starts another) and never writes it back.
 - **Runs** stopped or waiting for you can be resumed in any window: `/resume`, the desktop's *Resumable runs*, or
   `duo resume`.
 - **Settings.** A setting saved to a file (`--save`, `--global`, the desktop's Settings) reaches every window before its
@@ -478,7 +557,9 @@ duo resume --answers answers.json   # structured: the file names the request and
 |---|---|
 | `duo` | Open the [chat](#chat) (in a terminal), in a new conversation |
 | `duo chat [id\|latest]`, `duo chat --list` | Continue a saved conversation, also one from VS Code or the desktop app (an id, the start of one, or `latest`); `--list` lists them ([Working from several windows](#working-from-several-windows)) |
+| `duo chat --archive\|--restore\|--delete <id>`, `duo chat --list --archived` | Archive a conversation (it leaves the list, whole), bring one back, or delete one with its files (asks first, or `--yes`); list the archived ones |
 | `duo "<task>"`, `duo run "<task>"` | Start a run (`--task-file F`; `--profile lightweight\|standard\|thorough`; use `duo -- "-x …"` for a task that starts with `-`) |
+| `duo team "<request>"` | Open the chat and hand the request to a [team](#team-mode): you talk to its PM |
 | `duo resume [id]` | Continue the latest (or given) run with the config it started with (`--reload-config` to use today's); `--decision resume\|revise\|abort [--note "..."]` answers a pending decision; `--answers F` answers the agents' [questions](#questions-from-the-agents) |
 | `duo status [id]`, `duo list` | Progress, history, what the gates and `DONE` were verified on, and where the files are |
 | `duo doctor` | Check the CLIs and config without calling models |
