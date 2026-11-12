@@ -1,0 +1,93 @@
+/* Work: the inspector beside the chat (a run's plan, changes, diff and gates) and the running team's views in the chat.
+   Design: docs/superpowers/specs/2026-11-12-desktop-ui-redesign.md (the Work rows of the catalogue). A status always
+   has its word (A/M/D, ok/error/running, the task's state); the colour only adds to it. */
+
+/* ------------------------------------------------------------------ inspector */
+.inspector { width: var(--inspector-w); display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--line-side); background: var(--bg-side); }
+body.narrow .inspector { position: fixed; right: 0; top: 0; bottom: 0; z-index: 20; box-shadow: var(--shadow); max-width: 92vw; }
+/* As high as the title bar beside it, so the two lines meet. */
+.inspector-head { display: flex; align-items: center; gap: var(--space-1); height: var(--topbar-h); padding: 0 var(--space-2); border-bottom: 1px solid var(--line); }
+.tabs { display: flex; gap: 2px; min-width: 0; overflow-x: auto; }
+.tab {
+  height: var(--control-md); padding: 0 var(--space-3); border: 0; border-radius: var(--r-sm);
+  background: none; color: var(--fg-muted); font: inherit; white-space: nowrap; cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.tab:hover { color: var(--fg); background: var(--hover-bg); }
+.tab.active { color: var(--fg); background: var(--select-bg); font-weight: var(--weight-medium); }
+.tab:focus-visible { outline: var(--focus-w) solid var(--focus-c); outline-offset: -2px; }
+.inspector-body { flex: 1 1 auto; overflow: auto; padding: var(--space-2) 0 var(--space-5); }
+.inspector-body h3 { margin: var(--space-4) var(--space-3) var(--space-2); font-size: var(--text-sm); font-weight: var(--weight-strong); color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.inspector-body .pad { padding: var(--space-2) var(--space-3); }
+
+/* A run's facts: a two-column list, the names muted. */
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-3); margin: 0; padding: var(--space-2) var(--space-3); }
+.facts dt { color: var(--fg-muted); }
+.facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+
+/* A document (plan, review, report): its own scrolling block, never wider than the inspector. */
+.artifact { padding: 0 var(--space-3); }
+.artifact h3 { margin-left: 0; margin-right: 0; }
+.doc {
+  margin: 0; padding: var(--space-3); max-height: 60vh; overflow: auto;
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-md);
+  font-family: var(--font-mono); font-size: var(--text-sm); line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+/* Changes: one row per file, its status letter in a fixed column, the path cut at its start (the file name shows). */
+.change-list { list-style: none; margin: var(--space-1) 0; padding: 0 var(--space-2); }
+.change {
+  display: flex; align-items: center; gap: var(--space-2); width: 100%; min-height: var(--control-md); padding: 0 var(--space-2);
+  border: 0; border-radius: var(--r-sm); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.change:hover { background: var(--hover-bg); }
+.change.active { background: var(--select-bg); }
+.change:focus-visible { outline: var(--focus-w) solid var(--focus-c); outline-offset: -2px; }
+.change .status, .diff-title .status { flex: none; font-family: var(--font-mono); width: 1.5em; color: var(--fg-muted); font-weight: var(--weight-strong); }
+.change .path { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
+.st-a { color: var(--ok-c) !important; }
+.st-d { color: var(--err-c) !important; }
+.st-m { color: var(--warn-c) !important; }
+
+/* A file's diff: line numbers and marks in narrow columns, the text wrapping inside its cell. */
+.diff-wrap { border-top: 1px solid var(--line); margin-top: var(--space-2); }
+.diff-title { display: flex; gap: var(--space-2); padding: var(--space-2) var(--space-3); font-weight: var(--weight-medium); overflow-wrap: anywhere; }
+table.diff { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: var(--text-sm); line-height: 1.5; }
+table.diff td { padding: 0 var(--space-2); vertical-align: top; }
+table.diff td.ln { color: var(--fg-muted); text-align: right; user-select: none; width: 1%; white-space: nowrap; }
+table.diff td.mk { width: 1%; user-select: none; color: var(--fg-muted); }
+table.diff td.tx { white-space: pre-wrap; word-break: break-all; }
+tr.d-add { background: var(--add-bg); }
+tr.d-del { background: var(--del-bg); }
+
+/* Gates: each with its word (ok, error, running, skipped), coloured. */
+.gates { list-style: none; padding: 0 var(--space-3); margin: 0; }
+.gate { display: flex; align-items: center; gap: var(--space-2); min-height: var(--control-md); border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.gate:last-child { border-bottom: 0; }
+.gate-word { flex: none; font-weight: var(--weight-medium); }
+.g-ok .gate-word { color: var(--ok-c); }
+.g-error .gate-word { color: var(--err-c); }
+.g-running .gate-word { color: var(--accent-c); }
+
+/* ------------------------------------------------------------------ the running team, in the chat */
+/* The team's card above the composer: its phase, who works on what, and the board, each task with its state's word. */
+body.agentduo-desktop .team-card { gap: var(--space-2); border-color: var(--line-strong); }
+body.agentduo-desktop .team-head { gap: var(--space-2); }
+body.agentduo-desktop .team-phase {
+  padding: 0 var(--space-2); border-radius: var(--r-pill); background: var(--select-bg);
+  color: var(--accent-c); font-size: var(--text-xs); font-weight: var(--weight-strong); text-transform: uppercase; letter-spacing: 0.04em;
+}
+body.agentduo-desktop .team-working, body.agentduo-desktop .team-board { gap: var(--space-1); font-size: var(--text-sm); }
+body.agentduo-desktop .team-board { max-height: 30vh; overflow-y: auto; border-top: 1px solid var(--line); padding-top: var(--space-2); }
+body.agentduo-desktop .team-board .task { overflow-wrap: anywhere; }
+body.agentduo-desktop .team-board .task-id { font-family: var(--font-mono); font-weight: var(--weight-strong); }
+body.agentduo-desktop .team-board .task-merged { opacity: 0.75; }
+body.agentduo-desktop .team-board .task-escalated, body.agentduo-desktop .team-board .task-triage { color: var(--warn-c); }
+/* The PM's words, and the documents it shows (brief, plan, acceptance). */
+body.agentduo-desktop .pm-head { display: flex; align-items: center; gap: var(--space-1); margin-bottom: var(--space-1); font-size: var(--text-sm); color: var(--fg-muted); font-weight: var(--weight-medium); }
+body.agentduo-desktop .team-doc { padding: var(--space-2) var(--space-3); border-color: var(--line); border-radius: var(--r-md); background: var(--bg-elev); }
+body.agentduo-desktop .team-doc .text { max-height: 50vh; overflow: auto; font-size: var(--text-sm); line-height: 1.5; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tab { transition: none; }
+}

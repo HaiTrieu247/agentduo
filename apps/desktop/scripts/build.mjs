@@ -4,7 +4,7 @@
 // agentduo and the schemas, in dist/runtime, which the package keeps outside the ASAR archive so packageRoot() finds
 // them.
 //   node scripts/build.mjs [--only main,preload,renderer,runtime]
-import { copyFileSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,7 +53,19 @@ if (only.includes("renderer")) {
   const js = readFileSync(join(dir, "main.js"), "utf8");
   if (/\brequire\(["']node:|from ["']node:/.test(js)) throw new Error("the renderer bundle imports Node; it must not");
   copyFileSync(join(desktop, "src", "renderer", "index.html"), join(dir, "index.html"));
-  copyFileSync(join(desktop, "src", "renderer", "styles.css"), join(dir, "styles.css"));
+  // The stylesheet: styles.css imports one file per area (styles/) in cascade order. They go beside it, flat, and its
+  // imports name them so, since the app's protocol serves the renderer's folder only, without subfolders
+  // (main/resources.ts, appFile); the page's policy (style-src 'self') loads them from there.
+  const styles = join(desktop, "src", "renderer", "styles");
+  for (const file of readdirSync(styles).filter((f) => f.endsWith(".css"))) {
+    if (existsSync(join(dir, file))) throw new Error(`styles/${file} would overwrite the renderer's own ${file}`);
+    copyFileSync(join(styles, file), join(dir, file));
+  }
+  const entry = readFileSync(join(desktop, "src", "renderer", "styles.css"), "utf8").replace(/@import url\("styles\/([\w-]+\.css)"\);/g, '@import url("$1");');
+  for (const [, file] of entry.matchAll(/@import url\("([^"]+)"\);/g)) {
+    if (file.includes("/") || !existsSync(join(dir, file))) throw new Error(`styles.css imports ${file}, which the app cannot serve`);
+  }
+  writeFileSync(join(dir, "styles.css"), entry);
   // The app icon for Settings → About (an image only: the page's policy runs no script, and an <img> SVG runs none).
   copyFileSync(join(desktop, "resources", "icon.svg"), join(dir, "icon.svg"));
   copyFileSync(join(root, "packages", "webview", "src", "styles.css"), join(dir, "webview.css"));

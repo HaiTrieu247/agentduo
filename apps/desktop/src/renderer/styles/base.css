@@ -1,0 +1,80 @@
+/* Base: the reset and the primitives every area shares (text helpers, buttons, fields, tags, pills, meters, the
+   segmented control, notices, facts and documents). The areas come after this file (styles.css), so an area's rule
+   wins a tie with a primitive. Colours, sizes and spacing come from tokens.css only.
+
+   The shared chat page (webview.css, loaded before) has its own .btn, .icon-btn, .tag, .notice, .muted, .small and
+   .input, and these rules reach its elements too: a change here changes the chat. Element rules (select, input,
+   textarea) outrank its single classes. */
+
+html, body { background: var(--bg); color: var(--fg); font-family: var(--font-ui); font-size: var(--font-size); }
+code, pre, kbd { font-family: var(--font-mono); }
+:focus-visible { outline: var(--focus-w) solid var(--focus-c); outline-offset: var(--focus-offset); }
+::placeholder { color: var(--fg-placeholder); opacity: 1; }
+::selection { background: color-mix(in srgb, var(--accent-c) 30%, transparent); }
+[hidden] { display: none !important; }
+.muted { color: var(--fg-muted); }
+.small { font-size: var(--text-sm); }
+.pad { padding: 0 var(--space-3); }
+.error, .bad-text { color: var(--err-c); }
+.warn-text { color: var(--warn-c); }
+.ok-text { color: var(--ok-c); }
+
+/* ------------------------------------------------------------------ buttons */
+/* A button: a word (and an icon), --control-md high; primary is the one action of a place, ghost a quiet one. */
+.btn { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control-md); border: 1px solid var(--line); background: var(--bg-elev); color: var(--fg); border-radius: var(--r-sm); padding: 4px 10px; font: inherit; line-height: var(--leading-ui); cursor: pointer; transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease); }
+.btn:hover:not(:disabled) { background: var(--hover-bg); }
+.btn:active:not(:disabled) { background: var(--select-bg); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.btn.primary { background: var(--accent-bg); border-color: transparent; color: var(--fg-on-accent); }
+.btn.primary:hover:not(:disabled), .btn.primary:active:not(:disabled) { background: var(--accent-bg-hover); }
+.btn.ghost { background: transparent; border-color: transparent; }
+.btn.small { min-height: var(--control-sm); padding: 2px 8px; font-size: var(--text-sm); }
+.btn.wide { width: 100%; justify-content: flex-start; }
+.icon-btn { min-height: var(--control-sm); padding: 3px 5px; background: transparent; border-color: transparent; color: var(--fg-muted); }
+.icon-btn:hover:not(:disabled) { color: var(--fg); }
+.row-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-2) 0; }
+@media (prefers-reduced-motion: reduce) { .btn { transition: none; } }
+/* The browser's own controls (a slider, a check box, a radio) in the app's accent, never the system blue. */
+input[type="range"], input[type="checkbox"], input[type="radio"] { accent-color: var(--accent-bg); }
+
+/* ------------------------------------------------------------------ tags, documents, facts */
+.status-line:empty { display: none; }
+.tag { font-size: 0.78em; padding: 0 6px; border-radius: 9px; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
+.tag.warn { color: var(--warn-c); border: 1px solid currentColor; }
+pre.doc { white-space: pre-wrap; word-break: break-word; background: var(--code-c); padding: 10px; border-radius: var(--r-sm); font-size: 0.92em; max-height: 60vh; overflow: auto; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 12px; }
+.facts dt { color: var(--fg-muted); }
+.facts dd { margin: 0; word-break: break-word; }
+.inline { display: inline-flex; align-items: center; gap: var(--space-2); }
+
+/* ------------------------------------------------------------------ fields */
+select, input[type="text"], input[type="number"], textarea { background: var(--bg-input); color: var(--fg); border: 1px solid var(--line-strong); border-radius: var(--r-sm); padding: 4px 8px; font: inherit; }
+:is(select, input, textarea):disabled { opacity: 0.55; cursor: default; }
+:is(select, input, textarea)[aria-invalid="true"] { border-color: var(--err-c); }
+textarea { font-family: var(--font-mono); min-width: 260px; resize: vertical; }
+
+/* ------------------------------------------------------------------ segmented control, notices, pills, meters */
+.segmented { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--r-md); overflow: hidden; }
+.seg { min-height: var(--control-md); padding: 4px 12px; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+.seg + .seg { border-left: 1px solid var(--line); }
+.seg:hover:not(:disabled):not(.active) { background: var(--hover-bg); }
+.seg.active { background: var(--select-bg); font-weight: 600; }
+.seg:focus-visible { outline-offset: -2px; }
+.seg:disabled { opacity: 0.45; cursor: default; }
+.notices:empty { display: none; }
+.notice { padding: var(--space-2) 10px; border: 1px solid currentColor; border-radius: var(--r-sm); }
+.notice.error { background: var(--err-bg); }
+.notice.warn-text { background: var(--warn-bg); }
+.pill { font-size: 0.85em; padding: 1px 8px; border-radius: var(--r-pill); border: 1px solid currentColor; }
+.meter { height: 4px; margin: 3px 0 2px; overflow: hidden; border-radius: 2px; background: color-mix(in srgb, var(--fg) 14%, transparent); }
+.meter .fill { display: block; height: 100%; border-radius: 2px; background: var(--fg-muted); }
+.meter .fill.high { background: var(--warn-c); }
+.meter .fill.full { background: var(--err-c); }
+/* Who a signed-in CLI is: its email as plain text, no border and no mark. */
+.pill.account { padding: 0; border: 0; color: var(--fg); }
+.pill.ok { color: var(--ok-c); }
+.pill.ok::before { content: "✓ "; }
+.pill.warn { color: var(--warn-c); }
+.pill.warn::before { content: "! "; }
+.pill.bad { color: var(--err-c); }
+.pill.bad::before { content: "✕ "; }

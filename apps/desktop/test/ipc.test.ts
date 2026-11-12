@@ -25,6 +25,11 @@ describe("parseDesktopRequest", () => {
     expect(parseDesktopRequest({ method: "update.install" })).toEqual({ method: "update.install" });
     expect(parseDesktopRequest({ method: "link.open", link: "agentduo-releases" })).toEqual({ method: "link.open", link: "agentduo-releases" });
     expect(parseDesktopRequest({ method: "team.read", projectId: null })).toEqual({ method: "team.read", projectId: null });
+    const conversation = { projectId: "0123456789abcdef", conversationId: "20261031-120000-tab-abcd1234" };
+    for (const method of ["conversation.archive", "conversation.restore", "conversation.delete"]) {
+      expect(parseDesktopRequest({ method, ...conversation, path: "/etc" })).toEqual({ method, ...conversation });
+    }
+    expect(parseDesktopRequest({ method: "conversation.archived", projectId: "0123456789abcdef" })).toEqual({ method: "conversation.archived", projectId: "0123456789abcdef" });
     const team = { members: [{ role: "dev", level: "mid", cli: "claude", count: 2, group: "web", model: null }], roles: { dev: { kind: "worker" } }, levels: { mid: { can_review: false, claude: { model: "sonnet" } } }, max_parallel: 3 };
     expect(parseDesktopRequest({ method: "team.save", projectId: null, scope: "project", team })).toEqual({ method: "team.save", projectId: null, scope: "project", team });
     expect(parseDesktopRequest({ method: "team.openIdentity", projectId: null, scope: "global", kind: "role", name: "frontend-dev" }))
@@ -36,6 +41,8 @@ describe("parseDesktopRequest", () => {
       { method: "fs.read", path: "/etc/passwd" },
       { method: "project.select", projectId: "../../etc" },
       { method: "conversation.open", projectId: "0123456789abcdef", conversationId: "../x" },
+      { method: "conversation.delete", projectId: "0123456789abcdef", conversationId: "../x" },
+      { method: "conversation.archive", projectId: "0123456789abcdef" },
       { method: "prefs.set", patch: { theme: "neon" } },
       { method: "prefs.set", patch: { fontSize: 99 } },
       { method: "prefs.set", patch: { sidebarWidth: 100 } },

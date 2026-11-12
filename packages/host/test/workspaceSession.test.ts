@@ -10,6 +10,7 @@ import { SHUTDOWN_GRACE_MS, WorkerClient } from "../src/workerClient.js";
 import { emptyState, pickWorkspace, WorkspaceSession } from "../src/workspaceSession.js";
 import { reduce, type ViewState } from "../src/viewState.js";
 import { NOT_REPO_NOTE } from "@agentduo/engine/chat/chat";
+import { deleteConversation } from "@agentduo/engine/chat/conversation";
 import { acquireLockFile, acquireWorkspaceLock, RunStore } from "@agentduo/engine/workflow/state";
 import { conversationBusy, conversationLockPath } from "@agentduo/engine/workflow/lease";
 import { approval, critique, finding, impl, plan, plannerAsk, review } from "@agentduo/engine/testing/builders";
@@ -590,6 +591,20 @@ describe("WorkspaceSession: other agentduo windows on the workspace", () => {
     // Opened again in the window that closed it, the conversation has it all, once.
     const again = b.conversation(C);
     expect(said(again.state)).toEqual(["A question", "NEWER"]);
+  });
+
+  it("never writes back a conversation another window deleted, even closing its tab", async () => {
+    fake.setScenario({ chat_codex: [{ answer: "SAID" }] });
+    const a = session();
+    a.conversation(C).attach(new FakeView().post);
+    await a.start();
+    await a.conversation(C).submit("A question");
+    await until(a, (st) => said(st).includes("SAID"), "the answer");
+    await waitUntil(() => existsSync(viewFile()), 5000, "the view to be saved");
+    deleteConversation(join(repo, ".agentduo", "runs"), C);
+    await a.conversation(C).submit("Another");
+    await a.conversation(C).close();
+    expect(existsSync(join(repo, ".agentduo", "runs", "conversations", C))).toBe(false);
   });
 
   it("opens a conversation `duo` had, with no view of its own, with what was said in it", async () => {

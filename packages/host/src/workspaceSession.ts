@@ -324,6 +324,8 @@ export class WorkspaceSession {
     view.saveTimer = null;
     const file = this.viewFile(id);
     if (!file || !view.state.timeline.length) return;
+    // This window saw the conversation on disk, and it is gone: another window deleted it. Nothing writes it back.
+    if ((view.seenRecord || view.wroteView) && this.runsDir && !existsSync(conversationFile(this.runsDir, id))) return;
     try {
       if (fileStamp(file) !== view.wroteView) {
         const disk = this.loadView(id, view);

@@ -174,6 +174,13 @@ describe("AgentRunner", () => {
     expect(r.error).toContain("exited with code 2");
   });
 
+  it("says the error Claude reports in its result, not the raw stream, when it exits with code 1", async () => {
+    fake.setScenario({ implementer: [{ apiError: "You've hit your 5-hour limit · resets 4am (Asia/Saigon)" }] });
+    const r = await runner({ limits: { max_retries: 0 } }).call({ role: "implementer", agentRole: "implementer", prompt: prompt("implementer"), schemaName: "implementation", logPrefix: "005b" });
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe("claude exited with code 1: claude reported an error: You've hit your 5-hour limit · resets 4am (Asia/Saigon)");
+  });
+
   it("times out", async () => {
     fake.setScenario({ planner: [{ output: plan(), sleep: 5000 }] });
     const r = await runner({ limits: { max_retries: 0, agent_timeout_sec: 1 } }).call({ role: "planner", agentRole: "planner", prompt: prompt("planner"), schemaName: "plan", logPrefix: "006" });

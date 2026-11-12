@@ -1,0 +1,200 @@
+/* Tokens: every colour, size, space, radius and duration the desktop draws with, for each theme, and the VS Code
+   theme variables the reused chat styles (webview.css) read, mapped onto them. The areas use these names only; a
+   new colour is a new token here, in both themes, with its contrast measured (docs/superpowers/specs/
+   2026-11-12-desktop-ui-redesign.md, test/styles.test.ts, test/style-contract.test.ts). Neutral surfaces and a
+   neutral selection as in the reference: a near-black chat (#191919) beside a warm grey-brown sidebar in dark,
+   white beside warm grey in light. agentduo's own colours stay for what is agentduo's: Codex teal (the accent, links, focus, the primary button)
+   and Claude amber, the two dots of the mark.
+
+   webview.css defines --gap, --radius, --radius-lg, --ok, --err, --warn, --accent, --muted, --border, --rail,
+   --card, --surface, --code-bg, --hover and --*-text on :root for the chat: no token here takes one of those names. */
+
+:root {
+  --font-size: 13px;
+  --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --codex: #0f9d8a;
+  --claude: #d97a2b;
+  --sidebar-w: 248px;
+  --inspector-w: 380px;
+
+  /* Type: sizes relative to the user's font size (Settings → Appearance), so it scales them all. */
+  --text-xs: 0.8em;
+  --text-sm: 0.92em;
+  --text-md: 1em;
+  --text-lg: 1.15em;
+  --text-xl: 1.55em;
+  --text-2xl: 1.75em;
+  --weight-medium: 550;
+  --weight-strong: 650;
+  --leading-ui: 1.4;
+  --leading-read: 1.6;
+  /* The chat's reading column: about 76 characters of the body text, centred in the chat. */
+  --read-w: 76ch;
+
+  /* Space: one scale, 4 8 12 16 24 32. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* Radii: small controls, fields and rows, cards and menus, the composer and dialogs, pills. */
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-pill: 999px;
+
+  /* Controls: heights of a small button or row action, a button or field, a large button or sidebar row. */
+  --control-sm: 24px;
+  --control-md: 28px;
+  --control-lg: 32px;
+  --icon-size: 16px;
+  --topbar-h: 44px;
+
+  /* Focus: a 2px ring outside the control, in the focus colour, on keyboard focus only (:focus-visible). */
+  --focus-w: 2px;
+  --focus-offset: 2px;
+
+  /* Motion: short, and none when the system asks for reduced motion (each area's own @media). */
+  --dur-fast: 0.12s;
+  --dur-med: 0.2s;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* Light: white chat, warm grey sidebar. Text contrast on every surface it sits on, measured: --fg ≥ 12.6:1,
+   --fg-muted ≥ 5.1:1, --accent-c ≥ 5.0:1, --ok-c / --warn-c / --err-c ≥ 4.5:1 (also on the selection). */
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-side: #f4f2ef;
+  --bg-elev: #ffffff;
+  --bg-raised: #f7f6f4;
+  --bg-input: #ffffff;
+  --fg: #1f1d1c;
+  --fg-muted: #5f5b57;
+  --fg-placeholder: #6f6b67;
+  --fg-on-accent: #ffffff;
+  --busy-c: #1f1d1c;
+  --line: #e4e1dd;
+  --line-strong: #cfcbc6;
+  --line-side: #e4e1dd;
+  --hover-bg: rgba(60, 47, 40, 0.06);
+  --select-bg: rgba(60, 47, 40, 0.09);
+  --accent-c: #08695b;
+  --accent-bg: #0b7d6e;
+  --accent-bg-hover: #096b5e;
+  --focus-c: #08695b;
+  --ok-c: #16723a;
+  --warn-c: #875a00;
+  --err-c: #b91f2a;
+  --ok-bg: rgba(22, 114, 58, 0.1);
+  --warn-bg: rgba(135, 90, 0, 0.1);
+  --err-bg: rgba(185, 31, 42, 0.1);
+  --code-c: rgba(60, 47, 40, 0.06);
+  --add-bg: rgba(26, 127, 55, 0.12);
+  --del-bg: rgba(207, 34, 46, 0.1);
+  --scrim: rgba(31, 29, 28, 0.32);
+  --shadow-sm: 0 1px 3px rgba(31, 29, 28, 0.1);
+  --shadow: 0 8px 28px rgba(31, 29, 28, 0.14);
+  --kind-pm: #8250df;
+  --kind-lead: #0b7d6e;
+  --kind-worker: #57606a;
+  --kind-checker: #bc4c00;
+}
+
+/* Dark: #191919 chat, warm grey-brown sidebar, as the reference. Measured: --fg ≥ 8.8:1, --fg-muted ≥ 4.8:1 (on the
+   sidebar's selection; ≥ 5.7:1 elsewhere), --accent-c ≥ 5.4:1, --ok-c / --warn-c / --err-c ≥ 5.7:1. */
+:root[data-theme="dark"] {
+  --bg: #191919;
+  --bg-side: #292425;
+  --bg-elev: #242424;
+  --bg-raised: #303030;
+  --bg-input: #2a2a2a;
+  --fg: #efefef;
+  --fg-muted: #adadad;
+  --fg-placeholder: #9a9a9a;
+  --fg-on-accent: #ffffff;
+  --busy-c: #ffffff;
+  --line: #343434;
+  --line-strong: #4a4a4a;
+  --line-side: #3f3a3b;
+  --hover-bg: rgba(255, 255, 255, 0.06);
+  --select-bg: rgba(255, 255, 255, 0.11);
+  --accent-c: #4fd1bd;
+  --accent-bg: #0b7d6e;
+  --accent-bg-hover: #096b5e;
+  --focus-c: #4fd1bd;
+  --ok-c: #5cc97a;
+  --warn-c: #e0b341;
+  --err-c: #ff8a80;
+  --ok-bg: rgba(92, 201, 122, 0.12);
+  --warn-bg: rgba(224, 179, 65, 0.12);
+  --err-bg: rgba(255, 138, 128, 0.12);
+  --code-c: rgba(255, 255, 255, 0.06);
+  --add-bg: rgba(92, 201, 122, 0.15);
+  --del-bg: rgba(255, 138, 128, 0.14);
+  --scrim: rgba(0, 0, 0, 0.55);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  --kind-pm: #b392f0;
+  --kind-lead: #4fd1bd;
+  --kind-worker: #a8afb5;
+  --kind-checker: #f0883e;
+}
+
+/* What the reused chat styles read, from VS Code's theme. */
+:root[data-theme] {
+  --vscode-font-family: var(--font-ui);
+  --vscode-font-size: var(--font-size);
+  --vscode-editor-font-family: var(--font-mono);
+  --vscode-foreground: var(--fg);
+  --vscode-descriptionForeground: var(--fg-muted);
+  --vscode-editor-background: var(--bg);
+  --vscode-sideBar-background: var(--bg);
+  --vscode-editorWidget-background: var(--bg-elev);
+  --vscode-widget-border: var(--line);
+  --vscode-widget-shadow: rgba(0, 0, 0, 0.25);
+  --vscode-panel-border: var(--line);
+  --vscode-tree-indentGuidesStroke: var(--line);
+  --vscode-focusBorder: var(--focus-c);
+  --vscode-contrastBorder: transparent;
+  --vscode-contrastActiveBorder: transparent;
+  --vscode-textLink-foreground: var(--accent-c);
+  --vscode-textBlockQuote-border: var(--line-strong);
+  --vscode-textCodeBlock-background: var(--code-c);
+  --vscode-textPreformat-background: var(--code-c);
+  --vscode-toolbar-hoverBackground: var(--hover-bg);
+  --vscode-list-hoverBackground: var(--hover-bg);
+  --vscode-badge-background: var(--select-bg);
+  --vscode-badge-foreground: var(--fg);
+  --vscode-button-background: var(--accent-bg);
+  --vscode-button-foreground: var(--fg-on-accent);
+  --vscode-button-hoverBackground: var(--accent-bg-hover);
+  --vscode-button-border: transparent;
+  --vscode-button-secondaryBackground: var(--hover-bg);
+  --vscode-button-secondaryForeground: var(--fg);
+  --vscode-button-secondaryHoverBackground: var(--select-bg);
+  --vscode-input-background: var(--bg-input);
+  --vscode-input-border: var(--line);
+  --vscode-input-foreground: var(--fg);
+  --vscode-input-placeholderForeground: var(--fg-placeholder);
+  --vscode-inputValidation-errorBackground: var(--err-bg);
+  --vscode-inputValidation-errorBorder: var(--err-c);
+  --vscode-list-activeSelectionBackground: var(--select-bg);
+  --vscode-list-activeSelectionForeground: var(--fg);
+  --vscode-editorSuggestWidget-selectedBackground: var(--select-bg);
+  --vscode-editorSuggestWidget-selectedForeground: var(--fg);
+  --vscode-menu-background: var(--bg-elev);
+  --vscode-menu-border: var(--line);
+  --vscode-menu-foreground: var(--fg);
+  --vscode-menu-selectionBackground: var(--select-bg);
+  --vscode-menu-selectionForeground: var(--fg);
+  --vscode-menu-separatorBackground: var(--line);
+  --vscode-progressBar-background: var(--codex);
+  --vscode-statusBarItem-errorBackground: var(--err-c);
+  --vscode-statusBarItem-errorForeground: var(--bg);
+  --vscode-testing-iconPassed: var(--ok-c);
+  --vscode-editorError-foreground: var(--err-c);
+  --vscode-editorWarning-foreground: var(--warn-c);
+}

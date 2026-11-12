@@ -381,8 +381,10 @@ describe("agentduo desktop", () => {
     await page.locator(".sidebar .nav-head", { hasText: "Conversations" }).getByTitle("New conversation").click();
     await expect.poll(async () => (await activeConversation()).conversationId, { timeout: 10_000 }).not.toBe(a);
     expect(await page.locator(".chat-mount").count()).toBe(3);
-    // A conversation has no ✕ in the list: closing one only opened a new one in its place.
-    expect(await page.locator(".sidebar .nav-item.conversation button:not(.nav-main)").count()).toBe(0);
+    // A conversation has no ✕ in the list (closing one only opened a new one in its place): only those with something in
+    // them can be archived.
+    expect(await page.locator(".sidebar .nav-item.conversation button:not(.nav-main):not([title=\"Archive\"])").count()).toBe(0);
+    expect(await page.locator(".sidebar .nav-item.conversation", { hasText: "New conversation" }).getByTitle("Archive").count()).toBe(0);
     await page.locator(".sidebar .nav-item.conversation .nav-main", { hasText: "Hello Codex" }).click();
     await seeInChat("Codex says hello", 10_000);
     await expect.poll(async () => (await activeConversation()).conversationId, { timeout: 10_000 }).toBe(a);
@@ -393,6 +395,59 @@ describe("agentduo desktop", () => {
     await closeSettings();
     expect((await activeConversation()).conversationId).toBe(a);
     await seeInChat("Codex says hello", 5000);
+  });
+
+  it("archives a conversation from its row, lists it under the archive button beside +, restores it, and deletes it after asking", async () => {
+    const a = (await activeConversation()).conversationId!;
+    fake.setScenario({ chat_codex: [{ answer: "Ready to be archived" }] });
+    await page.locator(".sidebar .nav-head", { hasText: "Conversations" }).getByTitle("New conversation").click();
+    await expect.poll(async () => (await activeConversation()).conversationId, { timeout: 10_000 }).not.toBe(a);
+    await send("Archive me later");
+    await seeInChat("Ready to be archived");
+    const doomed = (await activeConversation()).conversationId!;
+    const rows = page.locator(".sidebar .nav-list.conversations:not(.archived) .nav-item.conversation");
+    const archived = page.locator(".sidebar .nav-list.archived .nav-item.conversation");
+    const archive = async () => {
+      const row = rows.filter({ hasText: "Archive me later" });
+      await row.hover();
+      await row.getByTitle("Archive").click();
+      await expect.poll(() => rows.filter({ hasText: "Archive me later" }).count(), { timeout: 10_000 }).toBe(0);
+    };
+    await archive();
+    // Its chat closed; another conversation is the active one.
+    await expect.poll(async () => (await activeConversation()).conversationId, { timeout: 10_000 }).not.toBe(doomed);
+    const toggle = page.locator(".sidebar .nav-head .archive-toggle");
+    await toggle.click();
+    expect(await toggle.getAttribute("aria-pressed")).toBe("true");
+    await archived.filter({ hasText: "Archive me later" }).waitFor({ timeout: 10_000 });
+    expect(await page.locator(".sidebar .nav-head").getByTitle("New conversation").count()).toBe(0);
+    // Restored and opened: back in the list, with what was said in it.
+    await archived.filter({ hasText: "Archive me later" }).locator(".nav-main").click();
+    await expect.poll(async () => (await activeConversation()).conversationId, { timeout: 10_000 }).toBe(doomed);
+    await seeInChat("Ready to be archived", 10_000);
+    await rows.filter({ hasText: "Archive me later" }).waitFor({ timeout: 10_000 });
+    // Archived again, then deleted from the archived list: asked first, and declining keeps it.
+    await archive();
+    await toggle.click();
+    const entry = archived.filter({ hasText: "Archive me later" });
+    await entry.waitFor({ timeout: 10_000 });
+    // The app's own dialog (never the browser's confirm): it names the conversation, and Cancel is focused first.
+    const dialog = page.getByRole("alertdialog");
+    await entry.hover();
+    await entry.getByTitle(/^Delete/).click();
+    await expect.poll(() => dialog.getByRole("heading").textContent(), { timeout: 5000 }).toBe("Delete «Archive me later»?");
+    expect(await dialog.getByRole("button", { name: "Cancel" }).evaluate((b) => b === document.activeElement)).toBe(true);
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await expect.poll(() => dialog.count(), { timeout: 5000 }).toBe(0);
+    expect(existsSync(join(runsDir, "conversations", doomed, "conversation.json"))).toBe(true);
+    await entry.getByTitle(/^Delete/).click();
+    await dialog.getByRole("button", { name: "Delete" }).click();
+    await expect.poll(() => archived.filter({ hasText: "Archive me later" }).count(), { timeout: 10_000 }).toBe(0);
+    expect(existsSync(join(runsDir, "conversations", doomed))).toBe(false);
+    await toggle.click();
+    // Back where the next tests expect it: conversation A.
+    await rows.filter({ hasText: "Hello Codex" }).locator(".nav-main").click();
+    await expect.poll(async () => (await activeConversation()).conversationId, { timeout: 10_000 }).toBe(a);
   });
 
   it("runs a pipeline: gate, review, a decision, Settings changed meanwhile, and its changes as a line diff", async () => {

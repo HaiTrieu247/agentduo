@@ -180,7 +180,9 @@ async function main() {
   }
   let text;
   const prose = "raw" in resp || "answer" in resp;
-  if ("answer" in resp) {
+  if ("apiError" in resp) {
+    text = "";
+  } else if ("answer" in resp) {
     text = resp.answer;
   } else if ("raw" in resp) {
     text = resp.raw;
@@ -217,6 +219,13 @@ async function main() {
     });
     await sleep();
     if ("answer" in resp && text) emit({ type: "assistant", uuid: "final", message: { id: "m-final", usage, content: [{ type: "text", text }] } });
+    // `apiError`: the API refused the call (a usage limit, 429), as Claude Code 2.1.321 reports it: a result that is an
+    // error, with the reason as its text, and exit code 1.
+    if (resp.apiError) {
+      emit({ type: "result", subtype: "success", is_error: true, result: resp.apiError, api_error_status: 429, terminal_reason: "api_error",
+        total_cost_usd: 0, session_id: session, num_turns: 1, permission_denials: [] });
+      return resp.exit ?? 1;
+    }
     const envelope = { type: "result", subtype: "success", is_error: false, result: text, total_cost_usd: 0.01, session_id: session, num_turns: 1, permission_denials: denials };
     if (!prose) envelope.structured_output = JSON.parse(text);
     emit(envelope);

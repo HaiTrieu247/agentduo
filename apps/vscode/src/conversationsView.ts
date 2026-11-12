@@ -11,6 +11,8 @@ export interface ConversationEntry {
   waiting: number;
   /** Another agentduo window (`duo`, the desktop, another VS Code window) works in it now. */
   elsewhere: boolean;
+  /** Something was said in it (it has a record): it can be archived. */
+  saved: boolean;
 }
 
 /** "just now", "12 min ago", "14:05", "yesterday", "28 Oct": when a conversation last changed. */
@@ -51,7 +53,9 @@ export class ConversationsView implements vscode.TreeDataProvider<ConversationEn
     item.tooltip = e.title || "New conversation";
     item.iconPath = new vscode.ThemeIcon(e.waiting ? "bell-dot" : e.running || e.elsewhere ? "loading~spin" : e.open ? "comment-discussion" : "comment");
     item.command = { command: "agentduo.openConversation", title: "Open conversation", arguments: [e.id] };
-    item.contextValue = e.open ? "conversation.open" : "conversation";
+    // `archivable`: the row's archive button (a conversation with something in it, nobody working in it, nothing waiting).
+    const archivable = e.saved && !e.running && !e.waiting && !e.elsewhere;
+    item.contextValue = `${e.open ? "conversation.open" : "conversation"}${archivable ? ".archivable" : ""}`;
     return item;
   }
 

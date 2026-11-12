@@ -204,7 +204,7 @@ describe("onboarding", () => {
 });
 
 describe("sidebar", () => {
-  const item = (running: boolean): ConversationItem => ({ id: "c", title: "t", updatedAt: null, running, waiting: 0, activity: null });
+  const item = (running: boolean): ConversationItem => ({ id: "c", title: "t", updatedAt: null, running, waiting: 0, activity: null, saved: true });
   it("marks a project busy only while an agent works in one of its conversations", () => {
     expect(projectBusy(undefined)).toBe(false);
     expect(projectBusy([item(false), item(false)])).toBe(false);

@@ -8,7 +8,7 @@ import type { Attachment } from "../../src/inputs/attachment-types.js";
 import { existingAttachmentFile } from "../../src/inputs/attachments.js";
 import { Conversation } from "../../src/chat/conversation.js";
 import type { ConfigData } from "../../src/config/config.js";
-import { listConversations } from "../../src/chat/conversation.js";
+import { archiveConversation, deleteConversation, listConversations } from "../../src/chat/conversation.js";
 import { acquireLockFile, acquireWorkspaceLock, RunStore, type EarlierTask, type Exchange } from "../../src/workflow/state.js";
 import { conversationBusy, conversationLockPath, WorkspaceLease } from "../../src/workflow/lease.js";
 import { ConfigFiles } from "../../src/config/configuration.js";
@@ -1530,8 +1530,9 @@ describe("Chat: attached files", () => {
     await chat.idle();
     const st = latest();
     expect(st.attachments).toEqual([expect.objectContaining({ name: "mockup.png", path: expect.stringMatching(new RegExp(`^${st.taskId}/attachments/`)) })]);
+    // The user's file and the chat's copy are gone (a deleted conversation sends nothing more, so only its files go).
     rmSync(source);
-    rmSync(join(runsDir, "conversations", chat.conversationId), { recursive: true });
+    rmSync(join(runsDir, "conversations", chat.conversationId, "attachments"), { recursive: true });
     await chat.submit("/resume");
     await chat.idle();
     expect(latest().phase).toBe("DONE");
@@ -1890,6 +1891,28 @@ describe("Chat: other agentduo windows on the workspace", () => {
     return chat;
   };
   const record = (id: string) => JSON.parse(readFileSync(join(runsDir, "conversations", id, "conversation.json"), "utf8"));
+
+  it("sends nothing in a conversation another window deleted, and brings an archived one back when it works again", async () => {
+    fake.setScenario({ chat_codex: [{ answer: "first" }, { answer: "again" }] });
+    const screen = new FakeUi();
+    const chat = windowChat({ screen, conversationId: "kept" });
+    await say(chat, "Hello");
+    // Archived elsewhere while this window keeps it open: its next message brings it back to the list.
+    archiveConversation(runsDir, "kept");
+    expect(listConversations(runsDir).map((c) => c.id)).toEqual([]);
+    await say(chat, "Still there?");
+    expect(answers().at(-1)).toMatchObject({ status: "success", answer: "again" });
+    expect(listConversations(runsDir).map((c) => c.id)).toEqual(["kept"]);
+    expect(screen.lines.some((l) => l.includes("was archived"))).toBe(true);
+    // Deleted elsewhere: nothing is sent, the line goes back, and the conversation is not written back.
+    deleteConversation(runsDir, "kept");
+    await say(chat, "Anyone?");
+    expect(fake.calls("chat_codex")).toHaveLength(2);
+    expect(screen.lines.at(-1)).toContain("was deleted in another agentduo window");
+    expect(screen.refusedLines).toEqual(["Anyone?"]);
+    await say(chat, "/claude");
+    expect(existsSync(join(runsDir, "conversations", "kept", "conversation.json"))).toBe(false);
+  });
 
   it("holds the workspace and its conversation only while an answer runs, a question to the user included", async () => {
     const asker = new ScriptedClarifier([(r) => {

@@ -5,13 +5,15 @@ import { basename, join } from "node:path";
 import * as vscode from "vscode";
 import { ATTACHMENT_LIMITS, formatBytes } from "@agentduo/engine/inputs/attachment-types";
 import { safeFileName } from "@agentduo/engine/inputs/attachments";
-import { listConversations } from "@agentduo/engine/chat/conversation";
+import {
+  archiveConversation, ConversationError, deleteConversation, listConversations, restoreConversation,
+} from "@agentduo/engine/chat/conversation";
 import { stamp } from "@agentduo/engine/workflow/state";
 import { shownImages, type ViewState } from "@agentduo/host/viewState";
 import { ACCOUNT_VIEW, AccountView } from "./accountView.js";
 import { ARTIFACT_SCHEME, ChangeRegistry, SNAPSHOT_SCHEME } from "./artifacts.js";
 import { ConversationPanel, PANEL_TYPE, type PanelHost } from "./conversationPanel.js";
-import { ConversationsView, type ConversationEntry } from "./conversationsView.js";
+import { ConversationsView, when, type ConversationEntry } from "./conversationsView.js";
 import { ArtifactContentProvider, changesToShow, openArtifact, openChanges, openDiff, SnapshotContentProvider } from "./diffProvider.js";
 import {
   isConversationId, type AccountUsage, type AccountViewState, type ArtifactName, type DecisionChoice, type WebviewCommand, type WebviewMessage,
@@ -364,17 +366,102 @@ class Controller implements vscode.Disposable, PanelHost {
     const runsDir = session?.runsDirectory ?? null;
     const saved = runsDir ? listConversations(runsDir) : [];
     const state = (id: string) => (session && (this.panels.has(id) || session.conversations.includes(id)) ? session.conversation(id).state : null);
-    const entry = (id: string, title: string, updatedAt: string | null, inUseBy: number | null = null): ConversationEntry => {
+    const entry = (id: string, title: string, updatedAt: string | null, inUseBy: number | null = null, saved = false): ConversationEntry => {
       const st = state(id);
       return {
         id, title: st && st.timeline.length ? titleOf(st) : title, updatedAt, open: this.panels.has(id),
         running: !!st && (st.status === "running" || st.status === "answering"), waiting: st ? (st.decision ? 1 : 0) + st.permissions.length + (st.questions ?? []).length : 0,
-        elsewhere: !!inUseBy && inUseBy !== session?.workerPid,
+        elsewhere: !!inUseBy && inUseBy !== session?.workerPid, saved,
       };
     };
     const known = new Set(saved.map((c) => c.id));
     const unsaved = [...this.panels.keys()].filter((id) => !known.has(id)).reverse().map((id) => entry(id, "", null));
-    return [...unsaved, ...saved.map((c) => entry(c.id, c.title, c.updatedAt, c.inUseBy))];
+    return [...unsaved, ...saved.map((c) => entry(c.id, c.title, c.updatedAt, c.inUseBy, true))];
+  }
+
+  // ------------------------------------------------------------------ archived conversations
+  /**
+   * Archives a conversation of the list (`id`), or the tab the commands act on: it leaves the list, whole, and its tab
+   * closes. Refused while an agent works in it or it waits for you.
+   */
+  async archive(id: string | null): Promise<void> {
+    const runsDir = this.session?.runsDirectory;
+    const target = id ?? this.active();
+    const e = target ? this.entries().find((x) => x.id === target) : undefined;
+    if (!runsDir || !e?.saved) {
+      void vscode.window.showInformationMessage("agentduo: only a conversation with something said in it can be archived.");
+      return;
+    }
+    if (e.running || e.waiting) {
+      void vscode.window.showWarningMessage("agentduo: an agent works in this conversation, or it waits for you: archive it once that is done.");
+      return;
+    }
+    try {
+      archiveConversation(runsDir, e.id);
+    } catch (err) {
+      if (!(err instanceof ConversationError)) throw err;
+      void vscode.window.showErrorMessage(`agentduo: ${err.message}`);
+      return;
+    }
+    this.panels.get(e.id)?.panel.dispose();
+    this.refreshList();
+  }
+
+  /** The archived conversations, to restore one (and open it) or delete one. */
+  async showArchived(): Promise<void> {
+    const runsDir = this.session?.runsDirectory;
+    if (!runsDir) {
+      void vscode.window.showInformationMessage("agentduo: the conversations are not known yet; try again in a moment.");
+      return;
+    }
+    const restoreButton = { iconPath: new vscode.ThemeIcon("discard"), tooltip: "Restore: back in the list" };
+    const deleteButton = { iconPath: new vscode.ThemeIcon("trash"), tooltip: "Delete with its logs and files…" };
+    type Item = vscode.QuickPickItem & { id: string };
+    const pick = vscode.window.createQuickPick<Item>();
+    pick.title = "Archived conversations";
+    pick.placeholder = "Pick one to restore and open it";
+    const fill = () => {
+      const items = listConversations(runsDir, "archived").map((c): Item => ({
+        id: c.id, label: c.title || "Untitled", description: c.archivedAt ? `archived ${when(c.archivedAt)}` : "archived", buttons: [restoreButton, deleteButton],
+      }));
+      pick.items = items;
+      if (!items.length) pick.placeholder = "No archived conversations";
+    };
+    fill();
+    const failed = (err: unknown) => {
+      if (!(err instanceof ConversationError)) throw err;
+      void vscode.window.showErrorMessage(`agentduo: ${err.message}`);
+    };
+    pick.onDidTriggerItemButton(async ({ item, button }) => {
+      try {
+        if (button === restoreButton) restoreConversation(runsDir, item.id);
+        else {
+          const sure = await vscode.window.showWarningMessage(`Delete «${item.label}» with its logs and attached files? This cannot be undone.`, { modal: true }, "Delete");
+          if (sure !== "Delete") return;
+          this.panels.get(item.id)?.panel.dispose();
+          deleteConversation(runsDir, item.id);
+        }
+      } catch (err) {
+        failed(err);
+      }
+      fill();
+      this.refreshList();
+    });
+    pick.onDidAccept(() => {
+      const item = pick.selectedItems[0];
+      pick.hide();
+      if (!item) return;
+      try {
+        restoreConversation(runsDir, item.id);
+      } catch (err) {
+        failed(err);
+        return;
+      }
+      this.refreshList();
+      void this.openConversation(item.id);
+    });
+    pick.onDidHide(() => pick.dispose());
+    pick.show();
   }
 
   /** The list follows the tabs, at most every 300 ms while answers stream in. */
@@ -595,6 +682,12 @@ export function activate(context: vscode.ExtensionContext): TestApi | undefined 
     }),
     vscode.commands.registerCommand("agentduo.newTask", () => c.openConversation(null)),
     vscode.commands.registerCommand("agentduo.openConversation", (id: unknown) => c.openConversation(isConversationId(id) ? id : null)),
+    // From a row of the list (its entry) or the palette (the tab the commands act on).
+    vscode.commands.registerCommand("agentduo.archiveConversation", (e: unknown) => {
+      const id = typeof e === "string" ? e : (e as { id?: unknown } | undefined)?.id;
+      return c.archive(isConversationId(id) ? id : null);
+    }),
+    vscode.commands.registerCommand("agentduo.archivedConversations", () => c.showArchived()),
     vscode.commands.registerCommand("agentduo.stop", () => c.command("stop")),
     vscode.commands.registerCommand("agentduo.resume", () => c.command("resume")),
     vscode.commands.registerCommand("agentduo.openSettings", () => c.openSettings()),

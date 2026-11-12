@@ -629,11 +629,13 @@ export class AgentRunner {
       }
       let data: unknown = null;
       let parseError: string | null = null;
+      let reported = false;
       try {
         ({ data, meta } = backend.finalize(parser, run.stdout, lastMessageFile, text ? "text" : "structured"));
       } catch (e) {
         if (!(e instanceof AgentFailure)) throw e;
         parseError = e.message;
+        reported = e.reported;
         meta = { permissionDenials: [], ...e.meta };
       }
       // A call the user denied at the prompt was their choice, not a settings problem worth a hint.
@@ -651,7 +653,8 @@ export class AgentRunner {
       const before = rejected;
       rejected = null;
       if (parseError) {
-        lastError = run.code === 0 ? parseError : `${backend.name} exited with code ${run.code}: ${(run.stderr || run.stdout).trim().slice(-800)}`;
+        // The CLI's own reason (a usage limit, say) when it gave one; else what it printed last.
+        lastError = run.code === 0 ? parseError : `${backend.name} exited with code ${run.code}: ${reported ? parseError : (run.stderr || run.stdout).trim().slice(-800)}`;
         if (run.code === 0 && o.mode !== "text") {
           rejections.push({ attempt, errors: [parseError] });
           if (before && sameErrors(before.errors, [parseError])) {

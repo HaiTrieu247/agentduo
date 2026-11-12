@@ -134,7 +134,8 @@ export type ClarificationReply = { questions: ClarificationQuestion[]; answers: 
 
 export class AgentFailure extends Error {
   override name = "AgentFailure";
-  constructor(message: string, readonly meta: Partial<AgentMeta> = {}) {
+  /** `reported`: the CLI said what went wrong itself (an error result), which beats its raw output as the reason. */
+  constructor(message: string, readonly meta: Partial<AgentMeta> = {}, readonly reported = false) {
     super(message);
   }
 }

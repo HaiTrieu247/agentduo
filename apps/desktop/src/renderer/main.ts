@@ -5,8 +5,9 @@ import type { WebviewCommand } from "@agentduo/host/protocol";
 import { CONVERSATIONS_PROJECT_ID } from "../shared/protocol.js";
 import type { AppSnapshot, ConversationItem, DesktopEvent, Preferences, UpdateState } from "../shared/protocol.js";
 import { updatedText } from "@agentduo/webview/account";
-import { button, call, el, errorText, onEvent } from "./bridge.js";
+import { button, call, el, errorText, icon, onEvent } from "./bridge.js";
 import { ChatHost, chatStatus, type Mount } from "./chat.js";
+import { confirmDialog } from "./dialog.js";
 import { Inspector, type InspectorTab } from "./inspector.js";
 import { Onboarding } from "./onboarding.js";
 import { SettingsPanel, type SettingsSection } from "./settings.js";
@@ -16,11 +17,16 @@ import { applyAppearance } from "./theme.js";
 import { restartQuestion } from "./update.js";
 import { turnEnded, USAGE_PERIOD_MS, USAGE_STALE_MS, UsageStore } from "./usage.js";
 
+/** The inspector stays beside the chat only while the chat keeps this much room; below, it floats over the chat. */
+const CHAT_ROOM = 520;
+/** The inspector's width beside the chat (--inspector-w). */
+const INSPECTOR_W = 380;
+/** Below this window width the inspector always floats, whatever the sidebar's width. */
 const NARROW = 900;
 
 const root = document.getElementById("root")!;
 const sidebar = el("aside", { class: "sidebar", attrs: { "aria-label": "Projects and conversations" } });
-const topTitle = el("span", { class: "top-title" });
+const topTitle = el("div", { class: "top-title" });
 const topStatus = el("span", { class: "top-status", attrs: { role: "status", "aria-live": "polite" } });
 const inspectorToggle = button("", () => void toggleInspector(), { class: "icon-btn", icon: "layout-sidebar-right", title: "Plan, changes and checks" });
 const topbar = el("header", { class: "topbar" }, topTitle, topStatus, el("span", { class: "spacer" }), inspectorToggle);
@@ -30,7 +36,9 @@ const center = el("main", { class: "center" }, topbar, chatArea, empty);
 const inspectorEl = el("aside", { class: "inspector", attrs: { "aria-label": "Run inspector" } });
 const settingsEl = el("section", { class: "overlay settings", attrs: { role: "dialog", "aria-label": "Settings" } });
 const onboardEl = el("section", { class: "overlay onboarding" });
-const toast = el("div", { class: "toast", attrs: { role: "alert" } });
+const toastText = el("span", { class: "toast-text" });
+const toast = el("div", { class: "toast", attrs: { role: "alert" } }, icon("error"), toastText,
+  button("", () => hideToast(), { class: "icon-btn toast-close", icon: "close", title: "Dismiss" }));
 settingsEl.hidden = true;
 onboardEl.hidden = true;
 toast.hidden = true;
@@ -42,18 +50,30 @@ let snapshot: AppSnapshot | null = null;
 const current = (): AppSnapshot | null => snapshot;
 const model: SidebarModel = {
   snapshot: null, conversations: new Map<string, ConversationItem[]>(), runs: null, runsOpen: false, runsError: null,
+  archivedOpen: false, archived: null, archivedError: null,
   account: { open: true, answer: null, looking: false, now: Date.now() },
   update: { status: "idle" },
 };
 const usage = new UsageStore((projectId) => call({ method: "account.usage", projectId }));
 let inspectorOpen = true;
 let narrowOverride: boolean | null = null;
-const sidebarWidth = sidebarResizer(sidebarEdge, (width) => void setPrefs({ sidebarWidth: width }).catch(showError));
+const sidebarWidth = sidebarResizer(sidebarEdge, (width) => {
+  layout();
+  void setPrefs({ sidebarWidth: width }).catch(showError);
+});
 
+let toastTimer: number | undefined;
+function hideToast(): void {
+  window.clearTimeout(toastTimer);
+  toast.hidden = true;
+}
+
+/** An error in the toast at the bottom, for 6 seconds after the latest one (or until dismissed). */
 function showError(e: unknown): void {
-  toast.textContent = errorText(e);
+  toastText.textContent = errorText(e);
   toast.hidden = false;
-  setTimeout(() => (toast.hidden = true), 6000);
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(hideToast, 6000);
 }
 
 const chats = new ChatHost(chatArea, {
@@ -101,7 +121,7 @@ const settings = new SettingsPanel(settingsEl, {
   usage,
   update: () => model.update,
   checkUpdate: () => checkUpdate(),
-  installUpdate: () => installUpdate(),
+  installUpdate: () => void installUpdate(),
   downloadUpdate: () => void call({ method: "link.open", link: "agentduo-releases" }).catch(showError),
   close: () => {
     settingsEl.hidden = true;
@@ -132,6 +152,9 @@ function setSnapshot(next: AppSnapshot): void {
   if (before?.projectId !== next.active.projectId) {
     model.runs = null;
     model.runsError = null;
+    // Another project shows its own conversations: the archived list is a look into one project.
+    model.archivedOpen = false;
+    model.archived = null;
     if (model.runsOpen && snapshot?.active.projectId !== CONVERSATIONS_PROJECT_ID) void loadRuns();
   }
   if (before?.projectId !== next.active.projectId) freshenUsage(USAGE_STALE_MS);
@@ -158,11 +181,17 @@ async function checkUpdate(): Promise<void> {
 }
 
 /** Restarts into the downloaded version: asked first when agents are working (restarting stops them). */
-function installUpdate(): void {
+async function installUpdate(): Promise<void> {
   let running = 0;
   for (const items of model.conversations.values()) running += items.filter((c) => c.running).length;
   const question = restartQuestion(running);
-  if (question && !confirm(question)) return;
+  if (question && !(await confirmDialog({
+    title: "Restart to update now?",
+    message: question.replace(/^Restart to update now\? /, ""),
+    confirm: "Restart",
+    cancel: "Not now",
+    destructive: true,
+  }))) return;
   void call({ method: "update.install" }).catch(showError);
 }
 
@@ -194,16 +223,20 @@ async function showActive(): Promise<void> {
   drawTop();
 }
 
-function drawEmpty(): void {
+/** The middle with nothing open: what the app does and the ways in; `error` when the app's state could not be read. */
+function drawEmpty(error?: unknown): void {
   chatArea.hidden = true;
   empty.hidden = false;
-  empty.replaceChildren(
+  empty.replaceChildren(el("div", { class: "empty-card" },
     el("div", { class: "brand-mark big", attrs: { "aria-hidden": "true" } }, el("span", { class: "dot dot-codex" }), el("span", { class: "dot dot-claude" })),
-    el("h2", { text: "Start a conversation" }),
-    el("p", { class: "muted", text: "Chat with Claude Code and Codex, /discuss a question until they agree, or run a /pipeline: Codex plans and reviews, Claude implements." }),
-    button("New conversation", () => void call({ method: "project.select", projectId: CONVERSATIONS_PROJECT_ID }).then(setSnapshot, showError), { class: "primary", icon: "add" }),
-    button("Open project…", () => void openProject(), { class: "ghost", icon: "folder-opened" }),
-    button("Set up the CLIs", () => void showOnboarding(), { class: "ghost", icon: "checklist" }));
+    el("h2", { class: "empty-title", text: error ? "AgentDuo could not load" : "Start a conversation" }),
+    error
+      ? el("p", { class: "empty-error", attrs: { role: "alert" } }, icon("error"), el("span", { text: errorText(error) }))
+      : el("p", { class: "muted", text: "Chat with Claude Code and Codex, /discuss a question until they agree, or run a /pipeline: Codex plans and reviews, Claude implements." }),
+    el("div", { class: "empty-actions" },
+      button("New conversation", () => void call({ method: "project.select", projectId: CONVERSATIONS_PROJECT_ID }).then(setSnapshot, showError), { class: "primary", icon: "add" }),
+      button("Open project…", () => void openProject(), { icon: "folder-opened" }),
+      button("Set up the CLIs", () => void showOnboarding(), { class: "ghost", icon: "checklist" }))));
 }
 
 // ------------------------------------------------------------------ account & usage
@@ -240,14 +273,23 @@ function drawSidebar(): void {
   renderSidebar(sidebar, model, {
     openProject: () => void openProject(),
     selectProject: (projectId) => void call({ method: "project.select", projectId }).then(setSnapshot, showError),
-    forgetProject: (projectId) => {
-      if (!confirm("Remove this project from the list? Its files and conversations stay where they are.")) return;
-      chats.dropProject(projectId);
-      void call({ method: "project.forget", projectId }).then(setSnapshot, showError);
-    },
+    forgetProject: (projectId) => void forgetProject(projectId),
     restartProject: (projectId) => void call({ method: "project.restart", projectId }).catch(showError),
     newConversation: () => void newConversation(),
     openConversation: (conversationId) => void openConversation(conversationId),
+    archiveConversation: (conversationId) => void archiveConversation(conversationId),
+    toggleArchived: () => {
+      model.archivedOpen = !model.archivedOpen;
+      if (model.archivedOpen) void loadArchived();
+      drawSidebar();
+    },
+    restoreConversation: (conversationId, open) => void restoreConversation(conversationId, open),
+    deleteConversation: (c) => void confirmDialog({
+      title: `Delete «${c.title}»?`,
+      message: "Its logs and attached files are deleted with it. This cannot be undone.",
+      confirm: "Delete",
+      destructive: true,
+    }).then((yes) => (yes ? deleteConversation(c.id) : undefined)),
     toggleRuns: () => {
       model.runsOpen = !model.runsOpen;
       if (model.runsOpen && snapshot?.active.projectId !== CONVERSATIONS_PROJECT_ID) void loadRuns();
@@ -261,18 +303,25 @@ function drawSidebar(): void {
       void setPrefs({ accountOpen: open }).then(() => freshenUsage(USAGE_STALE_MS), showError);
     },
     refreshAccount: () => void usage.refresh(usageProject()),
-    update: (action) => (action === "install" ? installUpdate() : void call({ method: "link.open", link: "agentduo-releases" }).catch(showError)),
+    update: (action) => void (action === "install" ? installUpdate() : call({ method: "link.open", link: "agentduo-releases" }).catch(showError)),
     settings: () => openSettings(),
   });
 }
 
+/** The title bar: where the chat is (the project, or Conversations outside one) and which conversation, then its state. */
 function drawTop(): void {
   const project = snapshot?.projects.find((p) => p.id === snapshot?.active.projectId);
   const items = project ? (model.conversations.get(project.id) ?? []) : [];
   const conv = items.find((c) => c.id === snapshot?.active.conversationId);
-  topTitle.replaceChildren(
-    el("strong", { text: project?.name ?? "AgentDuo" }),
-    project ? el("span", { class: "muted", text: ` · ${conv?.title || "New conversation"}` }) : "");
+  const general = project?.id === CONVERSATIONS_PROJECT_ID;
+  const place = project ? (general ? "Conversations" : project.name) : null;
+  const title = project ? conv?.title || "New conversation" : "AgentDuo";
+  topTitle.title = project && !general ? `${project.path}\n${title}` : title;
+  topTitle.replaceChildren(...[
+    place ? el("span", { class: "top-project" }, icon(general ? "comment-discussion" : "folder"), el("span", { class: "top-project-name", text: place })) : null,
+    place ? el("span", { class: "top-sep", text: "/", attrs: { "aria-hidden": "true" } }) : null,
+    el("strong", { class: "top-conversation", text: title }),
+  ].filter((n): n is HTMLElement => n !== null));
   const m = chats.active();
   const s = m?.state ?? null;
   const busy = s ? s.status === "running" || s.status === "answering" : false;
@@ -305,6 +354,19 @@ async function openProject(): Promise<boolean> {
   }
 }
 
+/** Off the list, after asking: its folder, conversations and runs stay where they are. */
+async function forgetProject(projectId: string): Promise<void> {
+  const name = snapshot?.projects.find((p) => p.id === projectId)?.name ?? "this project";
+  const yes = await confirmDialog({
+    title: `Remove «${name}» from the list?`,
+    message: "Its files and conversations stay where they are.",
+    confirm: "Remove",
+  });
+  if (!yes) return;
+  chats.dropProject(projectId);
+  void call({ method: "project.forget", projectId }).then(setSnapshot, showError);
+}
+
 async function newConversation(): Promise<void> {
   const projectId = snapshot?.active.projectId;
   if (!projectId) return void openProject();
@@ -316,6 +378,57 @@ async function newConversation(): Promise<void> {
   }
 }
 
+/** The conversation leaves the list, whole; its chat goes from the page, and main says which one is active now. */
+async function archiveConversation(conversationId: string): Promise<void> {
+  const projectId = snapshot?.active.projectId;
+  if (!projectId) return;
+  try {
+    await call({ method: "conversation.archive", projectId, conversationId });
+    chats.drop(projectId, conversationId);
+    setSnapshot(await call({ method: "app.state" }));
+  } catch (e) {
+    showError(e);
+  }
+}
+
+async function loadArchived(): Promise<void> {
+  const projectId = snapshot?.active.projectId;
+  if (!projectId) return;
+  try {
+    model.archived = await call({ method: "conversation.archived", projectId });
+    model.archivedError = null;
+  } catch (e) {
+    model.archivedError = errorText(e);
+  }
+  drawSidebar();
+}
+
+async function restoreConversation(conversationId: string, open: boolean): Promise<void> {
+  const projectId = snapshot?.active.projectId;
+  if (!projectId) return;
+  try {
+    await call({ method: "conversation.restore", projectId, conversationId });
+    if (open) {
+      model.archivedOpen = false;
+      await openConversation(conversationId);
+    } else await loadArchived();
+  } catch (e) {
+    showError(e);
+  }
+}
+
+async function deleteConversation(conversationId: string): Promise<void> {
+  const projectId = snapshot?.active.projectId;
+  if (!projectId) return;
+  try {
+    await call({ method: "conversation.delete", projectId, conversationId });
+    chats.drop(projectId, conversationId);
+  } catch (e) {
+    showError(e);
+  }
+  await loadArchived();
+}
+
 async function openConversation(conversationId: string): Promise<void> {
   const projectId = snapshot?.active.projectId;
   if (!projectId || !snapshot) return;
@@ -323,21 +436,29 @@ async function openConversation(conversationId: string): Promise<void> {
 }
 
 // ------------------------------------------------------------------ panels
+/** No room for the inspector beside the chat: below 900px, or when the sidebar and the inspector would leave the chat
+ * less than CHAT_ROOM. The inspector then floats over the chat, shown only on demand. */
+function isNarrow(): boolean {
+  return window.innerWidth < NARROW || window.innerWidth - sidebarWidth.width() - INSPECTOR_W < CHAT_ROOM;
+}
+
 function inspectorShown(): boolean {
-  if (window.innerWidth < NARROW) return narrowOverride ?? false;
+  if (isNarrow()) return narrowOverride ?? false;
   return inspectorOpen;
 }
 
 function layout(): void {
+  const narrow = isNarrow();
+  if (!narrow) narrowOverride = null;
   const shown = inspectorShown();
   inspectorEl.hidden = !shown;
-  document.body.classList.toggle("narrow", window.innerWidth < NARROW);
+  document.body.classList.toggle("narrow", narrow);
   inspectorToggle.setAttribute("aria-pressed", String(shown));
 }
 
 async function toggleInspector(force?: boolean): Promise<void> {
   const next = force ?? !inspectorShown();
-  if (window.innerWidth < NARROW) narrowOverride = next;
+  if (isNarrow()) narrowOverride = next;
   else {
     inspectorOpen = next;
     await setPrefs({ inspector: next }).catch(showError);
@@ -363,7 +484,6 @@ async function showOnboarding(): Promise<void> {
 }
 
 window.addEventListener("resize", () => {
-  if (window.innerWidth >= NARROW) narrowOverride = null;
   sidebarWidth.fit();
   layout();
 });
@@ -418,8 +538,7 @@ void (async () => {
   try {
     setSnapshot(await call({ method: "app.state" }));
   } catch (e) {
-    showError(e);
-    drawEmpty();
+    drawEmpty(e);
     return;
   }
   const now = current();

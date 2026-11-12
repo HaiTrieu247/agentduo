@@ -103,6 +103,14 @@ Code và Codex; pipeline đầy đủ chỉ chạy khi bạn yêu cầu:
   `/settings`, `/config`, `/help`, `/quit`. Bấm Ctrl-C hai lần cũng thoát; run đang chạy sẽ dừng ở bước hiện tại và vẫn
   resume được.
 
+**Archive và xoá cuộc trò chuyện.** Archive đưa một cuộc trò chuyện ra khỏi danh sách mà vẫn giữ nguyên mọi thứ: nút
+archive trên dòng của nó (sidebar app desktop, mục Conversations của VS Code), hoặc `duo chat --archive <id>`. Nút archive
+cạnh dấu **+** (desktop, VS Code) mở danh sách các cuộc đã archive: chọn một cuộc để khôi phục và mở, chỉ khôi phục, hoặc
+xoá hẳn cùng log và file đính kèm sau khi xác nhận (`duo chat --list --archived`, `--restore <id>`, `--delete <id>`; lệnh
+xoá hỏi trước, hoặc nhận `--yes`). Run vẫn giữ bản copy riêng những gì nó đã dùng. Cuộc đang có agent làm việc hoặc đang
+chờ bạn thì chưa archive hay xoá được. Làm việc tiếp trong một cuộc đã archive mà còn mở ở cửa sổ nào đó thì nó hiện lại
+trong danh sách; cửa sổ còn mở một cuộc đã bị xoá thì không gửi gì nữa (`/new` để mở cuộc mới) và không bao giờ ghi lại nó.
+
 Mỗi cuộc trò chuyện giữ một session Codex và một session Claude, dùng chung cho chat thường và mọi bước `/discuss`,
 kể cả tổng hợp. Mở lại cùng cuộc trò chuyện sẽ resume hai session đó; `/new` hoặc cuộc trò chuyện mới tạo session mới.
 Khi resume, agent chỉ nhận phần hội thoại mới (nếu phần đó vượt quá giới hạn của prompt, prompt ghi rõ bao nhiêu lượt bị

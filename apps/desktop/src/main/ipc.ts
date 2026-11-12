@@ -118,6 +118,17 @@ export class Dispatcher {
       case "conversation.select":
         projects.selectConversation(r.projectId, r.conversationId);
         return { selected: true };
+      case "conversation.archive":
+        await projects.archiveConversation(r.projectId, r.conversationId);
+        return { archived: true };
+      case "conversation.archived":
+        return projects.archived(r.projectId);
+      case "conversation.restore":
+        projects.restoreConversation(r.projectId, r.conversationId);
+        return { restored: true };
+      case "conversation.delete":
+        await projects.deleteConversation(r.projectId, r.conversationId);
+        return { deleted: true };
       case "chat.message":
         return { accepted: projects.chatMessage(r.projectId, r.conversationId, r.view, r.message) };
       case "chat.draft":

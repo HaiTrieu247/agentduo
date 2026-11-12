@@ -4,6 +4,7 @@ import YAML from "yaml";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyColorPreference, chatAvailable, isBackgroundFromPs, main, pinTerminalSize, type CliIO } from "../src/cli.js";
 import { acquireWorkspaceLock, RunStore } from "@agentduo/engine/workflow/state";
+import { Conversation } from "@agentduo/engine/chat/conversation";
 import { packageVersion } from "@agentduo/engine/paths";
 import { approval, critique, finding, impl, plan, plannerAsk, review } from "@agentduo/engine/testing/builders";
 import { GIT_MISSING } from "@agentduo/engine/git/run-git";
@@ -542,5 +543,45 @@ describe("cli: the questions the agents ask", () => {
     expect(fake.calls("implementer")[1]!.prompt).toContain("Which flag should the build use?\n  → --safe");
     expect(loadRun().clarifications).toMatchObject([{ status: "answered", answers: [{ optionIds: ["q1o2"] }] }]);
     expect(ok.out).not.toContain("previous run was interrupted");
+  });
+});
+
+describe("cli: archiving and deleting conversations", () => {
+  const runsDir = () => join(repo, ".agentduo", "runs");
+  const saved = (id: string, title: string) => {
+    const c = new Conversation(runsDir(), { id });
+    c.title = title;
+  };
+
+  it("archives one, lists the archived, restores it, and deletes one after asking", async () => {
+    writeConfig(repo);
+    saved("conv-a", "First");
+    saved("conv-b", "Second");
+    const archived = await cli(["chat", "--archive", "conv-a"]);
+    expect(archived.code, archived.err).toBe(0);
+    expect(archived.out).toContain("archived conv-a («First»)");
+    expect((await cli(["chat", "--list"])).out).not.toContain("conv-a");
+    const list = await cli(["chat", "--list", "--archived"]);
+    expect(list.out).toMatch(/^conv-a {2}archived \S+ {2}First\n/);
+    expect(list.out).toContain("duo chat --restore <id>");
+    expect((await cli(["chat", "--restore", "conv-a"])).out).toContain("restored conv-a («First»)");
+    expect((await cli(["chat", "--list"])).out).toContain("conv-a");
+    // Deleting asks on a terminal, and needs --yes without one.
+    const refused = await cli(["chat", "--delete", "conv-b"]);
+    expect([refused.code, refused.err]).toEqual([1, expect.stringContaining("--yes")]);
+    const asked: string[] = [];
+    const kept = await cli(["chat", "--delete", "conv-b"], repo, { stdin: { isTTY: true }, ask: async (q) => {
+      asked.push(q);
+      return "n";
+    } });
+    expect([kept.code, kept.out]).toEqual([0, expect.stringContaining("kept conv-b")]);
+    expect(asked[0]).toContain("cannot be undone");
+    expect(existsSync(join(runsDir(), "conversations", "conv-b"))).toBe(true);
+    const deleted = await cli(["chat", "--delete", "conv-b", "--yes"]);
+    expect([deleted.code, deleted.out]).toEqual([0, expect.stringContaining("deleted conv-b («Second»)")]);
+    expect(existsSync(join(runsDir(), "conversations", "conv-b"))).toBe(false);
+    expect((await cli(["chat", "--archive", "--delete", "conv-a"])).code).toBe(1);
+    const none = await cli(["chat", "--archive"]);
+    expect([none.code, none.err]).toEqual([1, expect.stringContaining("needs a conversation")]);
   });
 });

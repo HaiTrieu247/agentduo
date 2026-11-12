@@ -1,0 +1,129 @@
+/* The chat: what the desktop adds to or overrides in the shared chat page (packages/webview's styles.css, loaded
+   before this as webview.css). Scope every override with body.agentduo-desktop, so it beats the shared rule and never
+   reaches VS Code (which never loads this file anyway). Design: docs/superpowers/specs/2026-11-12-desktop-ui-redesign.md
+   ("Layout", the Chat rows of the catalogue). */
+
+.chat-area { position: relative; flex: 1 1 auto; min-height: 0; }
+.chat-area .app, .chat-mount { height: 100%; }
+
+/* ---------------------------------------------------------------- one reading column */
+/* Everything the chat says, what waits for you and the composer share one centred column of --read-w. The blocks
+   themselves stay as wide as the chat (the timeline's scroll bar stays at the window's edge): their side padding is
+   what centres the column, and never less than --space-5. */
+body.agentduo-desktop .chat-mount {
+  --column-pad: max(var(--space-5), calc((100% - var(--read-w)) / 2));
+  background: var(--bg);
+}
+body.agentduo-desktop .chat-mount .progress {
+  padding: var(--space-2) var(--column-pad);
+  border-bottom-color: var(--line);
+  font-size: var(--text-sm);
+}
+body.agentduo-desktop .chat-mount .banner {
+  margin: var(--space-3) var(--column-pad) 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--r-md);
+}
+body.agentduo-desktop .chat-mount .timeline {
+  padding: var(--space-5) var(--column-pad) var(--space-4);
+  gap: var(--space-4);
+}
+body.agentduo-desktop .chat-mount .pending {
+  padding: 0 var(--column-pad) var(--space-2);
+  gap: var(--space-2);
+}
+body.agentduo-desktop .chat-mount .composer {
+  padding: 0 var(--column-pad) var(--space-4);
+  gap: var(--space-2);
+}
+
+/* ---------------------------------------------------------------- your messages and the agents' answers */
+/* Yours: a raised bubble on the right, as wide as its words need; who it went to above it. */
+body.agentduo-desktop .user-msg { align-items: flex-end; gap: var(--space-1); }
+body.agentduo-desktop .user-to { font-size: var(--text-xs); color: var(--fg-muted); }
+body.agentduo-desktop .user-text {
+  max-width: min(100%, 64ch);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  line-height: var(--leading-read);
+}
+body.agentduo-desktop .user-msg .files { justify-content: flex-end; }
+
+/* An answer reads as text on the page: no box, the reading line height, room between paragraphs. */
+body.agentduo-desktop .turn-head { margin-bottom: var(--space-1); font-size: var(--text-sm); }
+body.agentduo-desktop .turn-head .meta { font-size: var(--text-xs); }
+body.agentduo-desktop .md { line-height: var(--leading-read); }
+body.agentduo-desktop .md p { margin: 0 0 var(--space-3); }
+body.agentduo-desktop .md-list { margin: 0 0 var(--space-3); padding-left: var(--space-5); }
+body.agentduo-desktop .md-list li { margin: var(--space-1) 0; }
+body.agentduo-desktop .md-h { margin: var(--space-4) 0 var(--space-2); font-weight: var(--weight-strong); }
+body.agentduo-desktop .md-quote { margin: 0 0 var(--space-3); padding-left: var(--space-3); }
+body.agentduo-desktop .md-rule { margin: var(--space-4) 0; border-top-color: var(--line); }
+
+/* Code: inline on the code tint; a block on a raised surface with its own scroll, so a long line never widens the
+   column. The copy button shows on hover and on keyboard focus (the shared rule). */
+body.agentduo-desktop .md-code { padding: 1px 5px; border-radius: 4px; background: var(--code-c); }
+body.agentduo-desktop .md-code-block { margin: 0 0 var(--space-3); }
+body.agentduo-desktop .md-pre {
+  padding: var(--space-3);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  line-height: 1.5;
+  overflow-x: auto;
+}
+body.agentduo-desktop .md-table-wrap { margin: 0 0 var(--space-3); border: 1px solid var(--line); border-radius: var(--r-md); }
+body.agentduo-desktop .md-table { font-size: var(--text-sm); width: 100%; }
+body.agentduo-desktop .md-table th, body.agentduo-desktop .md-table td { border: 0; border-bottom: 1px solid var(--line); padding: var(--space-1) var(--space-3); }
+body.agentduo-desktop .md-table tr:last-child td { border-bottom: 0; }
+body.agentduo-desktop .md-table th { background: var(--bg-raised); font-weight: var(--weight-medium); }
+
+/* Notes from agentduo (and the steps of a run) stay quieter than what the agents say. */
+body.agentduo-desktop .info-note { font-size: var(--text-sm); }
+
+/* ---------------------------------------------------------------- what waits for you */
+/* A question, a permission or a decision: a card on the raised surface, its edge in the accent while it waits. The
+   list of them scrolls on its own (the shared max-height), so the composer and the buttons stay reachable. */
+body.agentduo-desktop .card {
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-elev);
+  border-color: var(--line-strong);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+  gap: var(--space-2);
+}
+body.agentduo-desktop .card.permission, body.agentduo-desktop .card.question { border-color: var(--accent-c); }
+body.agentduo-desktop .card h2 { font-size: var(--text-md); font-weight: var(--weight-medium); }
+
+/* ---------------------------------------------------------------- the composer */
+/* Raised above the chat, rounded, at the column's width; its edge darkens while you type in it. */
+body.agentduo-desktop .composer-box {
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-2) var(--space-2) var(--space-3);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+}
+body.agentduo-desktop .composer-box:focus-within { border-color: var(--line-strong); }
+body.agentduo-desktop .composer-box.drop { border-color: var(--accent-c); }
+body.agentduo-desktop .composer-input { line-height: var(--leading-read); }
+body.agentduo-desktop .composer-input::placeholder { color: var(--fg-placeholder); }
+body.agentduo-desktop .composer-bar { gap: var(--space-1); }
+/* The send button: round, the one accent of the composer. */
+body.agentduo-desktop .send-btn { min-width: var(--control-lg); height: var(--control-lg); border-radius: var(--r-pill); }
+
+/* Menus over the composer (commands, recipient, mode, @ paths) and its sheets: the app's menu surface. */
+body.agentduo-desktop .composer .menu, body.agentduo-desktop .composer .sheet {
+  background: var(--bg-elev);
+  border-color: var(--line);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow);
+}
+body.agentduo-desktop .composer .menu-item { border-radius: var(--r-sm); }
+
+@media (prefers-reduced-motion: reduce) {
+  body.agentduo-desktop .chat-mount * { transition: none !important; animation: none !important; }
+}

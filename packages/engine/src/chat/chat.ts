@@ -8,7 +8,7 @@ import {
   AGENT_NAMES, helpText, isPermissionMode, MODE_INFO, modeLabel, nextMode, parseInput, type Backend, type ChatCommand, type SettingCommand,
 } from "./commands.js";
 import { configFromSaved, type ConfigData, type ProfileName } from "../config/config.js";
-import { Conversation, type Turn } from "./conversation.js";
+import { Conversation, isArchivedConversation, restoreConversation, type Turn } from "./conversation.js";
 import { parseVerdict } from "./discussion.js";
 import { missingCli } from "../system/environment.js";
 import { ModelRegistry, withObserved } from "../config/models.js";
@@ -604,6 +604,11 @@ export class Chat {
    * input. Nothing that runs elsewhere is interrupted.
    */
   private takeWorkspace(): (() => void) | null {
+    if (this.conversation.deleted) {
+      this.o.ui.info("This conversation was deleted in another agentduo window: nothing was sent. /new starts a new one.", "error");
+      if (this.line !== null) this.o.ui.refused?.(this.line);
+      return null;
+    }
     let release: () => void;
     try {
       release = this.lease.take(this.conversation.id);
@@ -617,6 +622,11 @@ export class Chat {
     try {
       this.o.beforeWork?.();
       this.catchUp(true);
+      // Work in an archived conversation brings it back to the lists.
+      if (isArchivedConversation(this.o.runsDir, this.conversation.id)) {
+        restoreConversation(this.o.runsDir, this.conversation.id);
+        this.o.ui.info("This conversation was archived: it is back in the list.");
+      }
     } catch (e) {
       release();
       throw e;

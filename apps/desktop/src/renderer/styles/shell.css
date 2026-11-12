@@ -1,0 +1,146 @@
+/* The shell: the workbench grid, the title bar, the sidebar of projects and conversations, its account box and foot,
+   the empty and error states of the middle, the toast and the confirmation dialog. Owned by the app frame (main.ts,
+   sidebar.ts, resizer.ts, dialog.ts). As the reference: a warm sidebar beside the chat, a thin title bar, rows that
+   are quiet until hovered or chosen, a neutral selection, light separators. Tokens only (tokens.css). */
+
+/* ------------------------------------------------------------------ the workbench */
+.workbench { position: relative; display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr) auto; height: 100vh; }
+/* The sidebar's right edge (renderer/resizer.ts): a strip over the line, which lights up when it can be dragged. */
+.sidebar-edge { position: absolute; top: 0; bottom: 0; left: calc(var(--sidebar-w) - 3px); width: 6px; z-index: 6; cursor: col-resize; -webkit-app-region: no-drag; }
+.sidebar-edge::after { content: ""; position: absolute; top: 0; bottom: 0; left: 2px; width: 2px; background: transparent; transition: background-color var(--dur-fast) var(--ease); }
+.sidebar-edge:hover::after, .sidebar-edge:focus-visible::after, body.resizing .sidebar-edge::after { background: var(--focus-c); }
+.sidebar-edge:focus-visible { outline: none; }
+body.resizing { cursor: col-resize; user-select: none; }
+@media (prefers-reduced-motion: reduce) { .sidebar-edge::after { transition: none; } }
+.center { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); border-left: 1px solid var(--line-side); }
+
+/* ------------------------------------------------------------------ the title bar */
+/* A drag region for the window; its controls opt out. Where the chat is, which conversation, its state, the inspector. */
+.topbar { flex: none; display: flex; align-items: center; gap: var(--space-3); height: var(--topbar-h); padding: 0 var(--space-3) 0 var(--space-4); border-bottom: 1px solid var(--line); -webkit-app-region: drag; }
+.topbar button, .topbar .top-status { -webkit-app-region: no-drag; }
+.top-title { flex: 1 1 auto; display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+/* The project keeps its name (up to 40% of the bar); the conversation's title is what gives way first. */
+.top-project { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 40%; color: var(--fg-muted); }
+.top-project .codicon { flex: none; }
+.top-project-name, .top-conversation { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.top-sep { flex: none; color: var(--fg-muted); }
+.top-conversation { flex: 0 1 auto; font-weight: var(--weight-medium); }
+/* The chat's state as a word in a quiet pill: running in the accent, waiting for the user in the warning colour. */
+.top-status { flex: 0 1 auto; min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px var(--space-2); border-radius: var(--r-pill); font-size: var(--text-sm); color: var(--fg-muted); }
+.top-status:empty { display: none; }
+.top-status.running { color: var(--accent-c); background: var(--hover-bg); }
+.top-status.running::before { content: "● "; }
+.top-status.waiting { color: var(--warn-c); background: var(--warn-bg); }
+.top-status.waiting::before { content: "◆ "; }
+.topbar .spacer { display: none; }
+.topbar .icon-btn { flex: none; width: var(--control-md); height: var(--control-md); justify-content: center; padding: 0; border-radius: var(--r-sm); }
+.topbar .icon-btn[aria-pressed="true"] { color: var(--fg); background: var(--select-bg); }
+
+/* ------------------------------------------------------------------ the middle with nothing open, or an error */
+.center-empty { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; padding: var(--space-6) var(--space-4); overflow: auto; }
+.empty-card { display: flex; flex-direction: column; align-items: center; gap: var(--space-3); max-width: 480px; text-align: center; }
+.empty-card p { margin: 0; line-height: var(--leading-read); }
+.empty-title { margin: var(--space-2) 0 0; font-size: var(--text-xl); font-weight: var(--weight-strong); }
+.empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-2); margin-top: var(--space-2); }
+.empty-error { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--r-md); color: var(--err-c); background: var(--err-bg); text-align: left; overflow-wrap: anywhere; }
+.empty-error .codicon { flex: none; margin-top: 2px; }
+
+/* ------------------------------------------------------------------ sidebar */
+.sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg-side); }
+.brand { flex: none; display: flex; align-items: center; gap: var(--space-2); height: var(--topbar-h); padding: 0 var(--space-4); font-weight: var(--weight-strong); -webkit-app-region: drag; }
+body.platform-darwin .brand { padding-left: 80px; }
+.brand-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.brand-mark { display: inline-flex; gap: 3px; }
+/* The chat's stylesheet places its timeline's .dot absolutely: the brand's dots stay in the flow. */
+.brand-mark .dot { position: static; width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.brand-mark.big .dot { width: 18px; height: 18px; }
+.dot-codex { background: var(--codex); }
+.dot-claude { background: var(--claude); }
+.side-start { flex: none; padding: 0 var(--space-2) var(--space-1); }
+.side-scroll { flex: 1 1 auto; min-height: 96px; overflow: auto; padding: var(--space-1) var(--space-2) var(--space-3); }
+
+/* A row: one line (the conversation's activity under it while an agent works), quiet until hovered or chosen. */
+.nav-main { flex: 1 1 auto; display: flex; align-items: center; gap: var(--space-2); min-width: 0; min-height: var(--control-lg); padding: 4px var(--space-2); background: none; border: 0; border-radius: var(--r-sm); color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.nav-main .codicon { flex: none; color: var(--fg-muted); }
+.nav-main:focus-visible, .nav-head.toggle:focus-visible { outline-offset: -2px; }
+.btn.nav-main { border: 0; background: none; }
+.btn.side-new, .btn.general-conversations { width: 100%; }
+.btn.side-new:hover:not(:disabled), .btn.general-conversations:hover:not(:disabled) { background: var(--hover-bg); }
+.btn.general-conversations[aria-current="true"] { background: var(--select-bg); font-weight: var(--weight-medium); }
+.nav-text { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+.nav-title { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nav-sub { font-size: var(--text-sm); color: var(--fg-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nav-meta { flex: none; margin-left: auto; font-size: var(--text-sm); color: var(--fg-muted); white-space: nowrap; }
+
+/* Section headings: a word in the secondary colour, with their actions at the right. */
+.nav-head { display: flex; align-items: center; gap: var(--space-1); width: 100%; min-height: var(--control-md); margin-top: var(--space-4); padding: 0 var(--space-1) 0 var(--space-2); color: var(--fg-muted); font-size: var(--text-sm); font-weight: var(--weight-medium); background: none; border: 0; border-radius: var(--r-sm); font-family: inherit; }
+.nav-head > span:not(.codicon) { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.nav-head.toggle { cursor: pointer; }
+.nav-head.toggle:hover { color: var(--fg); }
+/* The archived list's toggle beside +: pressed while the list shows the archived conversations. */
+.nav-head .archive-toggle[aria-pressed="true"] { color: var(--accent-c); background: var(--select-bg); }
+
+.nav-list { list-style: none; margin: 2px 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.nav-item { display: flex; align-items: center; min-width: 0; border-radius: var(--r-sm); }
+.nav-item:hover { background: var(--hover-bg); }
+.nav-item.active { background: var(--select-bg); }
+.nav-item.project .nav-title { font-weight: var(--weight-medium); }
+.nav-item.project.active .nav-title { font-weight: var(--weight-strong); }
+.nav-item.project.active .nav-main .codicon { color: var(--fg); }
+.nav-item.missing .nav-title { text-decoration: line-through; color: var(--fg-muted); }
+.nav-actions { display: flex; flex: none; padding-right: 2px; opacity: 0; }
+.nav-item:hover .nav-actions, .nav-item:focus-within .nav-actions, .nav-item.active .nav-actions { opacity: 1; }
+/* When a row's actions show, its time steps aside for them. */
+.nav-item.has-actions:is(:hover, :focus-within) .nav-meta { display: none; }
+.nav-actions .icon-btn.delete:hover { color: var(--err-c); }
+.nav-empty { padding: var(--space-1) var(--space-2); color: var(--fg-muted); font-size: var(--text-sm); overflow-wrap: anywhere; }
+/* The open project's conversations, grouped under it: indented along a light guide. */
+.project-group { list-style: none; margin: 2px 0 var(--space-2) var(--space-3); padding-left: var(--space-2); border-left: 1px solid var(--line-side); }
+.project-group > .nav-head:first-child { margin-top: var(--space-1); }
+.project-group .nav-head { margin-top: var(--space-2); }
+
+/* An agent works there now: a white dot (the text colour on a light theme) that fades in and out slowly. */
+.busy-dot { flex: none; width: 7px; height: 7px; margin: 0 4px 0 auto; border-radius: 50%; background: var(--busy-c); animation: busy-pulse 2.4s ease-in-out infinite; }
+@keyframes busy-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
+@media (prefers-reduced-motion: reduce) { .busy-dot { animation: none; } }
+
+/* The foot: the update (when it needs the user), Account & Usage (scrolls on its own in a short window), Settings. */
+.side-foot { flex: 0 1 auto; display: flex; flex-direction: column; min-height: 0; padding: var(--space-2); border-top: 1px solid var(--line-side); }
+.side-foot > .btn { flex: none; }
+/* The app's update, only when it needs the user: restart into it, or download it. */
+.btn.update-notice { margin: 0 0 var(--space-2); justify-content: flex-start; color: var(--accent-c); border-color: color-mix(in srgb, var(--accent-c) 45%, transparent); background: var(--hover-bg); }
+.btn.update-notice:hover:not(:disabled) { background: var(--select-bg); }
+.btn.side-settings { min-height: var(--control-lg); }
+/* Account & Usage above Settings: each agent's email in the text colour, then each limit's name, percent and thin meter. */
+.account-box { flex: 0 1 auto; min-height: 0; overflow: auto; margin: 0 0 var(--space-1); padding-bottom: var(--space-2); border-bottom: 1px solid var(--line-side); }
+.account-head { display: flex; align-items: center; }
+.account-head .nav-head { margin-top: 0; padding-left: var(--space-1); flex: 1 1 auto; }
+.account-agent { padding: var(--space-1) var(--space-2); }
+.account-agent + .account-agent { margin-top: var(--space-1); }
+.account-who { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--text-sm); }
+.account-email { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.account-limit { margin-top: var(--space-1); font-size: 0.85em; }
+.account-line { display: flex; align-items: baseline; gap: var(--space-2); color: var(--fg-muted); }
+.account-limit .meter { height: 3px; margin: 2px 0 0; }
+.account-group { margin-top: 6px; font-size: var(--text-xs); color: var(--fg-muted); }
+.account-note { margin-top: 2px; font-size: 0.85em; color: var(--fg-muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.account-note.error { color: var(--warn-c); }
+.btn.spin .codicon { animation: codicon-spin 1.5s steps(30) infinite; }
+@media (prefers-reduced-motion: reduce) { .btn.spin .codicon { animation: none; } }
+
+/* ------------------------------------------------------------------ the toast: an error, with its mark and a way to dismiss it */
+.toast { position: fixed; bottom: var(--space-5); left: 50%; transform: translateX(-50%); z-index: 40; display: flex; align-items: flex-start; gap: var(--space-2); max-width: min(560px, calc(100vw - 2 * var(--space-4))); padding: var(--space-2) var(--space-1) var(--space-2) var(--space-3); background: var(--bg-elev); color: var(--fg); border: 1px solid var(--line); border-left: 3px solid var(--err-c); border-radius: var(--r-md); box-shadow: var(--shadow); }
+.toast > .codicon { flex: none; margin-top: 3px; color: var(--err-c); }
+.toast-text { flex: 1 1 auto; min-width: 0; padding-top: 2px; line-height: var(--leading-ui); overflow-wrap: anywhere; }
+.toast .toast-close { flex: none; }
+
+/* ------------------------------------------------------------------ the confirmation dialog (renderer/dialog.ts) */
+.dialog-scrim { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: var(--space-4); background: var(--scrim); }
+.dialog { width: min(440px, 100%); max-height: calc(100vh - 2 * var(--space-4)); overflow: auto; padding: var(--space-5); background: var(--bg-elev); color: var(--fg); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow); }
+.dialog-title { margin: 0 0 var(--space-2); font-size: var(--text-lg); font-weight: var(--weight-strong); line-height: var(--leading-ui); overflow-wrap: anywhere; }
+.dialog-message { margin: 0; color: var(--fg-muted); line-height: var(--leading-read); overflow-wrap: anywhere; }
+.dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-5); }
+.dialog-actions .btn { min-width: 84px; justify-content: center; }
+/* What deletes or stops: the error colour, its word on it at 4.5:1 or more in both themes. */
+.dialog-actions .btn.danger { color: var(--vscode-statusBarItem-errorForeground); background: var(--vscode-statusBarItem-errorBackground); border-color: transparent; }
+.dialog-actions .btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--err-c) 88%, var(--fg)); }

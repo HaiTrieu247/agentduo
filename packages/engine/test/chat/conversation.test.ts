@@ -1,7 +1,11 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Conversation, listConversations } from "../../src/chat/conversation.js";
+import {
+  archiveConversation, Conversation, ConversationError, deleteConversation, isArchivedConversation, listConversations, restoreConversation,
+} from "../../src/chat/conversation.js";
+import { acquireLockFile } from "../../src/workflow/state.js";
+import { conversationBusy, conversationLockPath } from "../../src/workflow/lease.js";
 import { CONVERSATION_MARKER } from "../../src/workflow/prompts.js";
 import { tempDir } from "../helpers/tmp.js";
 
@@ -174,5 +178,64 @@ describe("Conversation", () => {
     expect(listConversations(t.path).map((x) => x.id)).toEqual(["conv-a", "conv-b"]);
     expect(listConversations(t.path)[1]).toMatchObject({ id: "conv-b", title: "Second" });
     expect(listConversations(join(t.path, "missing"))).toEqual([]);
+  });
+});
+
+describe("archiving and deleting conversations", () => {
+  const saved = (id: string, title: string) => {
+    const c = new Conversation(t.path, { id });
+    c.title = title;
+    return c;
+  };
+
+  it("hides an archived conversation from the list and keeps it whole, until it is restored", () => {
+    saved("conv-a", "First");
+    saved("conv-b", "Second");
+    archiveConversation(t.path, "conv-a");
+    expect(isArchivedConversation(t.path, "conv-a")).toBe(true);
+    expect(listConversations(t.path).map((x) => x.id)).toEqual(["conv-b"]);
+    const archived = listConversations(t.path, "archived");
+    expect(archived.map((x) => x.id)).toEqual(["conv-a"]);
+    expect(archived[0]!.archivedAt).toMatch(/^\d{4}-\d\d-\d\dT/);
+    expect(listConversations(t.path, "all").map((x) => x.id).sort()).toEqual(["conv-a", "conv-b"]);
+    // Its own file: a save of the record by any window keeps it archived.
+    const reopened = Conversation.open(t.path, "conv-a");
+    reopened.recipient = "claude";
+    expect(isArchivedConversation(t.path, "conv-a")).toBe(true);
+    expect(reopened.title).toBe("First");
+    restoreConversation(t.path, "conv-a");
+    expect(listConversations(t.path).map((x) => x.id).sort()).toEqual(["conv-a", "conv-b"]);
+    expect(listConversations(t.path)[0]!.archivedAt).toBeNull();
+  });
+
+  it("deletes a conversation with its files, and a window that still has it open never writes it back", () => {
+    const open = saved("conv-a", "First");
+    saved("conv-b", "Second");
+    deleteConversation(t.path, "conv-a");
+    expect(existsSync(join(t.path, "conversations", "conv-a"))).toBe(false);
+    expect(readdirSync(join(t.path, "conversations"))).toEqual(["conv-b"]);
+    expect(open.deleted).toBe(true);
+    open.recipient = "codex";
+    open.title = "Back?";
+    expect(existsSync(join(t.path, "conversations", "conv-a"))).toBe(false);
+    // One never saved is not deleted: it has nothing on disk yet.
+    expect(new Conversation(t.path, { id: "conv-new" }).deleted).toBe(false);
+  });
+
+  it("refuses what it cannot do: an unknown conversation, a bad id, one another agentduo works in", () => {
+    saved("conv-a", "First");
+    for (const act of [archiveConversation, restoreConversation, deleteConversation]) {
+      expect(() => act(t.path, "conv-missing")).toThrow(ConversationError);
+      expect(() => act(t.path, "../conv-a")).toThrow(ConversationError);
+    }
+    const release = acquireLockFile(conversationLockPath(t.path, "conv-a"), conversationBusy);
+    try {
+      expect(() => archiveConversation(t.path, "conv-a")).toThrow(/in use/);
+      expect(() => deleteConversation(t.path, "conv-a")).toThrow(/in use/);
+    } finally {
+      release();
+    }
+    expect(existsSync(join(t.path, "conversations", "conv-a", "conversation.json"))).toBe(true);
+    expect(isArchivedConversation(t.path, "conv-a")).toBe(false);
   });
 });

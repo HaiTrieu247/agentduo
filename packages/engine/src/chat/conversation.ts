@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { ATTACHMENT_LIMITS, formatBytes, type Attachment } from "../inputs/attachment-types.js";
 import { AttachmentError, attachmentFile, AttachmentStore } from "../inputs/attachments.js";
@@ -9,8 +10,8 @@ import {
 import type { Backend } from "../config/config.js";
 import { taggedPaths } from "../inputs/mentions.js";
 import * as prompts from "../workflow/prompts.js";
-import { atomicWrite, ensureRunsDir, stamp, type ConversationContext, type EarlierTask, type Exchange } from "../workflow/state.js";
-import { conversationHolder } from "../workflow/lease.js";
+import { acquireLockFile, atomicWrite, ensureRunsDir, LockError, stamp, type ConversationContext, type EarlierTask, type Exchange } from "../workflow/state.js";
+import { conversationBusy, conversationHolder, conversationLockPath } from "../workflow/lease.js";
 import type { DiscussionPlace, DiscussionStep, TurnStatus, Verdict } from "../events.js";
 
 /** How much of the conversation (questions and answers) a prompt carries; older exchanges go first, whole. */
@@ -78,9 +79,21 @@ export interface ConversationRecord {
 export type ConversationSummary = Pick<ConversationRecord, "id" | "title" | "createdAt" | "updatedAt"> & {
   /** The live process working in it now (an answer, a discussion, a run), or null. */
   inUseBy: number | null;
+  /** When the user archived it; null: it is not archived. */
+  archivedAt: string | null;
 };
 
+/** What archiving, restoring or deleting a conversation could not do, said for the user. */
+export class ConversationError extends Error {
+  override name = "ConversationError";
+}
+
 const RECORD = "conversation.json";
+/**
+ * The mark of an archived conversation: a file of its own beside the record (never in it), so that no window's save of
+ * the record drops it. Its text is when it was archived.
+ */
+const ARCHIVED = "archived";
 /** What an exchange recovered from a turn that never ended says its question was (the turn itself was not saved). */
 const UNFINISHED_QUESTION = "(the message of a turn that did not finish; it was not kept)";
 const conversationsDir = (runsDir: string) => join(runsDir, "conversations");
@@ -102,14 +115,85 @@ function readRecord(file: string): ConversationRecord | null {
   }
 }
 
-/** The conversations of a workspace that said something, the most recently changed first. */
-export function listConversations(runsDir: string): ConversationSummary[] {
+/**
+ * The conversations of a workspace that said something, the most recently changed first: those in use (the default),
+ * the archived ones, or all.
+ */
+export function listConversations(runsDir: string, which: "active" | "archived" | "all" = "active"): ConversationSummary[] {
   const dir = conversationsDir(runsDir);
   if (!existsSync(dir)) return [];
-  return readdirSync(dir).flatMap((name) => {
+  return readdirSync(dir).flatMap((name): ConversationSummary[] => {
     const r = readRecord(join(dir, name, RECORD));
-    return r ? [{ id: r.id, title: r.title, createdAt: r.createdAt, updatedAt: r.updatedAt, inUseBy: conversationHolder(runsDir, r.id) }] : [];
+    if (!r || r.id !== name) return [];
+    const archivedAt = archiveTime(runsDir, r.id);
+    if (which === "active" ? archivedAt : which === "archived" ? !archivedAt : false) return [];
+    return [{ id: r.id, title: r.title, createdAt: r.createdAt, updatedAt: r.updatedAt, inUseBy: conversationHolder(runsDir, r.id), archivedAt }];
   }).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
+const archiveMark = (runsDir: string, id: string) => join(conversationsDir(runsDir), id, ARCHIVED);
+
+/** When conversation `id` was archived, or null: it is not. */
+function archiveTime(runsDir: string, id: string): string | null {
+  const file = archiveMark(runsDir, id);
+  try {
+    const text = readFileSync(file, "utf8").trim();
+    return Number.isNaN(Date.parse(text)) ? statSync(file).mtime.toISOString() : text;
+  } catch {
+    return null;
+  }
+}
+
+export const isArchivedConversation = (runsDir: string, id: string): boolean => archiveTime(runsDir, id) !== null;
+
+const CONVERSATION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** Conversation `id`'s record, which must be saved: a name that is not one, or nothing saved by it, is an error. */
+function savedRecord(runsDir: string, id: string): ConversationRecord {
+  const r = CONVERSATION_ID.test(id) && !id.includes("..") ? readConversation(runsDir, id) : null;
+  if (!r || r.id !== id) throw new ConversationError(`no saved conversation '${id}'`);
+  return r;
+}
+
+/**
+ * Archives conversation `id`: it leaves the lists and `latest`, whole (its exchanges, logs, files); new work in it, or
+ * restoreConversation, brings it back. Refused while an agentduo works in it (its answer, run or wait for the user).
+ */
+export function archiveConversation(runsDir: string, id: string, now = new Date()): void {
+  savedRecord(runsDir, id);
+  const holder = conversationHolder(runsDir, id);
+  if (holder) throw new ConversationError(`${conversationBusy(holder)}; archive it once that is done`);
+  if (!isArchivedConversation(runsDir, id)) atomicWrite(archiveMark(runsDir, id), `${now.toISOString()}\n`);
+}
+
+/** Puts archived conversation `id` back in the lists. */
+export function restoreConversation(runsDir: string, id: string): void {
+  savedRecord(runsDir, id);
+  rmSync(archiveMark(runsDir, id), { force: true });
+}
+
+/**
+ * Deletes conversation `id` and everything under it (its record, view, logs and attached files; runs keep their own
+ * copies), under its lock: refused while an agentduo works in it. A window that still has it open never writes it back
+ * (`Conversation.deleted`).
+ */
+export function deleteConversation(runsDir: string, id: string): void {
+  savedRecord(runsDir, id);
+  let release: () => void;
+  try {
+    release = acquireLockFile(conversationLockPath(runsDir, id), conversationBusy);
+  } catch (e) {
+    if (e instanceof LockError) throw new ConversationError(`${e.message}; delete it once that is done`);
+    throw e;
+  }
+  // Out of the way at once (a rename), then removed: no window sees half a conversation.
+  const trash = join(conversationsDir(runsDir), `.deleted-${randomBytes(6).toString("hex")}`);
+  try {
+    renameSync(join(conversationsDir(runsDir), id), trash);
+  } finally {
+    release();
+  }
+  rmSync(trash, { recursive: true, force: true });
 }
 
 let counter = 0;
@@ -170,6 +254,13 @@ export class Conversation {
 
   /** The record's file as this process last read or wrote it (time and size), to tell when another process saved it. */
   private seen: string | null = null;
+  /** The record was on disk when this process last read or wrote it. */
+  private persisted = false;
+
+  /** It was saved, and its record is gone: another window deleted it (deleteConversation). Nothing writes it back. */
+  get deleted(): boolean {
+    return this.persisted && !existsSync(join(this.dir, RECORD));
+  }
 
   private fileStamp(): string | null {
     try {
@@ -183,7 +274,9 @@ export class Conversation {
   /** The saved record; what it was is noted first, so a save that lands while it is read is seen as a change next time. */
   private read(): ConversationRecord | null {
     this.seen = this.fileStamp();
-    return readRecord(join(this.dir, RECORD));
+    const r = readRecord(join(this.dir, RECORD));
+    if (r) this.persisted = true;
+    return r;
   }
 
   /**
@@ -267,6 +360,7 @@ export class Conversation {
   /** Writes conversation.json once there is something to keep; an empty conversation leaves no file. */
   private save(): void {
     if (!this.name && !this.exchanges.length && !this.done.length) return;
+    if (this.deleted) return;
     const record: ConversationRecord = {
       version: 1, id: this.id, title: this.name, createdAt: this.createdAt, updatedAt: this.clock().toISOString(), recipient: this.to,
       turns: this.before + this.turns.length, exchanges: this.exchanges, earlier: this.done, sessions: this.sessions,
@@ -276,6 +370,7 @@ export class Conversation {
     mkdirSync(this.dir, { recursive: true });
     atomicWrite(join(this.dir, RECORD), `${JSON.stringify(record, null, 2)}\n`);
     this.seen = this.fileStamp();
+    this.persisted = true;
   }
 
   /**

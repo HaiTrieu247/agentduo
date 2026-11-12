@@ -12,6 +12,7 @@ import { commitOnChange, optionsEditor } from "./argumentOptions.js";
 import { limitRows, updatedText, type AccountRow } from "@agentduo/webview/account";
 import { providerMark } from "@agentduo/webview/dom";
 import type { UsageState } from "@agentduo/engine/system/usage";
+import { rememberFocus } from "./dialog.js";
 import { teamPage } from "./team.js";
 import { updateAction, updateLine } from "./update.js";
 import { USAGE_PERIOD_MS, USAGE_STALE_MS, type UsageStore } from "./usage.js";
@@ -365,13 +366,41 @@ export class SettingsPanel {
   private readonly body = el("div", { class: "settings-body" });
   private readonly notices = el("div", { class: "notices" });
 
+  /** Gives focus back to what had it before the page opened (or its redrawn copy); null while the page is closed. */
+  private giveFocusBack: (() => void) | null = null;
+
   constructor(private readonly root: HTMLElement, private readonly host: SettingsHost) {
-    const side = el("aside", { class: "settings-side" }, el("div", { class: "settings-drag" }), el("h2", { class: "settings-title", text: "Settings" }), this.nav);
-    const head = el("header", { class: "settings-head" }, el("span", { class: "spacer" }), button("Done", () => host.close(), { class: "primary small", icon: "check" }));
+    const side = el("aside", { class: "settings-side" }, el("div", { class: "settings-drag" }), el("h2", { class: "settings-title", text: "Settings", attrs: { id: "settings-title" } }), this.nav);
+    const head = el("header", { class: "settings-head" }, el("span", { class: "spacer" }), button("Done", () => this.close(), { class: "primary small", icon: "check" }));
     root.replaceChildren(el("div", { class: "settings-main" }, side, el("div", { class: "settings-pane" }, head, this.body)));
-    root.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") host.close();
+    root.setAttribute("aria-modal", "true");
+    // On the document, not the page: a redraw of the page (a section's tab, its body) can drop the focus to <body>,
+    // and Escape must still close it. A form or a dialog over the page that takes Escape stops it first.
+    document.addEventListener("keydown", (e) => {
+      if (root.hidden) return;
+      if (e.key === "Escape" && !e.defaultPrevented) this.close();
+      else if (e.key === "Tab") this.keepFocus(e);
     });
+  }
+
+  /** Closes the page and gives focus back to what opened it. */
+  private close(): void {
+    const back = this.giveFocusBack;
+    this.giveFocusBack = null;
+    this.host.close();
+    back?.();
+  }
+
+  /** Tab and Shift+Tab stay inside the page while it is open: the workbench behind it is not reachable. */
+  private keepFocus(e: KeyboardEvent): void {
+    const items = [...this.root.querySelectorAll<HTMLElement>("a[href], button, input, select, textarea, summary, [tabindex]")]
+      .filter((n) => !n.hasAttribute("disabled") && n.tabIndex >= 0 && n.getClientRects().length > 0);
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (!first || !last) return;
+    const at = document.activeElement;
+    if (e.shiftKey && (at === first || !this.root.contains(at))) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (at === last || !this.root.contains(at))) { e.preventDefault(); first.focus(); }
   }
 
   private projectId(): string | null {
@@ -380,6 +409,7 @@ export class SettingsPanel {
   }
 
   open(section: SettingsSection = this.section): void {
+    if (!this.giveFocusBack && !this.root.contains(document.activeElement)) this.giveFocusBack = rememberFocus();
     this.section = section;
     if (!this.projectId() && this.scope !== "global") this.scope = "global";
     this.nav.replaceChildren(...SECTIONS.map(([id, label]) => {

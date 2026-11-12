@@ -1,5 +1,6 @@
-// Light, dark or as the system is, and the font size: on the document, where styles.css reads them. The reused chat
-// styles read VS Code's theme variables, which styles.css defines for each theme.
+// Light, dark or as the system is, and the font size: on the document, where the stylesheet reads them
+// (styles/tokens.css: data-theme picks the theme's tokens, --font-size scales every size). The reused chat styles read
+// VS Code's theme variables, which tokens.css defines for each theme.
 export type Theme = "system" | "light" | "dark";
 export const FONT_RANGE = { min: 11, max: 20, default: 13 } as const;
 

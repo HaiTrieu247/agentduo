@@ -5,7 +5,9 @@ import { createInterface } from "node:readline/promises";
 import { Command, CommanderError, Option } from "commander";
 import { killAllActive } from "@agentduo/engine/agents/process";
 import { Chat, newRun } from "@agentduo/engine/chat/chat";
-import { listConversations, readConversation } from "@agentduo/engine/chat/conversation";
+import {
+  archiveConversation, ConversationError, deleteConversation, listConversations, readConversation, restoreConversation,
+} from "@agentduo/engine/chat/conversation";
 import { ConfigFiles } from "@agentduo/engine/config/configuration";
 import { conversationHolder, WorkspaceLease } from "@agentduo/engine/workflow/lease";
 import { settings } from "@agentduo/engine/config/settings";
@@ -120,7 +122,14 @@ function withProfile<T extends ConfigData>(cfg: T, opts: { profile?: ProfileName
   return cfg;
 }
 interface ResumeOptions extends CommonOptions { decision?: Decision["decision"]; note?: string; reloadConfig?: boolean; acceptEdits?: boolean; answers?: string }
-interface ChatCommandOptions extends RunOptions { list?: boolean }
+interface ChatCommandOptions extends RunOptions {
+  list?: boolean;
+  archived?: boolean;
+  archive?: boolean;
+  restore?: boolean;
+  delete?: boolean;
+  yes?: boolean;
+}
 
 /** --accept-edits: the implementer edits files without asking, like /mode acceptEdits in the chat. */
 function withAcceptEdits<T extends ConfigData>(cfg: T, opts: { acceptEdits?: boolean }): T {
@@ -357,16 +366,17 @@ async function runCommand(io: CliIO, words: string[], opts: RunOptions, explicit
 const REFRESH_MS = 2000;
 
 /**
- * The saved conversation `wanted` names: its id, a prefix of one id, or `latest` (the one changed last). An unknown or
- * ambiguous name is an error that says what there is.
+ * The saved conversation `wanted` names among `which`: its id, a prefix of one id, or `latest` (the one in use changed
+ * last). An unknown or ambiguous name is an error that says what there is.
  */
-function findConversation(runsDir: string, wanted: string): string {
-  const saved = listConversations(runsDir);
-  const more = "`duo chat --list` lists them";
+function findConversation(runsDir: string, wanted: string, which: "active" | "archived" | "all" = "all"): string {
+  const more = which === "archived" ? "`duo chat --list --archived` lists them" : "`duo chat --list` lists them";
   if (wanted === "latest" || wanted === "last") {
-    if (!saved.length) throw new CliExit(EXIT.ERROR, `no saved conversation in ${runsDir} yet: \`duo\` starts one`);
-    return saved[0]!.id;
+    const recent = listConversations(runsDir, which === "archived" ? "archived" : "active");
+    if (!recent.length) throw new CliExit(EXIT.ERROR, `no saved conversation in ${runsDir} yet: \`duo\` starts one`);
+    return recent[0]!.id;
   }
+  const saved = listConversations(runsDir, which);
   if (saved.some((c) => c.id === wanted)) return wanted;
   const matches = saved.filter((c) => c.id.startsWith(wanted));
   if (matches.length === 1) return matches[0]!.id;
@@ -374,18 +384,55 @@ function findConversation(runsDir: string, wanted: string): string {
   throw new CliExit(EXIT.ERROR, `no saved conversation '${wanted}' in ${runsDir} (${more})`);
 }
 
-/** `duo chat --list`: the workspace's saved conversations, from any window (`duo`, VS Code, the desktop), newest first. */
-function listChats(io: CliIO, env: Env): number {
-  const saved = listConversations(env.runsDir);
+const titleOf = (title: string | undefined) => (title || "untitled").split("\n")[0]!.slice(0, 60);
+
+/**
+ * `duo chat --list`: the workspace's saved conversations, from any window (`duo`, VS Code, the desktop), newest first;
+ * with --archived, the archived ones.
+ */
+function listChats(io: CliIO, env: Env, archived: boolean): number {
+  const saved = listConversations(env.runsDir, archived ? "archived" : "active");
   if (!saved.length) {
-    io.stdout.write(`no saved conversations in ${env.runsDir}; \`duo\` starts one\n`);
+    io.stdout.write(archived ? `no archived conversations in ${env.runsDir}\n` : `no saved conversations in ${env.runsDir}; \`duo\` starts one\n`);
     return EXIT.DONE;
   }
   for (const c of saved) {
     const busy = c.inUseBy && c.inUseBy !== process.pid ? `  [in use by pid ${c.inUseBy}]` : "";
-    io.stdout.write(`${c.id}  ${c.updatedAt}  ${(c.title || "untitled").split("\n")[0]!.slice(0, 60)}${busy}\n`);
+    io.stdout.write(`${c.id}  ${archived ? `archived ${c.archivedAt}` : c.updatedAt}  ${titleOf(c.title)}${busy}\n`);
   }
-  io.stdout.write("open one with: duo chat <id> (or duo chat latest)\n");
+  io.stdout.write(archived ? "bring one back with: duo chat --restore <id> (duo chat --delete <id> deletes it)\n"
+    : "open one with: duo chat <id> (or duo chat latest); duo chat --archive <id> archives one\n");
+  return EXIT.DONE;
+}
+
+/** `duo chat --archive|--restore|--delete <conversation>`: deleting asks first on a terminal, else needs --yes. */
+async function manageChat(io: CliIO, env: Env, action: "archive" | "restore" | "delete", wanted: string | undefined, yes: boolean): Promise<number> {
+  if (!wanted) throw new CliExit(EXIT.ERROR, `--${action} needs a conversation: its id (or the start of it), or latest`);
+  const id = findConversation(env.runsDir, wanted, action === "archive" ? "active" : action === "restore" ? "archived" : "all");
+  const name = `${id} («${titleOf(readConversation(env.runsDir, id)?.title)}»)`;
+  try {
+    if (action === "archive") {
+      archiveConversation(env.runsDir, id);
+      io.stdout.write(`archived ${name}: duo chat --list --archived lists it, duo chat --restore ${id} brings it back\n`);
+    } else if (action === "restore") {
+      restoreConversation(env.runsDir, id);
+      io.stdout.write(`restored ${name}: duo chat ${id} opens it\n`);
+    } else {
+      if (!yes) {
+        if (!io.ask || !io.stdin.isTTY) throw new CliExit(EXIT.ERROR, `deleting ${name} cannot be undone: pass --yes to delete it without a terminal to ask on`);
+        const answer = (await io.ask(`Delete conversation ${name}, its logs and attached files? This cannot be undone. [y/N] `)).trim().toLowerCase();
+        if (answer !== "y" && answer !== "yes") {
+          io.stdout.write(`kept ${name}\n`);
+          return EXIT.DONE;
+        }
+      }
+      deleteConversation(env.runsDir, id);
+      io.stdout.write(`deleted ${name}\n`);
+    }
+  } catch (e) {
+    if (e instanceof ConversationError) throw new CliExit(EXIT.ERROR, e.message);
+    throw e;
+  }
   return EXIT.DONE;
 }
 
@@ -398,7 +445,10 @@ function listChats(io: CliIO, env: Env): number {
  */
 async function chatCommand(io: CliIO, opts: ChatCommandOptions, wanted?: string, initial?: string): Promise<number> {
   const env = await prepare(io, opts);
-  if (opts.list) return listChats(io, env);
+  if (opts.list) return listChats(io, env, !!opts.archived);
+  const actions = (["archive", "restore", "delete"] as const).filter((a) => opts[a]);
+  if (actions.length > 1) throw new CliExit(EXIT.ERROR, "use one of --archive, --restore and --delete at a time");
+  if (actions[0]) return manageChat(io, env, actions[0], wanted, !!opts.yes);
   let conversationId: string | undefined;
   if (wanted) {
     conversationId = findConversation(env.runsDir, wanted);
@@ -662,7 +712,11 @@ export async function main(argv: string[], io: CliIO = processIO()): Promise<num
     });
   common(program.command("chat").description("open the chat in a new conversation, or continue a saved one (also one from VS Code or the desktop app)")
     .argument("[conversation]", "a saved conversation's id (or the start of it), or latest")
-    .option("--list", "list the saved conversations, newest first").option("--accept-edits", acceptEdits).addOption(profile()))
+    .option("--list", "list the saved conversations, newest first").option("--archived", "with --list: list the archived ones")
+    .option("--archive", "archive the conversation: it leaves the list, whole (--restore brings it back)")
+    .option("--restore", "bring an archived conversation back to the list")
+    .option("--delete", "delete the conversation with its logs and files (asks first; cannot be undone)")
+    .option("--yes", "with --delete: do not ask").option("--accept-edits", acceptEdits).addOption(profile()))
     .action(async (conversation: string | undefined, _opts: ChatCommandOptions, cmd: Command) => {
       exitCode = await chatCommand(io, withGlobals<ChatCommandOptions>(cmd), conversation);
     });

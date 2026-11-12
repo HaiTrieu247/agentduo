@@ -298,7 +298,11 @@ export class ClaudeBackend implements AgentBackend {
       permissionDenials: (Array.isArray(envelope.permission_denials) ? envelope.permission_denials : []).filter((d: any) => d?.tool_name !== ASK_TOOL),
     };
     if (envelope.is_error || (envelope.subtype !== undefined && envelope.subtype !== "success")) {
-      throw new AgentFailure(`claude reported an error (subtype=${envelope.subtype}): ${String(envelope.result ?? "").slice(0, 500)}`, meta);
+      const kind = envelope.subtype !== undefined && envelope.subtype !== "success" ? ` (subtype=${envelope.subtype})` : "";
+      // Its reason: the result's text (a usage limit says when it resets), else its errors (a session it could not find).
+      const errors = Array.isArray(envelope.errors) ? envelope.errors.filter((x: unknown) => typeof x === "string") : [];
+      const reason = (typeof envelope.result === "string" && envelope.result.trim() ? envelope.result : errors.join("; ")).trim();
+      throw new AgentFailure(`claude reported an error${kind}: ${reason.slice(0, 500)}`, meta, !!reason);
     }
     if (mode === "text") {
       if (typeof envelope.result !== "string" || !envelope.result.trim()) throw new AgentFailure("claude returned no answer", meta);

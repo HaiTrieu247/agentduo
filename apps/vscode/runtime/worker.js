@@ -17811,11 +17811,14 @@ import { readFileSync as readFileSync9 } from "fs";
 import { realpathSync as realpathSync2 } from "fs";
 import { basename as basename4, dirname as dirname4, isAbsolute as isAbsolute7, join as join12, relative as relative4 } from "path";
 var AgentFailure = class extends Error {
-  constructor(message, meta = {}) {
+  /** `reported`: the CLI said what went wrong itself (an error result), which beats its raw output as the reason. */
+  constructor(message, meta = {}, reported = false) {
     super(message);
     this.meta = meta;
+    this.reported = reported;
   }
   meta;
+  reported;
   name = "AgentFailure";
 };
 var BinaryNotFound = class extends Error {
@@ -18139,7 +18142,10 @@ var ClaudeBackend = class {
       permissionDenials: (Array.isArray(envelope.permission_denials) ? envelope.permission_denials : []).filter((d) => d?.tool_name !== ASK_TOOL)
     };
     if (envelope.is_error || envelope.subtype !== void 0 && envelope.subtype !== "success") {
-      throw new AgentFailure(`claude reported an error (subtype=${envelope.subtype}): ${String(envelope.result ?? "").slice(0, 500)}`, meta);
+      const kind = envelope.subtype !== void 0 && envelope.subtype !== "success" ? ` (subtype=${envelope.subtype})` : "";
+      const errors = Array.isArray(envelope.errors) ? envelope.errors.filter((x) => typeof x === "string") : [];
+      const reason = (typeof envelope.result === "string" && envelope.result.trim() ? envelope.result : errors.join("; ")).trim();
+      throw new AgentFailure(`claude reported an error${kind}: ${reason.slice(0, 500)}`, meta, !!reason);
     }
     if (mode === "text") {
       if (typeof envelope.result !== "string" || !envelope.result.trim()) throw new AgentFailure("claude returned no answer", meta);
@@ -18767,11 +18773,13 @@ Return ONLY a JSON object that matches the required schema exactly.
       }
       let data = null;
       let parseError = null;
+      let reported = false;
       try {
         ({ data, meta } = backend.finalize(parser, run.stdout, lastMessageFile, text3 ? "text" : "structured"));
       } catch (e) {
         if (!(e instanceof AgentFailure)) throw e;
         parseError = e.message;
+        reported = e.reported;
         meta = { permissionDenials: [], ...e.meta };
       }
       if (deniedByUser.size) meta.permissionDenials = meta.permissionDenials.filter((d) => !d.tool_use_id || !deniedByUser.has(d.tool_use_id));
@@ -18787,7 +18795,7 @@ Return ONLY a JSON object that matches the required schema exactly.
       const before = rejected;
       rejected = null;
       if (parseError) {
-        lastError = run.code === 0 ? parseError : `${backend.name} exited with code ${run.code}: ${(run.stderr || run.stdout).trim().slice(-800)}`;
+        lastError = run.code === 0 ? parseError : `${backend.name} exited with code ${run.code}: ${reported ? parseError : (run.stderr || run.stdout).trim().slice(-800)}`;
         if (run.code === 0 && o.mode !== "text") {
           rejections.push({ attempt, errors: [parseError] });
           if (before && sameErrors(before.errors, [parseError])) {
@@ -18828,7 +18836,8 @@ Return ONLY a JSON object that matches the required schema exactly.
 };
 
 // packages/engine/src/chat/conversation.ts
-import { existsSync as existsSync15, mkdirSync as mkdirSync6, readdirSync as readdirSync5, readFileSync as readFileSync11, statSync as statSync6 } from "fs";
+import { randomBytes as randomBytes2 } from "crypto";
+import { existsSync as existsSync15, mkdirSync as mkdirSync6, readdirSync as readdirSync5, readFileSync as readFileSync11, renameSync as renameSync3, rmSync as rmSync4, statSync as statSync6 } from "fs";
 import { join as join17 } from "path";
 
 // packages/engine/src/inputs/mentions.ts
@@ -20414,9 +20423,17 @@ var WorkspaceLease = class {
 
 // packages/engine/src/chat/conversation.ts
 var CONTEXT_CHARS = 12e4;
+var ConversationError = class extends Error {
+  name = "ConversationError";
+};
 var RECORD = "conversation.json";
+var ARCHIVED = "archived";
 var UNFINISHED_QUESTION = "(the message of a turn that did not finish; it was not kept)";
 var conversationsDir = (runsDir) => join17(runsDir, "conversations");
+var conversationFile = (runsDir, id) => join17(conversationsDir(runsDir), id, RECORD);
+function readConversation(runsDir, id) {
+  return readRecord(conversationFile(runsDir, id));
+}
 function readRecord(file) {
   try {
     const r = JSON.parse(readFileSync11(file, "utf8"));
@@ -20424,6 +20441,27 @@ function readRecord(file) {
   } catch {
     return null;
   }
+}
+var archiveMark = (runsDir, id) => join17(conversationsDir(runsDir), id, ARCHIVED);
+function archiveTime(runsDir, id) {
+  const file = archiveMark(runsDir, id);
+  try {
+    const text3 = readFileSync11(file, "utf8").trim();
+    return Number.isNaN(Date.parse(text3)) ? statSync6(file).mtime.toISOString() : text3;
+  } catch {
+    return null;
+  }
+}
+var isArchivedConversation = (runsDir, id) => archiveTime(runsDir, id) !== null;
+var CONVERSATION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+function savedRecord(runsDir, id) {
+  const r = CONVERSATION_ID.test(id) && !id.includes("..") ? readConversation(runsDir, id) : null;
+  if (!r || r.id !== id) throw new ConversationError(`no saved conversation '${id}'`);
+  return r;
+}
+function restoreConversation(runsDir, id) {
+  savedRecord(runsDir, id);
+  rmSync4(archiveMark(runsDir, id), { force: true });
 }
 var counter2 = 0;
 var withoutId = ({ id: _id, ...e }) => e;
@@ -20471,6 +20509,12 @@ var Conversation = class _Conversation {
   }
   /** The record's file as this process last read or wrote it (time and size), to tell when another process saved it. */
   seen = null;
+  /** The record was on disk when this process last read or wrote it. */
+  persisted = false;
+  /** It was saved, and its record is gone: another window deleted it (deleteConversation). Nothing writes it back. */
+  get deleted() {
+    return this.persisted && !existsSync15(join17(this.dir, RECORD));
+  }
   fileStamp() {
     try {
       const st = statSync6(join17(this.dir, RECORD));
@@ -20482,7 +20526,9 @@ var Conversation = class _Conversation {
   /** The saved record; what it was is noted first, so a save that lands while it is read is seen as a change next time. */
   read() {
     this.seen = this.fileStamp();
-    return readRecord(join17(this.dir, RECORD));
+    const r = readRecord(join17(this.dir, RECORD));
+    if (r) this.persisted = true;
+    return r;
   }
   /**
    * Takes on a saved record. `settle`: nobody else works in the conversation, so a question still open was asked by a
@@ -20554,6 +20600,7 @@ var Conversation = class _Conversation {
   /** Writes conversation.json once there is something to keep; an empty conversation leaves no file. */
   save() {
     if (!this.name && !this.exchanges.length && !this.done.length) return;
+    if (this.deleted) return;
     const record = {
       version: 1,
       id: this.id,
@@ -20573,6 +20620,7 @@ var Conversation = class _Conversation {
     atomicWrite(join17(this.dir, RECORD), `${JSON.stringify(record, null, 2)}
 `);
     this.seen = this.fileStamp();
+    this.persisted = true;
   }
   /**
    * The session `backend`'s call continues, taken off the record until keepSession says what the call ended with: a
@@ -23859,6 +23907,7 @@ var TeamStore = class _TeamStore {
 var teamsDir = (runsDir) => join19(runsDir, "teams");
 
 // packages/engine/src/team/team.ts
+import { rmSync as rmSync7 } from "fs";
 import { join as join22 } from "path";
 
 // packages/engine/src/team/board.ts
@@ -24040,7 +24089,7 @@ function boardJobs(state, ctx) {
 
 // packages/engine/src/team/identity.ts
 var import_yaml4 = __toESM(require_dist(), 1);
-import { existsSync as existsSync18, mkdirSync as mkdirSync8, readFileSync as readFileSync14, rmSync as rmSync4, writeFileSync as writeFileSync5 } from "fs";
+import { existsSync as existsSync18, mkdirSync as mkdirSync8, readFileSync as readFileSync14, rmSync as rmSync5, writeFileSync as writeFileSync5 } from "fs";
 import { dirname as dirname6, join as join20 } from "path";
 
 // packages/engine/src/team/defaults.ts
@@ -24270,7 +24319,16 @@ var json = "\n\n## Your output\nReply with one JSON object that matches the requ
 function frame(kind, member, identity, members, brief2) {
   return [header2(kind, member) + intro(member), identity ?? "", roster(members), brief2 ? briefSection(brief2) : ""].filter(Boolean);
 }
-var transcript = (messages) => messages.map((m) => `${m.from === "user" ? "User" : "You (PM)"}: ${m.text}`).join("\n\n");
+var attached = (m) => m.attachments?.length ? `
+(attached: ${m.attachments.map((a) => inlineCode(a.name)).join(", ")})` : "";
+var transcript = (messages) => messages.map((m) => `${m.from === "user" ? "User" : "You (PM)"}: ${m.text}${attached(m)}`).join("\n\n");
+var TEAM_FILES = "The user attached these files to their messages to the team. agentduo keeps a copy of each at the path given, outside your folder. The images your CLI can take are also attached to this message as images; read any other file (text, code, PDF\u2026) at its path, and an image there too if you were not shown it. If you cannot read a file, say so.";
+function filesSection2(list, locate, continued) {
+  if (!list.length) return "";
+  return `## ${continued ? "New files the user attached" : "Files the user attached"}
+${TEAM_FILES}
+${attachmentLines(list, locate)}`;
+}
 function pmPrompt(p) {
   const s = p.state;
   const brief2 = s.briefs.at(-1) ?? null;
@@ -24495,7 +24553,7 @@ Allowed actions now: ${pmActions(p.state, p.occasion).join(", ")}. \`message\` i
 
 // packages/engine/src/team/worktrees.ts
 import { execFile as execFile3 } from "child_process";
-import { chmodSync, existsSync as existsSync19, lstatSync as lstatSync2, mkdirSync as mkdirSync9, readdirSync as readdirSync7, readFileSync as readFileSync15, rmSync as rmSync5, symlinkSync, unlinkSync as unlinkSync3, writeFileSync as writeFileSync6 } from "fs";
+import { chmodSync, existsSync as existsSync19, lstatSync as lstatSync2, mkdirSync as mkdirSync9, readdirSync as readdirSync7, readFileSync as readFileSync15, rmSync as rmSync6, symlinkSync, unlinkSync as unlinkSync3, writeFileSync as writeFileSync6 } from "fs";
 import { dirname as dirname7, join as join21, posix as posix5, resolve as resolve10 } from "path";
 function teamRefs(runId) {
   const root2 = `refs/agentduo/team/${runId}`;
@@ -24573,7 +24631,7 @@ var TeamGit = class {
     const wt = this.worktree(member);
     if (!existsSync19(join21(wt, ".git"))) {
       const add = this.adding.then(async () => {
-        rmSync5(wt, { recursive: true, force: true });
+        rmSync6(wt, { recursive: true, force: true });
         mkdirSync9(dirname7(wt), { recursive: true });
         await this.o.git.run(["worktree", "prune"]);
         await this.o.git.run(["worktree", "add", "--detach", "--force", wt, commit]);
@@ -24611,7 +24669,7 @@ var TeamGit = class {
       } catch {
       }
       if (present2) continue;
-      rmSync5(target, { recursive: true, force: true });
+      rmSync6(target, { recursive: true, force: true });
       mkdirSync9(dirname7(target), { recursive: true });
       symlinkSync(source, target, lstatSync2(source).isDirectory() ? "junction" : "file");
     }
@@ -24703,7 +24761,7 @@ var TeamGit = class {
       const gone = change.dstMode === "000000";
       if (gone || change.status === "T" || existsSync19(path)) {
         try {
-          if (lstatSync2(path).isDirectory() && !lstatSync2(path).isSymbolicLink()) rmSync5(path, { recursive: true, force: true });
+          if (lstatSync2(path).isDirectory() && !lstatSync2(path).isSymbolicLink()) rmSync6(path, { recursive: true, force: true });
           else unlinkSync3(path);
         } catch {
         }
@@ -24751,7 +24809,7 @@ var TeamGit = class {
     if (existsSync19(this.o.root)) {
       for (const wt of listDirs(this.o.root)) await this.o.git.run(["worktree", "remove", "--force", wt], { check: false });
     }
-    rmSync5(this.o.root, { recursive: true, force: true });
+    rmSync6(this.o.root, { recursive: true, force: true });
     await this.o.git.run(["worktree", "prune"], { check: false });
   }
 };
@@ -24772,6 +24830,7 @@ function listDirs(root2) {
 // packages/engine/src/team/team.ts
 var REPORT_INTERVAL_MS = 6e4;
 var APPROVE = "approve";
+var FILES_ALONE = "Look at the attached file(s).";
 var CHANGE = "change";
 var Interrupted2 = class extends Error {
 };
@@ -24793,7 +24852,7 @@ var TeamRun = class _TeamRun {
     this.members = teamMembers(o.cfg.team);
     this.groups = teamGroups(this.members);
     this.head = headPm(this.members);
-    this.runner = o.runner ?? new AgentRunner(o.cfg, o.workspace, join22(o.store.dir, "logs"), o.bus, { permissions: o.permissions });
+    this.runner = o.runner ?? new AgentRunner(o.cfg, o.workspace, join22(o.store.dir, "logs"), o.bus, { permissions: o.permissions, runsDir: o.store.runsDir });
   }
   o;
   members;
@@ -24821,9 +24880,22 @@ var TeamRun = class _TeamRun {
   budgetReached = null;
   reportTimer = null;
   env;
-  /** A new team run in `runsDir` for the user's `request`: its state, the configuration and the identities it keeps. */
+  /**
+   * A new team run in `runsDir` for the user's `request`: its state, the configuration and the identities it keeps.
+   * `attachments` (kept elsewhere in `runsDir`, a conversation's) go with the request: the run keeps copies of its own.
+   */
   static create(o) {
     const { store, state } = TeamStore.create(o.runsDir, o.request);
+    if (o.attachments?.length) {
+      const files = new AttachmentStore(o.runsDir, store.dir);
+      try {
+        state.messages[0].attachments = o.attachments.map((a) => files.adopt(a));
+      } catch (e) {
+        rmSync7(store.dir, { recursive: true, force: true });
+        throw e;
+      }
+      store.save(state);
+    }
     store.writeJson("config.json", o.cfg);
     return new _TeamRun({ ...o, store, state });
   }
@@ -24844,12 +24916,18 @@ var TeamRun = class _TeamRun {
     return !!this.o.decider;
   }
   // ------------------------------------------------------------------ the user's side
-  /** A message from the user: for the PM, whatever the team is doing. */
-  message(text3) {
-    const trimmed = text3.trim();
+  /**
+   * A message from the user: for the PM, whatever the team is doing. Its `attachments` (kept elsewhere in the runs
+   * directory, a conversation's) are copied into the run first (an AttachmentError leaves the run as it was); every
+   * member's next call is given them.
+   */
+  message(text3, attachments = []) {
+    const trimmed = text3.trim() || (attachments.length ? FILES_ALONE : "");
     if (!trimmed) return;
+    const files = new AttachmentStore(this.o.store.runsDir, this.o.store.dir);
+    const copies = attachments.map((a) => files.adopt(a));
     const seq = nextSeq(this.state);
-    this.state.messages.push({ seq, at: nowIso2(), from: "user", text: trimmed });
+    this.state.messages.push({ seq, at: nowIso2(), from: "user", text: trimmed, ...copies.length ? { attachments: copies } : {} });
     this.o.bus.emit({ type: "team.message", runId: this.id, from: "user", text: trimmed, seq });
     this.save();
     this.wake();
@@ -25610,8 +25688,19 @@ var TeamRun = class _TeamRun {
 ## Notes from the PM
 ${read.map((n) => `- ${n.text}`).join("\n")}` : "";
     const notesSeen = s.leadNotes.length;
-    const full = build(memberIdentity(this.identities, m)) + notes2;
-    const resume = keep && session2 && session2.backend === m.backend ? { id: session2.id, prompt: build(null) + notes2 } : void 0;
+    const files = this.files();
+    const continued = keep && session2 && session2.backend === m.backend ? session2 : null;
+    const given2 = new Set(continued?.files ?? []);
+    const unseen = files.filter((a) => !given2.has(a.id));
+    const locate = (a) => attachmentFile(this.o.store.runsDir, a);
+    const listed = (list, next) => {
+      const text3 = filesSection2(list, locate, next);
+      return text3 ? `
+
+${text3}` : "";
+    };
+    const full = build(memberIdentity(this.identities, m)) + notes2 + listed(files, false);
+    const resume = continued ? { id: continued.id, prompt: build(null) + notes2 + listed(unseen, true), attachments: unseen } : void 0;
     const profile = memberProfile(m);
     if (m.backend === "claude") profile.args = [...implementerPermissionArgs(this.o.cfg.claude), ...profile.args];
     const res = await this.runner.call({
@@ -25622,7 +25711,8 @@ ${read.map((n) => `- ${n.text}`).join("\n")}` : "";
       check: o.check,
       signal: this.abort.signal,
       session: { keep, ...resume ? { resume } : {} },
-      budget: this.callBudget()
+      budget: this.callBudget(),
+      attachments: files
     });
     s.usage.calls += res.calls;
     s.usage.unpricedCalls += res.unpricedCalls;
@@ -25643,10 +25733,15 @@ ${read.map((n) => `- ${n.text}`).join("\n")}` : "";
       this.save();
       throw new Error(res.error ?? "the call failed");
     }
-    if (keep && res.sessionId) s.sessions[m.name] = { backend: m.backend, id: res.sessionId };
+    if (keep && res.sessionId) s.sessions[m.name] = { backend: m.backend, id: res.sessionId, ...files.length ? { files: files.map((a) => a.id) } : {} };
     if (m.kind === "lead") s.leadNotesSeen[m.name] = notesSeen;
     this.save();
     return res.data;
+  }
+  /** The files the user attached to the request and to messages since, oldest first: every member is given them. */
+  files() {
+    const all = this.state.messages.flatMap((m) => m.from === "user" ? m.attachments ?? [] : []);
+    return all.filter((a, i) => all.findIndex((b) => b.id === a.id) === i);
   }
   parts(m) {
     return { member: m, members: this.members, state: this.state };
@@ -26602,7 +26697,7 @@ var Chat = class {
       case "discuss":
         return this.withFiles(o, (files) => this.discuss(input.question, files));
       case "team":
-        return this.teamCommand(input);
+        return this.teamCommand(input, o);
       case "attach":
         return this.attachTyped(input.home ? join23(homedir5(), input.path) : resolve11(this.o.workspace, input.path));
       case "detach":
@@ -26642,7 +26737,7 @@ var Chat = class {
       return;
     }
     if (await this.cannotSnapshot()) return;
-    this.startTeam(text3);
+    this.withFiles(o, (files) => this.startTeam(text3, files));
   }
   /** The Discuss route of the sidebar: the text is the question, unless it is a slash command, which goes as typed. */
   async submitDiscuss(raw, o = {}) {
@@ -26672,12 +26767,19 @@ var Chat = class {
   /** A plain message: a note for the running pipeline, or a question for the recipient. */
   message(text3, files) {
     if (this.active?.kind === "pipeline") return this.note(this.active, text3, files);
-    if (this.active?.kind === "team") {
-      if (files.length) this.o.ui.info("The team takes no files yet: describe them to the PM, or put them in the folder; they stay waiting.");
-      if (text3) this.active.run.message(text3);
+    if (this.active?.kind === "team") return this.teamMessage(this.active.run, text3, files);
+    this.ask(this.recipient, text3 || FILES_QUESTION, null, files);
+  }
+  /** A message for the running team's PM, with its files (the run copies them; every member is given them). */
+  teamMessage(run, text3, files) {
+    try {
+      run.message(text3, files);
+    } catch (e) {
+      if (!(e instanceof AttachmentError)) throw e;
+      this.o.ui.info(e.message, "error");
       return;
     }
-    this.ask(this.recipient, text3 || FILES_QUESTION, null, files);
+    this.sentFiles(files);
   }
   note(exec2, text3, files) {
     const copies = this.copyInto(exec2.store, files);
@@ -26806,6 +26908,11 @@ var Chat = class {
    * input. Nothing that runs elsewhere is interrupted.
    */
   takeWorkspace() {
+    if (this.conversation.deleted) {
+      this.o.ui.info("This conversation was deleted in another agentduo window: nothing was sent. /new starts a new one.", "error");
+      if (this.line !== null) this.o.ui.refused?.(this.line);
+      return null;
+    }
     let release;
     try {
       release = this.lease.take(this.conversation.id);
@@ -26819,6 +26926,10 @@ var Chat = class {
     try {
       this.o.beforeWork?.();
       this.catchUp(true);
+      if (isArchivedConversation(this.o.runsDir, this.conversation.id)) {
+        restoreConversation(this.o.runsDir, this.conversation.id);
+        this.o.ui.info("This conversation was archived: it is back in the list.");
+      }
     } catch (e) {
       release();
       throw e;
@@ -27168,13 +27279,13 @@ var Chat = class {
   }
   // ------------------------------------------------------------------ team
   /** /team <request>, status, members, abort, undo. */
-  async teamCommand(input) {
+  async teamCommand(input, o = {}) {
     const ui = this.o.ui;
     const active2 = this.active?.kind === "team" ? this.active.run : null;
     switch (input.action) {
       case "start":
         if (await this.cannotSnapshot()) return;
-        return this.startTeam(input.request);
+        return this.withFiles(o, (files) => this.startTeam(input.request, files));
       case "status": {
         const state = active2?.state ?? this.latestTeamState();
         ui.info(state ? teamStatusText(state) : "No team run yet. /team <request> starts one.");
@@ -27232,7 +27343,7 @@ var Chat = class {
       return null;
     }
   }
-  startTeam(request) {
+  startTeam(request, files = []) {
     if (this.active) return this.busy();
     if (this.elsewhere()) return;
     const release = this.takeWorkspace();
@@ -27251,19 +27362,30 @@ var Chat = class {
         this.o.ui.info(problem.message, "error");
         return;
       }
-      const run = TeamRun.create({
-        runsDir: this.o.runsDir,
-        request,
-        cfg: structuredClone(this.cfg),
-        workspace: this.o.workspace,
-        bus: this.o.bus,
-        decider: this.o.clarifier,
-        permissions: this.o.permissions,
-        env: this.env
-      });
+      let run;
+      try {
+        run = TeamRun.create({
+          runsDir: this.o.runsDir,
+          request,
+          cfg: structuredClone(this.cfg),
+          workspace: this.o.workspace,
+          bus: this.o.bus,
+          decider: this.o.clarifier,
+          permissions: this.o.permissions,
+          env: this.env,
+          attachments: files
+        });
+      } catch (e) {
+        if (!(e instanceof AttachmentError)) throw e;
+        release();
+        this.o.ui.info(e.message, "error");
+        return;
+      }
+      this.sentFiles(files);
       this.entitle(request);
       this.pausedTeam = null;
-      this.o.ui.info(`The team takes it from here (run ${run.id}). Your messages now go to the PM; Esc stops the team, /team status shows the board.`);
+      const with_ = files.length ? `, with ${files.length} file${files.length === 1 ? "" : "s"} every member is given` : "";
+      this.o.ui.info(`The team takes it from here (run ${run.id}${with_}). Your messages now go to the PM; Esc stops the team, /team status shows the board.`);
       this.runTeam(run, release, request);
     } catch (e) {
       if (!this.runsWith(release)) release();

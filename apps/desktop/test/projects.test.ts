@@ -348,4 +348,35 @@ describe("with real workers", () => {
     expect(fake.calls("chat_codex")).toHaveLength(2);
     expect(h.projects.session(p.id).conversation(saved).state.recipient).toBe("codex");
   }, 120_000);
+
+  it("archives a conversation (its chat closes, the next one is active), restores it, and deletes an archived one", async () => {
+    writeYaml(userConfig(), { claude: { bin: fake.path("claude") }, codex: { bin: fake.path("codex") } });
+    const h = harness({ worker: worker.script, env: env() });
+    const p = await project(h, "p", null);
+    const first = await chatting(h, p.id, "first");
+    const second = await chatting(h, p.id, "second");
+    const listed = () => h.projects.conversations(p.id).map((c) => c.id);
+    await waitUntil(() => listed().length === 2, 10_000, "both conversations listed");
+    expect(h.projects.conversations(p.id).every((c) => c.saved)).toBe(true);
+    expect(h.projects.active.conversationId).toBe(second);
+    expect(await ok(h.d.handle(good, { method: "conversation.archive", projectId: p.id, conversationId: second }))).toEqual({ archived: true });
+    expect(listed()).toEqual([first]);
+    expect(h.projects.active.conversationId).toBe(first);
+    const archived = await ok<Array<{ id: string; title: string; archivedAt: string | null }>>(h.d.handle(good, { method: "conversation.archived", projectId: p.id }));
+    expect(archived.map((c) => [c.id, c.title])).toEqual([[second, "second"]]);
+    expect(archived[0]!.archivedAt).toMatch(/^\d{4}-/);
+    // Only what the lists show can be acted on: an active one is not restored or deleted, an archived one not archived again.
+    expect(await h.d.handle(good, { method: "conversation.delete", projectId: p.id, conversationId: first })).toMatchObject({ ok: false });
+    expect(await h.d.handle(good, { method: "conversation.archive", projectId: p.id, conversationId: second })).toMatchObject({ ok: false });
+    expect(await ok(h.d.handle(good, { method: "conversation.restore", projectId: p.id, conversationId: second }))).toEqual({ restored: true });
+    expect(listed().sort()).toEqual([first, second].sort());
+    // Opened again, it has what was said in it.
+    await ok(h.d.handle(good, { method: "conversation.open", projectId: p.id, conversationId: second }));
+    await say(h, p.id, second, "still here");
+    await ok(h.d.handle(good, { method: "conversation.archive", projectId: p.id, conversationId: second }));
+    expect(await ok(h.d.handle(good, { method: "conversation.delete", projectId: p.id, conversationId: second }))).toEqual({ deleted: true });
+    expect(existsSync(join(p.path, ".agentduo", "runs", "conversations", second))).toBe(false);
+    expect(await ok(h.d.handle(good, { method: "conversation.archived", projectId: p.id }))).toEqual([]);
+    expect(listed()).toEqual([first]);
+  }, 120_000);
 });

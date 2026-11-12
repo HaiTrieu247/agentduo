@@ -196,6 +196,17 @@ export class ChatHost {
     }
   }
 
+  /** One conversation's chat goes from the page (it was archived or deleted); main closed it itself. */
+  drop(projectId: string, conversationId: string): void {
+    const key = mountKey(projectId, conversationId);
+    const mount = this.mounts.get(key);
+    if (!mount) return;
+    if (mount.draftTimer) clearTimeout(mount.draftTimer);
+    mount.root.remove();
+    this.mounts.delete(key);
+    if (this.activeKey === key) this.activeKey = null;
+  }
+
   /** Nothing is shown (another project without an open conversation, or none). */
   hideAll(): void {
     this.activeKey = null;

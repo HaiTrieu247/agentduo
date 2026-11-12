@@ -28,6 +28,20 @@ describe("extension manifest", () => {
       "agentduo.openChanges", "agentduo.openReport", "agentduo.doctor", "agentduo.openConfiguration"]));
   });
 
+  it("puts the archived conversations beside + on the Conversations view, and Archive on the rows that can be archived", () => {
+    const { menus } = manifest.contributes;
+    type Menu = { command: string; when: string; group: string };
+    const title = (menus["view/title"] as Menu[]).filter((m) => m.when === "view == agentduo.conversations" && m.group.startsWith("navigation"));
+    expect(title.map((m) => m.command)).toEqual(["agentduo.archivedConversations", "agentduo.newTask"]);
+    const rows = (menus["view/item/context"] as Menu[]).filter((m) => m.command === "agentduo.archiveConversation");
+    expect(rows.map((m) => m.group)).toEqual(["inline", "1_conversation@1"]);
+    for (const m of rows) {
+      const pattern = new RegExp(/viewItem =~ \/(.+)\/$/.exec(m.when)![1]!);
+      expect(["conversation.archivable", "conversation.open.archivable"].every((v) => pattern.test(v))).toBe(true);
+      expect(["conversation", "conversation.open"].some((v) => pattern.test(v))).toBe(false);
+    }
+  });
+
   it("wears the app's icon: a 256 px PNG on the Marketplace, and every icon it names in the extension", () => {
     expect(manifest.icon).toBe("media/icon.png");
     const png = readFileSync(join(ext, manifest.icon));

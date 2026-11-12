@@ -17,6 +17,8 @@ export interface SidebarResizer {
   set(width: number): void;
   /** The window changed size: the width is fitted to it again (nothing is saved). */
   fit(): void;
+  /** The width shown now, in pixels. */
+  width(): number;
 }
 
 /** Makes `edge` the separator that sets the CSS variable `--sidebar-w` on `doc`'s root; `save` keeps a width the user chose. */
@@ -82,5 +84,6 @@ export function sidebarResizer(edge: HTMLElement, save: (width: number) => void,
     fit: () => {
       if (!drag) show(wanted);
     },
+    width: () => shown,
   };
 }

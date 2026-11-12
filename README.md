@@ -418,6 +418,14 @@ from one to another without quitting the first.
 - **From the terminal:** `duo chat --list` lists the saved conversations, newest first (one in use elsewhere is marked
   with its pid); `duo chat <id>` (or the start of an id, or `latest`) opens one. `duo` alone still opens a new
   conversation. An unknown id, or a conversation another window is working in, is refused with the reason.
+- **Archiving and deleting.** Archive a conversation to take it out of the list, whole: the archive button on its row
+  (the desktop sidebar, VS Code's Conversations view), or `duo chat --archive <id>`. The archive button beside **+**
+  (desktop, VS Code) lists the archived ones: pick one to restore and open it, restore it, or delete it with its logs
+  and attached files after a confirmation (`duo chat --list --archived`, `--restore <id>`, `--delete <id>`, which asks
+  first or takes `--yes`). Runs keep their own copies of what they used. A conversation an agent works in, or that
+  waits for you, is not archived or deleted until that is done. Working again in an archived conversation that is
+  still open in a window brings it back to the list; a window still showing a deleted one sends nothing more in it
+  (`/new` starts another) and never writes it back.
 - **Runs** stopped or waiting for you can be resumed in any window: `/resume`, the desktop's *Resumable runs*, or
   `duo resume`.
 - **Settings.** A setting saved to a file (`--save`, `--global`, the desktop's Settings) reaches every window before its
@@ -549,6 +557,7 @@ duo resume --answers answers.json   # structured: the file names the request and
 |---|---|
 | `duo` | Open the [chat](#chat) (in a terminal), in a new conversation |
 | `duo chat [id\|latest]`, `duo chat --list` | Continue a saved conversation, also one from VS Code or the desktop app (an id, the start of one, or `latest`); `--list` lists them ([Working from several windows](#working-from-several-windows)) |
+| `duo chat --archive\|--restore\|--delete <id>`, `duo chat --list --archived` | Archive a conversation (it leaves the list, whole), bring one back, or delete one with its files (asks first, or `--yes`); list the archived ones |
 | `duo "<task>"`, `duo run "<task>"` | Start a run (`--task-file F`; `--profile lightweight\|standard\|thorough`; use `duo -- "-x …"` for a task that starts with `-`) |
 | `duo team "<request>"` | Open the chat and hand the request to a [team](#team-mode): you talk to its PM |
 | `duo resume [id]` | Continue the latest (or given) run with the config it started with (`--reload-config` to use today's); `--decision resume\|revise\|abort [--note "..."]` answers a pending decision; `--answers F` answers the agents' [questions](#questions-from-the-agents) |

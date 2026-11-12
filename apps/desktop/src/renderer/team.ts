@@ -598,7 +598,7 @@ export async function teamPage(projectId: string | null, o: { codexModels(): rea
       el("div", { class: "form-buttons" }, button("Cancel", cancel, { class: "small" }),
         button(f.index === null ? "Add to the team" : "Update the member", submit, { class: "primary small", icon: f.index === null ? "add" : "check" })));
     box.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") cancel();
+      if (e.key === "Escape") { e.stopPropagation(); cancel(); }
       else if (e.key === "Enter" && e.target instanceof HTMLInputElement && e.target.type !== "checkbox") submit();
     });
     showPreview();

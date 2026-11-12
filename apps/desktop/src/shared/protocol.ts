@@ -66,9 +66,19 @@ export interface ConversationItem {
   waiting: number;
   /** What is going on, in a few words ("Claude implementing · round 2"), or null. */
   activity: string | null;
+  /** Something was said in it (it has a record): it can be archived. */
+  saved: boolean;
 }
 
 /** A run of the project that is stopped or waiting, which /resume <id> continues. */
+/** An archived conversation, as the sidebar's archived list shows it. */
+export interface ArchivedConversation {
+  id: string;
+  title: string;
+  archivedAt: string | null;
+  updatedAt: string | null;
+}
+
 export interface RunItem {
   id: string;
   task: string;
@@ -190,6 +200,12 @@ export type DesktopRequest =
   | { method: "conversation.open"; projectId: string; conversationId: string }
   /** A conversation the window shows already becomes the selected one again (kept as it is: same view, same chat). */
   | { method: "conversation.select"; projectId: string; conversationId: string }
+  /** One of the project's conversations leaves the list, whole (main closes its chat); restore brings it back. */
+  | { method: "conversation.archive"; projectId: string; conversationId: string }
+  | { method: "conversation.archived"; projectId: string }
+  | { method: "conversation.restore"; projectId: string; conversationId: string }
+  /** An archived conversation is deleted with its logs and files (the renderer asked the user first). */
+  | { method: "conversation.delete"; projectId: string; conversationId: string }
   /** What a conversation's chat sends, as the VS Code webview sends it (`view`: the attachment it was shown by). */
   | { method: "chat.message"; projectId: string; conversationId: string; view: number; message: WebviewMessage }
   | { method: "chat.draft"; projectId: string; conversationId: string; text: string }
@@ -242,6 +258,10 @@ export interface DesktopResults {
   "conversation.new": { conversationId: string };
   "conversation.open": { conversationId: string; draft: string };
   "conversation.select": { selected: true };
+  "conversation.archive": { archived: true };
+  "conversation.archived": ArchivedConversation[];
+  "conversation.restore": { restored: true };
+  "conversation.delete": { deleted: true };
   "chat.message": { accepted: boolean };
   "chat.draft": { saved: true };
   "run.inspect": FocusedRun | null;
@@ -377,7 +397,7 @@ export function parsePreferences(v: unknown): Partial<Preferences> {
 
 const METHODS: readonly DesktopMethod[] = [
   "app.state", "prefs.set", "project.open", "project.select", "project.forget", "project.restart", "project.runs", "conversation.new", "conversation.open",
-  "conversation.select", "chat.message", "chat.draft", "run.inspect", "artifact.read", "changes.list", "changes.file", "settings.read", "settings.update",
+  "conversation.select", "conversation.archive", "conversation.archived", "conversation.restore", "conversation.delete", "chat.message", "chat.draft", "run.inspect", "artifact.read", "changes.list", "changes.file", "settings.read", "settings.update",
   "settings.clear", "settings.openFile", "team.read", "team.openIdentity", "team.save", "team.identity.read", "team.identity.write", "team.identity.reset",
   "team.identity.defaults", "folder.open", "cli.status", "cli.pick", "doctor.run", "account.usage", "diagnostics.collect", "diagnostics.export",
   "link.open", "update.check", "update.install",
@@ -488,9 +508,13 @@ export function parseDesktopRequest(v: unknown): DesktopRequest {
     case "project.restart":
     case "project.runs":
     case "conversation.new":
+    case "conversation.archived":
       return { method, projectId: projectId(o.projectId) };
     case "conversation.open":
     case "conversation.select":
+    case "conversation.archive":
+    case "conversation.restore":
+    case "conversation.delete":
       return { method, projectId: projectId(o.projectId), conversationId: conversationId(o.conversationId) };
     case "chat.message":
       return { method, projectId: projectId(o.projectId), conversationId: conversationId(o.conversationId), view: int(o.view, "view"), message: chatMessage(o.message) };

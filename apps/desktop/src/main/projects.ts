@@ -11,12 +11,12 @@ import { WorkspaceSession, type ConversationHandle } from "@agentduo/host/worksp
 import type { ChangeList, HostMessage, WebviewMessage } from "@agentduo/host/protocol";
 import type { NodeLookup } from "@agentduo/host/workerClient";
 import type { ConfigScope } from "@agentduo/engine/config/configuration";
-import { listConversations } from "@agentduo/engine/chat/conversation";
+import { archiveConversation, deleteConversation, listConversations, restoreConversation } from "@agentduo/engine/chat/conversation";
 import { RunStore, stamp } from "@agentduo/engine/workflow/state";
 import { safeFileName } from "@agentduo/engine/inputs/attachments";
 import { ATTACHMENT_LIMITS } from "@agentduo/engine/inputs/attachment-types";
 import { shownImages, type ViewState } from "@agentduo/host/viewState";
-import type { ConversationItem, DesktopEvent, ProjectSummary, RunItem } from "../shared/protocol.js";
+import type { ArchivedConversation, ConversationItem, DesktopEvent, ProjectSummary, RunItem } from "../shared/protocol.js";
 import type { PreferencesStore } from "./preferences.js";
 import type { ResourceTokens } from "./resources.js";
 
@@ -435,19 +435,88 @@ export class ProjectManager {
     const runsDir = session?.runsDirectory ?? null;
     const saved = runsDir ? listConversations(runsDir) : [];
     const live = new Set(session?.conversations ?? []);
-    const item = (id: string, title: string, updatedAt: string | null, inUseBy: number | null = null): ConversationItem => {
+    const item = (id: string, title: string, updatedAt: string | null, inUseBy: number | null = null, saved = false): ConversationItem => {
       const st = session && live.has(id) ? session.conversation(id).state : null;
       // Another agentduo window (`duo`, VS Code) works in it now: it can be read here, and continued once that is done.
       const elsewhere = !!inUseBy && inUseBy !== session?.workerPid;
       return {
         id, title: st && st.timeline.length ? titleOf(st) : title || "New conversation", updatedAt,
         running: !!st && (st.status === "running" || st.status === "answering"), waiting: st ? (st.decision ? 1 : 0) + st.permissions.length + (st.questions ?? []).length : 0,
-        activity: (st ? activityOf(st) : null) ?? (elsewhere ? "In use in another agentduo window" : null),
+        activity: (st ? activityOf(st) : null) ?? (elsewhere ? "In use in another agentduo window" : null), saved,
       };
     };
     const known = new Set(saved.map((c) => c.id));
     const unsaved = [...p.views.keys()].filter((id) => !known.has(id)).reverse().map((id) => item(id, "", null));
-    return [...unsaved, ...saved.map((c) => item(c.id, c.title, c.updatedAt, c.inUseBy))];
+    return [...unsaved, ...saved.map((c) => item(c.id, c.title, c.updatedAt, c.inUseBy, true))];
+  }
+
+  /** The project's archived conversations, the most recently changed first (none before its worker said where they are). */
+  archived(projectId: string): ArchivedConversation[] {
+    const runsDir = this.project(projectId).session?.runsDirectory ?? null;
+    return runsDir ? listConversations(runsDir, "archived").map((c) => ({ id: c.id, title: c.title || "Untitled", archivedAt: c.archivedAt, updatedAt: c.updatedAt })) : [];
+  }
+
+  /**
+   * One of the list's conversations is archived: it leaves the list, whole, and its chat closes (the next conversation
+   * becomes the active one). Refused while an agent works in it or it waits for the user.
+   */
+  async archiveConversation(projectId: string, conversationId: string): Promise<void> {
+    const p = this.project(projectId);
+    const runsDir = this.runsDirOf(p);
+    const item = this.conversations(projectId).find((c) => c.id === conversationId);
+    if (!item?.saved) throw new Error("that conversation is not in the list");
+    if (item.running || item.waiting) throw new Error("An agent works in this conversation, or it waits for you: archive it once that is done.");
+    archiveConversation(runsDir, conversationId);
+    await this.closeConversation(p, conversationId);
+    this.publishList(p);
+  }
+
+  /** An archived conversation is back in the list. */
+  restoreConversation(projectId: string, conversationId: string): void {
+    const p = this.project(projectId);
+    const runsDir = this.archivedIn(p, conversationId);
+    restoreConversation(runsDir, conversationId);
+    this.publishList(p);
+  }
+
+  /** An archived conversation is deleted with its logs and files; its draft goes too. */
+  async deleteConversation(projectId: string, conversationId: string): Promise<void> {
+    const p = this.project(projectId);
+    const runsDir = this.archivedIn(p, conversationId);
+    await this.closeConversation(p, conversationId);
+    deleteConversation(runsDir, conversationId);
+    this.o.prefs.setDraft(p.path, conversationId, "");
+    this.publishList(p);
+  }
+
+  private runsDirOf(p: Project): string {
+    const runsDir = p.session?.runsDirectory;
+    if (!runsDir) throw new Error("this project's conversations are not known yet: try again in a moment");
+    return runsDir;
+  }
+
+  /** The runs directory, when `conversationId` is one of its archived conversations (the only ones restored or deleted). */
+  private archivedIn(p: Project, conversationId: string): string {
+    const runsDir = this.runsDirOf(p);
+    if (!listConversations(runsDir, "archived").some((c) => c.id === conversationId)) throw new Error("that conversation is not archived");
+    return runsDir;
+  }
+
+  /** A conversation's chat leaves the window (its view, its grants, its chat in the worker); the active one is the next then. */
+  private async closeConversation(p: Project, conversationId: string): Promise<void> {
+    const view = p.views.get(conversationId);
+    p.fresh.delete(conversationId);
+    if (view !== undefined) {
+      this.o.tokens.revoke(`${p.id}/${conversationId}`, view);
+      p.views.delete(conversationId);
+      p.granted.delete(conversationId);
+      await p.session?.conversation(conversationId).close();
+    }
+    if (this.activeProject === p.id && this.activeConversation === conversationId) {
+      const next = this.conversations(p.id).find((c) => c.id !== conversationId)?.id ?? null;
+      this.activeConversation = next;
+      this.rememberConversation(p, next);
+    }
   }
 
   /** Runs of the project that stopped or wait for a decision: /resume <id> continues one. */
