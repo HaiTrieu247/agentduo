@@ -182,6 +182,15 @@ matter and HTML comments are left out. A role with no
 file of its own uses its kind's default and a warning says so; a level without one has none. The run keeps what it
 started with in `identities.json`. A continued session gets the turn's section without the identities.
 
+**Sessions** (amended 2026-11-13, after the first real run used a Claude Pro plan's 5 hours by task 2): a member's CLI
+session holds one task, kept under `sessionKey` (`<member>@<task>`): its work and fixes, its tests and checks, its
+review of it, the techlead's triage, answer or resolution of it. A turn of no task (the PM's conversation, the
+techlead's plan, the check and triage of the whole result) goes on in the member's own session (`<member>`). A new
+task starts a fresh session with the whole prompt, so no call carries another task's history: in that run each new job
+of a member had started with all its earlier ones (dev-1's review of another task at 290k tokens of context, a fresh
+call at 44k), about a third of the run's Claude tokens. A techlead's notes from the PM are counted per session
+(`MemberSession.notes`): a fresh one gets all of its group's.
+
 ## Engine
 
 `packages/engine/src/team/`:

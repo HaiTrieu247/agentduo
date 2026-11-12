@@ -125,6 +125,32 @@ describe("a team run", () => {
     expect(events.at(-1)).toMatchObject({ type: "team.finished", outcome: "done", phase: "DONE" });
   });
 
+  it("keeps a member's session to one task: a new task or a review of another's starts fresh, the same task's next job goes on", async () => {
+    fake.setScenario(happy());
+    expect(await teamRun({ decider: decider() }).run()).toBe("done");
+    const task = (c: FakeCall) => /## Task (T\d+)/.exec(c.prompt)?.[1];
+    // A task's own calls (the check of the whole result, once every task is merged, is no task's).
+    const by = (role: string, member: string) => new Map(fake.calls(role).filter((c) => c.member === member && !c.prompt.includes("Every task is merged")).map((c) => [task(c), c]));
+    // qa-1 writes the tests of both tasks, each in a session of its own: T2's does not carry T1's.
+    const tests = by("team_tests", "qa-1");
+    expect([...tests.keys()].sort()).toEqual(["T1", "T2"]);
+    for (const c of tests.values()) expect(c.resumed, `tests of ${task(c)}`).toBeUndefined();
+    expect(tests.get("T1")!.session).not.toBe(tests.get("T2")!.session);
+    // Its check of a task goes on in the session that wrote that task's tests.
+    for (const [id, check] of by("team_check", "qa-1")) expect(check.resumed, `check of ${id}`).toBe(tests.get(id)!.session);
+    // dev-1 reviews dev-2's T2 in a session of its own, not in the one that built T1.
+    const review = by("team_review", "dev-1").get("T2")!;
+    expect(review.resumed).toBeUndefined();
+    expect(review.session).not.toBe(by("team_work", "dev-1").get("T1")!.session);
+    // The check of the whole result belongs to no task: it does not carry a task's history either.
+    const whole = fake.calls("team_check").find((c) => c.prompt.includes("Every task is merged"))!;
+    expect([tests.get("T1")!.session, tests.get("T2")!.session]).not.toContain(whole.resumed);
+    // A turn that belongs to no task goes on as before: the PM keeps one session.
+    expect(fake.calls().filter((c) => c.member === "pm").slice(1).every((c) => c.resumed)).toBe(true);
+    const state = TeamStore.open(join(repo, ".agentduo", "runs"), "latest").load();
+    expect(Object.keys(state.sessions).sort()).toEqual(expect.arrayContaining(["pm", "qa-1@T1", "qa-1@T2", "dev-1@T1", "dev-1@T2", "dev-2@T2"]));
+  });
+
   it("asks the PM to revise the brief and the techlead the plan when you ask for changes", async () => {
     fake.setScenario(happy({
       team_pm_conversation: [{ output: teamPm.brief(two) }, { output: teamPm.brief(two) }, { output: teamPm.none("I passed it on.") }],

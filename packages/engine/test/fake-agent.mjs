@@ -89,11 +89,21 @@ async function main() {
   const member = /^\[agentduo-member: ([\w-]+)\]/m.exec(prompt)?.[1];
   const key = member && scenario[`${role}:${member}`] ? `${role}:${member}` : role;
   const sessionsFile = `${process.env.FAKE_COUNTS}.sessions.json`;
-  const sessions = existsSync(sessionsFile) ? JSON.parse(readFileSync(sessionsFile, "utf8")) : {};
   const resumed = backend === "codex"
     ? (args.includes("resume") ? args[args.indexOf("resume") + 1] : undefined)
     : (args.includes("--resume") ? args[args.indexOf("--resume") + 1] : undefined);
+  // The sessions and the call counts are read and written by every agent of a run, some at once (a team's members):
+  // under a lock, or two agents starting together would each write back the other's entry lost.
+  const release = lock(`${process.env.FAKE_COUNTS}.lock`);
+  let sessions;
+  try {
+    sessions = existsSync(sessionsFile) ? JSON.parse(readFileSync(sessionsFile, "utf8")) : {};
+  } catch (e) {
+    release();
+    throw e;
+  }
   if (resumed && !sessions[resumed]) {
+    release();
     appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend, role, call: null, args, prompt, resumed, lost: true }) + "\n");
     if (backend === "codex") {
       process.stderr.write(`Error: thread/resume: thread/resume failed: no rollout found for thread id ${resumed} (code -32600)\n`);
@@ -111,12 +121,17 @@ async function main() {
     writeFileSync(`${sessionsFile}.${process.pid}.tmp`, JSON.stringify(sessions));
     renameSync(`${sessionsFile}.${process.pid}.tmp`, sessionsFile);
   }
-  const counts = existsSync(process.env.FAKE_COUNTS) ? JSON.parse(readFileSync(process.env.FAKE_COUNTS, "utf8")) : {};
-  const n = counts[key] ?? 0;
-  counts[key] = n + 1;
-  // Whole or not at all: a stop may kill the agent here, and an emptied file would fail every later call.
-  writeFileSync(`${process.env.FAKE_COUNTS}.${process.pid}.tmp`, JSON.stringify(counts));
-  renameSync(`${process.env.FAKE_COUNTS}.${process.pid}.tmp`, process.env.FAKE_COUNTS);
+  let n;
+  try {
+    const counts = existsSync(process.env.FAKE_COUNTS) ? JSON.parse(readFileSync(process.env.FAKE_COUNTS, "utf8")) : {};
+    n = counts[key] ?? 0;
+    counts[key] = n + 1;
+    // Whole or not at all: a stop may kill the agent here, and an emptied file would fail every later call.
+    writeFileSync(`${process.env.FAKE_COUNTS}.${process.pid}.tmp`, JSON.stringify(counts));
+    renameSync(`${process.env.FAKE_COUNTS}.${process.pid}.tmp`, process.env.FAKE_COUNTS);
+  } finally {
+    release();
+  }
   const unscripted = step === "critique" ? [{ answer: "Looks right.\nVERDICT: AGREE" }] : chat ? scenario.chat ?? [{ answer: `Answer from ${backend}.` }] : [{ raw: `no scripted response for role ${role}` }];
   const responses = scenario[key] ?? unscripted;
   const resp = responses[Math.min(n, responses.length - 1)];
@@ -334,6 +349,24 @@ async function appServer(args) {
   // The real app server exits as soon as its stdin closes.
   if (process.env.FAKE_LOG) appendFileSync(process.env.FAKE_LOG, JSON.stringify({ backend: "codex", usage: true, args, methods }) + "\n");
   return 0;
+}
+
+/**
+ * Takes the lock at `dir` (a directory: mkdir is atomic), waiting for another agent's; one left by an agent killed while
+ * it held it (a stop) is taken over after 2 seconds. Returns what releases it.
+ */
+function lock(dir) {
+  const wait = new Int32Array(new SharedArrayBuffer(4));
+  for (const started = Date.now(); ; ) {
+    try {
+      mkdirSync(dir);
+      return () => rmSync(dir, { recursive: true, force: true });
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      if (Date.now() - started > 2000) rmSync(dir, { recursive: true, force: true });
+      else Atomics.wait(wait, 0, 0, 5);
+    }
+  }
 }
 
 process.exitCode = await main();

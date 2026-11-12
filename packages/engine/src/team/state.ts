@@ -176,12 +176,22 @@ export interface Report {
   text: string;
 }
 
+/**
+ * A member's CLI session, kept under `sessionKey`: one per task the member works on (its work and fixes, its tests and
+ * checks, its review of it), and one for its turns of no task (the PM's conversation, the techlead's plan). A new task
+ * starts a fresh session, so no call carries another task's history.
+ */
 export interface MemberSession {
   backend: TeamBackend;
   id: string;
   /** The ids of the user's files this session was given (absent: none); a continued call gets only the others. */
   files?: string[];
+  /** A techlead's: how many of the PM's notes (`leadNotes`) this session has read. */
+  notes?: number;
 }
+
+/** Where a member's session for `task` is kept: `<member>@<task>`, or the member's name for a turn of no task. */
+export const sessionKey = (member: { name: string }, task: string | null): string => (task ? `${member.name}@${task}` : member.name);
 
 /** What the run waits for from the user, through the PM: one of the three approvals, or how to apply a conflicting result. */
 export interface Approval {
@@ -269,6 +279,7 @@ export interface TeamState {
   replanning: boolean;
   /** Notes from the PM for a group's techlead (group null: every techlead), and how far each techlead has read them. */
   leadNotes: Array<{ group: string | null; text: string }>;
+  /** How many notes each techlead had read, in runs from before sessions were kept per task (`MemberSession.notes`). */
   leadNotesSeen: Record<string, number>;
   escalations: Escalation[];
   sessions: Record<string, MemberSession>;

@@ -23782,6 +23782,7 @@ import { existsSync as existsSync17, mkdirSync as mkdirSync7, readdirSync as rea
 import { join as join19 } from "path";
 var TEAM_STATE_VERSION = 1;
 var groupKey = (group) => group ?? "";
+var sessionKey = (member, task) => task ? `${member.name}@${task}` : member.name;
 var nowIso2 = () => (/* @__PURE__ */ new Date()).toISOString();
 function newTeamState(id, request) {
   const at = nowIso2();
@@ -25681,15 +25682,18 @@ var TeamRun = class _TeamRun {
     const s = this.state;
     const backend = this.runner.backends[m.backend];
     const keep = backend.keepsSessions(void 0, m.args);
-    const session2 = s.sessions[m.name];
-    const read = s.leadNotes.slice(s.leadNotesSeen[m.name] ?? 0).filter((n) => n.group === null || n.group === m.group);
-    const notes2 = m.kind === "lead" && read.length ? `
+    const key = sessionKey(m, o.task);
+    const session2 = s.sessions[key];
+    const continued = keep && session2 && session2.backend === m.backend ? session2 : null;
+    const leadNotes = (from) => {
+      const read = m.kind === "lead" ? s.leadNotes.slice(from).filter((n) => n.group === null || n.group === m.group) : [];
+      return read.length ? `
 
 ## Notes from the PM
 ${read.map((n) => `- ${n.text}`).join("\n")}` : "";
+    };
     const notesSeen = s.leadNotes.length;
     const files = this.files();
-    const continued = keep && session2 && session2.backend === m.backend ? session2 : null;
     const given2 = new Set(continued?.files ?? []);
     const unseen = files.filter((a) => !given2.has(a.id));
     const locate = (a) => attachmentFile(this.o.store.runsDir, a);
@@ -25699,8 +25703,8 @@ ${read.map((n) => `- ${n.text}`).join("\n")}` : "";
 
 ${text3}` : "";
     };
-    const full = build(memberIdentity(this.identities, m)) + notes2 + listed(files, false);
-    const resume = continued ? { id: continued.id, prompt: build(null) + notes2 + listed(unseen, true), attachments: unseen } : void 0;
+    const full = build(memberIdentity(this.identities, m)) + leadNotes(0) + listed(files, false);
+    const resume = continued ? { id: continued.id, prompt: build(null) + leadNotes(continued.notes ?? s.leadNotesSeen[m.name] ?? 0) + listed(unseen, true), attachments: unseen } : void 0;
     const profile = memberProfile(m);
     if (m.backend === "claude") profile.args = [...implementerPermissionArgs(this.o.cfg.claude), ...profile.args];
     const res = await this.runner.call({
@@ -25733,8 +25737,9 @@ ${text3}` : "";
       this.save();
       throw new Error(res.error ?? "the call failed");
     }
-    if (keep && res.sessionId) s.sessions[m.name] = { backend: m.backend, id: res.sessionId, ...files.length ? { files: files.map((a) => a.id) } : {} };
-    if (m.kind === "lead") s.leadNotesSeen[m.name] = notesSeen;
+    if (keep && res.sessionId) {
+      s.sessions[key] = { backend: m.backend, id: res.sessionId, ...files.length ? { files: files.map((a) => a.id) } : {}, ...m.kind === "lead" ? { notes: notesSeen } : {} };
+    }
     this.save();
     return res.data;
   }

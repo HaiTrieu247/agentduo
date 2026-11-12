@@ -32,7 +32,7 @@ import {
   reviewPrompt, testsPrompt, triagePrompt, workPrompt, type PmOccasion,
 } from "./prompts.js";
 import {
-  approvedBrief, currentAreas, groupKey, latestBrief, latestPlan, nextSeq, nowIso, planSignature, TeamStore, type Area, type Brief, type CheckFailure,
+  approvedBrief, currentAreas, groupKey, latestBrief, latestPlan, nextSeq, nowIso, planSignature, sessionKey, TeamStore, type Area, type Brief, type CheckFailure,
   type Escalation, type PlanTask, type ReviewFinding, type TaskCheck, type TaskState, type TeamPlan, type TeamState,
 } from "./state.js";
 import { TeamGit } from "./worktrees.js";
@@ -950,14 +950,20 @@ export class TeamRun {
     const s = this.state;
     const backend = this.runner.backends[m.backend];
     const keep = backend.keepsSessions(undefined, m.args);
-    const session = s.sessions[m.name];
-    // A techlead reads the PM's notes for its group (and those for every techlead) it has not read yet.
-    const read = s.leadNotes.slice(s.leadNotesSeen[m.name] ?? 0).filter((n) => n.group === null || n.group === m.group);
-    const notes = m.kind === "lead" && read.length ? `\n\n## Notes from the PM\n${read.map((n) => `- ${n.text}`).join("\n")}` : "";
+    // A member's session holds one task (its work, its fixes, its tests and checks, a review of it) or, for a turn of no
+    // task, the member's own thread (the PM's conversation, the techlead's plan): never another task's history.
+    const key = sessionKey(m, o.task);
+    const session = s.sessions[key];
+    const continued = keep && session && session.backend === m.backend ? session : null;
+    // A techlead reads the PM's notes for its group (and those for every techlead): all of them in a fresh session,
+    // the ones its session has not read yet in one that goes on (an older run counted them per member).
+    const leadNotes = (from: number) => {
+      const read = m.kind === "lead" ? s.leadNotes.slice(from).filter((n) => n.group === null || n.group === m.group) : [];
+      return read.length ? `\n\n## Notes from the PM\n${read.map((n) => `- ${n.text}`).join("\n")}` : "";
+    };
     const notesSeen = s.leadNotes.length;
     // The user's files: every one for a fresh session, the ones it was not given for a session that goes on.
     const files = this.files();
-    const continued = keep && session && session.backend === m.backend ? session : null;
     const given = new Set(continued?.files ?? []);
     const unseen = files.filter((a) => !given.has(a.id));
     const locate = (a: Attachment) => attachmentFile(this.o.store.runsDir, a);
@@ -965,8 +971,10 @@ export class TeamRun {
       const text = filesSection(list, locate, next);
       return text ? `\n\n${text}` : "";
     };
-    const full = build(memberIdentity(this.identities!, m)) + notes + listed(files, false);
-    const resume = continued ? { id: continued.id, prompt: build(null) + notes + listed(unseen, true), attachments: unseen } : undefined;
+    const full = build(memberIdentity(this.identities!, m)) + leadNotes(0) + listed(files, false);
+    const resume = continued
+      ? { id: continued.id, prompt: build(null) + leadNotes(continued.notes ?? s.leadNotesSeen[m.name] ?? 0) + listed(unseen, true), attachments: unseen }
+      : undefined;
     // Claude's permission mode as you set it (/mode, Shift+Tab, --accept-edits) holds for its members as for the
     // implementer and the chat; a member's own args come after it and win.
     const profile = memberProfile(m);
@@ -996,8 +1004,9 @@ export class TeamRun {
       this.save();
       throw new Error(res.error ?? "the call failed");
     }
-    if (keep && res.sessionId) s.sessions[m.name] = { backend: m.backend, id: res.sessionId, ...(files.length ? { files: files.map((a) => a.id) } : {}) };
-    if (m.kind === "lead") s.leadNotesSeen[m.name] = notesSeen;
+    if (keep && res.sessionId) {
+      s.sessions[key] = { backend: m.backend, id: res.sessionId, ...(files.length ? { files: files.map((a) => a.id) } : {}), ...(m.kind === "lead" ? { notes: notesSeen } : {}) };
+    }
     this.save();
     return res.data as T;
   }
