@@ -25,6 +25,9 @@ import type {
   ClarificationDecider, Decider, DiscussionPlace, DiscussionStatus, DiscussionStep, EventBus, ModelMap, PermissionDecider, TurnStatus, Verdict,
 } from "../events.js";
 import { formatCost, formatTokens, modelText, usageReportText } from "../format.js";
+import { teamConfigErrors, teamMembers } from "../team/config.js";
+import { TeamStore } from "../team/state.js";
+import { resumableTeam, TeamRun, teamRosterText, teamStatusText, undoTeam, type TeamOutcome } from "../team/team.js";
 
 /** idle: ready; running: a pipeline run is going; answering: an agent answers a question; paused: a run was stopped with Esc. */
 export type ChatStatus = "idle" | "running" | "answering" | "paused";
@@ -199,7 +202,9 @@ export function snapshotNote(plan: SnapshotPreflight): string | null {
 type Execution =
   | { kind: "pipeline"; store: RunStore; workflow: Workflow; cfg: ConfigData; done: Promise<void>; release: () => void }
   | { kind: "conversation"; turnId: string; backend: Backend; abort: AbortController; done: Promise<void>; release: () => void }
-  | { kind: "discussion"; id: string; answerer: Backend; critic: Backend; abort: AbortController; done: Promise<void>; release: () => void };
+  | { kind: "discussion"; id: string; answerer: Backend; critic: Backend; abort: AbortController; done: Promise<void>; release: () => void }
+  /** A team run (packages/engine/src/team): plain messages go to its PM while it works or waits for you. */
+  | { kind: "team"; run: TeamRun; done: Promise<void>; release: () => void };
 
 /** How one agent call of the conversation ended; a review's answer comes without its VERDICT line. */
 interface TurnOutcome {
@@ -236,6 +241,8 @@ export class Chat {
   private changes: SettingChange[] = [];
   /** Stopped with Esc: /resume continues it. */
   private paused: RunStore | null = null;
+  /** A team run stopped with Esc (or waiting where nobody could answer): /resume continues it. */
+  private pausedTeam: string | null = null;
   private last: RunStore | null = null;
   private escaped = false;
   private conversation: Conversation;
@@ -337,6 +344,8 @@ export class Chat {
     if (note) this.o.ui.info(note);
     const hint = resumeHint(this.o.runsDir, this.o.workspace);
     if (hint) this.o.ui.info(hint);
+    const team = hint ? null : resumableTeam(this.o.runsDir);
+    if (team) this.o.ui.info(`Team run ${team.id} (${firstLine(team.request, 60)}) is ${team.waiting ? "waiting for you" : "stopped"} in ${team.phase}. Type /resume to continue it.`);
   }
 
   /**
@@ -367,6 +376,8 @@ export class Chat {
         return this.withFiles(o, (files) => this.startPipeline(input.task, files, input.profile));
       case "discuss":
         return this.withFiles(o, (files) => this.discuss(input.question, files));
+      case "team":
+        return this.teamCommand(input, o);
       case "attach":
         return this.attachTyped(input.home ? join(homedir(), input.path) : resolve(this.o.workspace, input.path));
       case "detach":
@@ -395,6 +406,20 @@ export class Chat {
     }
     if (await this.cannotSnapshot()) return;
     this.withFiles(o, (files) => this.startPipeline(text, files));
+  }
+
+  /** The Team route of the composer: the text is the request for a new team (or a message to the running team's PM); a slash command goes as typed. */
+  async submitTeam(raw: string, o: SubmitOptions = {}): Promise<void> {
+    const text = raw.trim();
+    if (text.startsWith("/")) return this.submit(text, o);
+    if (this.active?.kind === "team") return this.submit(text, o);
+    this.line = `/team ${text}`;
+    if (!text) {
+      this.o.ui.info("usage: a request for the team, e.g. Add a CSV export to the reports page (you then talk to its PM)");
+      return;
+    }
+    if (await this.cannotSnapshot()) return;
+    this.withFiles(o, (files) => this.startTeam(text, files));
   }
 
   /** The Discuss route of the sidebar: the text is the question, unless it is a slash command, which goes as typed. */
@@ -427,7 +452,20 @@ export class Chat {
   /** A plain message: a note for the running pipeline, or a question for the recipient. */
   private message(text: string, files: Attachment[]): void {
     if (this.active?.kind === "pipeline") return this.note(this.active, text, files);
+    if (this.active?.kind === "team") return this.teamMessage(this.active.run, text, files);
     this.ask(this.recipient, text || FILES_QUESTION, null, files);
+  }
+
+  /** A message for the running team's PM, with its files (the run copies them; every member is given them). */
+  private teamMessage(run: TeamRun, text: string, files: Attachment[]): void {
+    try {
+      run.message(text, files);
+    } catch (e) {
+      if (!(e instanceof AttachmentError)) throw e;
+      this.o.ui.info(e.message, "error");
+      return;
+    }
+    this.sentFiles(files);
   }
 
   private note(exec: Extract<Execution, { kind: "pipeline" }>, text: string, files: Attachment[]): void {
@@ -620,6 +658,11 @@ export class Chat {
   escape(): void {
     const a = this.active;
     if (!a) return;
+    if (a.kind === "team") {
+      this.escaped = true;
+      a.run.stop();
+      return;
+    }
     if (a.kind !== "pipeline") {
       a.abort.abort();
       return;
@@ -671,7 +714,8 @@ export class Chat {
   async stop(): Promise<void> {
     this.usageAbort?.abort();
     const a = this.active;
-    if (a && a.kind !== "pipeline") a.abort.abort();
+    if (a?.kind === "team") a.run.stop();
+    else if (a && a.kind !== "pipeline") a.abort.abort();
     else a?.workflow.interrupt();
     await this.idle();
     this.offBus();
@@ -682,7 +726,9 @@ export class Chat {
   // ------------------------------------------------------------------ conversation
   private busy(): void {
     const a = this.active!;
-    this.o.ui.info(a.kind === "pipeline"
+    this.o.ui.info(a.kind === "team"
+      ? "The team is working: your messages go to its PM. Esc stops the team (/resume continues it); /team status shows the board."
+      : a.kind === "pipeline"
       ? "A pipeline run is going: wait for it, or press Esc to stop its current step first. (A plain message is a note for its next step.)"
       : a.kind === "discussion"
         ? `${AGENT_NAMES[a.answerer]} and ${AGENT_NAMES[a.critic]} are still discussing: wait for it, or press Esc to stop it. Settings you change apply to its next turn.`
@@ -759,7 +805,7 @@ export class Chat {
   private settled(exec: Execution): void {
     exec.release();
     if (this.active === exec) this.active = null;
-    if (!this.active) this.o.ui.setStatus(this.paused ? "paused" : "idle");
+    if (!this.active) this.o.ui.setStatus(this.paused || this.pausedTeam ? "paused" : "idle");
   }
 
   /**
@@ -928,6 +974,183 @@ export class Chat {
     })().finally(() => this.settled(exec));
   }
 
+  // ------------------------------------------------------------------ team
+  /** /team <request>, status, members, abort, undo. */
+  private async teamCommand(input: Extract<ReturnType<typeof parseInput>, { kind: "team" }>, o: SubmitOptions = {}): Promise<void> {
+    const ui = this.o.ui;
+    const active = this.active?.kind === "team" ? this.active.run : null;
+    switch (input.action) {
+      case "start":
+        if (await this.cannotSnapshot()) return;
+        return this.withFiles(o, (files) => this.startTeam(input.request, files));
+      case "status": {
+        const state = active?.state ?? this.latestTeamState();
+        ui.info(state ? teamStatusText(state) : "No team run yet. /team <request> starts one.");
+        return;
+      }
+      case "members":
+        ui.info(teamRosterText(active?.members ?? teamMembers(this.cfg.team)));
+        return;
+      case "abort": {
+        if (active) {
+          active.abortRun();
+          return;
+        }
+        const id = this.pausedTeam ?? resumableTeam(this.o.runsDir)?.id;
+        if (!id) {
+          ui.info("No team run to abort.");
+          return;
+        }
+        const store = TeamStore.open(this.o.runsDir, id);
+        const state = store.load();
+        state.phase = "ABORTED";
+        store.save(state);
+        this.pausedTeam = null;
+        ui.info(`Team run ${id} is aborted; nothing of it went into your folder.`);
+        return;
+      }
+      case "undo": {
+        if (this.active) return this.busy();
+        const id = input.runId ?? TeamStore.list(this.o.runsDir).filter((s) => s.applied).at(-1)?.id;
+        if (!id) {
+          ui.info("No team run has written a result into this folder.");
+          return;
+        }
+        const release = this.takeWorkspace();
+        if (!release) return;
+        try {
+          const undone = await undoTeam({ runsDir: this.o.runsDir, workspace: this.o.workspace, id, env: this.env });
+          ui.info("restored" in undone ? `Team run ${id}'s result is taken back out: ${undone.restored.length} file(s) are as they were.` : `Cannot undo team run ${id}: ${undone.problem}.`,
+            "restored" in undone ? "info" : "error");
+        } catch (e) {
+          ui.info(`Cannot undo team run ${id}: ${(e as Error).message}`, "error");
+        } finally {
+          release();
+        }
+        return;
+      }
+    }
+  }
+
+  private latestTeamState() {
+    try {
+      return TeamStore.list(this.o.runsDir).at(-1) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private startTeam(request: string, files: Attachment[] = []): void {
+    if (this.active) return this.busy();
+    if (this.elsewhere()) return;
+    const release = this.takeWorkspace();
+    if (!release) return;
+    try {
+      const errors = teamConfigErrors(this.cfg.team);
+      if (errors.length) {
+        release();
+        this.o.ui.info(`The team's configuration has problems:\n  - ${errors.join("\n  - ")}`, "error");
+        return;
+      }
+      const problem = missingCli(this.cfg, [...new Set(teamMembers(this.cfg.team).map((m) => m.backend))], this.env);
+      if (problem) {
+        release();
+        this.o.ui.info(problem.message, "error");
+        return;
+      }
+      let run: TeamRun;
+      try {
+        run = TeamRun.create({
+          runsDir: this.o.runsDir, request, cfg: structuredClone(this.cfg), workspace: this.o.workspace, bus: this.o.bus,
+          decider: this.o.clarifier, permissions: this.o.permissions, env: this.env, attachments: files,
+        });
+      } catch (e) {
+        if (!(e instanceof AttachmentError)) throw e;
+        release();
+        this.o.ui.info(e.message, "error");
+        return;
+      }
+      this.sentFiles(files);
+      this.entitle(request);
+      this.pausedTeam = null;
+      const with_ = files.length ? `, with ${files.length} file${files.length === 1 ? "" : "s"} every member is given` : "";
+      this.o.ui.info(`The team takes it from here (run ${run.id}${with_}). Your messages now go to the PM; Esc stops the team, /team status shows the board.`);
+      this.runTeam(run, release, request);
+    } catch (e) {
+      if (!this.runsWith(release)) release();
+      throw e;
+    }
+  }
+
+  /** The team run /resume continues: one named by id, else the stopped one, else the latest that is not over. */
+  private teamToResume(arg: string): string | null {
+    if (arg && RUN_ID.test(arg) && !arg.includes("..")) {
+      try {
+        const state = TeamStore.open(this.o.runsDir, arg).load();
+        return state.phase !== "DONE" && state.phase !== "ABORTED" ? state.id : null;
+      } catch {
+        return null;
+      }
+    }
+    if (this.pausedTeam) return this.pausedTeam;
+    // A pipeline run waiting or stopped goes first, as it always did.
+    if (this.paused || latestResumable(this.o.runsDir, this.o.workspace)) return null;
+    return resumableTeam(this.o.runsDir)?.id ?? null;
+  }
+
+  private resumeTeam(id: string, note: string): void {
+    if (this.elsewhere()) return;
+    const release = this.takeWorkspace();
+    if (!release) return;
+    try {
+      const run = TeamRun.resume({ runsDir: this.o.runsDir, id, workspace: this.o.workspace, bus: this.o.bus, decider: this.o.clarifier, permissions: this.o.permissions, env: this.env });
+      const problem = missingCli(this.cfg, [...new Set(run.members.map((m) => m.backend))], this.env);
+      if (problem) {
+        release();
+        this.o.ui.info(problem.message, "error");
+        return;
+      }
+      const raised = run.raiseBudget();
+      if (raised.length) this.o.ui.info(`Budget: ${raised.join("; ")}.`);
+      if (note) run.message(note);
+      this.pausedTeam = null;
+      this.o.ui.info(`Team run ${id} goes on. Your messages go to the PM.`);
+      this.runTeam(run, release, run.state.request);
+    } catch (e) {
+      if (!this.runsWith(release)) release();
+      throw e;
+    }
+  }
+
+  private runTeam(run: TeamRun, release: () => void, request: string): void {
+    const exec: Extract<Execution, { kind: "team" }> = { kind: "team", run, done: Promise.resolve(), release };
+    const conversation = this.conversation;
+    this.active = exec;
+    this.escaped = false;
+    this.o.ui.setStatus("running");
+    exec.done = (async () => {
+      await Promise.resolve();
+      let outcome: TeamOutcome = "error";
+      try {
+        outcome = await run.run();
+      } catch (e) {
+        this.o.ui.info(`error: ${(e as Error).message}`, "error");
+      }
+      const st = run.state;
+      if (outcome === "done") {
+        this.o.ui.info(st.summary ?? `Team run ${run.id} is done.`);
+        conversation.addEarlier({ task: firstLine(request, 200), outcome: `done by a team; ${firstLine(st.summary ?? "", 200)}`, runId: run.id });
+      } else if (outcome === "aborted") {
+        this.o.ui.info(`Team run ${run.id} is aborted; nothing of it went into your folder.`);
+      } else {
+        this.pausedTeam = run.id;
+        this.o.ui.info(outcome === "stopped"
+          ? `The team stopped. /resume continues it (/resume <message> also tells the PM something); /team abort ends it.`
+          : `The team waits (${st.waiting ? `for your ${st.waiting.kind === "apply_conflict" ? "decision on conflicts" : `approval of the ${st.waiting.kind}`}` : "for you"}). /resume continues it.`);
+      }
+    })().finally(() => this.settled(exec));
+  }
+
   // ------------------------------------------------------------------ pipeline
   /**
    * A run snapshots and diffs the workspace with git, in its repository or, in a folder with none, in one of agentduo's
@@ -1080,6 +1303,8 @@ export class Chat {
    */
   private resume(arg: string, o: SubmitOptions = {}): void {
     if (this.active) return this.busy();
+    const teamId = this.teamToResume(arg.trim());
+    if (teamId) return this.resumeTeam(teamId, arg.trim() === teamId ? "" : arg.trim());
     if (this.elsewhere()) return;
     const release = this.takeWorkspace();
     if (!release) return;

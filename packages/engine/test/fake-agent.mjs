@@ -84,6 +84,10 @@ async function main() {
   const step = chat ? /^\[agentduo-discussion: (\w+)/m.exec(prompt)?.[1] : undefined;
   const role = step ? `discuss_${step}` : chat ? `chat_${backend}` : /\[orchestrator-role: (\w+)\]/.exec(prompt)?.[1] ?? "unknown";
   const scenario = JSON.parse(readFileSync(process.env.FAKE_SCENARIO, "utf8"));
+  // A team member's turn ("[agentduo-member: dev-1]" in its prompt) takes the responses scripted for "<role>:<member>"
+  // when there are any, else the role's; it logs the member and the folder it ran in (its worktree).
+  const member = /^\[agentduo-member: ([\w-]+)\]/m.exec(prompt)?.[1];
+  const key = member && scenario[`${role}:${member}`] ? `${role}:${member}` : role;
   const sessionsFile = `${process.env.FAKE_COUNTS}.sessions.json`;
   const sessions = existsSync(sessionsFile) ? JSON.parse(readFileSync(sessionsFile, "utf8")) : {};
   const resumed = backend === "codex"
@@ -108,18 +112,19 @@ async function main() {
     renameSync(`${sessionsFile}.${process.pid}.tmp`, sessionsFile);
   }
   const counts = existsSync(process.env.FAKE_COUNTS) ? JSON.parse(readFileSync(process.env.FAKE_COUNTS, "utf8")) : {};
-  const n = counts[role] ?? 0;
-  counts[role] = n + 1;
+  const n = counts[key] ?? 0;
+  counts[key] = n + 1;
   // Whole or not at all: a stop may kill the agent here, and an emptied file would fail every later call.
   writeFileSync(`${process.env.FAKE_COUNTS}.${process.pid}.tmp`, JSON.stringify(counts));
   renameSync(`${process.env.FAKE_COUNTS}.${process.pid}.tmp`, process.env.FAKE_COUNTS);
   const unscripted = step === "critique" ? [{ answer: "Looks right.\nVERDICT: AGREE" }] : chat ? scenario.chat ?? [{ answer: `Answer from ${backend}.` }] : [{ raw: `no scripted response for role ${role}` }];
-  const responses = scenario[role] ?? unscripted;
+  const responses = scenario[key] ?? unscripted;
   const resp = responses[Math.min(n, responses.length - 1)];
   // What a host must keep to itself (Electron run as Node, its IPC channel): logged when it reached the agent.
   const leaked = ["ELECTRON_RUN_AS_NODE", "NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE"].filter((k) => process.env[k] !== undefined);
   appendFileSync(process.env.FAKE_LOG, JSON.stringify({
     backend, role, call: n, args, prompt, session, ...(resumed ? { resumed } : {}), ...(images.length ? { images } : {}), ...(leaked.length ? { leaked } : {}),
+    ...(member ? { member, cwd: process.cwd() } : {}),
   }) + "\n");
 
   const writeFiles = (files) => {

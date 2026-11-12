@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import YAML from "yaml";
 import { CLAUDE_EFFORTS, CODEX_EFFORTS, PIPELINE_PROFILES, type PipelineProfile } from "../chat/commands.js";
+import { TEAM_DEFAULTS, teamConfigErrors, type TeamConfig } from "../team/config.js";
 
 export type Backend = "codex" | "claude";
 export type AgentRole = "planner" | "plan_reviewer" | "implementer" | "code_reviewer";
@@ -80,6 +81,8 @@ export interface ConfigData {
     role_models: RoleValues; role_efforts: RoleValues;
   };
   paths: { runs_dir: string };
+  /** Team mode (packages/engine/src/team): its levels, roles, members and limits. */
+  team: TeamConfig;
 }
 
 const DEFAULTS: ConfigData = {
@@ -117,12 +120,16 @@ const DEFAULTS: ConfigData = {
   codex: { bin: "codex", model: null, args: [], role_args: {}, role_models: {}, role_efforts: {} },
   claude: { bin: "claude", model: null, max_budget_usd: null, permission_prompts: "ask", args: [], role_args: {}, role_models: {}, role_efforts: {} },
   paths: { runs_dir: ".agentduo/runs" },
+  team: TEAM_DEFAULTS,
 };
 
 /** Keys from agentduo v1 that kept their meaning under a new name. */
 const RENAMED: Record<string, string> = { "codex.extra_args": "codex.args", "claude.extra_args": "claude.args" };
 /** Mappings whose keys are user-chosen (validated later) rather than fixed by the defaults. */
-const OPEN_MAPPINGS = new Set(["codex.role_args", "claude.role_args", "codex.role_models", "claude.role_models", "codex.role_efforts", "claude.role_efforts"]);
+const OPEN_MAPPINGS = new Set([
+  "codex.role_args", "claude.role_args", "codex.role_models", "claude.role_models", "codex.role_efforts", "claude.role_efforts",
+  "team.levels", "team.roles",
+]);
 
 /** The efforts each CLI takes (Claude's --effort, Codex's model_reasoning_effort). */
 export const EFFORTS: Record<Backend, readonly string[]> = { claude: CLAUDE_EFFORTS, codex: CODEX_EFFORTS };
@@ -156,6 +163,16 @@ export function defaultConfig(): ConfigData {
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
+/** `over` on `base`, mapping by mapping (a list or a value replaces), with no key checked: an open mapping's entries are the user's. */
+function mergeOpen(base: Record<string, unknown>, over: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...base };
+  for (const [key, value] of Object.entries(over)) {
+    const current = base[key];
+    out[key] = isPlainObject(current) && isPlainObject(value) ? mergeOpen(current, value) : value;
+  }
+  return out;
+}
+
 function mergeInto(base: Record<string, unknown>, override: Record<string, unknown>, where: string, warnings: string[]): Record<string, unknown> {
   const out = structuredClone(base);
   for (const [key, value] of Object.entries(override)) {
@@ -167,8 +184,9 @@ function mergeInto(base: Record<string, unknown>, override: Record<string, unkno
     const current = base[key];
     if ((isPlainObject(current) || Array.isArray(current)) && (value === null || value === undefined)) continue; // "codex:" / "gates:" with no body keep the defaults
     if (OPEN_MAPPINGS.has(path)) {
-      // Merged per role, so a user-level implementer entry survives a workspace plan_reviewer entry.
-      out[key] = isPlainObject(current) && isPlainObject(value) ? { ...current, ...value } : value;
+      // Merged per role (or level), so a user-level implementer entry survives a workspace plan_reviewer entry, and a level
+      // the workspace changes in part keeps the rest.
+      out[key] = isPlainObject(current) && isPlainObject(value) ? mergeOpen(current, value) : value;
       continue;
     }
     if (isPlainObject(current)) {
@@ -353,5 +371,6 @@ export function configErrors(cfg: ConfigData): string[] {
       }
     }
   }
+  errors.push(...teamConfigErrors(cfg.team));
   return errors;
 }

@@ -12,14 +12,16 @@ import { commitOnChange, optionsEditor } from "./argumentOptions.js";
 import { limitRows, updatedText, type AccountRow } from "@agentduo/webview/account";
 import { providerMark } from "@agentduo/webview/dom";
 import type { UsageState } from "@agentduo/engine/system/usage";
+import { teamPage } from "./team.js";
 import { updateAction, updateLine } from "./update.js";
 import { USAGE_PERIOD_MS, USAGE_STALE_MS, type UsageStore } from "./usage.js";
 
-export type SettingsSection = "general" | "agents" | "configuration" | "storage" | "diagnostics" | "about";
+export type SettingsSection = "general" | "agents" | "configuration" | "team" | "storage" | "diagnostics" | "about";
 const SECTIONS: Array<[SettingsSection, string]> = [
-  ["general", "General"], ["agents", "Claude & Codex"], ["configuration", "Configuration"], ["storage", "Data & storage"], ["diagnostics", "Diagnostics"],
-  ["about", "About"],
+  ["general", "General"], ["agents", "Claude & Codex"], ["configuration", "Configuration"], ["team", "Team"], ["storage", "Data & storage"],
+  ["diagnostics", "Diagnostics"], ["about", "About"],
 ];
+
 
 const OS_NAME: Partial<Record<NodeJS.Platform, string>> = { darwin: "macOS", win32: "Windows", linux: "Linux" };
 
@@ -784,6 +786,12 @@ export class SettingsPanel {
       el("p", { class: "muted small", text: "The runs folder also holds the workspace lock, so it is not changed from here. To move it, close agentduo (and any duo in that folder), set paths.runs_dir in the project's .agentduo/config.yaml, and open the project again." }),
       status,
     ];
+  }
+
+  // ------------------------------------------------------------------ team
+  /** /team's department: its members, roles and levels (edited and saved here), and each identity's text (packages/engine/src/team). */
+  private async team(): Promise<Node[]> {
+    return teamPage(this.projectId(), { codexModels: () => this.host.codexModels() });
   }
 
   // ------------------------------------------------------------------ about

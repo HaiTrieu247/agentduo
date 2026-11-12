@@ -190,8 +190,8 @@ export class ClaudeBackend implements AgentBackend {
     return found;
   }
 
-  keepsSessions(role?: AgentRole): boolean {
-    return ![...this.cfg.args, ...(role ? this.cfg.role_args[role] ?? [] : [])].includes(CLAUDE_NO_PERSISTENCE);
+  keepsSessions(role?: AgentRole, extraArgs: string[] = []): boolean {
+    return ![...this.cfg.args, ...(role ? this.cfg.role_args[role] ?? [] : []), ...extraArgs].includes(CLAUDE_NO_PERSISTENCE);
   }
 
   /** --max-budget-usd: the lower of the per-call budget and what the run's budget has left, when either is set. */
@@ -211,9 +211,12 @@ export class ClaudeBackend implements AgentBackend {
   buildArgs(a: BuildArgs): string[] {
     const session = a.session;
     // A pipeline role's own model and effort; its effort goes after the args every call gets, so it wins over theirs.
-    const model = a.mode === "text" ? this.cfg.model : roleModel(this.cfg, a.role);
-    const effort = a.mode === "text" ? null : roleEffort(this.cfg, a.role);
-    const own = [...this.cfg.args, ...(effort ? ["--effort", effort] : []), ...(a.mode === "text" ? implementerPermissionArgs(this.cfg) : this.cfg.role_args[a.role] ?? [])];
+    // A team member's call runs with its own model, effort and args (packages/engine/src/team/config.ts).
+    const profile = a.mode === "text" ? undefined : a.profile;
+    const model = a.mode === "text" ? this.cfg.model : profile ? profile.model ?? this.cfg.model : roleModel(this.cfg, a.role!);
+    const effort = a.mode === "text" ? null : profile ? profile.effort : roleEffort(this.cfg, a.role!);
+    const roleArgs = a.mode === "text" ? implementerPermissionArgs(this.cfg) : profile ? profile.args : this.cfg.role_args[a.role!] ?? [];
+    const own = [...this.cfg.args, ...(effort ? ["--effort", effort] : []), ...roleArgs];
     return [
       "-p",
       "--output-format", "stream-json",

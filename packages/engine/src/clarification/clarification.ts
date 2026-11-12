@@ -36,8 +36,8 @@ export interface ClarificationQuestion {
   options: ClarificationOption[];
 }
 
-/** Who asked: the planner between its turns, or Claude inside one. */
-export type ClarificationSource = "planner" | "claude";
+/** Who asked: the planner between its turns, Claude inside one, or a team run's PM (its questions and the approvals it asks for). */
+export type ClarificationSource = "planner" | "claude" | "team";
 
 /**
  * A request for answers. `id` is agentduo's and unique; `callId` names the agent call (attempt) that asked, so an answer
@@ -51,6 +51,9 @@ export interface ClarificationRequest {
   agent: "claude" | "codex";
   role?: Role;
   turnId?: string;
+  /** A team run's request: the run, and the member who asks (always the PM: only the PM talks to the user). */
+  teamRunId?: string;
+  member?: string;
   /** The /discuss the turn belongs to. */
   discussionId?: string;
   questions: ClarificationQuestion[];
@@ -87,7 +90,7 @@ export interface ClarificationEntry extends ClarificationRequest {
 }
 
 /** Whether a request belongs to a run: put off, it stays saved and the run waits for it. A chat turn's question ends with its call instead. */
-export const keptByRun = (r: Pick<ClarificationRequest, "source" | "role">): boolean => r.source === "planner" || r.role !== undefined;
+export const keptByRun = (r: Pick<ClarificationRequest, "source" | "role">): boolean => r.source === "planner" || r.source === "team" || r.role !== undefined;
 
 /** Whether the user may dismiss the request to the agent that asked: only Claude's question, while its call is still there to be told. */
 export const dismissable = (r: Pick<ClarificationRequest, "source" | "held">): boolean => r.source === "claude" && !r.held;

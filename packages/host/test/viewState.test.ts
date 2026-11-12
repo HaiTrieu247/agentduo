@@ -4,7 +4,7 @@ import { adoptedView, restoredView } from "../src/workspaceSession.js";
 import type { ClarificationEntry, ClarificationRequest } from "@agentduo/engine/clarification/clarification";
 import {
   activityParts, canSubmit, decisionChoices, effortOptions, initialState, MAX_ACTIVITIES, MAX_ANSWER_CHARS, MAX_TIMELINE, modelOptions, permissionChoices, pipelineView,
-  placeholder, reduce, runInProgress, sendStops, withLedger, hasPending, type TimelineItem, type ViewAction, type ViewState, showsAllOf, withRecord,
+  placeholder, reduce, runInProgress, sendStops, withLedger, hasPending, teamActive, type TimelineItem, type ViewAction, type ViewState, showsAllOf, withRecord,
 } from "../src/viewState.js";
 import type { Activity, DuoEvent, HistoryEntry, HumanReview, ModelIdentity, PermissionRequest } from "@agentduo/engine/events";
 import { CLAUDE_MODELS } from "@agentduo/engine/chat/commands";
@@ -452,5 +452,43 @@ describe("a conversation another agentduo window continued", () => {
     expect(run(sent, { type: "ui", update: { type: "refused", text: "Something else" } }).timeline).toHaveLength(1);
     const answeredOne = answered(initialState("dormant"), "c-t1", "Q1", "A1");
     expect(run(answeredOne, { type: "ui", update: { type: "refused", text: "Q1" } }).timeline).toHaveLength(2);
+  });
+});
+
+describe("a team run in the view", () => {
+  const members = [
+    { name: "pm", role: "pm", kind: "pm", level: "senior", backend: "codex" },
+    { name: "dev-1", role: "dev", kind: "worker", level: "senior", backend: "claude" },
+  ] as const;
+  const started = ev({ type: "team.started", runId: "t1", request: "Add sub", runDir: "/d", members: members.map((m) => ({ ...m })) });
+  const task = { id: "T1", title: "sub()", status: "coding" as const, assignee: "dev-1", testers: ["qa-1"], attempt: 1, dependsOn: [] };
+
+  it("keeps the team's members, tasks and who is at work, and says the next message is for the PM", () => {
+    const s = run({ ...initialState("active", "/repo"), status: "running" }, started,
+      ev({ type: "team.phase", runId: "t1", phase: "EXECUTION" }),
+      ev({ type: "team.task", task }),
+      ev({ type: "team.member", member: "dev-1", state: "busy", job: "work", task: "T1" }),
+      ev({ type: "team.activity", member: "dev-1", task: "T1", agent: "claude", activity: { id: "a", kind: "edit", label: "Edit  a.ts", status: "ok" } }));
+    expect(s.team).toMatchObject({ runId: "t1", phase: "EXECUTION", tasks: [task], working: [{ member: "dev-1", job: "work", task: "T1", last: "Edit  a.ts" }] });
+    expect(teamActive(s)).toBe(true);
+    expect(placeholder(s)).toContain("A message for the PM");
+    const next = run(s, { type: "user", text: "How is it going?" }, { type: "user", text: "/team status" });
+    expect(next.timeline.filter((i) => i.kind === "user").map((i) => (i.kind === "user" ? !!i.pm : null))).toEqual([true, false]);
+    // The Team route's line is a request for a team, not a message to the PM.
+    const request = run(initialState("active", "/repo"), { type: "user", text: "Add sub", team: true });
+    expect(request.timeline[0]).toMatchObject({ kind: "user", team: true });
+    expect(placeholder(initialState("active", "/repo"), "team")).toContain("A request for the team");
+  });
+
+  it("puts the PM's words and documents in the timeline, never your own twice, and lets the team go once it is done", () => {
+    const s = run(initialState("active", "/repo"), started,
+      ev({ type: "team.message", runId: "t1", from: "user", text: "Add sub", seq: 1 }),
+      ev({ type: "team.message", runId: "t1", from: "pm", text: "Here is the brief.", seq: 2 }),
+      ev({ type: "team.document", runId: "t1", kind: "brief", title: "Brief v1", text: "- AC1" }),
+      ev({ type: "team.finished", runId: "t1", phase: "DONE", outcome: "done", summary: "In your folder." }));
+    expect(items(s)).toEqual(["info", "pm", "document", "info"]);
+    expect(s.team).toBeNull();
+    const stopped = run(initialState("active", "/repo"), started, ev({ type: "team.finished", runId: "t1", phase: "EXECUTION", outcome: "stopped", summary: null }));
+    expect(stopped.team?.outcome).toBe("stopped");
   });
 });

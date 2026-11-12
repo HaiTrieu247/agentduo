@@ -4,7 +4,11 @@
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { userConfigPath } from "@agentduo/engine/config/config";
-import { configFiles, type ConfigurationView } from "@agentduo/engine/config/configuration";
+import { configFiles, filesConfiguration, teamMembersSource, updateTeam, type ConfigurationView } from "@agentduo/engine/config/configuration";
+import {
+  builtInIdentity, identityDirs, identityPath, readIdentity, resetIdentity, teamInfo, writeDefaultIdentities, writeIdentity,
+} from "@agentduo/engine/team/identity";
+import { teamMembers } from "@agentduo/engine/team/config";
 import {
   LINKS, parseDesktopRequest, ProtocolError, trustedSender, type Answer, type AppSnapshot, type CliStatus, type DesktopRequest, type DesktopResults,
   type LauncherInfo, type SenderInfo, type UpdateState,
@@ -160,6 +164,53 @@ export class Dispatcher {
         }
         await this.o.shell.openPath(file);
         return { opened: file };
+      }
+      case "team.read": {
+        const t = this.target(r.projectId);
+        const files = { workspace: t.workspace, env: t.env };
+        return teamInfo(filesConfiguration(files).team, identityDirs(t.workspace, t.env), teamMembersSource(files));
+      }
+      case "team.save": {
+        const t = this.target(r.projectId);
+        if (!t.workspace && r.scope !== "global") throw new Error("with no project open, only the user config can be changed");
+        updateTeam({ workspace: t.workspace, env: t.env, pid: process.pid }, r.scope, r.team);
+        // Every live worker the file concerns reads it again (a team run already going keeps the team it started with).
+        await projects.syncConfiguration(r.scope, r.projectId);
+        const files = { workspace: t.workspace, env: t.env };
+        return teamInfo(filesConfiguration(files).team, identityDirs(t.workspace, t.env), teamMembersSource(files));
+      }
+      case "team.openIdentity":
+      case "team.identity.read":
+      case "team.identity.write":
+      case "team.identity.reset": {
+        const t = this.target(r.projectId);
+        const team = filesConfiguration({ workspace: t.workspace, env: t.env }).team;
+        const dirs = identityDirs(t.workspace, t.env);
+        // Only a role, level or member the team has: a name from the renderer never makes a path of its own.
+        if (!teamInfo(team, dirs).identities.some((i) => i.kind === r.kind && i.name === r.name)) throw new Error(`the team has no ${r.kind} '${r.name}'`);
+        if (!dirs[r.scope]) throw new Error("no project is open");
+        if (r.method === "team.identity.read") return readIdentity(team, dirs, r.scope, r.kind, r.name);
+        if (r.method === "team.identity.write") {
+          writeIdentity(dirs, r.scope, r.kind, r.name, r.text);
+          return readIdentity(team, dirs, r.scope, r.kind, r.name);
+        }
+        if (r.method === "team.identity.reset") {
+          resetIdentity(dirs, r.scope, r.kind, r.name);
+          return readIdentity(team, dirs, r.scope, r.kind, r.name);
+        }
+        const file = identityPath(dirs[r.scope]!, r.kind, r.name);
+        // A file opened in your editor starts as the text it falls back to, which you then change.
+        if (!existsSync(file)) writeIdentity(dirs, r.scope, r.kind, r.name, readIdentity(team, dirs, r.scope, r.kind, r.name).text || builtInIdentity(team, r.kind, r.name));
+        await this.o.shell.openPath(file);
+        return { opened: file };
+      }
+      case "team.identity.defaults": {
+        const t = this.target(r.projectId);
+        const team = filesConfiguration({ workspace: t.workspace, env: t.env }).team;
+        const dirs = identityDirs(t.workspace, t.env);
+        const problems = teamInfo(team, dirs).errors;
+        if (problems.length) throw new Error(`the team's configuration has problems: ${problems[0]}`);
+        return { written: writeDefaultIdentities(team, teamMembers(team), dirs).length };
       }
       case "folder.open": {
         let folder: string | null;

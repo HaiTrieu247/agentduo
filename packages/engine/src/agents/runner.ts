@@ -7,6 +7,7 @@ import {
   answerErrors, clarificationSection, cleanAnswers, openEntry, type ClarificationEntry, type ClarificationRequest, type ClarificationResponse,
 } from "../clarification/clarification.js";
 import type { AgentRole, Backend, ConfigData } from "../config/config.js";
+import type { CallProfile } from "../team/config.js";
 import type { Activity, CallContext, ClarificationDecider, EventBus, Party, PermissionAnswer, PermissionDecider, Role } from "../events.js";
 import { ClaudeBackend } from "./claude.js";
 import { CodexBackend } from "./codex.js";
@@ -22,11 +23,9 @@ interface WithAttachments {
   attachments?: Attachment[];
 }
 
-/** A pipeline role's call: its final message must match `schemaName` (and `check`), with retries. */
-export interface StructuredCall extends WithAttachments {
+/** What every structured call has: its final message must match `schemaName` (and `check`), with retries. */
+interface StructuredBase extends WithAttachments {
   mode?: "structured";
-  role: Role;
-  agentRole: AgentRole;
   prompt: string;
   schemaName: SchemaName;
   logPrefix: string;
@@ -38,6 +37,33 @@ export interface StructuredCall extends WithAttachments {
   session?: CallSession;
   /** The run's budget, consulted before every attempt; absent: none. */
   budget?: CallBudget;
+}
+
+/** A pipeline role's call. */
+export interface StructuredCall extends StructuredBase {
+  role: Role;
+  agentRole: AgentRole;
+  member?: undefined;
+}
+
+/**
+ * A team member's call (packages/engine/src/team): the member's CLI with its model, effort and args, run in the member's
+ * worktree, its events naming the member. A member never asks the user: its questions go to the techlead, in its output.
+ */
+export interface MemberCall {
+  name: string;
+  /** The task it works on, which its events carry; null for a turn about no task (the PM's, a plan). */
+  task: string | null;
+  backend: Backend;
+  profile: CallProfile;
+  /** Where the CLI runs: the member's copy of the workspace. */
+  cwd: string;
+}
+
+export interface MemberStructuredCall extends StructuredBase {
+  member: MemberCall;
+  role?: undefined;
+  agentRole?: undefined;
 }
 
 /** What a pipeline run may still spend, asked before each attempt of a call with what the call used so far. */
@@ -78,7 +104,7 @@ export interface TextCall extends WithAttachments {
   signal?: AbortSignal;
 }
 
-export type CallOptions = StructuredCall | TextCall;
+export type CallOptions = StructuredCall | MemberStructuredCall | TextCall;
 
 export interface AgentResult {
   ok: boolean;
@@ -195,11 +221,14 @@ interface Attempt {
   answered: ClarificationEntry[];
   /** Ends the call: the user would answer later, and a CLI process cannot wait for that. */
   stopCall(): void;
+  /** A team member's call, whose questions never reach the user. */
+  member: boolean;
 }
 
 const NO_QUESTIONS = "The user cannot be asked questions in this run. Decide from the repository, state the assumption you made in your report, and continue.";
 const DISMISSED = "The user dismissed the question without answering. Do not assume an answer: continue without it, and say in your report what you could not decide.";
 const PROMPTS_OFF = "This tool call needs a permission, and permission prompts are off (claude.permission_prompts: deny). Do not retry it; continue without it and say so in your report.";
+const MEMBER_QUESTIONS = "You cannot ask the user: in this team only the PM talks to the user. Finish your turn and put your question in your result (a blocked result with one precise question); it goes to the techlead.";
 
 /** Where one call's activities, usage and permission prompts go: a pipeline role, or a conversation turn. */
 interface Channel {
@@ -259,9 +288,12 @@ export class AgentRunner {
     return !!this.permissions && backend.name === "claude" && this.cfg.claude.permission_prompts === "ask" && !!backend.permissionReply;
   }
 
-  /** Whether the agent's structured questions go to the user: someone can answer and the config allows it. Independent of permissions. */
-  private asksQuestions(backend: AgentBackend): boolean {
-    return !!this.clarifications && backend.name === "claude" && this.cfg.clarification?.enabled !== false && !!backend.clarificationReply;
+  /**
+   * Whether the agent's structured questions go to the user: someone can answer and the config allows it. Independent of
+   * permissions. A team member's never do (it asks the techlead in its output).
+   */
+  private asksQuestions(backend: AgentBackend, member = false): boolean {
+    return !member && !!this.clarifications && backend.name === "claude" && this.cfg.clarification?.enabled !== false && !!backend.clarificationReply;
   }
 
   /**
@@ -269,8 +301,8 @@ export class AgentRunner {
    * prompts or questions. It is a transport only: what a request may do stays with the config that allows it, so with
    * only the questions on, every permission prompt is still denied as the CLI itself would.
    */
-  private hosts(backend: AgentBackend): boolean {
-    return backend.name === "claude" && !!backend.hostInput && !!backend.permissionReply && (this.asksPermissions(backend) || this.asksQuestions(backend));
+  private hosts(backend: AgentBackend, member = false): boolean {
+    return backend.name === "claude" && !!backend.hostInput && !!backend.permissionReply && (this.asksPermissions(backend) || this.asksQuestions(backend, member));
   }
 
   /** Writes the answer to a request on the CLI's stdin, and keeps it in the call's log. */
@@ -312,6 +344,7 @@ export class AgentRunner {
   private async answerQuestion(ev: QuestionEvent, a: Attempt): Promise<void> {
     const { channel, agent, backend } = a;
     const reply = (r: ClarificationReply) => this.send(a, backend.clarificationReply!(ev.raw, r));
+    if (a.member) return reply({ deny: MEMBER_QUESTIONS });
     if (!this.asksQuestions(backend)) return reply({ deny: NO_QUESTIONS });
     if (!ev.questions) {
       return reply({ deny: `agentduo could not show this question to the user (${ev.error ?? "malformed"}). Ask again with at most 4 questions that each have 2 to 6 distinct options, or continue without asking.` });
@@ -373,6 +406,15 @@ export class AgentRunner {
         model: (model) => this.bus.emit({ type: "turn.model", turnId: o.turnId, backend: o.backend, model }),
       };
     }
+    if (o.member) {
+      const { name: member, task } = o.member;
+      return {
+        context: { member },
+        activity: (activity) => this.bus.emit({ type: "team.activity", member, task, agent, activity }),
+        usage: (costUsd, tokens) => this.bus.emit({ type: "team.usage", member, agent, costUsd, tokens }),
+        model: (model) => this.bus.emit({ type: "team.model", member, model }),
+      };
+    }
     return {
       context: { role: o.role },
       activity: (activity) => this.bus.emit({ type: "agent.activity", role: o.role, agent, activity }),
@@ -383,7 +425,8 @@ export class AgentRunner {
 
   async call(o: CallOptions): Promise<AgentResult> {
     const text = o.mode === "text";
-    const backend = this.backends[o.mode === "text" ? o.backend : this.cfg.agents[o.agentRole]];
+    const member = o.mode !== "text" && o.member ? o.member : null;
+    const backend = this.backends[o.mode === "text" ? o.backend : member ? member.backend : this.cfg.agents[o.agentRole!]];
     const agent: Party = backend.name;
     const channel = this.channel(o, agent);
     const resume = o.session?.resume;
@@ -446,7 +489,10 @@ export class AgentRunner {
           ? `the continued session's answer was rejected (${lastError}); starting a new one, told why`
           : `the earlier session could not be continued (${lastError ?? "no answer"}); starting a new one`;
       }
-      if (attempt > 1 && o.mode !== "text") this.bus.emit({ type: "agent.retry", role: o.role, agent, attempt, max: attemptsAllowed, reason: lastError ?? "" });
+      if (attempt > 1 && o.mode !== "text") {
+        if (member) this.bus.emit({ type: "team.retry", member: member.name, agent, attempt, max: attemptsAllowed, reason: lastError ?? "" });
+        else this.bus.emit({ type: "agent.retry", role: o.role!, agent, attempt, max: attemptsAllowed, reason: lastError ?? "" });
+      }
       const stem = join(this.logDir, `${prefix}.a${attempt}`);
       // Only a new session needs them: a continued one (attempt 1, nothing answered yet) already holds its own conversation.
       const base = o.prompt + earlierAnswers();
@@ -460,7 +506,7 @@ export class AgentRunner {
       // A resumed session already has the files of its earlier turns: it gets only the ones it was not given.
       const attachments = resuming ? resuming.attachments ?? [] : o.attachments ?? [];
       const lastMessageFile = `${stem}.last.${text ? "md" : "json"}`;
-      const host = this.hosts(backend);
+      const host = this.hosts(backend, !!member);
       // Checked before every attempt: a copy removed meanwhile fails the call before it starts.
       const located = this.located(backend, attachments);
       if (typeof located === "string") return finish(false, attempt, null, located);
@@ -476,7 +522,8 @@ export class AgentRunner {
             ...(o.session ? { session: { keep: o.session.keep, ...(resuming ? { resume: resuming.id } : {}) } } : {}),
           })
           : backend.buildArgs({
-            schemaName: o.schemaName, lastMessageFile, role: o.agentRole, askPermissions: host, images, skipGitRepoCheck: o.skipGitRepoCheck,
+            schemaName: o.schemaName, lastMessageFile, askPermissions: host, images, skipGitRepoCheck: o.skipGitRepoCheck,
+            ...(member ? { profile: member.profile, cwd: member.cwd } : { role: o.agentRole! }),
             ...(o.session ? { session: { keep: o.session.keep, ...(resuming ? { resume: resuming.id } : {}) } } : {}),
             ...(budget?.costCap(cost) != null ? { costCap: budget.costCap(cost)! } : {}),
           });
@@ -516,7 +563,7 @@ export class AgentRunner {
         // Only host mode keeps stdin open (for the answers); otherwise it closes after the input.
         const input = stream ? backend.hostInput!(prompt, images) : prompt;
         run = await runProcess(binary, args, {
-          cwd: this.repo, input, holdStdin: host, timeoutMs, idleTimeoutMs, signal: processSignal,
+          cwd: member?.cwd ?? this.repo, input, holdStdin: host, timeoutMs, idleTimeoutMs, signal: processSignal,
           onSpawn: (child) => {
             io = child;
             calls += 1;
@@ -537,6 +584,7 @@ export class AgentRunner {
                 if (!host || !io) continue;
                 const here: Attempt = {
                   channel, signal: askSignal, agent, backend, io, callId, answersLog: `${stem}.answers.jsonl`, waits, answered, stopCall: () => stopped.abort(),
+                  member: !!member,
                 };
                 track(ev.type === "permission" ? this.answerPermission(ev, here, deniedByUser) : this.answerQuestion(ev, here));
               } else if (ev.type === "model") {

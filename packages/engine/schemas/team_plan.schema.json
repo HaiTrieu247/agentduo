@@ -1,0 +1,94 @@
+{
+  "title": "The techlead's plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "tasks",
+    "risks",
+    "report"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "The approach, in a few sentences"
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "description",
+          "assignee",
+          "testers",
+          "area",
+          "depends_on",
+          "criteria",
+          "test_focus"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "T1, T2…"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "description": "What to do, precisely enough for the assignee to do it without asking"
+          },
+          "assignee": {
+            "type": "string",
+            "description": "The name of the worker member who does it"
+          },
+          "testers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The names of the checker members who test it (at least one)"
+          },
+          "area": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The files or folders it touches"
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The ids of the tasks that must be merged first"
+          },
+          "criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The ids of the acceptance criteria it serves"
+          },
+          "test_focus": {
+            "type": "string",
+            "description": "What its testers must cover"
+          }
+        }
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "report": {
+      "type": "string",
+      "description": "One line for the PM"
+    }
+  }
+}

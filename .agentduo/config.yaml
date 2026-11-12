@@ -3,3 +3,53 @@ claude:
     implementer:
       - --permission-mode
       - auto
+team:
+  members:
+    - role: pm
+      level: senior
+      cli: codex
+      model: gpt-6.1-sol
+    - role: techlead
+      level: senior
+      cli: codex
+    - role: dev
+      level: senior
+      cli: claude
+    - role: dev
+      level: mid
+      cli: claude
+    - role: qa
+      level: mid
+      cli: claude
+  roles:
+    pm:
+      kind: pm
+    techlead:
+      kind: lead
+    dev:
+      kind: worker
+    qa:
+      kind: checker
+  levels:
+    junior:
+      can_review: false
+      claude:
+        model: sonnet
+        effort: low
+      codex:
+        effort: low
+    mid:
+      can_review: false
+      claude:
+        model: sonnet
+        effort: medium
+      codex:
+        effort: medium
+    senior:
+      can_review: true
+      claude:
+        model: opus
+        effort: high
+      codex:
+        effort: high
+  max_parallel: 3

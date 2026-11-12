@@ -20,8 +20,8 @@ import { h, icon, providerMark, type Child } from "./dom.js";
 import { parseInline, parseMarkdown, type Block, type Inline } from "./markdown.js";
 import {
   activityParts, canSubmit, decisionChoices, effortOptions, hasPending, isBusy, modelOptions, permissionChoices, pipelineView, placeholder, readyAttachments, runInProgress,
-  sendStops, uploading, type AttachmentChip, type DiscussionCard, type PendingDecision, type PendingPermission, type PickOption, type StageStatus, type StepCard, type TimelineItem,
-  type TurnCard, type ViewState,
+  sendStops, teamActive, uploading, type AttachmentChip, type DiscussionCard, type PendingDecision, type PendingPermission, type PickOption, type StageStatus, type StepCard,
+  type TeamCard, type TimelineItem, type TurnCard, type ViewState,
 } from "@agentduo/host/viewState";
 import { FileQueue } from "./uploads.js";
 
@@ -334,10 +334,39 @@ const FINISH: Record<string, { icon: string; tone: "ok" | "warn"; text: string }
   INTERRUPTED: { icon: "debug-pause", tone: "warn", text: "Stopped: Resume (or /resume) continues the run" },
 };
 
+const JOB_WORDS: Record<string, string> = {
+  pm: "talking", plan: "planning", work: "coding", tests: "writing tests", review: "reviewing", check: "testing", triage: "deciding",
+  answer: "answering", resolve: "resolving a conflict", integration_check: "testing the whole", integration_triage: "deciding", resolve_apply: "resolving a conflict",
+};
+const TASK_STATUS: Record<string, string> = {
+  pending: "waiting", coding: "coding", blocked: "asked a question", review: "in review", testing: "testing", triage: "with the techlead",
+  merging: "merging", resolving: "resolving", escalated: "waiting for the PM", merged: "merged", cancelled: "cancelled",
+};
+
+/** A team run: its phase, who is at work on what, and the board of its tasks. Read-only: you talk to the PM. */
+function teamCard(team: TeamCard, now: number): HTMLElement {
+  const merged = team.tasks.filter((t) => t.status === "merged").length;
+  return h("section", { class: "card team-card", label: `Team run ${team.runId}` },
+    h("div", { class: "team-head" }, icon("organization", "card-icon"), h("strong", {}, "Team"), h("span", { class: "team-phase" }, team.phase.toLowerCase()),
+      team.tasks.length ? h("span", { class: "muted small" }, `${merged}/${team.tasks.length} task(s) merged`) : null,
+      team.outcome ? h("span", { class: "muted small" }, team.outcome) : null),
+    team.working.length
+      ? h("ul", { class: "team-working" }, ...team.working.map((w) => {
+        const m = team.members.find((x) => x.name === w.member);
+        return h("li", {}, h("strong", {}, w.member), h("span", { class: "muted" }, ` ${m?.level ?? ""} `),
+          `${JOB_WORDS[w.job] ?? w.job}${w.task ? ` ${w.task}` : ""}`, h("span", { class: "muted small" }, ` · ${formatClock((now - w.since) / 1000)}${w.last ? ` · ${w.last}` : ""}`));
+      }))
+      : h("p", { class: "muted small" }, team.outcome ? "Stopped: /resume continues the team." : "Waiting for you."),
+    team.tasks.length
+      ? h("ul", { class: "team-board" }, ...team.tasks.map((t) => h("li", { class: `task task-${t.status}` },
+        h("span", { class: "task-id" }, t.id), ` ${t.title} `, h("span", { class: "muted small" }, `${t.assignee} · ${TASK_STATUS[t.status] ?? t.status}${t.attempt > 1 ? ` · attempt ${t.attempt}` : ""}`))))
+      : null);
+}
+
 function timelineItem(item: TimelineItem, actions: Actions): HTMLElement {
   switch (item.kind) {
     case "user": {
-      const to = item.pipeline ? "Pipeline" : item.discuss ? "Discuss" : item.to ? AGENT_NAMES[item.to] : null;
+      const to = item.pipeline ? "Pipeline" : item.discuss ? "Discuss" : item.team ? "Team" : item.pm ? "PM" : item.to ? AGENT_NAMES[item.to] : null;
       return h("div", { class: "user-msg" },
         h("div", { class: "user-to" }, h("span", { class: "sr-only" }, "You"), to ? ` → ${to}` : ""),
         item.text ? h("div", { class: "user-text" }, item.text) : null,
@@ -363,6 +392,12 @@ function timelineItem(item: TimelineItem, actions: Actions): HTMLElement {
       return note("debug-pause", "warn", `Decision deferred (${item.review.reason}): ${item.review.message}`);
     case "question":
       return questionHistory(item);
+    case "pm":
+      return h("div", { class: "pm-msg" }, h("div", { class: "pm-head" }, icon("person", "note-icon"), "PM"), markdownBody(item.text, actions));
+    case "document":
+      return h("details", { class: "team-doc", attrs: { open: "" } },
+        h("summary", {}, icon(item.docKind === "plan" ? "checklist" : item.docKind === "acceptance" ? "pass" : "note", "note-icon"), item.title),
+        h("pre", { class: "text" }, item.text));
     case "finish": {
       const f = FINISH[item.phase] ?? { icon: "circle-outline", tone: "warn", text: item.phase };
       return h("div", { class: `finish finish-${f.tone}`, role: "status" },
@@ -468,7 +503,7 @@ function permissionCard(p: PendingPermission, actions: Actions): HTMLElement {
   const message = h("input", { class: "input", attrs: { type: "text", placeholder: "Message for the agent if you deny (optional)", "aria-label": "Message for the agent if you deny" } });
   const answer = (key: PermissionAnswer["decision"]): PermissionAnswer => (key === "deny" ? (message.value.trim() ? { decision: "deny", message: message.value.trim() } : { decision: "deny" }) : { decision: key });
   return h("section", { class: "card permission", role: "group", label: "Permission request" },
-    h("h2", {}, icon("shield", "card-icon"), `${whoLabel(p.agent, p.role)} asks to use ${r.tool}`),
+    h("h2", {}, icon("shield", "card-icon"), `${whoLabel(p.agent, p.role, p.member)} asks to use ${r.tool}`),
     h("code", { class: "code" }, r.label),
     r.description ? h("p", { class: "text" }, r.description) : null,
     r.blockedPath ? h("p", { class: "muted" }, `path: ${r.blockedPath}`) : null,
@@ -554,7 +589,7 @@ function questionCard(request: ClarificationRequest, actions: Actions): HTMLElem
   }
   sync();
   return h("section", { class: "card question", role: "group", label: `Question from ${whoLabel(request.agent, request.role)}` },
-    h("h2", {}, icon("question", "card-icon"), `${whoLabel(request.agent, request.role)} asks you ${questions.length === 1 ? "a question" : `${questions.length} questions`}`),
+    h("h2", {}, icon("question", "card-icon"), `${whoLabel(request.agent, request.role, request.member)} asks you ${questions.length === 1 ? "a question" : `${questions.length} questions`}`),
     ...groups, problem, h("div", { class: "choices" }, submit, later, dismiss));
 }
 
@@ -569,7 +604,7 @@ function questionHistory(item: Extract<TimelineItem, { kind: "question" }>): HTM
   });
   return h("div", { class: `question-history${item.status === "answered" ? "" : " ended"}` },
     h("div", { class: "q-head" }, icon(item.status === "answered" ? "pass" : "circle-slash", "note-icon"),
-      `${whoLabel(item.agent, item.role)} asked ${item.questions.length === 1 ? "a question" : `${item.questions.length} questions`}`),
+      `${whoLabel(item.agent, item.role, item.member)} asked ${item.questions.length === 1 ? "a question" : `${item.questions.length} questions`}`),
     h("ul", { class: "items" }, ...rows), outcome ? h("p", { class: "muted small" }, outcome) : null,
     h("span", { class: "sr-only" }, answerSummary({ questions: item.questions, answers: item.answers, status: item.status === "deferred" ? "pending" : item.status })));
 }
@@ -756,10 +791,12 @@ const PROBLEM_ACTIONS: Record<string, Array<{ command: WebviewCommand; label: st
 };
 
 /** Where the composer's next message goes: an agent, or the pipeline for this one message. */
-type Target = Backend | "pipeline" | "discuss";
+type Target = Backend | "pipeline" | "discuss" | "team";
 /** A route the recipient menu sets for the next message only. */
-type Once = "pipeline" | "discuss";
-const ONCE: Record<Once, { icon: string; label: string }> = { pipeline: { icon: "run-all", label: "Pipeline" }, discuss: { icon: "comment-discussion", label: "Discuss" } };
+type Once = "pipeline" | "discuss" | "team";
+const ONCE: Record<Once, { icon: string; label: string }> = {
+  pipeline: { icon: "run-all", label: "Pipeline" }, discuss: { icon: "comment-discussion", label: "Discuss" }, team: { icon: "organization", label: "Team" },
+};
 const otherAgent = (b: Backend): Backend => (b === "codex" ? "claude" : "codex");
 type Panel = "settings" | "usage" | "commands" | "target" | "mode";
 
@@ -1088,6 +1125,7 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
     targetMenu.replaceChildren(agent("codex"), agent("claude"),
       oneOff("discuss", `a question: ${answerer} answers, ${AGENT_NAMES[otherAgent(s.recipient)]} reviews, until they agree`),
       oneOff("pipeline", "a task: Codex plans and reviews, Claude critiques and implements"),
+      oneOff("team", "a request for a team: you talk to its PM; the techlead plans, the devs build, the testers check"),
       h("li", { class: "menu-sep", role: "separator" }),
       menuItem({ mark: icon("settings-gear"), label: "Models, effort and permissions…", detail: "both agents' settings", pick: () => setPanel("settings", false) }));
   }
@@ -1375,7 +1413,8 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
     const now = { now: Date.now() };
     const step = s.current && (s.current.activities.length || s.status === "running" || s.current.message) ? [stepCard(s.current, actions, now)] : [];
     const answering = s.discussion ? [discussionCard(s.discussion, actions, { ...now, turn: s.turn })] : s.turn ? [answerCard(s.turn, actions, now)] : [];
-    live.replaceChildren(...step, ...answering);
+    const team = s.team ? [teamCard(s.team, now.now)] : [];
+    live.replaceChildren(...team, ...step, ...answering);
   }
 
   function renderPending(s: ViewState): void {
@@ -1392,7 +1431,7 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
     pending.replaceChildren(...cards);
     if (cards.length) {
       announce.textContent = s.permissions.length ? `${partyLabel(s.permissions[0]!.agent)} asks to use ${s.permissions[0]!.request.tool}`
-        : questions.length ? `${partyLabel(questions[0]!.agent)} asks you a question` : "Your decision is needed";
+        : questions.length ? `${whoLabel(questions[0]!.agent, undefined, questions[0]!.member)} asks you a question` : "Your decision is needed";
       if (hadFocus || document.activeElement === input || document.activeElement === document.body) cards[0]!.querySelector<HTMLButtonElement>("button.primary")?.focus();
     } else if (hadFocus) input.focus();
   }
@@ -1402,7 +1441,8 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
     sendIcon.className = `codicon codicon-${stopping ? "debug-stop" : "arrow-up"}`;
     sendBtn.classList.toggle("stop", stopping);
     const label = stopping ? "Stop (Esc): /resume continues a stopped run" : once === "pipeline" ? "Hand the task to the pipeline (Enter)"
-      : once === "discuss" ? "Start the discussion (Enter)" : s.status === "running" ? "Send the note (Enter)" : "Send (Enter)";
+      : once === "discuss" ? "Start the discussion (Enter)" : once === "team" ? "Hand the request to the team (Enter)"
+      : teamActive(s) ? "Send to the PM (Enter)" : s.status === "running" ? "Send the note (Enter)" : "Send (Enter)";
     sendBtn.title = (uploading(s) || reads.size) && !stopping ? "Files are still being attached…" : label;
     sendBtn.setAttribute("aria-label", label);
     sendBtn.disabled = !canSubmit(s);
@@ -1414,16 +1454,17 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
     input.placeholder = placeholder(s, once);
     input.disabled = !canSubmit(s);
     const t = target();
-    const agentTarget = t === "pipeline" || t === "discuss" ? null : t;
+    const agentTarget = t === "pipeline" || t === "discuss" || t === "team" ? null : t;
     targetIcon.replaceChildren(agentTarget ? providerMark(agentTarget) : icon(ONCE[t as Once].icon));
-    targetName.textContent = agentTarget ? AGENT_NAMES[agentTarget] : ONCE[t as Once].label;
+    targetName.textContent = teamActive(s) ? "PM" : agentTarget ? AGENT_NAMES[agentTarget] : ONCE[t as Once].label;
     targetDetail.textContent = agentTarget ? shortModel(s.models?.[agentTarget]) : t === "discuss" ? `${AGENT_NAMES[s.recipient]} answers` : "";
     targetDetail.hidden = !targetDetail.textContent;
     const m = agentTarget ? s.models?.[agentTarget] : null;
     const session = usageText(s.totals.costUsd || undefined, s.totals.tokens || undefined);
     const says = t === "pipeline" ? "The next message is a task for the pipeline"
       : t === "discuss" ? `The next message is a question to discuss: ${AGENT_NAMES[s.recipient]} answers, ${AGENT_NAMES[otherAgent(s.recipient)]} reviews (/discuss)`
-        : `Plain messages go to ${AGENT_NAMES[t]} (/${t})`;
+        : t === "team" ? "The next message is a request for a team: you then talk to its PM (/team)"
+          : teamActive(s) ? "Plain messages go to the team's PM while the team works" : `Plain messages go to ${AGENT_NAMES[t]} (/${t})`;
     targetBtn.title = [says,
       m ? modelTitle(m) : "", session ? `this session: ${session}` : ""].filter(Boolean).join("\n");
     targetBtn.setAttribute("aria-label", `Send to: ${targetName.textContent}${m ? `, ${modelText(m, { short: true })}` : ""}`);

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -24,6 +24,11 @@ describe("parseDesktopRequest", () => {
     expect(parseDesktopRequest({ method: "update.check", url: "https://evil.example/feed.yml" })).toEqual({ method: "update.check" });
     expect(parseDesktopRequest({ method: "update.install" })).toEqual({ method: "update.install" });
     expect(parseDesktopRequest({ method: "link.open", link: "agentduo-releases" })).toEqual({ method: "link.open", link: "agentduo-releases" });
+    expect(parseDesktopRequest({ method: "team.read", projectId: null })).toEqual({ method: "team.read", projectId: null });
+    const team = { members: [{ role: "dev", level: "mid", cli: "claude", count: 2, group: "web", model: null }], roles: { dev: { kind: "worker" } }, levels: { mid: { can_review: false, claude: { model: "sonnet" } } }, max_parallel: 3 };
+    expect(parseDesktopRequest({ method: "team.save", projectId: null, scope: "project", team })).toEqual({ method: "team.save", projectId: null, scope: "project", team });
+    expect(parseDesktopRequest({ method: "team.openIdentity", projectId: null, scope: "global", kind: "role", name: "frontend-dev" }))
+      .toEqual({ method: "team.openIdentity", projectId: null, scope: "global", kind: "role", name: "frontend-dev" });
   });
 
   it("refuses unknown methods, paths for ids, bad preferences and chat messages that mean nothing here", () => {
@@ -45,6 +50,13 @@ describe("parseDesktopRequest", () => {
       { method: "changes.file", projectId: "0123456789abcdef", listId: "/tmp/x", index: 0 },
       { method: "link.open", link: "https://evil.example" },
       { method: "folder.open", projectId: null, folder: "/" },
+      { method: "team.openIdentity", projectId: null, scope: "global", kind: "role", name: "../../etc" },
+      { method: "team.openIdentity", projectId: null, scope: "global", kind: "secrets", name: "dev" },
+      { method: "team.openIdentity", projectId: null, scope: "/", kind: "role", name: "dev" },
+      { method: "team.identity.write", projectId: null, scope: "global", kind: "role", name: "dev", text: "x".repeat(60_000) },
+      { method: "team.save", projectId: null, scope: "global", team: { members: [{ role: "../x", level: "mid", cli: "claude" }], roles: {}, levels: {}, max_parallel: 1 } },
+      { method: "team.save", projectId: null, scope: "global", team: { members: [{ role: "dev", level: "mid", cli: "gemini" }], roles: {}, levels: {}, max_parallel: 1 } },
+      { method: "team.save", projectId: null, scope: "global", team: { members: [], roles: { "a/b": { kind: "worker" } }, levels: {}, max_parallel: 1 } },
       "app.state",
       null,
     ];
@@ -162,6 +174,43 @@ describe("Dispatcher", () => {
     expect(back?.source).toBe("default");
     const project = await d.handle(good, { method: "settings.update", projectId: null, scope: "project", key: "claude.model", value: "opus" });
     expect(project.ok).toBe(false);
+  });
+
+  it("reads the team and opens its identity files by name, creating one with a note, and nothing the team does not have", async () => {
+    const { d, opened } = dispatcher();
+    const read = (await d.handle(good, { method: "team.read", projectId: null })) as
+      { ok: true; result: { members: Array<{ name: string }>; identities: Array<{ kind: string; name: string }>; membersFrom: string | null } };
+    expect(read.ok).toBe(true);
+    // No file has a team yet: agentduo's own runs, and Settings says so.
+    expect(read.result.membersFrom).toBeNull();
+    expect(read.result.members.map((m) => m.name)).toEqual(["pm", "techlead", "dev-1", "dev-2", "qa-1"]);
+    const open = await d.handle(good, { method: "team.openIdentity", projectId: null, scope: "global", kind: "role", name: "dev" });
+    expect(open).toMatchObject({ ok: true });
+    const file = opened.at(-1)!;
+    expect(file).toBe(join(dir, "config", "agentduo", "team", "roles", "dev", "IDENTITY.md"));
+    expect(readFileSync(file, "utf8")).toContain("You are a developer on the team.");
+    expect(await d.handle(good, { method: "team.openIdentity", projectId: null, scope: "global", kind: "role", name: "designer" }))
+      .toEqual({ ok: false, error: "the team has no role 'designer'" });
+    expect(await d.handle(good, { method: "team.openIdentity", projectId: null, scope: "project", kind: "level", name: "senior" }))
+      .toEqual({ ok: false, error: "no project is open" });
+  });
+
+  it("saves the team only when it can start, and edits an identity's whole text, saved, reset and written as defaults", async () => {
+    const { d } = dispatcher();
+    const read = (await d.handle(good, { method: "team.read", projectId: null })) as { ok: true; result: { config: { members: unknown[]; roles: object; levels: object; max_parallel: number } } };
+    const team = structuredClone(read.result.config) as { members: Array<Record<string, unknown>>; roles: object; levels: object; max_parallel: number };
+    team.members.push({ role: "qa", level: "senior", cli: "codex", name: "qa-lead" });
+    const saved = await d.handle(good, { method: "team.save", projectId: null, scope: "global", team });
+    expect(saved).toMatchObject({ ok: true, result: { membersFrom: "global", members: expect.arrayContaining([expect.objectContaining({ name: "qa-lead", backend: "codex" })]) } });
+    expect(readFileSync(join(dir, "config", "agentduo", "config.yaml"), "utf8")).toContain("qa-lead");
+    const broken = { ...team, members: team.members.filter((m) => m.role !== "pm") };
+    const refused = await d.handle(good, { method: "team.save", projectId: null, scope: "global", team: broken });
+    expect(refused).toMatchObject({ ok: false, error: expect.stringContaining("exactly one member whose role is of kind pm") });
+    const ref = { projectId: null, scope: "global" as const, kind: "role" as const, name: "dev" };
+    expect(await d.handle(good, { method: "team.identity.read", ...ref })).toMatchObject({ ok: true, result: { source: "default", text: expect.stringContaining("You are a developer") } });
+    expect(await d.handle(good, { method: "team.identity.write", ...ref, text: "Use pnpm." })).toEqual({ ok: true, result: { source: "global", text: "Use pnpm." } });
+    expect(await d.handle(good, { method: "team.identity.reset", ...ref })).toMatchObject({ ok: true, result: { source: "default" } });
+    expect(await d.handle(good, { method: "team.identity.read", ...ref, name: "designer" })).toEqual({ ok: false, error: "the team has no role 'designer'" });
   });
 
   it("checks for an update and restarts into one only when it is ready", async () => {

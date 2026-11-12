@@ -658,7 +658,10 @@ export class WorkspaceSession {
     this.follow(conversation, this.view(conversation), true);
     // Files alone are a message too; the worker says which went with it (`sent`), and they join it then.
     if (typed || attachments.length) {
-      this.dispatch({ type: "user", text: typed, ...(route === "pipeline" && !command ? { pipeline: true } : {}), ...(route === "discuss" && !command ? { discuss: true } : {}) }, conversation);
+      this.dispatch({
+        type: "user", text: typed, ...(route === "pipeline" && !command ? { pipeline: true } : {}), ...(route === "discuss" && !command ? { discuss: true } : {}),
+        ...(route === "team" && !command ? { team: true } : {}),
+      }, conversation);
     }
     await this.send({ type: "submit", conversation, text, route, attachments }, conversation);
   }

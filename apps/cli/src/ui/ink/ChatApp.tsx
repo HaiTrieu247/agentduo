@@ -11,7 +11,7 @@ import type { EarlierTask, Exchange } from "@agentduo/engine/workflow/state";
 import { modelText, PROVIDERS } from "@agentduo/engine/format";
 import { StaticItemView } from "./App.js";
 import { HumanReviewPrompt, VIEWS, type ViewKind } from "./HumanReviewPrompt.js";
-import { LiveFooter, TurnFooter } from "./LiveFooter.js";
+import { LiveFooter, TeamFooter, TurnFooter } from "./LiveFooter.js";
 import { PermissionPrompt } from "./PermissionPrompt.js";
 import { QuestionPrompt } from "./QuestionPrompt.js";
 import type { QuestionReply } from "./session.js";
@@ -108,8 +108,9 @@ export interface ChatAppProps {
   findFiles?(query: string): Promise<PathEntry[]>;
 }
 
-function placeholder(status: ChatStatus, to: Backend): string {
+function placeholder(status: ChatStatus, to: Backend, team: boolean): string {
   const name = AGENT_NAMES[to];
+  if (team) return status === "paused" ? "Ask Codex or Claude… or /resume to continue the team" : "A message for the PM… (/team status shows the board)";
   switch (status) {
     case "idle":
       return `Ask ${name}… (/pipeline <task> runs the workflow; / lists commands; @ to tag files)`;
@@ -170,8 +171,8 @@ function Attachments({ files }: { files: Attachment[] }) {
   );
 }
 
-function ChatInput({ status, mode, to, models, files, onSubmit, onEscape, onCycleMode, findFiles, restore }: {
-  status: ChatStatus; mode: string | null; to: Backend; models: ModelMap | null; files: Attachment[]; onSubmit(text: string): void; onEscape(): void; onCycleMode?(): void;
+function ChatInput({ status, mode, to, team, models, files, onSubmit, onEscape, onCycleMode, findFiles, restore }: {
+  status: ChatStatus; mode: string | null; to: Backend; team: boolean; models: ModelMap | null; files: Attachment[]; onSubmit(text: string): void; onEscape(): void; onCycleMode?(): void;
   findFiles?(query: string): Promise<PathEntry[]>;
   /** A line that could not run now, given back (unless something new was typed meanwhile). */
   restore?: { text: string; seq: number } | null;
@@ -251,17 +252,17 @@ function ChatInput({ status, mode, to, models, files, onSubmit, onEscape, onCycl
       <Box borderStyle="round" borderColor={status === "paused" ? "yellow" : "gray"} paddingX={1}>
         <Text wrap="wrap">
           <Text color="cyan">{"› "}</Text>
-          {text ? text : <Text dimColor>{placeholder(status, to)}</Text>}
+          {text ? text : <Text dimColor>{placeholder(status, to, team)}</Text>}
           <Text inverse> </Text>
         </Text>
       </Box>
       {menu ? <Suggestions items={suggestions} selected={Math.min(selected, suggestions.length - 1)} keys={mention ? PATH_KEYS : COMMAND_KEYS} /> : null}
       <Text dimColor wrap="truncate-end">
         {"  to: "}
-        <Text bold>{AGENT_NAMES[to]}</Text>
+        <Text bold>{team && status === "running" ? "PM" : AGENT_NAMES[to]}</Text>
         {` · ${model("claude")} · ${model("codex")}${mode ? ` · mode: ${modeLabel(mode)} (Shift+Tab)` : ""}`}
       </Text>
-      <Text dimColor wrap="truncate-end">{`  ${HINTS[status]}`}</Text>
+      <Text dimColor wrap="truncate-end">{`  ${team && status === "running" ? "Enter message the PM · Esc stops the team · Ctrl-C twice quit" : HINTS[status]}`}</Text>
     </Box>
   );
 }
@@ -333,7 +334,8 @@ export function ChatApp(p: ChatAppProps) {
         <HumanReviewPrompt review={view.humanReview} views={p.views()} onDecision={p.onDecision} onView={onView} />
       ) : (
         <>
-          {status === "running" && view.current ? <LiveFooter view={view} now={Date.now()} frame={frame} interactive={false} /> : null}
+          {status === "running" && view.team ? <TeamFooter view={view} now={Date.now()} frame={frame} /> : null}
+          {status === "running" && view.current && !view.team ? <LiveFooter view={view} now={Date.now()} frame={frame} interactive={false} /> : null}
           {status === "answering" && view.turn ? <TurnFooter view={view} now={Date.now()} frame={frame} /> : null}
           {usage ? (
             <UsagePanel report={usage} top={usageTop} setTop={setUsageTop} onRefresh={() => p.onUsageRefresh?.()} onClose={() => {
@@ -341,7 +343,7 @@ export function ChatApp(p: ChatAppProps) {
               setUsage(null);
             }} />
           ) : (
-            <ChatInput status={status} mode={mode} to={to} models={models} files={files} onSubmit={p.onSubmit} onEscape={p.onEscape} onCycleMode={p.onCycleMode} findFiles={p.findFiles}
+            <ChatInput status={status} mode={mode} to={to} team={!!view.team} models={models} files={files} onSubmit={p.onSubmit} onEscape={p.onEscape} onCycleMode={p.onCycleMode} findFiles={p.findFiles}
               restore={restore} />
           )}
         </>

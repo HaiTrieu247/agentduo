@@ -6,6 +6,8 @@ import { whoLabel } from "@agentduo/engine/format";
 export interface PermissionAsk {
   /** The pipeline role asking; absent when Claude asks while answering a question of the chat. */
   role?: Role;
+  /** A team member asking (packages/engine/src/team). */
+  member?: string;
   agent: Party;
   request: PermissionRequest;
 }
@@ -52,7 +54,7 @@ export function PermissionPrompt({ ask, onAnswer }: { ask: PermissionAsk; onAnsw
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
-      <Text color="yellow" bold wrap="truncate-end">{`⚠ ${whoLabel(ask.agent, ask.role)} asks to use ${request.tool}`}</Text>
+      <Text color="yellow" bold wrap="truncate-end">{`⚠ ${whoLabel(ask.agent, ask.role, ask.member)} asks to use ${request.tool}`}</Text>
       <Text wrap="truncate-end">{`  ${request.label}`}</Text>
       {request.description ? <Text dimColor wrap="truncate-end">{`  ${request.description}`}</Text> : null}
       {request.blockedPath ? <Text dimColor wrap="truncate-end">{`  path: ${request.blockedPath}`}</Text> : null}

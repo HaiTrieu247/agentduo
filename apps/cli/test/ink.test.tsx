@@ -14,6 +14,8 @@ import type { QuestionReply } from "../src/ui/ink/session.js";
 import { StaticItemView } from "../src/ui/ink/App.js";
 import { StepBlock } from "../src/ui/ink/StepBlock.js";
 import { initialView, reduce, type StepView, type ViewState } from "../src/ui/ink/store.js";
+import { TeamFooter } from "../src/ui/ink/LiveFooter.js";
+import type { TeamTaskView } from "@agentduo/engine/team/model";
 
 const wait = (ms = 60) => new Promise((r) => setTimeout(r, ms));
 /**
@@ -94,6 +96,53 @@ describe("view reducer additions", () => {
       { type: "run.finished", runId: "r1", phase: "HUMAN_REVIEW", reportPath: "/r", exitCode: 2 },
     ]);
     expect(deferred.items.map((i) => i.kind)).toEqual(["review", "finish"]);
+  });
+});
+
+describe("a team run in the view", () => {
+  const members = [
+    { name: "pm", role: "pm", kind: "pm", level: "senior", backend: "codex" },
+    { name: "techlead", role: "techlead", kind: "lead", level: "senior", backend: "codex" },
+    { name: "dev-1", role: "dev", kind: "worker", level: "senior", backend: "claude" },
+  ] as const;
+  const started: DuoEvent = { type: "team.started", runId: "t1", request: "Add sub", runDir: "/d", members: members.map((m) => ({ ...m })) };
+  const task: TeamTaskView = { id: "T1", title: "sub()", status: "coding", assignee: "dev-1", testers: ["qa-1"], attempt: 1, dependsOn: [] };
+
+  it("prints what the PM says and the documents it shows, but not your own words twice", () => {
+    const s = play([
+      started,
+      { type: "team.message", runId: "t1", from: "user", text: "Add sub", seq: 1 },
+      { type: "team.message", runId: "t1", from: "pm", text: "Here is what I understood.", seq: 2 },
+      { type: "team.document", runId: "t1", kind: "brief", title: "Brief v1: Add sub", text: "- AC1: sub works" },
+    ]);
+    expect(s.items.map((i) => i.kind)).toEqual(["info", "pm", "artifact"]);
+    const frame = render(<StaticItemView item={s.items[1]!} />).lastFrame()!;
+    expect(frame).toContain("PM");
+    expect(frame).toContain("Here is what I understood.");
+  });
+
+  it("shows each member at work in the footer, with its task and latest activity", () => {
+    const s = play([
+      started,
+      { type: "team.phase", runId: "t1", phase: "EXECUTION" },
+      { type: "team.task", task },
+      { type: "team.member", member: "dev-1", state: "busy", job: "work", task: "T1" },
+      { type: "team.activity", member: "dev-1", task: "T1", agent: "claude", activity: { id: "a", kind: "edit", label: "Edit  src/sub.ts", status: "ok" } },
+    ]);
+    expect(s.team?.phase).toBe("EXECUTION");
+    const frame = render(<TeamFooter view={s} now={5000} frame={0} />).lastFrame()!;
+    for (const text of ["TEAM", "execution", "0/1 task(s) merged", "dev-1", "senior", "coding T1", "Edit  src/sub.ts"]) expect(frame).toContain(text);
+    const idle = play([{ type: "team.member", member: "dev-1", state: "idle", job: null, task: null }], s);
+    expect(render(<TeamFooter view={idle} now={5000} frame={0} />).lastFrame()!).toContain("waiting for you");
+  });
+
+  it("names the PM as the one asking, and forgets the team once it is done", () => {
+    const request = { id: "q1", source: "team", callId: "c", agent: "codex", teamRunId: "t1", member: "pm", at: "x",
+      questions: [{ id: "decision", header: "Brief", question: "Approve?", multiSelect: false, options: [{ id: "approve", label: "Approve", description: "" }, { id: "change", label: "Ask for changes", description: "" }] }] } as ClarificationRequest;
+    const s = play([started, { type: "clarification.requested", request }, { type: "clarification.answered", id: "q1", callId: "c", answers: [{ questionId: "decision", optionIds: ["approve"], otherText: null }] }]);
+    expect(render(<StaticItemView item={s.items.at(-1)!} />).lastFrame()!).toContain("PM asked [Brief] — Brief: Approve");
+    const done = play([{ type: "team.finished", runId: "t1", phase: "DONE", outcome: "done", summary: "in" }], s);
+    expect(done.team).toBeNull();
   });
 });
 

@@ -52,6 +52,12 @@ export async function runDoctor(o: { dir: string; cfg: ConfigData; sources: stri
   add(major > 22 || (major === 22 && minor >= 12), `node ${process.versions.node} (>= 22.12)`);
   const gitVersion = await probe("git", ["--version"], o.dir);
   add(gitVersion.ok, gitVersion.ok ? gitVersion.out.trim() : "git is not installed");
+  if (gitVersion.ok) {
+    // Team runs merge their members' work with `git merge-tree --write-tree` (packages/engine/src/team/worktrees.ts).
+    const [gMajor = 0, gMinor = 0] = (/(\d+)\.(\d+)/.exec(gitVersion.out)?.slice(1) ?? []).map(Number);
+    const teams = gMajor > 2 || (gMajor === 2 && gMinor >= 38);
+    add(teams, teams ? "git can merge a team's work (2.38 or later)" : "git is older than 2.38: /team needs `git merge-tree --write-tree` (the chat and /pipeline work)", false);
+  }
   const git = new Git(o.dir);
   const snapshots = await preflightSnapshots(o.dir, env);
   const isRepo = snapshots.mode === "native";

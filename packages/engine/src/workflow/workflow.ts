@@ -152,7 +152,7 @@ export interface WorkflowOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-function relativeInside(path: string, root: string): string | null {
+export function relativeInside(path: string, root: string): string | null {
   const rel = relative(resolve(root), resolve(path));
   return rel && !leavesBase(rel) ? rel.split("\\").join("/") : null;
 }

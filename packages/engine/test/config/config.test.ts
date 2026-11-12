@@ -3,8 +3,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { configFromSaved, ConfigError, defaultConfig, loadConfig, userConfigPath, validateConfig } from "../../src/config/config.js";
 import {
-  clearConfiguration, ConfigurationError, readConfiguration, updateConfiguration, type ConfigurationOptions, type ConfigurationView,
+  clearConfiguration, ConfigurationError, filesConfiguration, readConfiguration, teamMembersSource, updateConfiguration, updateTeam, type ConfigurationOptions, type ConfigurationView,
 } from "../../src/config/configuration.js";
+import { TEAM_DEFAULTS } from "../../src/team/config.js";
 import { userConfigEnv } from "../helpers/config.js";
 import { tempDir } from "../helpers/tmp.js";
 
@@ -193,6 +194,40 @@ describe("saved configs and paths", () => {
     expect(userConfigPath({ XDG_CONFIG_HOME: "/x" }, "linux")).toBe(join("/x", "agentduo", "config.yaml"));
     expect(userConfigPath({ HOME: "/h" }, "darwin")).toBe(join("/h", ".config", "agentduo", "config.yaml"));
     expect(userConfigPath({ APPDATA: "C:\\AppData" }, "win32")).toContain("agentduo");
+  });
+});
+
+describe("the team in Settings", () => {
+  it("writes the team into a layer, keeping the file's comments, and refuses a team that could not start", () => {
+    const { dir, env } = setup("# my project's settings\nlimits:\n  max_retries: 2\n");
+    const o = { workspace: dir, env };
+    // No file has a team yet: agentduo's own runs.
+    expect(teamMembersSource(o)).toBeNull();
+    const team = structuredClone(TEAM_DEFAULTS);
+    team.members = [...team.members, { role: "qa", level: "senior", cli: "codex", name: "qa-lead" }];
+    team.max_parallel = 5;
+    updateTeam(o, "project", team);
+    expect(teamMembersSource(o)).toBe("project");
+    const text = readFileSync(join(dir, ".agentduo", "config.yaml"), "utf8");
+    expect(text).toContain("# my project's settings");
+    expect(text).toContain("max_retries: 2");
+    const cfg = filesConfiguration(o);
+    expect(cfg.team.members.at(-1)).toEqual({ role: "qa", level: "senior", cli: "codex", name: "qa-lead" });
+    expect(cfg.team.max_parallel).toBe(5);
+    const broken = structuredClone(TEAM_DEFAULTS);
+    broken.members = broken.members.filter((m) => m.role !== "techlead");
+    expect(() => updateTeam(o, "project", broken)).toThrow(/exactly one member whose role is of kind lead/);
+    expect(filesConfiguration(o).team.max_parallel).toBe(5);
+  });
+
+  it("says which file's team holds: the project's over the user config's, and none when only other team keys are set", () => {
+    const { dir, env } = setup("team:\n  max_parallel: 2\n");
+    const o = { workspace: dir, env };
+    expect(teamMembersSource(o)).toBeNull();
+    updateTeam({ workspace: null, env }, "global", structuredClone(TEAM_DEFAULTS));
+    expect(teamMembersSource(o)).toBe("global");
+    updateTeam(o, "project", structuredClone(TEAM_DEFAULTS));
+    expect(teamMembersSource(o)).toBe("project");
   });
 });
 

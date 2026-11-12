@@ -1,0 +1,496 @@
+{
+  "title": "The PM's turn",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "message",
+    "action"
+  ],
+  "properties": {
+    "message": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "What you tell the user now, in their language; null: nothing"
+    },
+    "action": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "none"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "questions"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "questions"
+              ]
+            },
+            "questions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "header",
+                  "question",
+                  "multi_select",
+                  "options"
+                ],
+                "properties": {
+                  "header": {
+                    "type": "string"
+                  },
+                  "question": {
+                    "type": "string"
+                  },
+                  "multi_select": {
+                    "type": "boolean"
+                  },
+                  "options": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "label",
+                        "description"
+                      ],
+                      "properties": {
+                        "label": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "brief"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "brief"
+              ]
+            },
+            "brief": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "title",
+                "goal",
+                "scope",
+                "out_of_scope",
+                "constraints",
+                "criteria",
+                "notes"
+              ],
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "description": "A short name for the work"
+                },
+                "goal": {
+                  "type": "string",
+                  "description": "What the user wants and why, in a few sentences"
+                },
+                "scope": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "What is in scope"
+                },
+                "out_of_scope": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "What is explicitly not part of this work"
+                },
+                "constraints": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Technical or product constraints the user stated"
+                },
+                "criteria": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "id",
+                      "criterion"
+                    ],
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "description": "AC1, AC2…"
+                      },
+                      "criterion": {
+                        "type": "string",
+                        "description": "An observable, testable acceptance criterion"
+                      }
+                    }
+                  }
+                },
+                "notes": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Anything else the team must know, or null"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "approve",
+            "issues",
+            "summary"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "plan_review"
+              ]
+            },
+            "approve": {
+              "type": "boolean",
+              "description": "true: show the plan to the user; false: send it back to the techlead"
+            },
+            "issues": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "issue",
+                  "group"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "issue": {
+                    "type": "string"
+                  },
+                  "group": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The group whose plan it is about (a team with groups), or null"
+                  }
+                }
+              },
+              "description": "Why it goes back (empty when approved)"
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The plan as the user reads it, when approved"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "note",
+            "group"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "lead_note"
+              ]
+            },
+            "note": {
+              "type": "string",
+              "description": "A clarification for the techlead"
+            },
+            "group": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The group whose techlead it is for; null: every techlead"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "question_id",
+            "answer"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "team_answer"
+              ]
+            },
+            "question_id": {
+              "type": "string"
+            },
+            "answer": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "question_id",
+            "question"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "escalate"
+              ]
+            },
+            "question_id": {
+              "type": "string"
+            },
+            "question": {
+              "type": "string",
+              "description": "What the head PM must answer (an area PM only)"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "areas"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "areas"
+              ]
+            },
+            "areas": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "group",
+                  "area",
+                  "criteria"
+                ],
+                "properties": {
+                  "group": {
+                    "type": "string"
+                  },
+                  "area": {
+                    "type": "string",
+                    "description": "What this group builds, in a few sentences"
+                  },
+                  "criteria": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "The acceptance criteria it is responsible for"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "brief"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "change_request"
+              ]
+            },
+            "brief": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "title",
+                "goal",
+                "scope",
+                "out_of_scope",
+                "constraints",
+                "criteria",
+                "notes"
+              ],
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "description": "A short name for the work"
+                },
+                "goal": {
+                  "type": "string",
+                  "description": "What the user wants and why, in a few sentences"
+                },
+                "scope": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "What is in scope"
+                },
+                "out_of_scope": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "What is explicitly not part of this work"
+                },
+                "constraints": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Technical or product constraints the user stated"
+                },
+                "criteria": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "id",
+                      "criterion"
+                    ],
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "description": "AC1, AC2…"
+                      },
+                      "criterion": {
+                        "type": "string",
+                        "description": "An observable, testable acceptance criterion"
+                      }
+                    }
+                  }
+                },
+                "notes": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Anything else the team must know, or null"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "criteria",
+            "summary"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "acceptance"
+              ]
+            },
+            "criteria": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "status",
+                  "evidence"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "met",
+                      "partly",
+                      "not_met"
+                    ]
+                  },
+                  "evidence": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "summary": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

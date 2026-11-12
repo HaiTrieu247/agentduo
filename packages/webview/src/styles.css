@@ -751,3 +751,17 @@ body.vscode-high-contrast .menu-item:hover, body.vscode-high-contrast-light .men
 .files-hint .codicon { vertical-align: text-bottom; }
 .composer-box.drop { border-color: var(--vscode-focusBorder); border-style: dashed; }
 body.vscode-high-contrast .file-chip, body.vscode-high-contrast-light .file-chip { border-color: var(--vscode-contrastBorder); }
+
+/* A team run (packages/engine/src/team): what the PM says, what it shows, and the team's board. */
+.pm-msg { display: flex; flex-direction: column; gap: 4px; border-left: 2px solid var(--accent); padding-left: 8px; border-radius: 0; }
+.pm-head { display: flex; gap: 6px; align-items: center; font-weight: 600; color: var(--accent); }
+.team-doc { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; background: var(--card); }
+.team-doc summary { display: flex; gap: 6px; align-items: center; cursor: pointer; font-weight: 600; }
+.team-doc .text { white-space: pre-wrap; margin: 6px 0 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
+.team-card { display: flex; flex-direction: column; gap: 6px; }
+.team-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.team-phase { color: var(--accent); font-weight: 600; }
+.team-working, .team-board { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.team-board .task-id { font-family: var(--vscode-editor-font-family, monospace); font-weight: 600; }
+.team-board .task-merged { opacity: 0.7; }
+.team-board .task-escalated, .team-board .task-triage { color: var(--warn-text); }

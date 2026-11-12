@@ -9,6 +9,8 @@ import {
 } from "@agentduo/host/protocol";
 import type { AccountUsage } from "@agentduo/host/protocol";
 import type { Check } from "@agentduo/engine/system/doctor";
+import type { TeamIdentityFile, TeamInfo } from "@agentduo/engine/team/model";
+import type { TeamEdit } from "@agentduo/engine/config/configuration";
 
 export { ProtocolError };
 
@@ -200,6 +202,19 @@ export type DesktopRequest =
   | { method: "settings.clear"; projectId: string | null; scope: ConfigScope; key: string }
   /** Opens that config file in the user's editor (creating an empty one when there is none). */
   | { method: "settings.openFile"; projectId: string | null; scope: "global" | "project" }
+  /** The team (team: in the config) of the project, or of the user config with no project: its members, roles, levels and identity files. */
+  | { method: "team.read"; projectId: string | null }
+  /** Opens one identity file of that team in the user's editor (creating it with agentduo's text when there is none), by kind and name, never by path. */
+  | { method: "team.openIdentity"; projectId: string | null; scope: "global" | "project"; kind: TeamIdentityFile["kind"]; name: string }
+  /** Saves the team (members, roles, levels, how many work at once) into the user config or the project's file. */
+  | { method: "team.save"; projectId: string | null; scope: "global" | "project"; team: TeamEdit }
+  /** One identity's whole text in a scope, as it is or as it falls back (the user config's, agentduo's). */
+  | { method: "team.identity.read"; projectId: string | null; scope: "global" | "project"; kind: TeamIdentityFile["kind"]; name: string }
+  | { method: "team.identity.write"; projectId: string | null; scope: "global" | "project"; kind: TeamIdentityFile["kind"]; name: string; text: string }
+  /** Removes the scope's file: what it fell back to holds again. */
+  | { method: "team.identity.reset"; projectId: string | null; scope: "global" | "project"; kind: TeamIdentityFile["kind"]; name: string }
+  /** Writes agentduo's text of every role and level the team uses into the project's .agentduo/team, where there is no file yet. */
+  | { method: "team.identity.defaults"; projectId: string }
   | { method: "folder.open"; projectId: string | null; folder: Folder }
   | { method: "cli.status"; projectId: string | null }
   /** A binary picked with the native file dialog becomes `<backend>.bin` in the user config. */
@@ -237,6 +252,13 @@ export interface DesktopResults {
   "settings.update": ConfigurationView;
   "settings.clear": ConfigurationView;
   "settings.openFile": { opened: string };
+  "team.read": TeamInfo;
+  "team.openIdentity": { opened: string };
+  "team.save": TeamInfo;
+  "team.identity.read": { text: string; source: "project" | "global" | "default" | "none" };
+  "team.identity.write": { text: string; source: "project" | "global" | "default" | "none" };
+  "team.identity.reset": { text: string; source: "project" | "global" | "default" | "none" };
+  "team.identity.defaults": { written: number };
   "folder.open": { opened: string };
   "cli.status": { clis: CliStatus[]; launcher: LauncherInfo };
   "cli.pick": { clis: CliStatus[]; launcher: LauncherInfo } | null;
@@ -356,7 +378,8 @@ export function parsePreferences(v: unknown): Partial<Preferences> {
 const METHODS: readonly DesktopMethod[] = [
   "app.state", "prefs.set", "project.open", "project.select", "project.forget", "project.restart", "project.runs", "conversation.new", "conversation.open",
   "conversation.select", "chat.message", "chat.draft", "run.inspect", "artifact.read", "changes.list", "changes.file", "settings.read", "settings.update",
-  "settings.clear", "settings.openFile", "folder.open", "cli.status", "cli.pick", "doctor.run", "account.usage", "diagnostics.collect", "diagnostics.export",
+  "settings.clear", "settings.openFile", "team.read", "team.openIdentity", "team.save", "team.identity.read", "team.identity.write", "team.identity.reset",
+  "team.identity.defaults", "folder.open", "cli.status", "cli.pick", "doctor.run", "account.usage", "diagnostics.collect", "diagnostics.export",
   "link.open", "update.check", "update.install",
 ];
 
@@ -368,6 +391,85 @@ function chatMessage(v: unknown): WebviewMessage {
 }
 
 const MAX_DRAFT = 100_000;
+const MAX_IDENTITY = 50_000;
+/** A role's, a level's, a member's or a group's name, as the team's config writes them: it becomes a folder name. */
+const TEAM_NAME = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+
+function identityRef(o: Record<string, unknown>) {
+  if (typeof o.name !== "string" || !TEAM_NAME.test(o.name)) throw new ProtocolError("name is not a team name");
+  return {
+    projectId: maybeProject(o.projectId), scope: oneOf(o.scope, ["global", "project"] as const, "scope"),
+    kind: oneOf(o.kind, ["role", "level", "agent"] as const, "kind"), name: o.name,
+  };
+}
+
+const short = (v: unknown, what: string, max = 200): string => {
+  if (typeof v !== "string" || v.length > max || /[\u0000-\u001f]/.test(v)) throw new ProtocolError(`${what} must be a short string`);
+  return v;
+};
+const name = (v: unknown, what: string): string => {
+  if (typeof v !== "string" || !TEAM_NAME.test(v)) throw new ProtocolError(`${what} is not a team name`);
+  return v;
+};
+const optional = <T>(v: unknown, read: (x: unknown) => T): T | undefined => (v === undefined ? undefined : read(v));
+const modelOrNull = (v: unknown, what: string): string | null | undefined => (v === null ? null : optional(v, (x) => short(x, what)));
+
+/**
+ * The team Settings saves: only its shape and sizes are checked here (names that make folders, short strings, bounded
+ * lists); whether it is a team that can start is the configuration's check, in main, before anything is written.
+ */
+function teamEdit(v: unknown): TeamEdit {
+  const t = obj(v, "team");
+  if (!Array.isArray(t.members) || t.members.length > 100) throw new ProtocolError("team.members must be a list of at most 100");
+  const members = t.members.map((m, i) => {
+    const e = obj(m, `team.members[${i}]`);
+    const entry: TeamEdit["members"][number] = { role: name(e.role, "role"), level: name(e.level, "level"), cli: oneOf(e.cli, BACKENDS, "cli") };
+    if (e.count !== undefined) entry.count = int(e.count, "count", 20);
+    if (e.name !== undefined) entry.name = name(e.name, "name");
+    if (e.group !== undefined) entry.group = name(e.group, "group");
+    const model = modelOrNull(e.model, "model");
+    if (model !== undefined) entry.model = model;
+    const effort = modelOrNull(e.effort, "effort");
+    if (effort !== undefined) entry.effort = effort;
+    if (e.args !== undefined) {
+      if (!Array.isArray(e.args) || e.args.length > 40) throw new ProtocolError("args must be a list of at most 40");
+      entry.args = e.args.map((a) => short(a, "an argument", 2000));
+    }
+    return entry;
+  });
+  const roles = obj(t.roles, "team.roles");
+  if (Object.keys(roles).length > 50) throw new ProtocolError("team.roles has at most 50 roles");
+  const levels = obj(t.levels, "team.levels");
+  if (Object.keys(levels).length > 20) throw new ProtocolError("team.levels has at most 20 levels");
+  const cliOf = (v: unknown) => {
+    if (v === undefined) return undefined;
+    const c = obj(v, "a level's CLI");
+    const out: { model?: string | null; effort?: string | null } = {};
+    const model = modelOrNull(c.model, "model");
+    if (model !== undefined) out.model = model;
+    const effort = modelOrNull(c.effort, "effort");
+    if (effort !== undefined) out.effort = effort;
+    return out;
+  };
+  return {
+    members,
+    roles: Object.fromEntries(Object.entries(roles).map(([k, r]) => [name(k, "role"), { kind: oneOf(obj(r, "role").kind, ["pm", "lead", "worker", "checker"] as const, "kind") }])),
+    levels: Object.fromEntries(Object.entries(levels).map(([k, l]) => {
+      const level = obj(l, "level");
+      const out: TeamEdit["levels"][string] = {};
+      if (level.can_review !== undefined) {
+        if (typeof level.can_review !== "boolean") throw new ProtocolError("can_review must be true or false");
+        out.can_review = level.can_review;
+      }
+      const claude = cliOf(level.claude);
+      if (claude) out.claude = claude;
+      const codex = cliOf(level.codex);
+      if (codex) out.codex = codex;
+      return [name(k, "level"), out];
+    })),
+    max_parallel: int(t.max_parallel, "max_parallel", 50),
+  };
+}
 
 /** Checks a request from the renderer; anything else throws ProtocolError and is refused. */
 export function parseDesktopRequest(v: unknown): DesktopRequest {
@@ -417,6 +519,20 @@ export function parseDesktopRequest(v: unknown): DesktopRequest {
       return { method, projectId: maybeProject(o.projectId), scope: oneOf(o.scope, CONFIG_SCOPES, "scope"), key: settingKey(o.key) };
     case "settings.openFile":
       return { method, projectId: maybeProject(o.projectId), scope: oneOf(o.scope, ["global", "project"] as const, "scope") };
+    case "team.read":
+      return { method, projectId: maybeProject(o.projectId) };
+    case "team.openIdentity":
+    case "team.identity.read":
+    case "team.identity.reset":
+      return { method, ...identityRef(o) };
+    case "team.identity.write": {
+      if (typeof o.text !== "string" || o.text.length > MAX_IDENTITY) throw new ProtocolError(`text must be a string of at most ${MAX_IDENTITY} characters`);
+      return { method, ...identityRef(o), text: o.text };
+    }
+    case "team.identity.defaults":
+      return { method, projectId: projectId(o.projectId) };
+    case "team.save":
+      return { method, projectId: maybeProject(o.projectId), scope: oneOf(o.scope, ["global", "project"] as const, "scope"), team: teamEdit(o.team) };
     case "folder.open":
       return { method, projectId: maybeProject(o.projectId), folder: oneOf(o.folder, ["runs", "userData", "logs", "project"] as const, "folder") };
     case "cli.pick":

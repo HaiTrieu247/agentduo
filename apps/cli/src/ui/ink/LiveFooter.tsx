@@ -50,6 +50,42 @@ function Pipeline({ view }: { view: ViewState }) {
   );
 }
 
+const JOB_WORDS: Record<string, string> = {
+  pm: "talking", plan: "planning", work: "coding", tests: "writing tests", review: "reviewing", check: "testing", triage: "deciding",
+  answer: "answering", resolve: "resolving a conflict", integration_check: "testing the whole", integration_triage: "deciding", resolve_apply: "resolving a conflict",
+};
+
+/** A team run: its phase and tasks, then each member at work, what on, for how long, and its latest activity. */
+export function TeamFooter({ view, now, frame }: { view: ViewState; now: number; frame: number }) {
+  const team = view.team;
+  if (!team) return null;
+  const spinner = SPINNER[frame % SPINNER.length]!;
+  const merged = team.tasks.filter((t) => t.status === "merged").length;
+  const working = Object.entries(team.working);
+  return (
+    <Box flexDirection="column" borderStyle="single" borderLeft={false} borderRight={false} borderBottom={false} borderDimColor>
+      <Text wrap="truncate-end">
+        <Text bold>{" TEAM "}</Text>
+        <Text color="cyan">{team.phase.toLowerCase()}</Text>
+        <Text dimColor>{team.tasks.length ? ` · ${merged}/${team.tasks.length} task(s) merged` : ""}{` · ${working.length} at work`}</Text>
+      </Text>
+      {working.map(([name, w]) => {
+        const member = team.members.find((m) => m.name === name);
+        return (
+          <Text key={name} wrap="truncate-end">
+            <Text color="cyan">{` ${spinner} `}</Text>
+            <Text bold>{name.padEnd(10)}</Text>
+            <Text dimColor>{`${(member?.level ?? "").padEnd(7)} `}</Text>
+            {`${JOB_WORDS[w.job] ?? w.job}${w.task ? ` ${w.task}` : ""} `}
+            <Text dimColor>{`${formatClock((now - w.since) / 1000)}${w.last ? ` │ ${w.last}` : ""}`}</Text>
+          </Text>
+        );
+      })}
+      {!working.length ? <Text dimColor>{" waiting for you…"}</Text> : null}
+    </Box>
+  );
+}
+
 export function LiveFooter({ view, now, frame, interactive }: { view: ViewState; now: number; frame: number; interactive: boolean }) {
   const cur = view.current;
   const spinner = SPINNER[frame % SPINNER.length]!;

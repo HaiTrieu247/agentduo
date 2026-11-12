@@ -294,6 +294,32 @@ export function updateConfiguration(o: ConfigurationOptions, scope: "global" | "
 }
 
 /**
+ * The file whose `team.members` the configuration takes (the project's over the user config's), or null when neither
+ * file has one and agentduo's own team runs. A file that cannot be read counts as having none, as the merge reads it.
+ */
+export function teamMembersSource(o: ConfigurationOptions): "project" | "global" | null {
+  const has = (l: Layer) => !l.info.error && isPlainObject(l.raw.team) && l.raw.team.members !== null && l.raw.team.members !== undefined;
+  return load(o).layers.filter(has).at(-1)?.info.scope ?? null;
+}
+
+/** What Settings → Team edits of team mode's configuration: who is in the team, the roles and levels, how many work at once. */
+export type TeamEdit = Pick<ConfigData["team"], "members" | "roles" | "levels" | "max_parallel">;
+
+/**
+ * Writes the team (team.members, team.roles, team.levels, team.max_parallel) into the user config or the workspace's
+ * file, keeping the file's comments. Refused, and nothing written, when the team would have a problem it did not have:
+ * a team must be one that can start.
+ */
+export function updateTeam(o: ConfigurationOptions, scope: "global" | "project", team: TeamEdit): ConfigurationView {
+  const file = fileFor(o, scope);
+  const doc = documentOf(file);
+  for (const key of ["members", "roles", "levels", "max_parallel"] as const) doc.setIn(["team", key], structuredClone(team[key]));
+  guard(o, scope, doc);
+  atomicWrite(file, configText(doc));
+  return readConfiguration(o);
+}
+
+/**
  * Removes one key from the user config or the workspace's file, so it inherits again (from the user config, or the
  * default); it is deleted, never written as null.
  */

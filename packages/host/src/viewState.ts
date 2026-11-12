@@ -14,6 +14,19 @@ import type {
 } from "@agentduo/engine/events";
 import { answerActivities, resumeHint, resumeLabel, withObserved } from "@agentduo/engine/format";
 import type { ArtifactName, DecisionChoice, PipelineStep, Problem, UiUpdate } from "./protocol.js";
+import type { TeamMemberView, TeamPhase, TeamTaskView } from "@agentduo/engine/team/model";
+
+/** A team run of this tab (packages/engine/src/team): its phase, members and tasks, and what each member does now. */
+export interface TeamCard {
+  runId: string;
+  request: string;
+  phase: TeamPhase;
+  members: TeamMemberView[];
+  tasks: TeamTaskView[];
+  working: Array<{ member: string; job: string; task: string | null; since: number; last: string | null }>;
+  /** How it last ended in this tab (stopped, waiting…); null while it runs. */
+  outcome: string | null;
+}
 
 /** Kept in the view; older items stay in the run's files (events.jsonl, report.md, logs/). */
 export const MAX_TIMELINE = 400;
@@ -87,7 +100,7 @@ export interface DiscussionCard {
 
 export type TimelineItem = { id: string } & (
   /** `to`: the agent the message went to as a question; `pipeline`: sent as a task with the Pipeline button; `discuss`: a question to discuss. */
-  | { kind: "user"; text: string; to?: Backend; pipeline?: boolean; discuss?: boolean; attachments?: Attachment[] }
+  | { kind: "user"; text: string; to?: Backend; pipeline?: boolean; discuss?: boolean; attachments?: Attachment[]; pm?: boolean; team?: boolean }
   | { kind: "info"; text: string; tone: "info" | "error" }
   | { kind: "run"; runId: string; task: string }
   | { kind: "step"; step: StepCard }
@@ -96,8 +109,14 @@ export type TimelineItem = { id: string } & (
   | { kind: "warning"; text: string }
   | { kind: "permission"; agent: Party; role?: Role; label: string; rules: string[]; answer: PermissionAnswer }
   | { kind: "review"; review: HumanReview }
-  /** A question an agent asked the user, once over: the questions, and what was answered (or how it ended). */
-  | { kind: "question"; requestId: string; agent: Party; role?: Role; questions: ClarificationQuestion[]; answers?: ClarificationAnswer[]; status: ClarificationStatus | "deferred" }
+  /** A question an agent asked the user, once over: the questions, and what was answered (or how it ended). `member`: a team's PM. */
+  | {
+    kind: "question"; requestId: string; agent: Party; role?: Role; member?: string; questions: ClarificationQuestion[]; answers?: ClarificationAnswer[];
+    status: ClarificationStatus | "deferred";
+  }
+  /** What a team's PM says to the user, and what it shows beside it (the brief, the plan, the acceptance report). */
+  | { kind: "pm"; text: string }
+  | { kind: "document"; docKind: "brief" | "plan" | "acceptance"; title: string; text: string }
   | { kind: "finish"; phase: string; runId: string; summary?: string }
 );
 
@@ -113,6 +132,8 @@ export interface AttachmentChip {
 }
 
 export interface PendingPermission {
+  /** A team member asking (packages/engine/src/team). */
+  member?: string;
   /** Absent when Claude asks while answering a question of the chat. */
   role?: Role;
   agent: Party;
@@ -176,12 +197,14 @@ export interface ViewState {
   /** Timeline items dropped from the front. */
   dropped: number;
   seq: number;
+  /** The tab's team run; absent in a view saved before teams. */
+  team?: TeamCard | null;
 }
 
 export type ViewAction =
   | { type: "event"; event: DuoEvent; now: number }
   | { type: "ui"; update: UiUpdate }
-  | { type: "user"; text: string; pipeline?: boolean; discuss?: boolean }
+  | { type: "user"; text: string; pipeline?: boolean; discuss?: boolean; team?: boolean }
   | { type: "note"; text: string; tone: "info" | "error" }
   | { type: "workspace"; session: SessionState; workspace: string | null; generation: number }
   | {
@@ -202,8 +225,50 @@ export function initialState(session: SessionState = "starting", workspace: stri
     generation, session, workspace, version: null, pipeline: [], status: "idle", mode: "manual", recipient: "codex", models: null, settings: null, catalog: null, usage: null, problem: null,
     run: null, ended: null, current: null, turn: null, discussion: null, logs: null, reached: [], stopped: null,
     planning: { round: 1, limit: 0 }, impl: { round: 0, limit: 0 }, totals: { costUsd: 0, tokens: 0 }, live: { costUsd: 0, tokens: 0 },
-    decision: null, permissions: [], questions: [], attachments: [], timeline: [], dropped: 0, seq: 0,
+    decision: null, permissions: [], questions: [], attachments: [], timeline: [], dropped: 0, seq: 0, team: null,
   };
+}
+
+function onTeam(s: ViewState, e: Extract<DuoEvent, { type: `team.${string}` }>, now: number): ViewState {
+  const team = s.team ?? null;
+  switch (e.type) {
+    case "team.started":
+      return {
+        ...push(s, { kind: "info", text: `Team run ${e.runId}: ${e.members.map((m) => m.name).join(", ")}. You talk to the PM.`, tone: "info" }),
+        team: { runId: e.runId, request: e.request, phase: "INTAKE", members: e.members, tasks: [], working: [], outcome: null },
+      };
+    case "team.phase":
+      return team && team.runId === e.runId ? { ...s, team: { ...team, phase: e.phase } } : s;
+    case "team.task": {
+      if (!team) return s;
+      const tasks = team.tasks.some((t) => t.id === e.task.id) ? team.tasks.map((t) => (t.id === e.task.id ? e.task : t)) : [...team.tasks, e.task];
+      return { ...s, team: { ...team, tasks } };
+    }
+    case "team.member": {
+      if (!team) return s;
+      const working = team.working.filter((w) => w.member !== e.member);
+      if (e.state === "busy") working.push({ member: e.member, job: e.job ?? "work", task: e.task, since: now, last: null });
+      return { ...s, team: { ...team, working } };
+    }
+    case "team.activity": {
+      if (!team || e.activity.kind === "think") return s;
+      return { ...s, team: { ...team, working: team.working.map((w) => (w.member === e.member ? { ...w, last: e.activity.label } : w)) } };
+    }
+    case "team.retry":
+      return push(s, { kind: "warning", text: `${e.member} retries (${e.attempt}/${e.max}): ${e.reason.split("\n")[0]}` });
+    case "team.message":
+      // Your own words are in the timeline already (the composer put them there).
+      return e.from === "pm" ? push(s, { kind: "pm", text: e.text }) : s;
+    case "team.document":
+      return push(s, { kind: "document", docKind: e.kind, title: e.title, text: e.text });
+    case "team.finished": {
+      const over = e.outcome === "done" || e.outcome === "aborted";
+      const next = e.summary && e.outcome === "done" ? push(s, { kind: "info", text: e.summary, tone: "info" }) : s;
+      return { ...next, team: over ? null : team ? { ...team, working: [], outcome: e.outcome } : null };
+    }
+    default:
+      return s;
+  }
 }
 
 /**
@@ -355,6 +420,9 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
   switch (e.type) {
     case "run.started":
       return push({ ...s, run: { id: e.runId, task: e.task }, ended: null, reached: [], stopped: null, current: null }, { kind: "run", runId: e.runId, task: e.task });
+    case "team.started": case "team.phase": case "team.task": case "team.member": case "team.activity": case "team.retry": case "team.message":
+    case "team.document": case "team.finished":
+      return onTeam(s, e, now);
     case "phase.started":
       return {
         ...s, current: newStep(e.phase, e.round, now, e.role, e.agent), stopped: null, planning: e.planning, impl: e.impl, budget: e.budget ?? null,
@@ -433,7 +501,7 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
     }
     case "permission.requested":
       if (s.permissions.some((p) => p.request.id === e.request.id)) return s;
-      return { ...s, permissions: [...s.permissions, { role: e.role, agent: e.agent, request: e.request }] };
+      return { ...s, permissions: [...s.permissions, { role: e.role, ...(e.member ? { member: e.member } : {}), agent: e.agent, request: e.request }] };
     case "permission.answered": {
       const ask = s.permissions.find((p) => p.request.id === e.id);
       const rest = { ...s, permissions: s.permissions.filter((p) => p.request.id !== e.id) };
@@ -467,8 +535,8 @@ function endQuestion(s: ViewState, id: string, status: ClarificationStatus | "de
   if (!request) return s;
   const rest = { ...s, questions: s.questions.filter((q) => q.id !== id) };
   return push(rest, {
-    kind: "question", requestId: id, agent: request.agent, ...(request.role ? { role: request.role } : {}), questions: request.questions,
-    ...(answers ? { answers } : {}), status,
+    kind: "question", requestId: id, agent: request.agent, ...(request.role ? { role: request.role } : {}), ...(request.member ? { member: request.member } : {}),
+    questions: request.questions, ...(answers ? { answers } : {}), status,
   });
 }
 
@@ -602,8 +670,13 @@ export function reduce(s: ViewState, a: ViewAction): ViewState {
       return onEvent(s, a.event, a.now);
     case "ui":
       return onUi(s, a.update);
-    case "user":
-      return push(s, { kind: "user", text: a.text, ...(a.pipeline ? { pipeline: true } : {}), ...(a.discuss ? { discuss: true } : {}) });
+    case "user": {
+      // While a team runs, a plain message is for its PM.
+      const pm = !!s.team && !s.team.outcome && !a.pipeline && !a.discuss && !a.team && !a.text.trim().startsWith("/");
+      return push(s, {
+        kind: "user", text: a.text, ...(a.pipeline ? { pipeline: true } : {}), ...(a.discuss ? { discuss: true } : {}), ...(a.team ? { team: true } : {}), ...(pm ? { pm: true } : {}),
+      });
+    }
     case "note":
       return push(s, { kind: "info", text: a.text, tone: a.tone });
     case "workspace": {
@@ -648,13 +721,18 @@ export const readyAttachments = (s: ViewState): string[] => s.attachments.flatMa
 
 // ------------------------------------------------------------------ view model (pure, shared by render.ts and tests)
 /** `next`: the composer's next message is a task for the pipeline, or a question to discuss (picked in its recipient menu). */
-export function placeholder(s: ViewState, next: "pipeline" | "discuss" | null = null): string {
+/** A team runs in this tab now: plain messages go to its PM. */
+export const teamActive = (s: ViewState): boolean => !!s.team && !s.team.outcome && s.status === "running";
+
+export function placeholder(s: ViewState, next: "pipeline" | "discuss" | "team" | null = null): string {
   if (s.session === "choose-folder") return "Choose a workspace folder first";
   const name = AGENT_NAMES[s.recipient];
   if (next === "pipeline" && s.status !== "running") return "A task for the pipeline: Codex plans and reviews, Claude critiques and implements";
+  if (next === "team" && s.status !== "running") return "A request for the team: its PM asks what it needs, then the team plans, builds and tests it";
   if (next === "discuss" && s.status !== "running") {
     return `A question to discuss: ${name} answers, ${AGENT_NAMES[s.recipient === "codex" ? "claude" : "codex"]} reviews, until they agree`;
   }
+  if (teamActive(s)) return "A message for the PM… (/team status shows the board; Esc stops the team)";
   switch (s.status) {
     case "idle":
       return `Ask ${name}… (/ for commands, @ to tag files)`;

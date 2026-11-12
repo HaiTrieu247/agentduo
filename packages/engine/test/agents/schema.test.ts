@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { loadSchema, SCHEMA_NAMES, strictProblems, validateOutput } from "../../src/agents/schema.js";
 import { approval, critique, finding, impl, issue, plan, plannerAsk, plannerPlan, plannerQuestion, review } from "../helpers/builders.js";
+import { teamAnswer, teamCheck, teamPm, teamPlan, teamReview, teamTests, teamTriage, teamWork } from "../helpers/team-builders.js";
 
 describe("schemas", () => {
   it("are compatible with OpenAI strict structured outputs", () => {
@@ -11,8 +12,17 @@ describe("schemas", () => {
     const samples = {
       plan: plan(), planner: plannerPlan(), plan_critique: critique(false, [issue("C1")]), plan_approval: approval(true),
       implementation: impl("completed", ["F1"]), review: review(false, [finding("F1")], [], "a".repeat(40)),
+      team_pm: teamPm.brief(), team_plan: teamPlan(), team_work: teamWork(), team_review: teamReview("changes"), team_tests: teamTests(),
+      team_check: teamCheck("fail"), team_triage: teamTriage("add_tasks"), team_answer: teamAnswer(),
     } as const;
     for (const name of SCHEMA_NAMES) expect(validateOutput(name, samples[name]), name).toEqual([]);
+  });
+
+  it("accept every action of the PM's turn", () => {
+    const turns = [teamPm.none(), teamPm.questions(), teamPm.brief(), teamPm.planReview(true), teamPm.planReview(false), teamPm.leadNote(),
+      teamPm.teamAnswer("q1"), teamPm.changeRequest(), teamPm.acceptance("partly"), teamPm.escalate("T1-E1"), teamPm.areas([{ group: "web", criteria: ["AC1"] }])];
+    for (const turn of turns) expect(validateOutput("team_pm", turn), turn.action.kind).toEqual([]);
+    expect(validateOutput("team_pm", { message: null, action: { kind: "brief" } })).not.toEqual([]);
   });
 
   it("report readable errors", () => {

@@ -1,0 +1,115 @@
+{
+  "title": "The techlead's decision on a failure",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "action",
+    "assignee",
+    "guidance",
+    "question",
+    "tasks",
+    "report"
+  ],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "retry",
+        "reassign",
+        "fix_tests",
+        "add_tasks",
+        "escalate"
+      ]
+    },
+    "assignee": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "reassign: the worker member who takes the task over"
+    },
+    "guidance": {
+      "type": "string",
+      "description": "What the member who acts next must do differently"
+    },
+    "question": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "escalate: the question for the PM"
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "description",
+          "assignee",
+          "testers",
+          "area",
+          "depends_on",
+          "criteria",
+          "test_focus"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "T1, T2…"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "description": "What to do, precisely enough for the assignee to do it without asking"
+          },
+          "assignee": {
+            "type": "string",
+            "description": "The name of the worker member who does it"
+          },
+          "testers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The names of the checker members who test it (at least one)"
+          },
+          "area": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The files or folders it touches"
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The ids of the tasks that must be merged first"
+          },
+          "criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The ids of the acceptance criteria it serves"
+          },
+          "test_focus": {
+            "type": "string",
+            "description": "What its testers must cover"
+          }
+        }
+      },
+      "description": "add_tasks: the new tasks (empty otherwise)"
+    },
+    "report": {
+      "type": "string",
+      "description": "One line for the PM"
+    }
+  }
+}

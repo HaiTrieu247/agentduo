@@ -116,8 +116,8 @@ export class CodexBackend implements AgentBackend {
     return found;
   }
 
-  keepsSessions(role?: AgentRole): boolean {
-    return ![...this.cfg.args, ...(role ? this.cfg.role_args[role] ?? [] : [])].includes(CODEX_EPHEMERAL);
+  keepsSessions(role?: AgentRole, extraArgs: string[] = []): boolean {
+    return ![...this.cfg.args, ...(role ? this.cfg.role_args[role] ?? [] : []), ...extraArgs].includes(CODEX_EPHEMERAL);
   }
 
   /**
@@ -132,17 +132,18 @@ export class CodexBackend implements AgentBackend {
   buildArgs(a: BuildArgs): string[] {
     const text = a.mode === "text";
     const session = a.session;
-    const roleArgs = text ? [] : this.cfg.role_args[a.role] ?? [];
-    // A pipeline role's own model and reasoning effort; the effort goes after the args every call gets, so it wins.
-    const model = text ? this.cfg.model : roleModel(this.cfg, a.role);
-    const effort = text ? null : roleEffort(this.cfg, a.role);
+    // A pipeline role's own model and reasoning effort (or a team member's); the effort goes after the args every call gets, so it wins.
+    const profile = text ? undefined : a.profile;
+    const roleArgs = text ? [] : profile ? profile.args : this.cfg.role_args[a.role!] ?? [];
+    const model = text ? this.cfg.model : profile ? profile.model ?? this.cfg.model : roleModel(this.cfg, a.role!);
+    const effort = text ? null : profile ? profile.effort : roleEffort(this.cfg, a.role!);
     const ephemeral = session?.keep || [...this.cfg.args, ...roleArgs].includes(CODEX_EPHEMERAL) ? [] : [CODEX_EPHEMERAL];
     return [
       "exec", "--json",
       "--color", "never",
       ...(text ? ["--skip-git-repo-check"] : [...(a.skipGitRepoCheck ? ["--skip-git-repo-check"] : []), "--output-schema", schemaPath(a.schemaName)]),
       "--output-last-message", a.lastMessageFile,
-      "--cd", this.repo,
+      "--cd", (!text && a.cwd) || this.repo,
       ...(model ? ["--model", model] : []),
       ...ephemeral,
       ...this.cfg.args,

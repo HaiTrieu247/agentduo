@@ -1,0 +1,112 @@
+{
+  "title": "A tester's or checker's result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "summary",
+    "results",
+    "failures",
+    "added_tests"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "case",
+          "status",
+          "detail"
+        ],
+        "properties": {
+          "case": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail",
+              "skipped"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "detail",
+          "reproduction",
+          "expected",
+          "actual",
+          "criteria",
+          "suspect"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Q1, Q2…"
+          },
+          "title": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "reproduction": {
+            "type": "string"
+          },
+          "expected": {
+            "type": "string"
+          },
+          "actual": {
+            "type": "string"
+          },
+          "criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "suspect": {
+            "type": "string",
+            "enum": [
+              "code",
+              "test",
+              "plan"
+            ],
+            "description": "What you think is wrong"
+          }
+        }
+      }
+    },
+    "added_tests": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Test files you added in this turn"
+    }
+  }
+}

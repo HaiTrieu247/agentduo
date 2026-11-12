@@ -1,3 +1,4 @@
+import { teamConfigErrors, teamMembers } from "@agentduo/engine/team/config";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { killAllActive } from "@agentduo/engine/agents/process";
@@ -111,6 +112,9 @@ function agentsFor(text: string, route: Route, cfg: ConfigData, recipient: Backe
   const input = parseInput(text);
   if (input.kind === "pipeline" || (route === "pipeline" && input.kind === "message")) return Object.values(cfg.agents);
   if (input.kind === "discuss" || (route === "discuss" && input.kind === "message")) return ["codex", "claude"];
+  if ((input.kind === "team" && input.action === "start") || (route === "team" && input.kind === "message")) {
+    return teamConfigErrors(cfg.team).length ? [] : [...new Set(teamMembers(cfg.team).map((m) => m.backend))];
+  }
   if (input.kind === "ask") return [input.backend];
   return input.kind === "message" ? [recipient] : [];
 }
@@ -346,7 +350,8 @@ export class RuntimeSession {
       const chat = await this.ensureSession(conversation, (cfg) => agentsFor(text || (attachments.length ? "files" : ""), route, cfg, this.recipientOf(conversation)));
       // The files the tab showed as ready, by id: the chat sends only those, and only its own.
       const o = { attachments };
-      await (route === "pipeline" ? chat.submitPipeline(text, o) : route === "discuss" ? chat.submitDiscuss(text, o) : chat.submit(text, o));
+      await (route === "pipeline" ? chat.submitPipeline(text, o) : route === "discuss" ? chat.submitDiscuss(text, o) : route === "team" ? chat.submitTeam(text, o)
+        : chat.submit(text, o));
     });
   }
 

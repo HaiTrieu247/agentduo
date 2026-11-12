@@ -396,7 +396,7 @@ function listChats(io: CliIO, env: Env): number {
  * and it shows what they said in its conversation. It opens without either CLI (help and settings need none), and
  * without Git; each question checks its agent's CLI, and /pipeline those of every role and where its snapshots can go.
  */
-async function chatCommand(io: CliIO, opts: ChatCommandOptions, wanted?: string): Promise<number> {
+async function chatCommand(io: CliIO, opts: ChatCommandOptions, wanted?: string, initial?: string): Promise<number> {
   const env = await prepare(io, opts);
   if (opts.list) return listChats(io, env);
   let conversationId: string | undefined;
@@ -452,6 +452,8 @@ async function chatCommand(io: CliIO, opts: ChatCommandOptions, wanted?: string)
   refresh.unref?.();
   try {
     await chat.greet();
+    // `duo team <request>`: the chat opens on it, as if it had been typed.
+    if (initial) await chat.submit(initial);
     await session.exited;
     await chat.stop(); // a running run stops at its current step and stays resumable; the workspace goes back with it
   } finally {
@@ -663,6 +665,11 @@ export async function main(argv: string[], io: CliIO = processIO()): Promise<num
     .option("--list", "list the saved conversations, newest first").option("--accept-edits", acceptEdits).addOption(profile()))
     .action(async (conversation: string | undefined, _opts: ChatCommandOptions, cmd: Command) => {
       exitCode = await chatCommand(io, withGlobals<ChatCommandOptions>(cmd), conversation);
+    });
+  common(program.command("team").description("open the chat and hand the request to a team (PM, techlead, devs, testers): you talk to the PM only")
+    .argument("<request...>", "what you want the team to build").option("--accept-edits", acceptEdits))
+    .action(async (words: string[], _opts: ChatCommandOptions, cmd: Command) => {
+      exitCode = await chatCommand(io, withGlobals<ChatCommandOptions>(cmd), undefined, `/team ${words.join(" ")}`);
     });
   common(program.command("status").description("show a run's state").argument("[runId]"))
     .action(async (runId: string | undefined, _opts: CommonOptions, cmd: Command) => {

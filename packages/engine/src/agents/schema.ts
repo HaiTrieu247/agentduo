@@ -3,7 +3,11 @@ import { join } from "node:path";
 import { Ajv, type ErrorObject, type ValidateFunction } from "ajv";
 import { packageRoot } from "../paths.js";
 
-export const SCHEMA_NAMES = ["plan", "planner", "plan_critique", "plan_approval", "implementation", "review"] as const;
+export const SCHEMA_NAMES = [
+  "plan", "planner", "plan_critique", "plan_approval", "implementation", "review",
+  // Team mode (packages/engine/src/team).
+  "team_pm", "team_plan", "team_work", "team_review", "team_tests", "team_check", "team_triage", "team_answer",
+] as const;
 export type SchemaName = (typeof SCHEMA_NAMES)[number];
 
 const ajv = new Ajv({ allErrors: true, strict: false });

@@ -107,6 +107,9 @@ export function internalNotice(meta: Extract<RunGit, { mode: "internal" }>): str
   return `This run keeps its snapshots in agentduo's own Git repository, ${meta.gitDir}, outside the workspace (no .git is created in it).`;
 }
 
+/** What owns a run's snapshots: a pipeline run, or a team run (packages/engine/src/team), by its id and the snapshots it refers to. */
+export type GitOwner = Pick<RunState, "taskId" | "git" | "base" | "lastSnapshot">;
+
 interface Marker {
   repositoryId: string;
   taskId: string;
@@ -114,7 +117,7 @@ interface Marker {
 }
 
 /** A new internal repository for the run, created whole before anything names it. */
-async function createInternal(state: RunState, workspace: string, root: string): Promise<Extract<RunGit, { mode: "internal" }>> {
+async function createInternal(state: GitOwner, workspace: string, root: string): Promise<Extract<RunGit, { mode: "internal" }>> {
   const repositoryId = randomUUID();
   const gitDir = join(root, `${repositoryId}.git`);
   try {
@@ -135,7 +138,7 @@ async function createInternal(state: RunState, workspace: string, root: string):
  * says it is under the data root (whatever `gitDir` the state names), outside the workspace, a bare repository, with
  * a marker naming the run, its workspace and the id. Nothing runs in it before that.
  */
-function openInternal(meta: Extract<RunGit, { mode: "internal" }>, state: RunState, workspace: string, env: NodeJS.ProcessEnv): Git {
+function openInternal(meta: Extract<RunGit, { mode: "internal" }>, state: GitOwner, workspace: string, env: NodeJS.ProcessEnv): Git {
   const id = meta.repositoryId;
   const bad = (why: string) => new RunGitError(`run ${state.taskId} cannot use its snapshot repository ${meta.gitDir}: ${why}`);
   if (typeof id !== "string" || !UUID.test(id)) throw bad("the run names no valid repository id");
@@ -169,7 +172,7 @@ function openInternal(meta: Extract<RunGit, { mode: "internal" }>, state: RunSta
  * The snapshots a run refers to are whole in its internal repository: the state's commits and those its refs keep (a
  * round re-run starts from one), with every tree and file in them. A diff would fail on a missing one only later.
  */
-async function checkSnapshots(git: Git, state: RunState): Promise<void> {
+async function checkSnapshots(git: Git, state: GitOwner): Promise<void> {
   const where = git.internal?.gitDir ?? git.dir;
   const commits = [state.base, state.lastSnapshot].flatMap((snap) => (snap ? [snap.commit] : []));
   for (const commit of commits) {
@@ -189,7 +192,7 @@ async function checkSnapshots(git: Git, state: RunState): Promise<void> {
  * before any agent runs). A run that recorded one keeps it, whatever the workspace looks like now; an older run with
  * snapshots and no record is native, as every run was then. Throws RunGitError, having changed nothing the run uses.
  */
-export async function prepareRunGit(state: RunState, workspace: string, env: NodeJS.ProcessEnv): Promise<{ git: Git; meta: RunGit }> {
+export async function prepareRunGit(state: GitOwner, workspace: string, env: NodeJS.ProcessEnv): Promise<{ git: Git; meta: RunGit }> {
   let meta = state.git;
   try {
     if (!meta && (state.base || state.lastSnapshot)) meta = { mode: "native" };
@@ -216,6 +219,6 @@ export async function prepareRunGit(state: RunState, workspace: string, env: Nod
  * The Git a run's snapshots are read from (Changes, /diff, the report's diff stat): the internal repository it
  * recorded, checked, or the workspace's. Creates and records nothing, and never falls back to another repository.
  */
-export function openRunGit(state: RunState, workspace: string, env: NodeJS.ProcessEnv): Git {
+export function openRunGit(state: GitOwner, workspace: string, env: NodeJS.ProcessEnv): Git {
   return state.git?.mode === "internal" ? openInternal(state.git, state, workspace, env) : new Git(workspace);
 }

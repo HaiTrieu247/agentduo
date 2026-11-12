@@ -1162,27 +1162,27 @@ var require_stringifyString = __commonJS({
       return true;
     }
     function doubleQuotedString(value, ctx) {
-      const json = JSON.stringify(value);
+      const json2 = JSON.stringify(value);
       if (ctx.options.doubleQuotedAsJSON)
-        return json;
+        return json2;
       const { implicitKey } = ctx;
       const minMultiLineLength = ctx.options.doubleQuotedMinMultiLineLength;
       const indent = ctx.indent || (containsDocumentMarker(value) ? "  " : "");
       let str = "";
       let start = 0;
-      for (let i = 0, ch = json[i]; ch; ch = json[++i]) {
-        if (ch === " " && json[i + 1] === "\\" && json[i + 2] === "n") {
-          str += json.slice(start, i) + "\\ ";
+      for (let i = 0, ch = json2[i]; ch; ch = json2[++i]) {
+        if (ch === " " && json2[i + 1] === "\\" && json2[i + 2] === "n") {
+          str += json2.slice(start, i) + "\\ ";
           i += 1;
           start = i;
           ch = "\\";
         }
         if (ch === "\\")
-          switch (json[i + 1]) {
+          switch (json2[i + 1]) {
             case "u":
               {
-                str += json.slice(start, i);
-                const code = json.substr(i + 2, 4);
+                str += json2.slice(start, i);
+                const code = json2.substr(i + 2, 4);
                 switch (code) {
                   case "0000":
                     str += "\\0";
@@ -1212,23 +1212,23 @@ var require_stringifyString = __commonJS({
                     if (code.substr(0, 2) === "00")
                       str += "\\x" + code.substr(2);
                     else
-                      str += json.substr(i, 6);
+                      str += json2.substr(i, 6);
                 }
                 i += 5;
                 start = i + 1;
               }
               break;
             case "n":
-              if (implicitKey || json[i + 2] === '"' || json.length < minMultiLineLength) {
+              if (implicitKey || json2[i + 2] === '"' || json2.length < minMultiLineLength) {
                 i += 1;
               } else {
-                str += json.slice(start, i) + "\n\n";
-                while (json[i + 2] === "\\" && json[i + 3] === "n" && json[i + 4] !== '"') {
+                str += json2.slice(start, i) + "\n\n";
+                while (json2[i + 2] === "\\" && json2[i + 3] === "n" && json2[i + 4] !== '"') {
                   str += "\n";
                   i += 2;
                 }
                 str += indent;
-                if (json[i + 2] === " ")
+                if (json2[i + 2] === " ")
                   str += "\\";
                 i += 1;
                 start = i + 1;
@@ -1238,7 +1238,7 @@ var require_stringifyString = __commonJS({
               i += 1;
           }
       }
-      str = start ? str + json.slice(start) : json;
+      str = start ? str + json2.slice(start) : json2;
       return implicitKey ? str : foldFlowLines.foldFlowLines(str, indent, foldFlowLines.FOLD_QUOTED, getFoldOptions(ctx, false));
     }
     function singleQuotedString(value, ctx) {
@@ -1323,9 +1323,9 @@ ${indent}`) + "'";
         start = start.replace(/\n+/g, `$&${indent}`);
       }
       const indentSize = indent ? "2" : "1";
-      let header2 = (startWithSpace ? indentSize : "") + chomp;
+      let header3 = (startWithSpace ? indentSize : "") + chomp;
       if (comment) {
-        header2 += " " + commentString(comment.replace(/ ?[\r\n]+/g, " "));
+        header3 += " " + commentString(comment.replace(/ ?[\r\n]+/g, " "));
         if (onComment)
           onComment();
       }
@@ -1340,11 +1340,11 @@ ${indent}`) + "'";
         }
         const body = foldFlowLines.foldFlowLines(`${start}${foldedValue}${end}`, indent, foldFlowLines.FOLD_BLOCK, foldOptions);
         if (!literalFallback)
-          return `>${header2}
+          return `>${header3}
 ${indent}${body}`;
       }
       value = value.replace(/\n+/g, `$&${indent}`);
-      return `|${header2}
+      return `|${header3}
 ${indent}${start}${value}${end}`;
     }
     function plainString(item, ctx, onComment, onChompKeep) {
@@ -3660,11 +3660,11 @@ var require_Document = __commonJS({
           throw new Error(`With a null YAML version, the { schema: Schema } option is required`);
       }
       // json & jsonArg are only used from toJSON()
-      toJS({ json, jsonArg, mapAsMap, maxAliasCount, onAnchor, reviver } = {}) {
+      toJS({ json: json2, jsonArg, mapAsMap, maxAliasCount, onAnchor, reviver } = {}) {
         const ctx = {
           anchors: /* @__PURE__ */ new Map(),
           doc: this,
-          keep: !json,
+          keep: !json2,
           mapAsMap: mapAsMap === true,
           mapKeyWarned: false,
           maxAliasCount: typeof maxAliasCount === "number" ? maxAliasCount : 100
@@ -4447,10 +4447,10 @@ var require_resolve_block_scalar = __commonJS({
     var Scalar = require_Scalar();
     function resolveBlockScalar(ctx, scalar, onError) {
       const start = scalar.offset;
-      const header2 = parseBlockScalarHeader(scalar, ctx.options.strict, onError);
-      if (!header2)
+      const header3 = parseBlockScalarHeader(scalar, ctx.options.strict, onError);
+      if (!header3)
         return { value: "", type: null, comment: "", range: [start, start, start] };
-      const type = header2.mode === ">" ? Scalar.Scalar.BLOCK_FOLDED : Scalar.Scalar.BLOCK_LITERAL;
+      const type = header3.mode === ">" ? Scalar.Scalar.BLOCK_FOLDED : Scalar.Scalar.BLOCK_LITERAL;
       const lines = scalar.source ? splitLines(scalar.source) : [];
       let chompStart = lines.length;
       for (let i = lines.length - 1; i >= 0; --i) {
@@ -4461,26 +4461,26 @@ var require_resolve_block_scalar = __commonJS({
           break;
       }
       if (chompStart === 0) {
-        const value2 = header2.chomp === "+" && lines.length > 0 ? "\n".repeat(Math.max(1, lines.length - 1)) : "";
-        let end2 = start + header2.length;
+        const value2 = header3.chomp === "+" && lines.length > 0 ? "\n".repeat(Math.max(1, lines.length - 1)) : "";
+        let end2 = start + header3.length;
         if (scalar.source)
           end2 += scalar.source.length;
-        return { value: value2, type, comment: header2.comment, range: [start, end2, end2] };
+        return { value: value2, type, comment: header3.comment, range: [start, end2, end2] };
       }
-      let trimIndent = scalar.indent + header2.indent;
-      let offset = scalar.offset + header2.length;
+      let trimIndent = scalar.indent + header3.indent;
+      let offset = scalar.offset + header3.length;
       let contentStart = 0;
       for (let i = 0; i < chompStart; ++i) {
         const [indent, content] = lines[i];
         if (content === "" || content === "\r") {
-          if (header2.indent === 0 && indent.length > trimIndent)
+          if (header3.indent === 0 && indent.length > trimIndent)
             trimIndent = indent.length;
         } else {
           if (indent.length < trimIndent) {
             const message = "Block scalars with more-indented leading empty lines must use an explicit indentation indicator";
             onError(offset + indent.length, "MISSING_CHAR", message);
           }
-          if (header2.indent === 0)
+          if (header3.indent === 0)
             trimIndent = indent.length;
           contentStart = i;
           if (trimIndent === 0 && !ctx.atRoot) {
@@ -4507,7 +4507,7 @@ var require_resolve_block_scalar = __commonJS({
         if (crlf)
           content = content.slice(0, -1);
         if (content && indent.length < trimIndent) {
-          const src = header2.indent ? "explicit indentation indicator" : "first line";
+          const src = header3.indent ? "explicit indentation indicator" : "first line";
           const message = `Block scalar lines must not be less indented than their ${src}`;
           onError(offset - content.length - (crlf ? 2 : 1), "BAD_INDENT", message);
           indent = "";
@@ -4534,7 +4534,7 @@ var require_resolve_block_scalar = __commonJS({
           prevMoreIndented = false;
         }
       }
-      switch (header2.chomp) {
+      switch (header3.chomp) {
         case "-":
           break;
         case "+":
@@ -4546,8 +4546,8 @@ var require_resolve_block_scalar = __commonJS({
         default:
           value += "\n";
       }
-      const end = start + header2.length + scalar.source.length;
-      return { value, type, comment: header2.comment, range: [start, end, end] };
+      const end = start + header3.length + scalar.source.length;
+      return { value, type, comment: header3.comment, range: [start, end, end] };
     }
     function parseBlockScalarHeader({ offset, props }, strict, onError) {
       if (props[0].type !== "block-scalar-header") {
@@ -5386,10 +5386,10 @@ var require_cst_scalar = __commonJS({
             type = "QUOTE_DOUBLE";
             break;
           case "block-scalar": {
-            const header2 = token.props[0];
-            if (header2.type !== "block-scalar-header")
+            const header3 = token.props[0];
+            if (header3.type !== "block-scalar-header")
               throw new Error("Invalid block scalar header");
-            type = header2.source[0] === ">" ? "BLOCK_FOLDED" : "BLOCK_LITERAL";
+            type = header3.source[0] === ">" ? "BLOCK_FOLDED" : "BLOCK_LITERAL";
             break;
           }
           default:
@@ -5421,10 +5421,10 @@ var require_cst_scalar = __commonJS({
       const head = source.substring(0, he);
       const body = source.substring(he + 1) + "\n";
       if (token.type === "block-scalar") {
-        const header2 = token.props[0];
-        if (header2.type !== "block-scalar-header")
+        const header3 = token.props[0];
+        if (header3.type !== "block-scalar-header")
           throw new Error("Invalid block scalar header");
-        header2.source = head;
+        header3.source = head;
         token.source = body;
       } else {
         const { offset } = token;
@@ -9567,8 +9567,8 @@ var require_resolve = __commonJS({
       }
       return count;
     }
-    function getFullPath(resolver, id = "", normalize) {
-      if (normalize !== false)
+    function getFullPath(resolver, id = "", normalize2) {
+      if (normalize2 !== false)
         id = normalizeId(id);
       const p = resolver.parse(id);
       return _getFullPath(resolver, p);
@@ -10316,7 +10316,7 @@ var require_compile = __commonJS({
       const schOrFunc = root2.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve13.call(this, root2, ref);
+      let _sch = resolve14.call(this, root2, ref);
       if (_sch === void 0) {
         const schema = (_a = root2.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
         const { schemaId } = this.opts;
@@ -10343,7 +10343,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve13(root2, ref) {
+    function resolve14(root2, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -11197,7 +11197,7 @@ var require_fast_uri = __commonJS({
       }
       return stringScheme;
     }
-    function normalize(uri, options) {
+    function normalize2(uri, options) {
       if (typeof uri === "string") {
         uri = /** @type {T} */
         normalizeString(uri, options);
@@ -11207,7 +11207,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve13(baseURI, relativeURI, options) {
+    function resolve14(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const {
         parsed: baseParsed,
@@ -11597,8 +11597,8 @@ var require_fast_uri = __commonJS({
     }
     var fastUri = {
       SCHEMES,
-      normalize,
-      resolve: resolve13,
+      normalize: normalize2,
+      resolve: resolve14,
       resolveComponent,
       equal,
       serialize,
@@ -14271,7 +14271,7 @@ var require_ajv = __commonJS({
 });
 
 // packages/host/src/worker.ts
-import { resolve as resolve12 } from "path";
+import { resolve as resolve13 } from "path";
 
 // packages/engine/src/agents/process.ts
 import { spawn, spawnSync } from "child_process";
@@ -14484,6 +14484,7 @@ var COMMANDS = [
   { name: "/codex", usage: "/codex <question>", description: "ask Codex; /codex alone sends your next messages to Codex", args: true },
   { name: "/pipeline", usage: "/pipeline [--profile lightweight|standard|thorough] <task>", description: "run the full workflow: plan \u2192 critique \u2192 finalize \u2192 implement \u2192 verify \u2192 review", args: true },
   { name: "/discuss", usage: "/discuss <question>", description: "the recipient answers, the other agent reviews, they revise until they agree, then Codex sums it up", args: true },
+  { name: "/team", usage: "/team <request> | status | members | abort | undo [run]", description: "hand the request to a team (PM, techlead, devs, testers): you talk to the PM only", args: true },
   { name: "/plan", usage: "/plan", description: "show the final plan of the current run", args: false },
   { name: "/diff", usage: "/diff", description: "show what the current run changed", args: false },
   { name: "/status", usage: "/status", description: "show where the current run is, and what it has cost", args: false },
@@ -14642,6 +14643,15 @@ function parsePathArg(input, platform) {
   return !escapedFirst && home ? { path: out.slice(1), home: true } : { path: out, home: false };
 }
 var ATTACH_USAGE = 'usage: /attach <path>, e.g. /attach screenshots/bug.png or /attach "~/Desktop/My notes.pdf" (one file at a time)';
+var TEAM_USAGE = "usage: /team <request> (e.g. /team Add a CSV export to the reports page), or /team status|members|abort|undo [run]";
+function teamCommand(rest) {
+  if (!rest) return usage(TEAM_USAGE);
+  const words2 = rest.split(/\s+/);
+  const word = words2[0].toLowerCase();
+  if (words2.length === 1 && (word === "status" || word === "members" || word === "abort")) return { kind: "team", action: word };
+  if (word === "undo" && words2.length <= 2) return { kind: "team", action: "undo", runId: words2[1] ?? null };
+  return { kind: "team", action: "start", request: rest };
+}
 var PIPELINE_USAGE = `usage: /pipeline [--profile ${PIPELINE_PROFILES.join("|")}] <task>, e.g. /pipeline --profile lightweight Fix the typo in README`;
 function pipelineCommand(rest) {
   const m = /^--profile(?:=|\s+)(\S+)\s*([\s\S]*)$/.exec(rest);
@@ -14665,6 +14675,8 @@ function parseInput(raw, platform) {
       return pipelineCommand(rest);
     case "discuss":
       return rest ? { kind: "discuss", question: rest } : usage("usage: /discuss <question>, e.g. /discuss Redis or Postgres for the job queue?");
+    case "team":
+      return teamCommand(rest);
     case "settings":
       return settingsCommand(rest);
     case "mode":
@@ -14713,6 +14725,228 @@ function helpText() {
   }).join("\n\n");
 }
 
+// packages/engine/src/team/config.ts
+var ROLE_KINDS = ["pm", "lead", "worker", "checker"];
+var TEAM_DEFAULTS = {
+  levels: {
+    junior: { can_review: false, claude: { model: "sonnet", effort: "low" }, codex: { effort: "low" } },
+    mid: { can_review: false, claude: { model: "sonnet", effort: "medium" }, codex: { effort: "medium" } },
+    senior: { can_review: true, claude: { model: "opus", effort: "high" }, codex: { effort: "high" } }
+  },
+  roles: {
+    pm: { kind: "pm" },
+    techlead: { kind: "lead" },
+    dev: { kind: "worker" },
+    qa: { kind: "checker" }
+  },
+  members: [
+    { role: "pm", level: "senior", cli: "codex" },
+    { role: "techlead", level: "senior", cli: "codex" },
+    { role: "dev", level: "senior", cli: "claude" },
+    { role: "dev", level: "mid", cli: "claude" },
+    { role: "qa", level: "mid", cli: "claude" }
+  ],
+  max_parallel: 3,
+  limits: { max_review_rounds: 3, max_task_attempts: 3 },
+  worktree: { setup: [], link: [] }
+};
+var NAME = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+var EFFORTS = { claude: CLAUDE_EFFORTS, codex: CODEX_EFFORTS };
+var isPlainObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var isPosInt = (v) => Number.isInteger(v) && v >= 1;
+var isStringList = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
+var isModel = (v) => typeof v === "string" && !!v.trim() && v.length <= 200 && !/[\s\u0000-\u001f]/.test(v);
+var describeName = "must be lowercase letters, digits, '-' or '_' (at most 40), starting with a letter or digit";
+function entryNames(entries, kindOf) {
+  const numbered = /* @__PURE__ */ new Map();
+  return entries.map((e) => {
+    if (typeof e.name === "string") return [e.name];
+    const kind = kindOf(e.role);
+    const group = typeof e.group === "string" && NAME.test(e.group) ? e.group : null;
+    const count = isPosInt(e.count) ? e.count : 1;
+    const names = [];
+    for (let i = 0; i < count; i++) {
+      if (kind === "pm" || kind === "lead") names.push(group ? `${String(e.role)}-${group}` : String(e.role));
+      else {
+        const key = `${String(e.role)}|${group ?? ""}`;
+        const n = (numbered.get(key) ?? 0) + 1;
+        numbered.set(key, n);
+        names.push(group ? `${String(e.role)}-${group}-${n}` : `${String(e.role)}-${n}`);
+      }
+    }
+    return names;
+  });
+}
+function teamMembers(team) {
+  const levels = Object.keys(team.levels);
+  const names = entryNames(team.members, (role) => team.roles[role]?.kind);
+  const out = [];
+  team.members.forEach((entry, i) => {
+    const kind = team.roles[entry.role].kind;
+    const level = team.levels[entry.level] ?? {};
+    const cli = level[entry.cli] ?? {};
+    for (const name2 of names[i]) {
+      out.push({
+        name: name2,
+        role: entry.role,
+        kind,
+        group: entry.group ?? null,
+        level: entry.level,
+        levelRank: levels.indexOf(entry.level),
+        canReview: level.can_review === true,
+        backend: entry.cli,
+        model: entry.model ?? cli.model ?? null,
+        effort: entry.effort ?? cli.effort ?? null,
+        args: [...entry.args ?? []]
+      });
+    }
+  });
+  return out;
+}
+var headPm = (members) => members.find((m) => m.kind === "pm" && m.group === null);
+function teamGroups(members) {
+  const names = [...new Set(members.flatMap((m) => m.group ? [m.group] : []))];
+  if (!names.length) {
+    return [{ name: null, lead: members.find((m) => m.kind === "lead"), pm: null, members: members.filter((m) => m.kind !== "pm") }];
+  }
+  return names.map((name2) => {
+    const inGroup = members.filter((m) => m.group === name2);
+    return { name: name2, lead: inGroup.find((m) => m.kind === "lead"), pm: inGroup.find((m) => m.kind === "pm") ?? null, members: inGroup };
+  });
+}
+var memberProfile = (m) => ({ model: m.model, effort: m.effort, args: [...m.args] });
+function levelErrors(name2, level) {
+  const where = `team.levels.${name2}`;
+  if (!isPlainObject(level)) return [`${where} must be a mapping`];
+  const errors = [];
+  const unknown = Object.keys(level).filter((k) => !["can_review", "claude", "codex"].includes(k));
+  if (unknown.length) errors.push(`${where}: unknown keys ${unknown.sort().join(", ")}`);
+  if (level.can_review !== void 0 && typeof level.can_review !== "boolean") errors.push(`${where}.can_review must be true or false`);
+  for (const cli of ["claude", "codex"]) {
+    const value = level[cli];
+    if (value === void 0 || value === null) continue;
+    if (!isPlainObject(value)) {
+      errors.push(`${where}.${cli} must be a mapping with model and effort`);
+      continue;
+    }
+    const extra = Object.keys(value).filter((k) => !["model", "effort"].includes(k));
+    if (extra.length) errors.push(`${where}.${cli}: unknown keys ${extra.sort().join(", ")}`);
+    if (value.model != null && !isModel(value.model)) errors.push(`${where}.${cli}.model must be a model name or null`);
+    if (value.effort != null && !EFFORTS[cli].includes(value.effort)) errors.push(`${where}.${cli}.effort must be one of ${EFFORTS[cli].join(", ")}, or null`);
+  }
+  return errors;
+}
+var insidePath = (p) => !!p && !/^([a-zA-Z]:)?[\\/]/.test(p) && !p.split(/[\\/]/).some((part) => part === ".." || part === "");
+function teamConfigErrors(raw) {
+  if (!isPlainObject(raw)) return ["team must be a mapping"];
+  const team = raw;
+  const errors = [];
+  const levels = isPlainObject(team.levels) ? Object.keys(team.levels) : [];
+  if (!isPlainObject(team.levels) || !levels.length) errors.push("team.levels must be a mapping of at least one level");
+  else {
+    for (const name2 of levels) {
+      if (!NAME.test(name2)) errors.push(`team.levels: level name '${name2}' ${describeName}`);
+      errors.push(...levelErrors(name2, team.levels[name2]));
+    }
+  }
+  const roles = isPlainObject(team.roles) ? Object.keys(team.roles) : [];
+  if (!isPlainObject(team.roles) || !roles.length) errors.push("team.roles must be a mapping of at least one role");
+  else {
+    for (const name2 of roles) {
+      const role = team.roles[name2];
+      if (!NAME.test(name2)) errors.push(`team.roles: role name '${name2}' ${describeName}`);
+      if (!isPlainObject(role)) {
+        errors.push(`team.roles.${name2} must be a mapping with a kind`);
+        continue;
+      }
+      if (!ROLE_KINDS.includes(role.kind)) errors.push(`team.roles.${name2}.kind must be one of ${ROLE_KINDS.join(", ")}`);
+      const extra = Object.keys(role).filter((k) => k !== "kind");
+      if (extra.length) errors.push(`team.roles.${name2}: unknown keys ${extra.sort().join(", ")}`);
+    }
+  }
+  if (!isPosInt(team.max_parallel)) errors.push("team.max_parallel must be a positive integer");
+  if (!isPlainObject(team.limits)) errors.push("team.limits must be a mapping");
+  else for (const key of ["max_review_rounds", "max_task_attempts"]) {
+    if (!isPosInt(team.limits[key])) errors.push(`team.limits.${key} must be a positive integer`);
+  }
+  if (!isPlainObject(team.worktree)) errors.push("team.worktree must be a mapping with setup and link");
+  else {
+    if (!isStringList(team.worktree.setup)) errors.push("team.worktree.setup must be a list of strings");
+    if (!isStringList(team.worktree.link)) errors.push("team.worktree.link must be a list of strings");
+    else team.worktree.link.forEach((p, i) => {
+      if (!insidePath(p)) errors.push(`team.worktree.link[${i}] must be a relative path inside the workspace`);
+    });
+  }
+  if (!Array.isArray(team.members)) {
+    errors.push("team.members must be a list");
+    return errors;
+  }
+  const names = /* @__PURE__ */ new Map();
+  const placed = [];
+  const made = entryNames(
+    team.members.map((e) => isPlainObject(e) ? e : {}),
+    (r) => isPlainObject(team.roles) && typeof r === "string" ? team.roles[r]?.kind : void 0
+  );
+  team.members.forEach((entry, i) => {
+    const where = `team.members[${i}]`;
+    if (!isPlainObject(entry)) {
+      errors.push(`${where} must be a mapping with role, level and cli`);
+      return;
+    }
+    const e = entry;
+    const extra = Object.keys(e).filter((k) => !["role", "level", "cli", "count", "name", "group", "model", "effort", "args"].includes(k));
+    if (extra.length) errors.push(`${where}: unknown keys ${extra.sort().join(", ")}`);
+    const role = isPlainObject(team.roles) && typeof e.role === "string" ? team.roles[e.role] : void 0;
+    if (!role) errors.push(`${where}.role: unknown role '${String(e.role)}' (roles: ${roles.join(", ")})`);
+    if (typeof e.level !== "string" || !levels.includes(e.level)) errors.push(`${where}.level: unknown level '${String(e.level)}' (levels: ${levels.join(", ")})`);
+    const cli = e.cli === "codex" || e.cli === "claude" ? e.cli : null;
+    if (!cli) errors.push(`${where}.cli must be one of codex, claude`);
+    if (e.count !== void 0 && !isPosInt(e.count)) errors.push(`${where}.count must be a positive integer`);
+    if (e.name !== void 0) {
+      if (typeof e.name !== "string" || !NAME.test(e.name)) errors.push(`${where}.name ${describeName}`);
+      if (e.count !== void 0 && e.count !== 1) errors.push(`${where}: a member with a name has count 1`);
+    }
+    if (e.model != null && !isModel(e.model)) errors.push(`${where}.model must be a model name or null`);
+    if (e.effort != null && cli && !EFFORTS[cli].includes(e.effort)) errors.push(`${where}.effort must be one of ${EFFORTS[cli].join(", ")}, or null`);
+    if (e.args !== void 0 && !isStringList(e.args)) errors.push(`${where}.args must be a list of strings`);
+    if (e.group !== void 0 && (typeof e.group !== "string" || !NAME.test(e.group))) errors.push(`${where}.group ${describeName}`);
+    if (!role || !ROLE_KINDS.includes(role.kind)) return;
+    const group = typeof e.group === "string" && NAME.test(e.group) ? e.group : null;
+    for (const name2 of made[i]) {
+      if (names.has(name2)) errors.push(`${where}: duplicate member name '${name2}'`);
+      names.set(name2, i);
+      placed.push({ name: name2, kind: role.kind, group });
+    }
+  });
+  const groups = [...new Set(placed.flatMap((p) => p.group ? [p.group] : []))];
+  const list = (xs) => xs.map((x) => x.name).join(", ");
+  const heads = placed.filter((p) => p.kind === "pm" && !p.group);
+  if (heads.length !== 1) {
+    errors.push(`team.members must have exactly one member whose role is of kind pm${groups.length ? " and who is in no group (the head PM)" : ""}` + (heads.length ? ` (found ${heads.length}: ${list(heads)})` : ""));
+  }
+  if (!groups.length) {
+    const leads = placed.filter((p) => p.kind === "lead");
+    if (leads.length !== 1) errors.push(`team.members must have exactly one member whose role is of kind lead${leads.length ? ` (found ${leads.length}: ${list(leads)})` : ""}`);
+    for (const kind of ["worker", "checker"]) {
+      if (!placed.some((p) => p.kind === kind)) errors.push(`team.members must have at least one member whose role is of kind ${kind}`);
+    }
+  } else {
+    const loose = placed.filter((p) => !p.group && p.kind !== "pm");
+    if (loose.length) errors.push(`team.members: in a team with groups every member but the head PM is in a group (not in one: ${list(loose)})`);
+    for (const g of groups) {
+      const inGroup = placed.filter((p) => p.group === g);
+      const leads = inGroup.filter((p) => p.kind === "lead");
+      const pms = inGroup.filter((p) => p.kind === "pm");
+      if (leads.length !== 1) errors.push(`group '${g}' must have exactly one techlead (a member whose role is of kind lead)${leads.length ? ` (found ${list(leads)})` : ""}`);
+      if (pms.length > 1) errors.push(`group '${g}' has at most one PM of its own (found ${list(pms)})`);
+      for (const kind of ["worker", "checker"]) {
+        if (!inGroup.some((p) => p.kind === kind)) errors.push(`group '${g}' must have at least one member whose role is of kind ${kind}`);
+      }
+    }
+  }
+  return errors;
+}
+
 // packages/engine/src/config/config.ts
 var AGENT_ROLES = ["planner", "plan_reviewer", "implementer", "code_reviewer"];
 var SEVERITIES = ["critical", "high", "medium", "low"];
@@ -14751,11 +14985,21 @@ var DEFAULTS = {
   // --no-session-persistence to every other call. Listing one in args turns the continuation off.
   codex: { bin: "codex", model: null, args: [], role_args: {}, role_models: {}, role_efforts: {} },
   claude: { bin: "claude", model: null, max_budget_usd: null, permission_prompts: "ask", args: [], role_args: {}, role_models: {}, role_efforts: {} },
-  paths: { runs_dir: ".agentduo/runs" }
+  paths: { runs_dir: ".agentduo/runs" },
+  team: TEAM_DEFAULTS
 };
 var RENAMED = { "codex.extra_args": "codex.args", "claude.extra_args": "claude.args" };
-var OPEN_MAPPINGS = /* @__PURE__ */ new Set(["codex.role_args", "claude.role_args", "codex.role_models", "claude.role_models", "codex.role_efforts", "claude.role_efforts"]);
-var EFFORTS = { claude: CLAUDE_EFFORTS, codex: CODEX_EFFORTS };
+var OPEN_MAPPINGS = /* @__PURE__ */ new Set([
+  "codex.role_args",
+  "claude.role_args",
+  "codex.role_models",
+  "claude.role_models",
+  "codex.role_efforts",
+  "claude.role_efforts",
+  "team.levels",
+  "team.roles"
+]);
+var EFFORTS2 = { claude: CLAUDE_EFFORTS, codex: CODEX_EFFORTS };
 var isModelName = (v) => typeof v === "string" && !!v.trim() && v.length <= 200 && !/[\s\u0000-\u001f]/.test(v);
 function roleModel(cli, role) {
   return cli.role_models?.[role] ?? cli.model;
@@ -14769,7 +15013,15 @@ var ConfigError = class extends Error {
 function defaultConfig() {
   return structuredClone(DEFAULTS);
 }
-var isPlainObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var isPlainObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+function mergeOpen(base, over) {
+  const out = { ...base };
+  for (const [key, value] of Object.entries(over)) {
+    const current = base[key];
+    out[key] = isPlainObject2(current) && isPlainObject2(value) ? mergeOpen(current, value) : value;
+  }
+  return out;
+}
 function mergeInto(base, override, where, warnings) {
   const out = structuredClone(base);
   for (const [key, value] of Object.entries(override)) {
@@ -14779,13 +15031,13 @@ function mergeInto(base, override, where, warnings) {
       continue;
     }
     const current = base[key];
-    if ((isPlainObject(current) || Array.isArray(current)) && (value === null || value === void 0)) continue;
+    if ((isPlainObject2(current) || Array.isArray(current)) && (value === null || value === void 0)) continue;
     if (OPEN_MAPPINGS.has(path)) {
-      out[key] = isPlainObject(current) && isPlainObject(value) ? { ...current, ...value } : value;
+      out[key] = isPlainObject2(current) && isPlainObject2(value) ? mergeOpen(current, value) : value;
       continue;
     }
-    if (isPlainObject(current)) {
-      if (!isPlainObject(value)) throw new ConfigError(`'${path}' must be a mapping`);
+    if (isPlainObject2(current)) {
+      if (!isPlainObject2(value)) throw new ConfigError(`'${path}' must be a mapping`);
       out[key] = mergeInto(current, value, path, warnings);
     } else {
       out[key] = value;
@@ -14806,7 +15058,7 @@ function readYaml(path) {
     throw new ConfigError(`${path}: ${err.message}`);
   }
   if (parsed === null || parsed === void 0) return {};
-  if (!isPlainObject(parsed)) throw new ConfigError(`${path}: top level must be a mapping`);
+  if (!isPlainObject2(parsed)) throw new ConfigError(`${path}: top level must be a mapping`);
   return parsed;
 }
 function mergeFile(data, path, warnings) {
@@ -14847,12 +15099,12 @@ function configFromLayers(layers, warnings = []) {
   return data;
 }
 function configFromSaved(raw) {
-  if (!isPlainObject(raw)) throw new ConfigError("saved run config is not a mapping");
+  if (!isPlainObject2(raw)) throw new ConfigError("saved run config is not a mapping");
   return mergeInto(defaultConfig(), raw, "", []);
 }
-var isPosInt = (v) => Number.isInteger(v) && v >= 1;
+var isPosInt2 = (v) => Number.isInteger(v) && v >= 1;
 var isNonNegInt = (v) => Number.isInteger(v) && v >= 0;
-var isStringList = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
+var isStringList2 = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
 function validateConfig(cfg, source) {
   const errors = configErrors(cfg);
   if (errors.length) {
@@ -14875,12 +15127,12 @@ function configErrors(cfg) {
     "max_diff_chars",
     "max_gate_output_chars"
   ]) {
-    if (!isPosInt(cfg.limits[key])) errors.push(`limits.${key} must be a positive integer`);
+    if (!isPosInt2(cfg.limits[key])) errors.push(`limits.${key} must be a positive integer`);
   }
   if (!isNonNegInt(cfg.limits.max_retries)) errors.push("limits.max_retries must be an integer >= 0");
   if (!isNonNegInt(cfg.limits.agent_idle_timeout_sec)) errors.push("limits.agent_idle_timeout_sec must be an integer >= 0");
   for (const key of ["max_run_tokens", "max_run_agent_calls", "max_run_minutes"]) {
-    if (cfg.limits[key] !== null && !isPosInt(cfg.limits[key])) errors.push(`limits.${key} must be a positive integer or null`);
+    if (cfg.limits[key] !== null && !isPosInt2(cfg.limits[key])) errors.push(`limits.${key} must be a positive integer or null`);
   }
   const runCost = cfg.limits.max_run_cost_usd;
   if (runCost !== null && !(typeof runCost === "number" && Number.isFinite(runCost) && runCost > 0)) errors.push("limits.max_run_cost_usd must be a positive number or null");
@@ -14897,7 +15149,7 @@ function configErrors(cfg) {
     const names = /* @__PURE__ */ new Set();
     cfg.gates.forEach((gate, i) => {
       const g = gate;
-      if (!isPlainObject(g) || typeof g.name !== "string" || !g.name || typeof g.command !== "string" || !g.command) {
+      if (!isPlainObject2(g) || typeof g.name !== "string" || !g.name || typeof g.command !== "string" || !g.command) {
         errors.push(`gates[${i}] needs 'name' and 'command'`);
         return;
       }
@@ -14906,7 +15158,7 @@ function configErrors(cfg) {
       const unknown = Object.keys(g).filter((k) => !["name", "command", "required", "timeout_sec"].includes(k));
       if (unknown.length) errors.push(`gates[${i}]: unknown keys ${unknown.sort().join(", ")}`);
       if (g.required !== void 0 && typeof g.required !== "boolean") errors.push(`gates[${i}].required must be true or false`);
-      if (g.timeout_sec !== void 0 && !isPosInt(g.timeout_sec)) errors.push(`gates[${i}].timeout_sec must be a positive integer`);
+      if (g.timeout_sec !== void 0 && !isPosInt2(g.timeout_sec)) errors.push(`gates[${i}].timeout_sec must be a positive integer`);
     });
   }
   const flags = [
@@ -14925,26 +15177,26 @@ function configErrors(cfg) {
   const budget = cfg.claude.max_budget_usd;
   if (budget !== null && !(typeof budget === "number" && budget > 0)) errors.push("claude.max_budget_usd must be a positive number or null");
   for (const backend of ["codex", "claude"]) {
-    if (!isStringList(cfg[backend].args)) errors.push(`${backend}.args must be a list of strings`);
+    if (!isStringList2(cfg[backend].args)) errors.push(`${backend}.args must be a list of strings`);
     const roleArgs = cfg[backend].role_args;
-    if (!isPlainObject(roleArgs)) {
+    if (!isPlainObject2(roleArgs)) {
       errors.push(`${backend}.role_args must be a mapping of role to a list of strings`);
       continue;
     }
     for (const [role, args] of Object.entries(roleArgs)) {
       if (!AGENT_ROLES.includes(role)) errors.push(`${backend}.role_args: unknown role '${role}' (roles: ${AGENT_ROLES.join(", ")})`);
-      else if (!isStringList(args)) errors.push(`${backend}.role_args.${role} must be a list of strings`);
+      else if (!isStringList2(args)) errors.push(`${backend}.role_args.${role} must be a list of strings`);
     }
   }
   for (const backend of ["codex", "claude"]) {
-    const efforts = EFFORTS[backend];
+    const efforts = EFFORTS2[backend];
     const mappings = [
       ["role_models", "a model", (v) => isModelName(v), "a model name or null"],
       ["role_efforts", "an effort", (v) => efforts.includes(v), `one of ${efforts.join(", ")}, or null`]
     ];
     for (const [name2, what, valid, expected] of mappings) {
       const mapping = cfg[backend][name2];
-      if (!isPlainObject(mapping)) {
+      if (!isPlainObject2(mapping)) {
         errors.push(`${backend}.${name2} must be a mapping of role to ${what}`);
         continue;
       }
@@ -14954,6 +15206,7 @@ function configErrors(cfg) {
       }
     }
   }
+  errors.push(...teamConfigErrors(cfg.team));
   return errors;
 }
 
@@ -15083,7 +15336,23 @@ import { isAbsolute as isAbsolute3, join as join8, posix as posix2, relative as 
 var import_ajv = __toESM(require_ajv(), 1);
 import { readFileSync as readFileSync3 } from "fs";
 import { join as join4 } from "path";
-var SCHEMA_NAMES = ["plan", "planner", "plan_critique", "plan_approval", "implementation", "review"];
+var SCHEMA_NAMES = [
+  "plan",
+  "planner",
+  "plan_critique",
+  "plan_approval",
+  "implementation",
+  "review",
+  // Team mode (packages/engine/src/team).
+  "team_pm",
+  "team_plan",
+  "team_work",
+  "team_review",
+  "team_tests",
+  "team_check",
+  "team_triage",
+  "team_answer"
+];
 var ajv = new import_ajv.Ajv({ allErrors: true, strict: false });
 var schemas = /* @__PURE__ */ new Map();
 var validators = /* @__PURE__ */ new Map();
@@ -15165,7 +15434,7 @@ function strictProblems(schema, path = "$") {
 import { execFile } from "child_process";
 import { randomUUID } from "crypto";
 import { existsSync as existsSync4 } from "fs";
-import { copyFile, mkdtemp, readdir, rename, rm } from "fs/promises";
+import { copyFile, mkdtemp, readdir, rename, rm, stat, utimes } from "fs/promises";
 import { tmpdir } from "os";
 import { join as join5, posix } from "path";
 var GitError = class extends Error {
@@ -15305,7 +15574,11 @@ var Git = class {
     const env = { GIT_INDEX_FILE: index };
     try {
       const real = join5((await this.run(["rev-parse", "--absolute-git-dir"])).stdout.trim(), "index");
-      if (existsSync4(real)) await copyFile(real, index);
+      if (existsSync4(real)) {
+        await copyFile(real, index);
+        const { atime, mtime } = await stat(real);
+        await utimes(index, atime, mtime);
+      }
       if (!existsSync4(real) || (await this.run(["ls-files", "-u", "--", ":/"], { env })).stdout) {
         const head = await this.head();
         await this.run(head ? ["read-tree", head] : ["read-tree", "--empty"], { env });
@@ -15332,6 +15605,8 @@ var Git = class {
       let seeded = false;
       if (existsSync4(cache)) {
         await copyFile(cache, index);
+        const { atime, mtime } = await stat(cache);
+        await utimes(index, atime, mtime);
         const listed = await this.run(["ls-files", "-z", "--stage"], { env, check: false });
         if (listed.code === 0) {
           seeded = true;
@@ -15443,6 +15718,46 @@ var Git = class {
   async diffStat(a, b) {
     return (await this.run(["diff", "--no-color", "--stat", "--relative", a, b, "--", "."])).stdout;
   }
+  /** A commit of `tree` with these parents, made by agentduo (never by the user's identity). */
+  async commitTree(tree, parents, message) {
+    return (await this.run(["commit-tree", tree, ...parents.flatMap((p) => ["-p", p]), "-m", message], { env: IDENTITY })).stdout.trim();
+  }
+  /**
+   * Commits `a` and `b` merged, without a working tree (`git merge-tree --write-tree`, git 2.38 or later): the merged
+   * tree, or the paths that conflict (relative to the workspace, which a merge of whole-repository trees may lie in).
+   */
+  async mergeTree(a, b) {
+    const r = await this.run(["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", a, b], { check: false });
+    if (r.code !== 0 && r.code !== 1) throw new GitError(`git merge-tree ${a} ${b} failed: ${(r.stderr || r.stdout).trim()}`);
+    const [tree = "", ...paths] = r.stdout.split("\0").filter(Boolean);
+    if (!/^[0-9a-f]{40,64}$/.test(tree)) throw new GitError(`git merge-tree ${a} ${b} gave no tree: ${(r.stderr || r.stdout).trim()}`);
+    const prefix = await this.prefix();
+    const conflicts = [...new Set(paths)].map((p) => prefix ? posix.relative(prefix, p) : p);
+    return { tree, conflicts: r.code === 1 ? conflicts : [] };
+  }
+  /** The files that differ between two trees inside the workspace, with their modes and blobs (`git diff --raw`). */
+  async rawChanges(a, b) {
+    const out = (await this.run(["diff", "--raw", "-z", "--no-renames", "--relative", a, b, "--", "."])).stdout;
+    const parts = out.split("\0");
+    const changes = [];
+    for (let i = 0; i + 1 < parts.length; i += 2) {
+      const meta = parts[i];
+      if (!meta.startsWith(":")) break;
+      const [srcMode, dstMode, srcBlob, dstBlob, status] = meta.slice(1).split(" ");
+      changes.push({ srcMode, dstMode, srcBlob, dstBlob, status: status.charAt(0), path: parts[i + 1] });
+    }
+    return changes;
+  }
+  /** A blob's bytes. */
+  async blob(id) {
+    const call = await this.invocation(["cat-file", "blob", id]);
+    return new Promise((resolvePromise, reject) => {
+      execFile("git", call.args, { cwd: this.dir, env: call.env, encoding: "buffer", maxBuffer: 512 * 1024 * 1024 }, (error, stdout, stderr) => {
+        if (error) reject(new GitError(`git cat-file blob ${id} failed: ${stderr.toString().trim() || error.message}`));
+        else resolvePromise(stdout);
+      });
+    });
+  }
 };
 
 // packages/engine/src/git/run-git.ts
@@ -15466,8 +15781,8 @@ function stamp(d) {
 }
 function slugify(text3, maxLen = 40) {
   const ascii2 = text3.replace(/đ/g, "d").replace(/Đ/g, "D").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^\x00-\x7f]/g, "");
-  const slug = ascii2.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
-  return slug.slice(0, maxLen).replace(/-+$/, "") || "task";
+  const slug2 = ascii2.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
+  return slug2.slice(0, maxLen).replace(/-+$/, "") || "task";
 }
 function atomicWrite(path, text3) {
   mkdirSync(dirname2(path), { recursive: true });
@@ -15822,13 +16137,13 @@ function openInternal(meta, state, workspace, env) {
   if (typeof meta.gitDir !== "string" || canonicalPath(meta.gitDir) !== canonicalPath(gitDir)) throw bad(`agentduo keeps that repository in ${gitDir}`);
   if (typeof meta.workspace !== "string" || canonicalPath(meta.workspace) !== canonicalPath(workspace)) throw bad(`it belongs to the workspace ${meta.workspace}`);
   if (isWithin(gitDir, workspace)) throw bad("it is inside the workspace");
-  let stat;
+  let stat2;
   try {
-    stat = lstatSync(gitDir);
+    stat2 = lstatSync(gitDir);
   } catch {
     throw bad("it is missing (deleted or moved); the run cannot go on without its snapshots. Abort it, or start a new run");
   }
-  if (!stat.isDirectory()) throw bad("it is not a folder");
+  if (!stat2.isDirectory()) throw bad("it is not a folder");
   if (!["HEAD", "config", "objects"].every((name2) => existsSync6(join7(gitDir, name2)))) throw bad("it is not a git repository");
   let marker;
   try {
@@ -15909,6 +16224,11 @@ async function runDoctor(o) {
   add(major2 > 22 || major2 === 22 && minor2 >= 12, `node ${process.versions.node} (>= 22.12)`);
   const gitVersion = await probe("git", ["--version"], o.dir);
   add(gitVersion.ok, gitVersion.ok ? gitVersion.out.trim() : "git is not installed");
+  if (gitVersion.ok) {
+    const [gMajor = 0, gMinor = 0] = (/(\d+)\.(\d+)/.exec(gitVersion.out)?.slice(1) ?? []).map(Number);
+    const teams = gMajor > 2 || gMajor === 2 && gMinor >= 38;
+    add(teams, teams ? "git can merge a team's work (2.38 or later)" : "git is older than 2.38: /team needs `git merge-tree --write-tree` (the chat and /pipeline work)", false);
+  }
   const git = new Git(o.dir);
   const snapshots = await preflightSnapshots(o.dir, env);
   const isRepo = snapshots.mode === "native";
@@ -16226,7 +16546,7 @@ function checkSettingValue(k, value) {
     case "model":
       return value === null || isModelName(value) ? null : `${k.key} must be a string or null`;
     case "effort": {
-      const efforts = EFFORTS[k.path[0]];
+      const efforts = EFFORTS2[k.path[0]];
       return value === null || efforts.includes(value) ? null : `${k.key} must be one of ${efforts.join(", ")}, or null`;
     }
     case "args":
@@ -16370,7 +16690,7 @@ var ConfigurationError = class extends Error {
   errors;
   name = "ConfigurationError";
 };
-var isPlainObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var isPlainObject3 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function configFiles(o) {
   const project = o.workspace ? o.configPath ? resolve5(o.workspace, o.configPath) : join10(o.workspace, ".agentduo", "config.yaml") : null;
   return { global: userConfigPath(o.env), project };
@@ -16392,7 +16712,7 @@ function readLayer(scope, path) {
   }
   const raw = doc.toJS();
   if (raw === null || raw === void 0) return { info, raw: {} };
-  if (!isPlainObject2(raw)) return { info: { ...info, error: { message: "the top level must be a mapping", line: null, col: null } }, raw: {} };
+  if (!isPlainObject3(raw)) return { info: { ...info, error: { message: "the top level must be a mapping", line: null, col: null } }, raw: {} };
   return { info, raw };
 }
 function load(o, replace) {
@@ -16441,7 +16761,7 @@ function fileChanges(before, after, session2) {
 function layerValue(raw, path) {
   let at = raw;
   for (const key of path) {
-    if (!isPlainObject2(at) || !Object.prototype.hasOwnProperty.call(at, key)) return null;
+    if (!isPlainObject3(at) || !Object.prototype.hasOwnProperty.call(at, key)) return null;
     at = at[key];
   }
   return { value: at };
@@ -16515,7 +16835,7 @@ function guard(o, scope, doc) {
   const raw = doc.toJS();
   let after;
   try {
-    after = configErrors(load(o, { scope, raw: isPlainObject2(raw) ? raw : {} }).cfg);
+    after = configErrors(load(o, { scope, raw: isPlainObject3(raw) ? raw : {} }).cfg);
   } catch (e) {
     if (e instanceof ConfigError) throw new ConfigurationError(`not saved: ${e.message}`, [e.message]);
     throw e;
@@ -16622,8 +16942,8 @@ function parseQuestions(raw) {
     if ("error" in question) return question;
     if (seen.has(question.text.trim())) return { error: `${at}: the question text repeats an earlier question's (each must be distinct)` };
     seen.add(question.text.trim());
-    const header2 = given(q.header, `${at}: 'header'`, MAX_HEADER, false);
-    if ("error" in header2) return header2;
+    const header3 = given(q.header, `${at}: 'header'`, MAX_HEADER, false);
+    if ("error" in header3) return header3;
     const multiSelect = q.multiSelect === true || q.multi_select === true;
     if (!Array.isArray(q.options) || q.options.length < MIN_OPTIONS || q.options.length > MAX_OPTIONS) {
       return { error: `${at}: needs ${MIN_OPTIONS} to ${MAX_OPTIONS} options` };
@@ -16640,7 +16960,7 @@ function parseQuestions(raw) {
       if ("error" in description) return description;
       options.push({ id: `q${i + 1}o${j + 1}`, label: label.text, description: description.text });
     }
-    questions.push({ id: `q${i + 1}`, header: header2.text, question: question.text, multiSelect, options });
+    questions.push({ id: `q${i + 1}`, header: header3.text, question: question.text, multiSelect, options });
   }
   return { questions };
 }
@@ -16864,9 +17184,9 @@ function rankPaths(query, entries, limit = MENTION_LIMITS.results) {
 }
 
 // packages/host/src/protocol.ts
-var PROTOCOL_VERSION = 12;
+var PROTOCOL_VERSION = 13;
 var BACKENDS = ["codex", "claude"];
-var ROUTES = ["message", "pipeline", "discuss"];
+var ROUTES = ["message", "pipeline", "discuss", "team"];
 var ARTIFACTS = ["plan", "review", "feedback", "report"];
 var DECISIONS = ["resume", "revise", "abort", "defer"];
 var CONFIGURATION_REQUESTS = ["readConfiguration", "updateConfiguration", "clearConfiguration", "syncConfiguration"];
@@ -17124,12 +17444,12 @@ function parseRequestEnvelope(v) {
 }
 
 // packages/host/src/runtimeSession.ts
-import { join as join20, resolve as resolve11 } from "path";
+import { join as join24, resolve as resolve12 } from "path";
 import { isDeepStrictEqual as isDeepStrictEqual3 } from "util";
 
 // packages/engine/src/chat/chat.ts
 import { homedir as homedir5 } from "os";
-import { join as join19, resolve as resolve10 } from "path";
+import { join as join23, resolve as resolve11 } from "path";
 
 // packages/engine/src/agents/runner.ts
 import { randomUUID as randomUUID3 } from "crypto";
@@ -17723,8 +18043,8 @@ var ClaudeBackend = class {
     if (!found) throw new BinaryNotFound(`claude CLI not found (configured bin: '${this.cfg.bin}')`);
     return found;
   }
-  keepsSessions(role) {
-    return ![...this.cfg.args, ...role ? this.cfg.role_args[role] ?? [] : []].includes(CLAUDE_NO_PERSISTENCE);
+  keepsSessions(role, extraArgs = []) {
+    return ![...this.cfg.args, ...role ? this.cfg.role_args[role] ?? [] : [], ...extraArgs].includes(CLAUDE_NO_PERSISTENCE);
   }
   /** --max-budget-usd: the lower of the per-call budget and what the run's budget has left, when either is set. */
   budgetArgs(costCap) {
@@ -17741,9 +18061,11 @@ var ClaudeBackend = class {
    */
   buildArgs(a) {
     const session2 = a.session;
-    const model = a.mode === "text" ? this.cfg.model : roleModel(this.cfg, a.role);
-    const effort = a.mode === "text" ? null : roleEffort(this.cfg, a.role);
-    const own = [...this.cfg.args, ...effort ? ["--effort", effort] : [], ...a.mode === "text" ? implementerPermissionArgs(this.cfg) : this.cfg.role_args[a.role] ?? []];
+    const profile = a.mode === "text" ? void 0 : a.profile;
+    const model = a.mode === "text" ? this.cfg.model : profile ? profile.model ?? this.cfg.model : roleModel(this.cfg, a.role);
+    const effort = a.mode === "text" ? null : profile ? profile.effort : roleEffort(this.cfg, a.role);
+    const roleArgs = a.mode === "text" ? implementerPermissionArgs(this.cfg) : profile ? profile.args : this.cfg.role_args[a.role] ?? [];
+    const own = [...this.cfg.args, ...effort ? ["--effort", effort] : [], ...roleArgs];
     return [
       "-p",
       "--output-format",
@@ -17936,8 +18258,8 @@ var CodexBackend = class {
     if (!found) throw new BinaryNotFound(`codex CLI not found (configured bin: '${this.cfg.bin}')`);
     return found;
   }
-  keepsSessions(role) {
-    return ![...this.cfg.args, ...role ? this.cfg.role_args[role] ?? [] : []].includes(CODEX_EPHEMERAL);
+  keepsSessions(role, extraArgs = []) {
+    return ![...this.cfg.args, ...role ? this.cfg.role_args[role] ?? [] : [], ...extraArgs].includes(CODEX_EPHEMERAL);
   }
   /**
    * A conversation turn (text mode) gets no schema and nothing of a role's (args, model, effort): only what every call gets. It may run outside
@@ -17951,9 +18273,10 @@ var CodexBackend = class {
   buildArgs(a) {
     const text3 = a.mode === "text";
     const session2 = a.session;
-    const roleArgs = text3 ? [] : this.cfg.role_args[a.role] ?? [];
-    const model = text3 ? this.cfg.model : roleModel(this.cfg, a.role);
-    const effort = text3 ? null : roleEffort(this.cfg, a.role);
+    const profile = text3 ? void 0 : a.profile;
+    const roleArgs = text3 ? [] : profile ? profile.args : this.cfg.role_args[a.role] ?? [];
+    const model = text3 ? this.cfg.model : profile ? profile.model ?? this.cfg.model : roleModel(this.cfg, a.role);
+    const effort = text3 ? null : profile ? profile.effort : roleEffort(this.cfg, a.role);
     const ephemeral = session2?.keep || [...this.cfg.args, ...roleArgs].includes(CODEX_EPHEMERAL) ? [] : [CODEX_EPHEMERAL];
     return [
       "exec",
@@ -17964,7 +18287,7 @@ var CodexBackend = class {
       "--output-last-message",
       a.lastMessageFile,
       "--cd",
-      this.repo,
+      !text3 && a.cwd || this.repo,
       ...model ? ["--model", model] : [],
       ...ephemeral,
       ...this.cfg.args,
@@ -17999,13 +18322,13 @@ var CodexBackend = class {
 // packages/engine/src/agents/runner.ts
 var MAX_REJECTED_CHARS = 2e4;
 function rejectionNote(errors, answer, unseen) {
-  const json = answer == null ? null : JSON.stringify(answer, null, 2);
-  const shown2 = json == null ? "" : json.length > MAX_REJECTED_CHARS ? `
-Your rejected answer is ${json.length} characters long, too long to repeat here: give it again with these corrections.
+  const json2 = answer == null ? null : JSON.stringify(answer, null, 2);
+  const shown2 = json2 == null ? "" : json2.length > MAX_REJECTED_CHARS ? `
+Your rejected answer is ${json2.length} characters long, too long to repeat here: give it again with these corrections.
 ` : `
 Your rejected answer:
 \`\`\`\`json
-${json}
+${json2}
 \`\`\`\`
 `;
   return `
@@ -18042,6 +18365,7 @@ var HumanWaits = class {
 var NO_QUESTIONS = "The user cannot be asked questions in this run. Decide from the repository, state the assumption you made in your report, and continue.";
 var DISMISSED = "The user dismissed the question without answering. Do not assume an answer: continue without it, and say in your report what you could not decide.";
 var PROMPTS_OFF = "This tool call needs a permission, and permission prompts are off (claude.permission_prompts: deny). Do not retry it; continue without it and say so in your report.";
+var MEMBER_QUESTIONS = "You cannot ask the user: in this team only the PM talks to the user. Finish your turn and put your question in your result (a blocked result with one precise question); it goes to the techlead.";
 var AgentRunner = class {
   constructor(cfg, repo, logDir, bus, o = {}) {
     this.cfg = cfg;
@@ -18094,17 +18418,20 @@ var AgentRunner = class {
   asksPermissions(backend) {
     return !!this.permissions && backend.name === "claude" && this.cfg.claude.permission_prompts === "ask" && !!backend.permissionReply;
   }
-  /** Whether the agent's structured questions go to the user: someone can answer and the config allows it. Independent of permissions. */
-  asksQuestions(backend) {
-    return !!this.clarifications && backend.name === "claude" && this.cfg.clarification?.enabled !== false && !!backend.clarificationReply;
+  /**
+   * Whether the agent's structured questions go to the user: someone can answer and the config allows it. Independent of
+   * permissions. A team member's never do (it asks the techlead in its output).
+   */
+  asksQuestions(backend, member = false) {
+    return !member && !!this.clarifications && backend.name === "claude" && this.cfg.clarification?.enabled !== false && !!backend.clarificationReply;
   }
   /**
    * Host mode: the backend relays its requests to agentduo, which answers each, because the user can answer permission
    * prompts or questions. It is a transport only: what a request may do stays with the config that allows it, so with
    * only the questions on, every permission prompt is still denied as the CLI itself would.
    */
-  hosts(backend) {
-    return backend.name === "claude" && !!backend.hostInput && !!backend.permissionReply && (this.asksPermissions(backend) || this.asksQuestions(backend));
+  hosts(backend, member = false) {
+    return backend.name === "claude" && !!backend.hostInput && !!backend.permissionReply && (this.asksPermissions(backend) || this.asksQuestions(backend, member));
   }
   /** Writes the answer to a request on the CLI's stdin, and keeps it in the call's log. */
   send(a, reply) {
@@ -18142,6 +18469,7 @@ var AgentRunner = class {
   async answerQuestion(ev, a) {
     const { channel, agent, backend } = a;
     const reply = (r) => this.send(a, backend.clarificationReply(ev.raw, r));
+    if (a.member) return reply({ deny: MEMBER_QUESTIONS });
     if (!this.asksQuestions(backend)) return reply({ deny: NO_QUESTIONS });
     if (!ev.questions) {
       return reply({ deny: `agentduo could not show this question to the user (${ev.error ?? "malformed"}). Ask again with at most 4 questions that each have 2 to 6 distinct options, or continue without asking.` });
@@ -18161,9 +18489,9 @@ var AgentRunner = class {
     a.waits.start();
     let response;
     let onAbort;
-    const ended = new Promise((resolve13) => {
-      if (a.signal.aborted) return resolve13({ kind: "defer" });
-      onAbort = () => resolve13({ kind: "defer" });
+    const ended = new Promise((resolve14) => {
+      if (a.signal.aborted) return resolve14({ kind: "defer" });
+      onAbort = () => resolve14({ kind: "defer" });
       a.signal.addEventListener("abort", onAbort, { once: true });
     });
     try {
@@ -18203,6 +18531,15 @@ var AgentRunner = class {
         model: (model) => this.bus.emit({ type: "turn.model", turnId: o.turnId, backend: o.backend, model })
       };
     }
+    if (o.member) {
+      const { name: member, task } = o.member;
+      return {
+        context: { member },
+        activity: (activity) => this.bus.emit({ type: "team.activity", member, task, agent, activity }),
+        usage: (costUsd, tokens) => this.bus.emit({ type: "team.usage", member, agent, costUsd, tokens }),
+        model: (model) => this.bus.emit({ type: "team.model", member, model })
+      };
+    }
     return {
       context: { role: o.role },
       activity: (activity) => this.bus.emit({ type: "agent.activity", role: o.role, agent, activity }),
@@ -18212,7 +18549,8 @@ var AgentRunner = class {
   }
   async call(o) {
     const text3 = o.mode === "text";
-    const backend = this.backends[o.mode === "text" ? o.backend : this.cfg.agents[o.agentRole]];
+    const member = o.mode !== "text" && o.member ? o.member : null;
+    const backend = this.backends[o.mode === "text" ? o.backend : member ? member.backend : this.cfg.agents[o.agentRole]];
     const agent = backend.name;
     const channel = this.channel(o, agent);
     const resume = o.session?.resume;
@@ -18275,7 +18613,10 @@ ${clarificationSection(answered, "## What the user already answered during an ea
         }
         lastError = rejected ? `the continued session's answer was rejected (${lastError}); starting a new one, told why` : `the earlier session could not be continued (${lastError ?? "no answer"}); starting a new one`;
       }
-      if (attempt > 1 && o.mode !== "text") this.bus.emit({ type: "agent.retry", role: o.role, agent, attempt, max: attemptsAllowed, reason: lastError ?? "" });
+      if (attempt > 1 && o.mode !== "text") {
+        if (member) this.bus.emit({ type: "team.retry", member: member.name, agent, attempt, max: attemptsAllowed, reason: lastError ?? "" });
+        else this.bus.emit({ type: "agent.retry", role: o.role, agent, attempt, max: attemptsAllowed, reason: lastError ?? "" });
+      }
       const stem2 = join13(this.logDir, `${prefix}.a${attempt}`);
       const base = o.prompt + earlierAnswers();
       const prompt = resuming ? resuming.prompt : rejected ? base + rejectionNote(rejected.errors, rejected.answer, fellBack) : lastError && !fellBack ? `${base}
@@ -18286,7 +18627,7 @@ Return ONLY a JSON object that matches the required schema exactly.
 ` : base;
       const attachments = resuming ? resuming.attachments ?? [] : o.attachments ?? [];
       const lastMessageFile = `${stem2}.last.${text3 ? "md" : "json"}`;
-      const host = this.hosts(backend);
+      const host = this.hosts(backend, !!member);
       const located = this.located(backend, attachments);
       if (typeof located === "string") return finish(false, attempt, null, located);
       const { images } = located;
@@ -18304,10 +18645,10 @@ Return ONLY a JSON object that matches the required schema exactly.
         }) : backend.buildArgs({
           schemaName: o.schemaName,
           lastMessageFile,
-          role: o.agentRole,
           askPermissions: host,
           images,
           skipGitRepoCheck: o.skipGitRepoCheck,
+          ...member ? { profile: member.profile, cwd: member.cwd } : { role: o.agentRole },
           ...o.session ? { session: { keep: o.session.keep, ...resuming ? { resume: resuming.id } : {} } } : {},
           ...budget?.costCap(cost) != null ? { costCap: budget.costCap(cost) } : {}
         });
@@ -18349,7 +18690,7 @@ Return ONLY a JSON object that matches the required schema exactly.
       try {
         const input = stream ? backend.hostInput(prompt, images) : prompt;
         run = await runProcess(binary, args, {
-          cwd: this.repo,
+          cwd: member?.cwd ?? this.repo,
           input,
           holdStdin: host,
           timeoutMs,
@@ -18383,7 +18724,8 @@ Return ONLY a JSON object that matches the required schema exactly.
                   answersLog: `${stem2}.answers.jsonl`,
                   waits,
                   answered,
-                  stopCall: () => stopped.abort()
+                  stopCall: () => stopped.abort(),
+                  member: !!member
                 };
                 track(ev.type === "permission" ? this.answerPermission(ev, here, deniedByUser) : this.answerQuestion(ev, here));
               } else if (ev.type === "model") {
@@ -18813,6 +19155,9 @@ ${output}
     results.push(result);
   }
   return results;
+}
+function requiredPassed(results) {
+  return results.every((r) => r.passed || !r.required);
 }
 function describeGates(results, withOutput = true) {
   if (!results.length) return "(no quality gates configured)";
@@ -19498,10 +19843,10 @@ function changedSection(changed) {
 function repoNotesSection(list, continued) {
   if (!list?.length) return "";
   const title = continued ? "## New repository notes" : "## Repository notes from earlier agents";
-  const intro = (continued ? "Recorded by other agents of this run since your last turn" : "Recorded by earlier agents of this run") + ". Each still holds as far as agentduo can tell: nothing under its path changed since it was written. Use them instead of looking the same things up again, and read the file when a detail matters.";
+  const intro2 = (continued ? "Recorded by other agents of this run since your last turn" : "Recorded by earlier agents of this run") + ". Each still holds as far as agentduo can tell: nothing under its path changed since it was written. Use them instead of looking the same things up again, and read the file when a detail matters.";
   return `
 ${title}
-${intro}
+${intro2}
 ` + list.map((n) => `- ${inlineCode(n.path)}: ${n.note} (${NAMES[n.backend]}, ${ROLE_TITLES[n.role]})`).join("\n") + "\n";
 }
 var REPO_NOTES_ASK = `## Repository notes
@@ -19658,13 +20003,13 @@ ${e.question.trim()}${files}${asked}
 **${name2}:**
 ${e.answer.trim()}`;
 }
-function conversationSection(conversation2, title, intro, locate) {
+function conversationSection(conversation2, title, intro2, locate) {
   if (!conversation2?.exchanges.length) return "";
   const omitted = conversation2.omitted ? `(${conversation2.omitted} older exchange(s) are left out.)
 ` : "";
   return `
 ## ${title}
-${intro}
+${intro2}
 ${omitted}
 ${conversation2.exchanges.map((e) => exchangeText(e, locate)).join("\n\n")}
 `;
@@ -19776,11 +20121,11 @@ function notes(list, locate, onlyNew = false, tagged) {
   const files = (n) => tags(n) + (n.attachments?.length && locate ? `
   Files:
 ${attachmentLines(n.attachments, locate, "  ")}` : "");
-  const intro = locate && list.some((n) => n.attachments?.length) ? `${NOTE_FILES}
+  const intro2 = locate && list.some((n) => n.attachments?.length) ? `${NOTE_FILES}
 ` : "";
   return `
 ## ${onlyNew ? "New notes" : "Notes"} from the human operator (highest priority)
-` + intro + list.map((n) => `- (${n.at}, during ${n.phase}) ${n.note}${files(n)}`).join("\n") + "\n";
+` + intro2 + list.map((n) => `- (${n.at}, during ${n.phase}) ${n.note}${files(n)}`).join("\n") + "\n";
 }
 function feedbackSection(feedback) {
   if (!feedback) return "";
@@ -19816,12 +20161,12 @@ function planner(ctx, round2, version, previousPlan, feedback) {
 ## Previous plan (v${version - 1})
 The plan you returned earlier in this session.` + (ctx.planFile ? ` It is also in \`${ctx.planFile}\`.` : "") + "\n");
     } else {
-      const json = JSON.stringify(previousPlan, null, 2);
-      const fence = fenceFor(json);
+      const json2 = JSON.stringify(previousPlan, null, 2);
+      const fence = fenceFor(json2);
       out.push(`
 ## Previous plan (v${version - 1}) as JSON
 ${fence}json
-${json}
+${json2}
 ${fence}
 `);
     }
@@ -19957,8 +20302,8 @@ ${rerun ? "Finish implementing the plan" : "Implement the plan now"}. \`addresse
 function codeReviewer(ctx, round2, planMd, base, snapshot, gateResults, diffStat, diff, truncated, previousFindings, implReport, fullDiff, contract = { attribute: [], accepted: [], kept: [] }) {
   const tests = implReport.tests_run.map((t) => "- `" + t.command + "` passed=" + t.passed + " " + t.notes).join("\n") || "_(none)_";
   const fence = fenceFor(diff);
-  const stat = diffStat.trimEnd() || "(no changes)";
-  const statFence = fenceFor(stat);
+  const stat2 = diffStat.trimEnd() || "(no changes)";
+  const statFence = fenceFor(stat2);
   const whole = ctx.internalSnapshots && fullDiff ? "read the whole diff in `" + fullDiff + "`" : "run `git diff " + base + " " + snapshot + " -- .` for the full diff";
   const since = ctx.continued?.sinceReviewed;
   const out = [
@@ -19967,7 +20312,7 @@ function codeReviewer(ctx, round2, planMd, base, snapshot, gateResults, diffStat
     planSection("Final approved plan", planMd, ctx, "Unchanged: the final approved plan you were given earlier in this session."),
     "## Quality gate results (run by agentduo on this revision)\n" + describeGates(gateResults) + "\n",
     "## Implementer's report\n" + implReport.summary + "\n\nTests the implementer says it ran:\n" + tests + "\n",
-    "## Diff stat (base \u2192 revision)\n" + statFence + "\n" + stat + "\n" + statFence + "\n"
+    "## Diff stat (base \u2192 revision)\n" + statFence + "\n" + stat2 + "\n" + statFence + "\n"
   ];
   if (since) {
     const sinceStat = since.stat.trimEnd() || "(no changes)";
@@ -20704,8 +21049,8 @@ function managedSettingsPaths(platform = process.platform) {
 function readJsonFile(path) {
   if (!existsSync16(path)) return { missing: true };
   try {
-    const json = JSON.parse(readFileSync12(path, "utf8"));
-    return json && typeof json === "object" && !Array.isArray(json) ? { json } : { error: "not a JSON object" };
+    const json2 = JSON.parse(readFileSync12(path, "utf8"));
+    return json2 && typeof json2 === "object" && !Array.isArray(json2) ? { json: json2 } : { error: "not a JSON object" };
   } catch (e) {
     return { error: e.message };
   }
@@ -22593,9 +22938,9 @@ var Workflow = class {
     const { store, cfg } = this.o;
     st.finalPlanVersion = version;
     st.finalPlanHash = st.planHash;
-    const header2 = `<!-- final plan v${version}, sha256 ${st.planHash}${byHuman ? ", accepted by the human operator" : ""} -->
+    const header3 = `<!-- final plan v${version}, sha256 ${st.planHash}${byHuman ? ", accepted by the human operator" : ""} -->
 `;
-    store.writeText("plan.final.md", header2 + store.readText(`plan.v${version}.md`));
+    store.writeText("plan.final.md", header3 + store.readText(`plan.v${version}.md`));
     if (st.base !== null) {
       st.implRound += 1;
       setFindings(st, [], null);
@@ -23384,6 +23729,2696 @@ function usageReportText(r) {
   return ["\u2500\u2500 usage \u2500\u2500", ...usageRows(r).map(line)].join("\n");
 }
 
+// packages/engine/src/team/state.ts
+import { existsSync as existsSync17, mkdirSync as mkdirSync7, readdirSync as readdirSync6, readFileSync as readFileSync13 } from "fs";
+import { join as join19 } from "path";
+var TEAM_STATE_VERSION = 1;
+var groupKey = (group) => group ?? "";
+var nowIso2 = () => (/* @__PURE__ */ new Date()).toISOString();
+function newTeamState(id, request) {
+  const at = nowIso2();
+  return {
+    version: TEAM_STATE_VERSION,
+    kind: "team",
+    id,
+    request,
+    phase: "INTAKE",
+    createdAt: at,
+    updatedAt: at,
+    git: void 0,
+    base: null,
+    briefs: [],
+    approvedBrief: null,
+    areas: [],
+    plans: [],
+    planReviewed: null,
+    planPresented: null,
+    approvedPlan: null,
+    planFeedback: {},
+    planningRounds: 0,
+    planningExtra: {},
+    tasks: [],
+    integrationRounds: 0,
+    integration: null,
+    verifiedTree: null,
+    accepted: false,
+    applyConflict: null,
+    lastReportAt: null,
+    changeRequest: null,
+    acceptance: null,
+    messages: [{ seq: 1, at, from: "user", text: request }],
+    pmSeen: 0,
+    reports: [],
+    reportsSeen: 0,
+    replanning: false,
+    leadNotes: [],
+    leadNotesSeen: {},
+    escalations: [],
+    sessions: {},
+    clarifications: [],
+    waiting: null,
+    usage: { calls: 0, unpricedCalls: 0, costUsd: 0, tokens: 0, workSec: 0, byMember: {} },
+    budget: null,
+    applied: null,
+    summary: null,
+    warnings: [],
+    seq: 1
+  };
+}
+var nextSeq = (state) => ++state.seq;
+var latestBrief = (state) => state.briefs.at(-1) ?? null;
+var approvedBrief = (state) => state.briefs.find((b) => b.version === state.approvedBrief) ?? null;
+var latestPlan = (state, group = null) => state.plans.filter((p) => p.group === group && p.briefVersion === state.approvedBrief).at(-1) ?? null;
+var currentAreas = (state) => state.areas.filter((a) => a.briefVersion === state.approvedBrief);
+var planSignature = (plans) => plans.map((p) => `${p.group ?? ""}:${p.version}`).join(",");
+var stamp2 = (d) => d.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z").replace("T", "-");
+var slug = (text3) => text3.toLowerCase().normalize("NFKD").replace(/[^\w\s-]/g, "").trim().replace(/[\s_]+/g, "-").replace(/-+/g, "-").slice(0, 40) || "team";
+var TeamStore = class _TeamStore {
+  constructor(runsDir, id) {
+    this.runsDir = runsDir;
+    this.id = id;
+    this.dir = join19(teamsDir(runsDir), id);
+  }
+  runsDir;
+  id;
+  dir;
+  static create(runsDir, request, now = /* @__PURE__ */ new Date()) {
+    const base = `${stamp2(now)}-${slug(request)}`;
+    let id = base;
+    for (let n = 2; existsSync17(join19(teamsDir(runsDir), id)); n++) id = `${base}-${n}`;
+    const store = new _TeamStore(runsDir, id);
+    mkdirSync7(join19(store.dir, "logs"), { recursive: true });
+    const state = newTeamState(id, request);
+    store.save(state);
+    return { store, state };
+  }
+  static open(runsDir, id) {
+    let name2 = id;
+    if (id === "latest") {
+      const all = _TeamStore.list(runsDir);
+      if (!all.length) throw new Error(`no team runs in ${teamsDir(runsDir)}`);
+      name2 = all.at(-1).id;
+    }
+    const store = new _TeamStore(runsDir, name2);
+    if (!existsSync17(store.path("state.json"))) throw new Error(`team run '${name2}' not found in ${teamsDir(runsDir)}`);
+    return store;
+  }
+  /** Every team run, oldest first. */
+  static list(runsDir) {
+    const dir = teamsDir(runsDir);
+    if (!existsSync17(dir)) return [];
+    return readdirSync6(dir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort().flatMap((name2) => {
+      try {
+        return [new _TeamStore(runsDir, name2).load()];
+      } catch {
+        return [];
+      }
+    });
+  }
+  path(name2) {
+    return join19(this.dir, name2);
+  }
+  load() {
+    const state = JSON.parse(readFileSync13(this.path("state.json"), "utf8"));
+    if (state.kind !== "team" || state.version !== TEAM_STATE_VERSION) throw new Error(`unsupported team state in ${this.dir}`);
+    return state;
+  }
+  save(state) {
+    state.updatedAt = nowIso2();
+    atomicWrite(this.path("state.json"), `${JSON.stringify(state, null, 2)}
+`);
+  }
+  writeJson(name2, data) {
+    atomicWrite(this.path(name2), `${JSON.stringify(data, null, 2)}
+`);
+  }
+  readJson(name2) {
+    return JSON.parse(readFileSync13(this.path(name2), "utf8"));
+  }
+};
+var teamsDir = (runsDir) => join19(runsDir, "teams");
+
+// packages/engine/src/team/team.ts
+import { join as join22 } from "path";
+
+// packages/engine/src/team/board.ts
+var jobKey = (job) => `${job.kind}:${"member" in job ? job.member : "-"}:${"task" in job ? job.task ?? "-" : "-"}`;
+var ownJob = (job) => job.kind === "gates" || job.kind === "merge";
+var DONE = ["merged", "cancelled"];
+var finished = (t) => DONE.includes(t.status);
+var leadOf = (groups, group) => (groups.find((g) => g.name === group) ?? groups[0]).lead;
+function ready(task, tasks) {
+  return task.depends_on.every((id) => {
+    const dep = tasks.find((t) => t.id === id);
+    return !dep || finished(dep);
+  });
+}
+function chooseReviewer(task, members, busy, groups = teamGroups(members)) {
+  const author = members.find((m) => m.name === task.assignee);
+  const techlead = leadOf(groups, task.group ?? null).name;
+  if (!author || author.canReview) return techlead;
+  const able = members.filter((m) => m.kind === "worker" && m.canReview && m.name !== author.name).sort((a, b) => Number(b.group === author.group) - Number(a.group === author.group) || Number(b.role === author.role) - Number(a.role === author.role) || b.levelRank - a.levelRank);
+  if (!able.length) return techlead;
+  return able.find((m) => !busy.has(m.name))?.name ?? null;
+}
+var blocks = (f, blocking) => f.origin === "in_scope" && blocking.includes(f.severity);
+var normalize = (text3) => text3.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+var failureKey = (f) => `${f.suspect}:${normalize(f.title)}`;
+function madeProgress(previous, now) {
+  if (!previous.length) return true;
+  const current = new Set(now);
+  return previous.some((key) => !current.has(key));
+}
+var TASK_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,19}$/;
+function planProblems(tasks, members, brief2, existing = [], required = true) {
+  const problems = [];
+  if (!tasks.length) problems.push("the plan has no task");
+  const byName2 = new Map(members.map((m) => [m.name, m]));
+  const workers = members.filter((m) => m.kind === "worker").map((m) => m.name);
+  const checkers = members.filter((m) => m.kind === "checker").map((m) => m.name);
+  const ids = /* @__PURE__ */ new Set();
+  const known = new Set(existing.map((t) => t.id));
+  const criteria2 = new Set(brief2.criteria.map((c) => c.id));
+  for (const t of tasks) {
+    const where = `task '${t.id}'`;
+    if (!TASK_ID.test(t.id)) problems.push(`${where}: an id is letters, digits, '-' or '_' (at most 20), like T1`);
+    if (ids.has(t.id)) problems.push(`${where}: the id is used twice`);
+    if (known.has(t.id)) problems.push(`${where}: the id is already a task of this run; use a new one`);
+    ids.add(t.id);
+    if (!t.title.trim() || !t.description.trim()) problems.push(`${where}: give it a title and a description`);
+    const assignee = byName2.get(t.assignee);
+    if (!assignee || assignee.kind !== "worker") problems.push(`${where}: the assignee '${t.assignee}' is not a member who takes tasks (${workers.join(", ")})`);
+    if (!t.testers.length) problems.push(`${where}: name at least one tester (${checkers.join(", ")})`);
+    for (const tester of t.testers) {
+      if (byName2.get(tester)?.kind !== "checker") problems.push(`${where}: '${tester}' is not a tester (${checkers.join(", ")})`);
+    }
+    if (new Set(t.testers).size !== t.testers.length) problems.push(`${where}: a tester is named twice`);
+    for (const c of t.criteria) if (!criteria2.has(c)) problems.push(`${where}: '${c}' is not an acceptance criterion of the brief (${[...criteria2].join(", ")})`);
+    if (!t.criteria.length) problems.push(`${where}: name the acceptance criteria it serves`);
+  }
+  for (const t of tasks) {
+    for (const d of t.depends_on) {
+      if (d === t.id) problems.push(`task '${t.id}' depends on itself`);
+      else if (!ids.has(d) && !known.has(d)) problems.push(`task '${t.id}' depends on '${d}', which is no task`);
+    }
+  }
+  const cycle = findCycle(tasks);
+  if (cycle) problems.push(`the dependencies form a cycle: ${cycle.join(" -> ")}`);
+  if (required) {
+    const served = new Set(tasks.flatMap((t) => t.criteria));
+    for (const c of required === true ? brief2.criteria.map((x) => x.id) : required) if (!served.has(c)) problems.push(`acceptance criterion ${c} is served by no task`);
+  }
+  return problems;
+}
+function findCycle(tasks) {
+  const deps = new Map(tasks.map((t) => [t.id, t.depends_on]));
+  const state = /* @__PURE__ */ new Map();
+  const path = [];
+  const visit = (id) => {
+    if (state.get(id) === "done" || !deps.has(id)) return null;
+    if (state.get(id) === "visiting") return [...path.slice(path.indexOf(id)), id];
+    state.set(id, "visiting");
+    path.push(id);
+    for (const d of deps.get(id)) {
+      const found = visit(d);
+      if (found) return found;
+    }
+    path.pop();
+    state.set(id, "done");
+    return null;
+  };
+  for (const t of tasks) {
+    const found = visit(t.id);
+    if (found) return found;
+  }
+  return null;
+}
+function newTask(t, group = null) {
+  return {
+    ...structuredClone(t),
+    group,
+    status: "pending",
+    attempt: 1,
+    reviewRound: 0,
+    base: null,
+    code: null,
+    codeSummary: null,
+    notes: [],
+    tests: Object.fromEntries(t.testers.map((name2) => [name2, { status: "pending", commit: null, summary: null, howToRun: null }])),
+    candidate: null,
+    reviewer: null,
+    review: null,
+    checks: [],
+    guidance: null,
+    trouble: null,
+    question: null,
+    lastFailureKeys: [],
+    stalls: 0,
+    conflicts: [],
+    history: []
+  };
+}
+function checksComplete(task, gates) {
+  const by = new Set(task.checks.map((c) => c.by));
+  return task.testers.every((t) => by.has(t)) && (!gates || by.has("gates"));
+}
+var testsWritten = (task) => Object.values(task.tests).every((t) => t.status === "written");
+function boardJobs(state, ctx) {
+  const jobs = [];
+  const groups = ctx.groups ?? teamGroups(ctx.members);
+  const techleadOf = (t) => leadOf(groups, t.group ?? null).name;
+  const free = (m) => !ctx.busy.has(m);
+  const add = (job) => {
+    if (ctx.running.has(jobKey(job))) return;
+    if ("member" in job && !free(job.member)) return;
+    if (jobs.some((j) => "member" in j && "member" in job && j.member === job.member)) return;
+    jobs.push(job);
+  };
+  const phase = state.phase;
+  if (phase === "EXECUTION") {
+    const tasks = state.tasks;
+    for (const t of tasks) {
+      if (t.status === "triage") add({ kind: "triage", member: techleadOf(t), task: t.id });
+      else if (t.status === "blocked" && t.question && !t.question.escalated && t.question.answer === null) add({ kind: "answer", member: techleadOf(t), task: t.id });
+      else if (t.status === "resolving") add({ kind: "resolve", member: techleadOf(t), task: t.id });
+    }
+    for (const t of tasks) {
+      if (t.status !== "review") continue;
+      const reviewer = chooseReviewer(t, ctx.members, ctx.busy, groups);
+      if (reviewer) add({ kind: "review", member: reviewer, task: t.id });
+    }
+    for (const t of tasks) {
+      if (t.status !== "testing" || !t.candidate) continue;
+      const by = new Set(t.checks.map((c) => c.by));
+      for (const tester of t.testers) if (!by.has(tester)) add({ kind: "check", member: tester, task: t.id });
+      if (ctx.gates && !by.has("gates")) add({ kind: "gates", task: t.id });
+    }
+    for (const t of tasks) if (t.status === "merging") add({ kind: "merge", task: t.id });
+    for (const t of tasks) {
+      if (t.status === "coding" || t.status === "pending" && ready(t, tasks)) add({ kind: "work", member: t.assignee, task: t.id });
+    }
+    for (const t of tasks) {
+      if (!["coding", "review", "testing", "blocked"].includes(t.status)) continue;
+      for (const [tester, tests] of Object.entries(t.tests)) if (tests.status !== "written") add({ kind: "tests", member: tester, task: t.id });
+    }
+  }
+  if (state.integration?.triage && (phase === "INTEGRATION" || phase === "ACCEPTANCE")) {
+    for (const key of state.integration.triageGroups) add({ kind: "integration_triage", member: leadOf(groups, key || null).name });
+  } else if (phase === "INTEGRATION" && state.integration) {
+    const by = new Set(state.integration.checks.map((c) => c.by));
+    const testers = new Set(state.tasks.flatMap((t) => t.testers));
+    for (const tester of testers) if (!by.has(tester)) add({ kind: "integration_check", member: tester });
+    if (ctx.gates && !by.has("gates")) add({ kind: "gates", task: null });
+  }
+  if (phase === "APPLY" && state.applyConflict?.resolving) add({ kind: "resolve_apply", member: groups[0].lead.name });
+  return ["merge", "gates"].reduce((list, kind) => {
+    const first = list.find((j) => j.kind === kind);
+    const runs = [...ctx.running].some((k) => k.startsWith(`${kind}:`));
+    return list.filter((j) => j.kind !== kind || !runs && j === first);
+  }, jobs);
+}
+
+// packages/engine/src/team/identity.ts
+var import_yaml4 = __toESM(require_dist(), 1);
+import { existsSync as existsSync18, mkdirSync as mkdirSync8, readFileSync as readFileSync14, rmSync as rmSync4, writeFileSync as writeFileSync5 } from "fs";
+import { dirname as dirname6, join as join20 } from "path";
+
+// packages/engine/src/team/defaults.ts
+var PM = `You are the team's product manager, and the only member the user talks to.
+
+- You own the requirements. Before anything is built, ask until the goal, who it is for, what is in scope, what is out
+  of scope, the constraints and the acceptance criteria are clear and each criterion can be checked. Ask one topic at
+  a time; offer options when you can; never assume an answer the user did not give.
+- Write acceptance criteria someone could test: observable behaviour, not intentions.
+- When the techlead hands you a plan, check it against the brief: every criterion covered by a task, nothing outside
+  the scope, no assumption that contradicts what the user said. Send it back with the exact problems before you show it
+  to the user.
+- Speak to the user plainly and briefly, in the user's language. Report bad news as soon as you know it. Never promise
+  what testing has not shown.
+- Keep the team's internal detail out of your messages unless the user asks for it: say what it means for them.`;
+var TECHLEAD = `You are the team's techlead.
+
+- Split the brief into small tasks that can be done and tested on their own, each touching an area few other tasks
+  touch, so parallel work rarely conflicts. Say each task's dependencies.
+- Assign by level: hard, risky or design-heavy work to senior members, well-defined work to junior ones. Name the
+  member; give testers to every task.
+- Map every task to the acceptance criteria it serves, and give its testers a test focus.
+- When a test fails, decide what is wrong: the code (retry with guidance, or reassign), the test (send it back to the
+  tester), or the plan (add tasks). Change the approach after a second failure of the same kind.
+- Never widen the scope yourself: anything the brief does not ask for goes to the PM.
+- Report to the PM briefly and truthfully at every milestone.`;
+var DEV = `You are a developer on the team.
+
+- Do exactly the task you are given, in the area it names. If you must change anything outside it, say why.
+- Follow the repository's conventions and instructions (AGENTS.md / CLAUDE.md), and run the tests that concern your
+  change before you finish.
+- Report what you changed and anything you are unsure of. If you are blocked, ask the techlead one precise question
+  instead of guessing.`;
+var QA = `You are a tester on the team.
+
+- Write tests from the acceptance criteria and the task's description, not from the code: the happy path, the
+  boundaries, invalid input, errors, state and concurrency where they matter, and regressions of what already worked.
+- Make every test deterministic, and run it yourself.
+- Report each failure with how to reproduce it, what was expected and what happened. Never change the product code to
+  make a test pass.
+- If you think a test of yours is wrong, say so rather than defending it.`;
+var WORKER = `You are a member of the team who takes tasks.
+
+- Do exactly the task you are given, following the repository's conventions, and test your change before you finish.
+- Report what you changed and anything you are unsure of; ask the techlead when you are blocked.`;
+var CHECKER = `You are a member of the team who checks the work of others.
+
+- Check each task you are given against its acceptance criteria and your own responsibility, and write tests or checks
+  that show what you found.
+- Report every problem with how to see it, what was expected and what happened. Never change the product code yourself.`;
+var ROLE_IDENTITIES = {
+  pm: { kind: "pm", text: PM },
+  techlead: { kind: "lead", text: TECHLEAD },
+  dev: { kind: "worker", text: DEV },
+  qa: { kind: "checker", text: QA }
+};
+var KIND_IDENTITIES = { pm: PM, lead: TECHLEAD, worker: WORKER, checker: CHECKER };
+var LEVEL_IDENTITIES = {
+  junior: `You are a junior member.
+
+- Follow the plan and the task closely. When something is unclear, ask before you decide.
+- Keep to small, safe steps; do not refactor outside your task.`,
+  mid: `You are a mid-level member.
+
+- Decide the details within your task yourself, and explain the decisions that matter.
+- Say so when you see a design problem, even outside your task, but do not fix it unasked.`,
+  senior: `You are a senior member.
+
+- You may propose a different approach to the techlead, with your reasons, before you take it.
+- When you review someone's work, check correctness, design, the repository's conventions and the tests, and give
+  specific, actionable comments.`
+};
+
+// packages/engine/src/team/identity.ts
+function identityDirs(workspace, env = process.env) {
+  return { global: join20(dirname6(userConfigPath(env)), "team"), project: workspace ? join20(workspace, ".agentduo", "team") : null };
+}
+var FOLDERS = { role: "roles", level: "levels", agent: "agents" };
+var FILES = { role: "IDENTITY.md", level: "IDENTITY.md", agent: "AGENT.md" };
+var identityPath = (dir, kind, name2) => join20(dir, FOLDERS[kind], name2, FILES[kind]);
+function parseFile(path, warnings) {
+  const raw = readFileSync14(path, "utf8").replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/<!--[\s\S]*?-->/g, "").trimStart();
+  const m = /^---\n([\s\S]*?)\n---\n?/.exec(raw);
+  if (!m) return { text: raw.trim(), replace: false };
+  let meta;
+  try {
+    meta = import_yaml4.default.parse(m[1]);
+  } catch (e) {
+    warnings.push(`${path}: its front matter is not valid YAML (${e.message.split("\n")[0]}), so the whole file is taken as text`);
+    return { text: raw.slice(m[0].length).trim(), replace: false };
+  }
+  const replace = typeof meta === "object" && meta !== null && meta.replace === true;
+  return { text: raw.slice(m[0].length).trim(), replace };
+}
+function layered(kind, name2, dirs, builtIn, warnings) {
+  for (const dir of [dirs.project, dirs.global]) {
+    if (!dir) continue;
+    const path = identityPath(dir, kind, name2);
+    if (existsSync18(path)) return { text: parseFile(path, warnings).text, sources: [path] };
+  }
+  return builtIn !== null ? { text: builtIn, sources: ["default"] } : { text: "", sources: [] };
+}
+var hasFile = (kind, name2, dirs) => [dirs.global, dirs.project].some((dir) => !!dir && existsSync18(identityPath(dir, kind, name2)));
+function teamIdentities(team, members, dirs) {
+  const warnings = [];
+  const roles = {};
+  const levels = {};
+  const agents = {};
+  for (const role of new Set(members.map((m) => m.role))) {
+    const kind = team.roles[role].kind;
+    const own = ROLE_IDENTITIES[role];
+    let builtIn = own && own.kind === kind ? own.text : null;
+    if (builtIn === null) {
+      builtIn = KIND_IDENTITIES[kind];
+      if (!hasFile("role", role, dirs)) {
+        warnings.push(`role '${role}' has no IDENTITY.md of its own, so it uses the default for a ${kind} role (write roles/${role}/IDENTITY.md in .agentduo/team to describe it)`);
+      } else builtIn = null;
+    }
+    roles[role] = layered("role", role, dirs, builtIn, warnings);
+  }
+  for (const level of new Set(members.map((m) => m.level))) {
+    const builtIn = LEVEL_IDENTITIES[level] ?? null;
+    if (builtIn === null && !hasFile("level", level, dirs)) {
+      warnings.push(`level '${level}' has no IDENTITY.md (write levels/${level}/IDENTITY.md in .agentduo/team to describe it)`);
+    }
+    levels[level] = layered("level", level, dirs, builtIn, warnings);
+  }
+  for (const m of members) agents[m.name] = layered("agent", m.name, dirs, null, warnings);
+  return { roles, levels, agents, warnings };
+}
+function memberIdentity(ids, m) {
+  const parts = [
+    `## Your role: ${m.role}
+${ids.roles[m.role]?.text ?? ""}`.trimEnd(),
+    `## Your level: ${m.level}
+${ids.levels[m.level]?.text ?? ""}`.trimEnd()
+  ];
+  const own = ids.agents[m.name]?.text;
+  if (own) parts.push(`## Notes for you (${m.name})
+${own}`);
+  return parts.join("\n\n");
+}
+
+// packages/engine/src/team/prompts.ts
+function pmActions(state, occasion) {
+  switch (occasion.kind) {
+    case "plan_review":
+    case "area_review":
+      return ["plan_review"];
+    case "areas":
+      return ["areas"];
+    case "area_escalation":
+      return ["none", "team_answer", "escalate"];
+    case "acceptance":
+      return ["acceptance"];
+    case "reports":
+      return ["none"];
+    case "escalation":
+      return ["none", "questions", "team_answer"];
+    case "conversation":
+      switch (state.phase) {
+        case "INTAKE":
+          return ["none", "questions", "brief"];
+        case "PLANNING":
+          return ["none", "questions"];
+        case "EXECUTION":
+        case "INTEGRATION":
+          return ["none", "questions", "lead_note", "change_request", "team_answer"];
+        case "ACCEPTANCE":
+          return ["none", "questions", "lead_note", "change_request", "acceptance"];
+        default:
+          return ["none"];
+      }
+  }
+}
+var header2 = (kind, member) => `[orchestrator-role: team_${kind}]
+[agentduo-member: ${member.name}]
+`;
+var intro = (member) => `You are ${member.name}, the ${member.role} (${member.level}) of a software team that agentduo runs. The user talks only to the PM; the techlead plans, assigns, reviews and merges; the other members take tasks or test them. Every member works in a git worktree of its own, a copy of the repository: agentduo collects your changes after your turn (you need not commit) and merges them. Follow your own configuration and the repository's instructions (AGENTS.md / CLAUDE.md).`;
+function groupsSection(groups) {
+  if (!groups.length || groups[0].name === null) return "";
+  return ["## The groups", ...groups.map((g) => `- ${g.name}: techlead ${g.lead.name}${g.pm ? `, its PM ${g.pm.name}` : ""}; members ${g.members.filter((m) => m.kind === "worker" || m.kind === "checker").map((m) => m.name).join(", ")}`)].join("\n");
+}
+function areaSection(area) {
+  return `## Your group's part: ${area.group}
+${area.area}
+Acceptance criteria your group answers for: ${area.criteria.join(", ") || "(none)"}`;
+}
+function roster(members) {
+  return ["## The team", ...members.map((m) => `- ${m.name}: ${m.role} (${m.kind === "worker" ? "takes tasks" : m.kind === "checker" ? "tests tasks" : m.kind}), level ${m.level}${m.canReview && m.kind === "worker" ? ", reviews others" : ""}, on ${m.backend === "codex" ? "Codex" : "Claude"}`)].join("\n");
+}
+function briefSection(brief2, label = "The brief") {
+  const list = (title, xs) => xs.length ? `${title}:
+${xs.map((x) => `- ${x}`).join("\n")}` : "";
+  return [
+    `## ${label} (v${brief2.version}): ${brief2.title}`,
+    brief2.goal,
+    list("In scope", brief2.scope),
+    list("Out of scope", brief2.out_of_scope),
+    list("Constraints", brief2.constraints),
+    `Acceptance criteria:
+${brief2.criteria.map((c) => `- ${c.id}: ${c.criterion}`).join("\n")}`,
+    brief2.notes ? `Notes: ${brief2.notes}` : ""
+  ].filter(Boolean).join("\n\n");
+}
+function taskSection2(t, heading = `## Task ${t.id}: ${t.title}`) {
+  return [
+    heading,
+    t.description,
+    `Assignee: ${t.assignee}. Testers: ${t.testers.join(", ")}. Area: ${t.area.join(", ") || "(not said)"}.`,
+    `Acceptance criteria it serves: ${t.criteria.join(", ")}.${t.depends_on.length ? ` After: ${t.depends_on.join(", ")}.` : ""}`,
+    `Test focus: ${t.test_focus}`
+  ].join("\n");
+}
+function boardSection(tasks) {
+  if (!tasks.length) return "## The board\n(no task yet)";
+  return ["## The board", ...tasks.map((t) => `- ${t.id} [${t.status}] ${t.title} (assignee ${t.assignee}, attempt ${t.attempt})`)].join("\n");
+}
+var checkLines = (checks) => checks.flatMap((c) => [
+  `- ${c.by}: ${c.verdict}. ${c.summary}`,
+  ...c.failures.map((f) => `  - ${f.id} ${f.title} (suspects the ${f.suspect}; ${f.criteria.join(", ") || "no criterion"}): ${f.detail}
+    reproduce: ${f.reproduction}
+    expected: ${f.expected}
+    actual: ${f.actual}`)
+]);
+var json = "\n\n## Your output\nReply with one JSON object that matches the required schema exactly; nothing else.";
+function frame(kind, member, identity, members, brief2) {
+  return [header2(kind, member) + intro(member), identity ?? "", roster(members), brief2 ? briefSection(brief2) : ""].filter(Boolean);
+}
+var transcript = (messages) => messages.map((m) => `${m.from === "user" ? "User" : "You (PM)"}: ${m.text}`).join("\n\n");
+function pmPrompt(p) {
+  const s = p.state;
+  const brief2 = s.briefs.at(-1) ?? null;
+  const actions = pmActions(s, p.occasion);
+  const parts = frame(`pm_${p.occasion.kind}`, p.member, p.identity, p.members, null);
+  const groups = groupsSection(p.groups);
+  if (groups) parts.push(`${groups}
+You are the head PM: the only one who talks with the user. Each group's techlead plans its part; a group's own PM checks it first.`);
+  parts.push(`## Where the work is
+Phase: ${s.phase}.${s.approvedBrief ? ` The user approved brief v${s.approvedBrief}.` : ""}${s.approvedPlan ? " The user approved the plan." : ""}`);
+  if (brief2) parts.push(briefSection(brief2, s.approvedBrief === brief2.version ? "The brief" : "Your latest brief (not approved yet)"));
+  if (p.areas.length) parts.push(`## The groups' parts
+${p.areas.map((a) => `- ${a.group}: ${a.area} (${a.criteria.join(", ")})`).join("\n")}`);
+  if (s.phase !== "INTAKE") for (const plan of p.plans) parts.push(planSection2(plan));
+  if (s.tasks.length) parts.push(boardSection(s.tasks));
+  const fresh = p.state.messages.slice(p.seenMessages);
+  if (p.seenMessages > 0 && fresh.length) parts.push(`## New in the conversation with the user
+${transcript(fresh)}`);
+  else if (s.messages.length) parts.push(`## The conversation with the user
+${transcript(s.messages)}`);
+  if (p.reports.length) parts.push(`## Reports from the team since your last turn
+${p.reports.map((r) => `- ${r.from}: ${r.text}`).join("\n")}`);
+  if (p.openEscalations.length) {
+    parts.push(`## Questions the team needs answered (answer one with team_answer and its id)
+${p.openEscalations.map((e) => `- ${e.id}${e.task ? ` (task ${e.task})` : ""}: ${e.text}`).join("\n")}`);
+  }
+  const feedback = Object.entries(s.planFeedback).filter(([, text3]) => text3);
+  if (feedback.length && p.occasion.kind === "plan_review") {
+    parts.push(`## What was asked of the techleads last time
+${feedback.map(([group, text3]) => group ? `- ${group}: ${text3}` : text3).join("\n")}`);
+  }
+  parts.push(`## What to do now
+${pmTask(s, p.occasion)}
+
+Allowed actions now: ${actions.join(", ")}. \`message\` is what the user reads (in the user's language), or null. Use \`questions\` to ask the user up to 4 questions with 2 to 6 options each; they can always answer in their own words too.` + json);
+  return parts.join("\n\n");
+}
+function pmTask(s, occasion) {
+  switch (occasion.kind) {
+    case "plan_review":
+      return "The techlead submitted the plan above (in a team with groups, each group's techlead its part). Check it against the brief: every acceptance criterion served, nothing outside the scope, no assumption against what the user said, and in a team with groups the parts fit together. approve: true sends it to the user for approval with your `summary` of it in plain words (what will be done, in how many parts, by whom, the risks); approve: false sends it back with the exact `issues` (each naming its `group`, or null for every techlead).";
+    case "areas":
+      return "The user approved the brief. Split it between the groups above: for each group, the part it builds and the acceptance criteria it answers for (action areas, every group once). Every criterion must be some group's; a criterion that needs two groups is given to both. Split along the groups' strengths and so that they rarely touch the same files.";
+    case "area_review":
+    case "area_escalation":
+      return "";
+    case "acceptance":
+      return `Every task is merged and the testers' last check of the whole passed: ${s.integration ? checkLines(s.integration.checks).join("\n") : ""}
+Report to the user, criterion by criterion, whether it is met, with the evidence (the tests and checks that show it). Then the user accepts or asks for changes.`;
+    case "reports":
+      return "Tell the user, in one or two short sentences, what the reports above mean for them. Nothing else.";
+    case "escalation":
+      return "The team needs the answers above. Answer one yourself with team_answer when the brief and the conversation already settle it; otherwise explain it to the user in your message (and ask with questions if options help). The team waits.";
+    case "conversation":
+      switch (s.phase) {
+        case "INTAKE":
+          return "Understand what the user wants. Ask until the goal, scope, out of scope, constraints and testable acceptance criteria are clear; then write the brief (action brief). The user approves it or asks for changes. Do not write the brief while something important is unclear.";
+        case "PLANNING":
+          return "The techlead is planning. Answer the user; their comments about the plan reach the techlead with the plan's review.";
+        case "ACCEPTANCE":
+          return "The user asked for changes to the result. Within the brief's scope: lead_note tells the techlead what to change. Outside it: change_request with the new brief (the user approves it, then the techlead plans the rest). Ask first if it is unclear.";
+        default:
+          return "Answer the user from what you know (the board and the reports). A clarification of the work becomes a lead_note for the techlead; a change of scope becomes a change_request with the new brief for the user to approve. The team keeps working meanwhile.";
+      }
+  }
+}
+function planSection2(plan) {
+  return [
+    `## Plan v${plan.version}`,
+    plan.summary,
+    ...plan.tasks.map((t) => `- ${t.id} ${t.title} \u2192 ${t.assignee} (tests: ${t.testers.join(", ")}; ${t.criteria.join(", ")}${t.depends_on.length ? `; after ${t.depends_on.join(", ")}` : ""}): ${t.description}`),
+    plan.risks.length ? `Risks:
+${plan.risks.map((r) => `- ${r}`).join("\n")}` : ""
+  ].filter(Boolean).join("\n");
+}
+function planPrompt(p) {
+  const parts = frame("plan", p.member, p.identity, p.members, p.brief);
+  if (p.area && p.group) {
+    parts.push(`${areaSection(p.area)}
+Plan only your group's part, and give its tasks only to your group: ${p.group.members.filter((m) => m.kind === "worker").map((m) => m.name).join(", ")} take tasks, ${p.group.members.filter((m) => m.kind === "checker").map((m) => m.name).join(", ")} test them. The other groups plan theirs at the same time; depend only on tasks of your own group.`);
+  }
+  if (p.existing.length) parts.push(`## Tasks the run already has
+${p.existing.map((t) => `- ${t.id} [${t.status}] ${t.title} (${t.assignee})`).join("\n")}`);
+  if (p.previous) parts.push(`## Your previous plan
+${planSection2(p.previous)}`);
+  if (p.feedback) parts.push(`## What must change
+${p.feedback}`);
+  parts.push(`## What to do now
+${p.additions ? "The brief changed. Plan only the new tasks the change needs (new ids; they may depend on existing tasks)." : "Read the repository, then plan the work."} Split it into tasks that can each be done and tested on their own and that rarely touch the same files, so members can work in parallel. Name each task's assignee (a member who takes tasks), its testers, the files or folders it touches, its dependencies, the acceptance criteria it serves and what its testers must cover. Assign by level. ${p.area ? "Every acceptance criterion of your group's part" : "Every acceptance criterion"} must be served by some task. \`report\` is one line for the PM.` + json);
+  return parts.join("\n\n");
+}
+function workPrompt(p) {
+  const t = p.task;
+  const parts = frame("work", p.member, p.identity, p.members, p.brief);
+  parts.push(taskSection2(t));
+  const inFlight = p.others.filter((o) => o.id !== t.id && !["merged", "cancelled"].includes(o.status));
+  if (inFlight.length) parts.push(`## Other tasks in progress (stay out of their areas)
+${inFlight.map((o) => `- ${o.id} ${o.title} (${o.assignee}): ${o.area.join(", ")}`).join("\n")}`);
+  if (t.question?.answer) parts.push(`## The answer to your question
+You asked: ${t.question.text}
+Answer: ${t.question.answer}`);
+  if (t.review?.verdict === "changes") {
+    parts.push(`## ${t.review.reviewer}'s review asks for changes
+${t.review.summary}
+${t.review.findings.map((f) => `- ${f.id} [${f.severity}${f.origin === "out_of_scope" ? ", a suggestion outside the scope" : ""}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} ` : ""}${f.title}: ${f.detail}`).join("\n")}`);
+  }
+  if (t.guidance) parts.push(`## The techlead's guidance for this attempt (${t.attempt})
+${t.guidance}`);
+  if (t.trouble && t.attempt > 1) parts.push(`## Why the previous attempt failed
+${t.trouble}`);
+  parts.push(`## What to do now
+You work in ${p.cwd}. ${t.code ? "Your earlier work on this task is already there; continue from it." : "Implement the task."} When it is done, report done with a summary; if you cannot go on without an answer, report blocked with one precise question for the techlead.` + json);
+  return parts.join("\n\n");
+}
+function testsPrompt(p) {
+  const t = p.task;
+  const parts = frame("tests", p.member, p.identity, p.members, p.brief);
+  parts.push(taskSection2(t));
+  const fixing = t.tests[p.member.name]?.status === "fixing";
+  if (fixing) {
+    parts.push(`## The techlead says your tests are wrong
+${t.guidance ?? ""}
+${checkLines(p.failures).join("\n")}`);
+  }
+  parts.push(`## What to do now
+You work in ${p.cwd}. ${fixing ? "Fix your tests." : `Write the tests for task ${t.id} now, while ${t.assignee} writes the code.`} Test the acceptance criteria and the test focus, not an implementation: the code is not there yet, so your tests may fail for now. Put them where the repository keeps its tests and follow its conventions. Never change the product code. Say how to run them.` + json);
+  return parts.join("\n\n");
+}
+function reviewPrompt(p) {
+  const t = p.task;
+  const parts = frame("review", p.member, p.identity, p.members, p.brief);
+  parts.push(taskSection2(t));
+  if (t.codeSummary) parts.push(`## ${t.assignee}'s report
+${t.codeSummary}${t.notes.length ? `
+${t.notes.map((n) => `- ${n}`).join("\n")}` : ""}`);
+  const fence = "`".repeat(Math.max(3, ...[...p.diff.matchAll(/`+/g)].map((m) => m[0].length + 1)));
+  parts.push(`## The change
+${fence}diff
+${p.diff || "(no change)"}
+${fence}`);
+  parts.push(`## What to do now
+Review ${t.assignee}'s change for task ${t.id}; the code is checked out in your worktree. Ask for changes (verdict changes) only for a finding inside the task's scope of severity ${p.blocking.join(" or ")}; anything else is a suggestion. A finding outside the task or the brief has origin out_of_scope and is never work for this task. Cite the acceptance criteria a finding concerns.` + json);
+  return parts.join("\n\n");
+}
+function checkPrompt(p) {
+  const t = p.task;
+  const tests = t.tests[p.member.name];
+  const parts = frame("check", p.member, p.identity, p.members, p.brief);
+  parts.push(taskSection2(t));
+  if (tests?.summary) parts.push(`## Your tests
+${tests.summary}${tests.howToRun ? `
+Run them with: ${tests.howToRun}` : ""}`);
+  if (t.codeSummary) parts.push(`## ${t.assignee}'s report
+${t.codeSummary}`);
+  parts.push(`## What to do now
+In ${p.cwd} the task's code and its tests are merged. Run your tests and check the task against its acceptance criteria and its test focus. Now that you see the code you may add tests for cases it reveals (list them in added_tests). Report pass only when every case passes; for each failure say how to reproduce it, what was expected, what happened, and whether you suspect the code, the test or the plan.` + json);
+  return parts.join("\n\n");
+}
+function triagePrompt(p) {
+  const t = p.task;
+  const parts = frame("triage", p.member, p.identity, p.members, p.brief);
+  parts.push(taskSection2(t));
+  parts.push(`## What went wrong (attempt ${t.attempt} of ${p.maxAttempts})
+${t.trouble ?? "(not said)"}${t.checks.length ? `
+${checkLines(t.checks).join("\n")}` : ""}`);
+  if (t.history.length) parts.push(`## The task's history
+${t.history.slice(-12).map((h) => `- ${h.text}`).join("\n")}`);
+  parts.push(`## What to do now
+Decide what happens next: retry (the same assignee, with your guidance), reassign (to another member who takes tasks: ${p.workers.map((w) => `${w.name} (${w.level})`).join(", ")}), fix_tests (the tests are wrong: the testers fix them), or escalate (a question only the PM or the user can answer). After a second failure of the same kind, change the approach rather than retry the same way. \`report\` is one line for the PM.` + json);
+  return parts.join("\n\n");
+}
+function answerPrompt(p) {
+  const t = p.task;
+  const parts = frame("answer", p.member, p.identity, p.members, p.brief);
+  parts.push(taskSection2(t));
+  parts.push(`## ${t.question?.from} asks
+${t.question?.text}`);
+  parts.push("## What to do now\nAnswer from the brief, the plan and the repository. When only the PM or the user can decide it (the product, the scope), give escalate with the question for the PM and no answer." + json);
+  return parts.join("\n\n");
+}
+function resolvePrompt(p) {
+  const t = p.task;
+  const parts = frame("resolve", p.member, p.identity, p.members, p.brief);
+  if (t) parts.push(taskSection2(t));
+  const what = t ? `Merging task ${t.id} into the integration branch` : "Merging the user's own changes to their folder (made while the team worked) into the integration branch";
+  parts.push(`## What to do now
+${what} conflicts in: ${p.files.join(", ")}. In ${p.cwd} the integration branch is checked out with the other side merged in and conflict markers in those files. Resolve them so that both sides keep working, remove every marker, and report done.` + json);
+  return parts.join("\n\n");
+}
+function integrationCheckPrompt(p) {
+  const parts = frame("check", p.member, p.identity, p.members, p.brief);
+  parts.push(boardSection(p.state.tasks));
+  parts.push(`## What to do now
+Every task is merged; ${p.cwd} holds the whole result. Run every test of the repository and every test the team wrote, and check the result against every acceptance criterion of the brief. Report pass only when all of it passes.` + json);
+  return parts.join("\n\n");
+}
+function integrationTriagePrompt(p) {
+  const parts = frame("triage", p.member, p.identity, p.members, p.brief);
+  parts.push(boardSection(p.state.tasks));
+  parts.push(`## What must be fixed
+${p.trouble}${p.checks.length ? `
+${checkLines(p.checks).join("\n")}` : ""}`);
+  parts.push("## What to do now\nAdd the tasks that fix it (action add_tasks, new ids, with assignees and testers), or escalate with a question only the PM or the user can answer. `report` is one line for the PM." + json);
+  return parts.join("\n\n");
+}
+function areaPmPrompt(p) {
+  const parts = frame(`pm_${p.occasion.kind}`, p.member, p.identity, p.members, p.brief);
+  parts.push(`You are the PM of group ${p.group.name}. You never talk to the user: ${p.head.name}, the head PM, does. You answer for your group's part.`);
+  if (p.area) parts.push(areaSection(p.area));
+  if (p.plan) parts.push(planSection2(p.plan));
+  if (p.openEscalations.length) {
+    parts.push(`## Questions from your group's techlead (answer one with team_answer and its id)
+${p.openEscalations.map((e) => `- ${e.id}${e.task ? ` (task ${e.task})` : ""}: ${e.text}`).join("\n")}`);
+  }
+  const task = p.occasion.kind === "area_review" ? `Check ${p.group.lead.name}'s plan above against your group's part and the brief: every criterion of the part served, nothing outside the scope, no assumption against the brief. approve: true passes it to the head PM; approve: false sends it back with the exact \`issues\` (group: your group's name).` : "Answer a question yourself (team_answer) when the brief and your part settle it; otherwise pass it to the head PM (escalate, with what the head PM must decide).";
+  parts.push(`## What to do now
+${task}
+
+Allowed actions now: ${pmActions(p.state, p.occasion).join(", ")}. \`message\` is never shown to the user: leave it null.` + json);
+  return parts.join("\n\n");
+}
+
+// packages/engine/src/team/worktrees.ts
+import { execFile as execFile3 } from "child_process";
+import { chmodSync, existsSync as existsSync19, lstatSync as lstatSync2, mkdirSync as mkdirSync9, readdirSync as readdirSync7, readFileSync as readFileSync15, rmSync as rmSync5, symlinkSync, unlinkSync as unlinkSync3, writeFileSync as writeFileSync6 } from "fs";
+import { dirname as dirname7, join as join21, posix as posix5, resolve as resolve10 } from "path";
+function teamRefs(runId) {
+  const root2 = `refs/agentduo/team/${runId}`;
+  return {
+    base: `${root2}/base`,
+    integration: `${root2}/integration`,
+    /** The workspace as it was just before the result was written into it. */
+    backup: `${root2}/backup`,
+    /** The workspace as the result made it. */
+    applied: `${root2}/applied`,
+    /** A member's work on a task (code, tests). */
+    task: (task, member) => `${root2}/task/${task}/${member}`,
+    /** A task's code and tests merged, as its testers ran them. */
+    candidate: (task) => `${root2}/task/${task}/candidate`
+  };
+}
+var CLAUDE_LOCAL = ".claude/settings.local.json";
+var exec = (cmd, args, cwd, shell = false) => new Promise((resolvePromise) => {
+  execFile3(cmd, args, { cwd, shell, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
+    resolvePromise({ code: error ? Number(error.code ?? 1) || 1 : 0, out: `${stdout}${stderr}` });
+  });
+});
+function inside(dir, path) {
+  const parts = path.split("/");
+  if (!path || parts.some((p) => p === ".." || p === "" || p === ".git")) return null;
+  return join21(dir, ...parts);
+}
+var TeamGit = class {
+  constructor(o) {
+    this.o = o;
+    this.refs = teamRefs(o.runId);
+  }
+  o;
+  refs;
+  /** The workspace's path inside its repository ("" at the root): a worktree's copy of the workspace is there. */
+  prefix = null;
+  /** `git worktree add` changes the repository's worktree list: one at a time. */
+  adding = Promise.resolve();
+  async workspacePrefix() {
+    this.prefix ??= await this.o.git.prefix();
+    return this.prefix;
+  }
+  /** A member's worktree (the whole repository's files). */
+  worktree(member) {
+    return join21(this.o.root, member);
+  }
+  /** Where a member works: its worktree's copy of the workspace. */
+  async cwd(member) {
+    const prefix = await this.workspacePrefix();
+    return prefix ? join21(this.worktree(member), ...prefix.split("/")) : this.worktree(member);
+  }
+  /** A member's worktree as a repository of its own, on its copy of the workspace. */
+  async memberGit(member) {
+    return new Git(await this.cwd(member));
+  }
+  /** The workspace now, as the base of the run: integration starts there. */
+  async createBase(message) {
+    const snap = await this.o.git.snapshot(this.o.exclude, this.refs.base, message);
+    await this.o.git.run(["update-ref", this.refs.integration, snap.commit]);
+    return snap;
+  }
+  async read(ref) {
+    return this.o.git.readRef(ref);
+  }
+  async integrationHead() {
+    const head = await this.o.git.readRef(this.refs.integration);
+    if (!head) throw new GitError(`the team run ${this.o.runId} has no integration branch (${this.refs.integration})`);
+    return head.commit;
+  }
+  /**
+   * The member's worktree at `commit`, created the first time (then its setup commands run), else checked out there with
+   * whatever the member left removed; the workspace's shared folders and Claude's settings are linked in again.
+   */
+  async checkout(member, commit) {
+    const wt = this.worktree(member);
+    if (!existsSync19(join21(wt, ".git"))) {
+      const add = this.adding.then(async () => {
+        rmSync5(wt, { recursive: true, force: true });
+        mkdirSync9(dirname7(wt), { recursive: true });
+        await this.o.git.run(["worktree", "prune"]);
+        await this.o.git.run(["worktree", "add", "--detach", "--force", wt, commit]);
+      });
+      this.adding = add.catch(() => void 0);
+      await add;
+      await this.links(member);
+      const cwd = await this.cwd(member);
+      for (const command of this.o.setup) {
+        const r = await exec(command, [], cwd, true);
+        this.o.onSetup?.(member, command, r.code === 0, r.out);
+      }
+    } else {
+      const git = new Git(wt);
+      await git.run(["merge", "--abort"], { check: false });
+      await git.run(["checkout", "--detach", "--force", commit]);
+      await git.run(["clean", "-fd", ...this.keep().flatMap((p) => ["-e", p])]);
+      await this.links(member);
+    }
+    return this.cwd(member);
+  }
+  /** What a worktree keeps across checkouts and never snapshots: the links into the workspace. */
+  keep() {
+    return [...this.o.link, CLAUDE_LOCAL];
+  }
+  async links(member) {
+    const cwd = await this.cwd(member);
+    for (const path of [...this.o.link, CLAUDE_LOCAL]) {
+      const source = inside(this.o.workspace, path);
+      const target = inside(cwd, path);
+      if (!source || !target || !existsSync19(source)) continue;
+      let present2 = false;
+      try {
+        present2 = lstatSync2(target).isSymbolicLink();
+      } catch {
+      }
+      if (present2) continue;
+      rmSync5(target, { recursive: true, force: true });
+      mkdirSync9(dirname7(target), { recursive: true });
+      symlinkSync(source, target, lstatSync2(source).isDirectory() ? "junction" : "file");
+    }
+  }
+  /** The member's worktree as a commit on `ref`, whose parent is the commit the worktree was checked out at. */
+  async snapshot(member, ref, message) {
+    const git = await this.memberGit(member);
+    const snap = await git.snapshot(this.keep(), void 0, message);
+    await this.o.git.run(["update-ref", ref, snap.commit]);
+    return snap;
+  }
+  /** The commits merged into one, in order; the first conflict stops it. */
+  async merge(commits, message) {
+    let commit = commits[0];
+    for (const next of commits.slice(1)) {
+      const merged = await this.o.git.mergeTree(commit, next);
+      if (merged.conflicts.length) return { conflicts: merged.conflicts };
+      commit = await this.o.git.commitTree(merged.tree, [commit, next], message);
+    }
+    return { commit };
+  }
+  /**
+   * `commit` merged into the integration branch, which may have moved since the task started from it. A conflict
+   * changes nothing and names the files.
+   */
+  async mergeIntoIntegration(commit, message) {
+    const head = await this.integrationHead();
+    const merged = await this.o.git.mergeTree(head, commit);
+    if (merged.conflicts.length) return { conflicts: merged.conflicts };
+    const next = await this.o.git.commitTree(merged.tree, [head, commit], message);
+    await this.o.git.run(["update-ref", this.refs.integration, next, head]);
+    return { head: next };
+  }
+  /**
+   * The member's worktree at the integration head with `commit` merged in and the conflicts left as markers, for the
+   * member to resolve; the files that conflict.
+   */
+  async startResolve(member, commit) {
+    const head = await this.integrationHead();
+    await this.checkout(member, head);
+    const git = new Git(this.worktree(member));
+    await git.run(["merge", "--no-ff", "--no-commit", commit], { check: false, env: IDENTITY2 });
+    const files = (await git.run(["diff", "--name-only", "--diff-filter=U", "-z"])).stdout.split("\0").filter(Boolean);
+    const prefix = await this.workspacePrefix();
+    return files.map((f) => prefix ? posix5.relative(prefix, f) : f);
+  }
+  /**
+   * The member's resolution as the merge of `commit` into the integration branch. Refused (and nothing changes) when a
+   * file still has conflict markers, or when the integration branch moved since the merge started.
+   */
+  async finishResolve(member, commit, expectedHead, message) {
+    const cwd = await this.cwd(member);
+    const git = new Git(this.worktree(member));
+    const unmerged = (await git.run(["diff", "--name-only", "--diff-filter=U", "-z"])).stdout.split("\0").filter(Boolean);
+    const marked = unmerged.filter((f) => {
+      const path = join21(this.worktree(member), ...f.split("/"));
+      return existsSync19(path) && /^(<{7}|>{7})( |$)/m.test(readFileSync15(path, "utf8"));
+    });
+    if (marked.length) return { problem: `conflict markers are still in ${marked.join(", ")}` };
+    const head = await this.integrationHead();
+    if (head !== expectedHead) return { problem: "the integration branch moved while the conflict was being resolved" };
+    const tree = await new Git(cwd).worktreeTree(this.keep());
+    const next = await this.o.git.commitTree(tree, [head, commit], message);
+    await this.o.git.run(["update-ref", this.refs.integration, next, head]);
+    await git.run(["merge", "--abort"], { check: false });
+    return { head: next };
+  }
+  /** How `commit` would go into the workspace now. */
+  async planApply(commit, message) {
+    const base = await this.read(this.refs.base);
+    if (!base) throw new GitError(`the team run ${this.o.runId} has no base snapshot`);
+    const current = await this.o.git.snapshot(this.o.exclude, this.refs.backup, `${message} (the workspace before)`);
+    const tree = (await this.o.git.run(["rev-parse", `${commit}^{tree}`])).stdout.trim();
+    if (current.tree === base.tree) return { kind: "direct", current, tree };
+    const ours = await this.o.git.commitTree(current.tree, [base.commit], `${message} (the workspace)`);
+    const merged = await this.o.git.mergeTree(ours, commit);
+    if (merged.conflicts.length) return { kind: "conflicts", current, tree: merged.tree, ours, files: merged.conflicts };
+    return { kind: "merged", current, tree: merged.tree, ours };
+  }
+  /**
+   * Writes `to` into the workspace over `from` (what the workspace holds now): the files that differ are written,
+   * created or deleted, with their modes; nothing is committed, and the workspace's git index is not touched.
+   */
+  async write(from, to) {
+    const written = [];
+    for (const change of await this.o.git.rawChanges(from, to)) {
+      const path = inside(this.o.workspace, change.path);
+      if (!path) continue;
+      const gone = change.dstMode === "000000";
+      if (gone || change.status === "T" || existsSync19(path)) {
+        try {
+          if (lstatSync2(path).isDirectory() && !lstatSync2(path).isSymbolicLink()) rmSync5(path, { recursive: true, force: true });
+          else unlinkSync3(path);
+        } catch {
+        }
+      }
+      if (gone) {
+        written.push(change.path);
+        continue;
+      }
+      if (change.dstMode === "160000") continue;
+      mkdirSync9(dirname7(path), { recursive: true });
+      const bytes = await this.o.git.blob(change.dstBlob);
+      if (change.dstMode === "120000") symlinkSync(bytes.toString("utf8"), path);
+      else {
+        writeFileSync6(path, bytes);
+        if (process.platform !== "win32") chmodSync(path, change.dstMode === "100755" ? 493 : 420);
+      }
+      written.push(change.path);
+    }
+    return written;
+  }
+  /** Records what the workspace is after the result went in, so undo can tell whether it changed since. */
+  async recordApplied(message) {
+    return this.o.git.snapshot(this.o.exclude, this.refs.applied, message);
+  }
+  /**
+   * The workspace as it was before the result was written into it. Refused when it changed since (your edits would be
+   * lost): the files are named instead.
+   */
+  async undo(message) {
+    const backup = await this.read(this.refs.backup);
+    const applied = await this.read(this.refs.applied);
+    if (!backup || !applied) return { problem: "this team run's result was never written into the workspace" };
+    const now = await this.o.git.worktreeTree(this.o.exclude);
+    if (now !== applied.tree) {
+      const changed = (await this.o.git.rawChanges(applied.tree, now)).map((c) => c.path);
+      return { problem: `the workspace changed since the result was written into it (${changed.slice(0, 10).join(", ")}${changed.length > 10 ? ", \u2026" : ""})` };
+    }
+    const restored = await this.write(applied.tree, backup.tree);
+    await this.o.git.snapshot(this.o.exclude, this.refs.applied, message);
+    return { restored };
+  }
+  /** Every member's worktree removed (the refs stay). */
+  async remove() {
+    await this.adding;
+    if (existsSync19(this.o.root)) {
+      for (const wt of listDirs(this.o.root)) await this.o.git.run(["worktree", "remove", "--force", wt], { check: false });
+    }
+    rmSync5(this.o.root, { recursive: true, force: true });
+    await this.o.git.run(["worktree", "prune"], { check: false });
+  }
+};
+var IDENTITY2 = {
+  GIT_AUTHOR_NAME: "agentduo",
+  GIT_AUTHOR_EMAIL: "agentduo@localhost",
+  GIT_COMMITTER_NAME: "agentduo",
+  GIT_COMMITTER_EMAIL: "agentduo@localhost"
+};
+function listDirs(root2) {
+  try {
+    return readdirSync7(root2, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => resolve10(root2, d.name));
+  } catch {
+    return [];
+  }
+}
+
+// packages/engine/src/team/team.ts
+var REPORT_INTERVAL_MS = 6e4;
+var APPROVE = "approve";
+var CHANGE = "change";
+var Interrupted2 = class extends Error {
+};
+var taskView = (t) => ({
+  id: t.id,
+  title: t.title,
+  status: t.status,
+  assignee: t.assignee,
+  testers: [...t.testers],
+  attempt: t.attempt,
+  dependsOn: [...t.depends_on],
+  group: t.group ?? null
+});
+var GATES = "_gates";
+var TeamRun = class _TeamRun {
+  constructor(o) {
+    this.o = o;
+    this.env = o.env ?? process.env;
+    this.members = teamMembers(o.cfg.team);
+    this.groups = teamGroups(this.members);
+    this.head = headPm(this.members);
+    this.runner = o.runner ?? new AgentRunner(o.cfg, o.workspace, join22(o.store.dir, "logs"), o.bus, { permissions: o.permissions });
+  }
+  o;
+  members;
+  /** The team's groups (one, named null, in a team without groups), and the head PM, who talks with you. */
+  groups;
+  head;
+  identities = null;
+  runner;
+  tg = null;
+  git = null;
+  running = /* @__PURE__ */ new Map();
+  busy = /* @__PURE__ */ new Set();
+  wakeUp = null;
+  woken = false;
+  stopRequested = false;
+  abortRequested = false;
+  abort = new AbortController();
+  /** Requests open with the decider now (approvals, the PM's questions), by id. */
+  open = /* @__PURE__ */ new Set();
+  /** Requests the decider put off in this process: asked again only by a later run. */
+  deferred = /* @__PURE__ */ new Set();
+  /** Failed attempts of a job in this process, by key: the second failure stops it and asks the user. */
+  failures = /* @__PURE__ */ new Map();
+  /** Why nothing more may start in this process: a budget limit reached, or the PM failing again and again. */
+  budgetReached = null;
+  reportTimer = null;
+  env;
+  /** A new team run in `runsDir` for the user's `request`: its state, the configuration and the identities it keeps. */
+  static create(o) {
+    const { store, state } = TeamStore.create(o.runsDir, o.request);
+    store.writeJson("config.json", o.cfg);
+    return new _TeamRun({ ...o, store, state });
+  }
+  /** A team run of `runsDir` again (by id, or "latest"), with the configuration it started with. */
+  static resume(o) {
+    const store = TeamStore.open(o.runsDir, o.id);
+    const state = store.load();
+    const cfg = o.cfg ?? configFromSaved(store.readJson("config.json"));
+    return new _TeamRun({ ...o, store, state, cfg });
+  }
+  get state() {
+    return this.o.state;
+  }
+  get id() {
+    return this.state.id;
+  }
+  get interactive() {
+    return !!this.o.decider;
+  }
+  // ------------------------------------------------------------------ the user's side
+  /** A message from the user: for the PM, whatever the team is doing. */
+  message(text3) {
+    const trimmed = text3.trim();
+    if (!trimmed) return;
+    const seq = nextSeq(this.state);
+    this.state.messages.push({ seq, at: nowIso2(), from: "user", text: trimmed });
+    this.o.bus.emit({ type: "team.message", runId: this.id, from: "user", text: trimmed, seq });
+    this.save();
+    this.wake();
+  }
+  /** Esc: the running calls stop; the run returns "stopped" and a later run continues it. */
+  stop() {
+    this.stopRequested = true;
+    this.abort.abort();
+    this.wake();
+  }
+  /** Ends the run for good. */
+  abortRun() {
+    this.abortRequested = true;
+    this.stop();
+  }
+  /** A reached budget limit raised by one more allowance (the user decided to go on). */
+  raiseBudget() {
+    const budget = this.state.budget;
+    if (!budget) return [];
+    const used = this.used();
+    const allowance = configLimits(this.o.cfg);
+    const changes = [];
+    for (const key of reachedLimits(budget, used)) {
+      const add = allowance[key];
+      budget.limits[key] = add === null ? null : Math.ceil((used[key] + add) * (key === "cost" ? 100 : 1)) / (key === "cost" ? 100 : 1);
+      changes.push(add === null ? `${key}: no limit` : `${key} limit raised to ${budget.limits[key]}`);
+    }
+    this.save();
+    return changes;
+  }
+  // ------------------------------------------------------------------ the loop
+  async run() {
+    this.prepareIdentities();
+    this.o.bus.emit({
+      type: "team.started",
+      runId: this.id,
+      request: this.state.request,
+      runDir: this.o.store.dir,
+      members: this.members.map((m) => ({ name: m.name, role: m.role, kind: m.kind, level: m.level, backend: m.backend }))
+    });
+    this.o.bus.emit({ type: "team.phase", runId: this.id, phase: this.state.phase });
+    for (const t of this.state.tasks) this.o.bus.emit({ type: "team.task", task: taskView(t) });
+    try {
+      for (; ; ) {
+        if (this.abortRequested) {
+          await this.settle();
+          return this.finish("aborted");
+        }
+        if (this.state.phase === "DONE") return this.finish("done");
+        if (this.stopRequested) {
+          await this.settle();
+          return this.finish("stopped");
+        }
+        if (await this.advance()) continue;
+        this.schedule();
+        if (!this.running.size) {
+          if (this.budgetReached) {
+            this.o.bus.emit({ type: "warning", text: `The team stopped: ${this.budgetReached}. /resume goes on${this.state.budget && reachedLimits(this.state.budget, this.used()).length ? " (and raises the limit)" : ""}.` });
+            return this.finish("waiting");
+          }
+          if (!this.interactive || this.waitsOnDeferred()) return this.finish("waiting");
+        }
+        await this.nextWake();
+      }
+    } catch (e) {
+      this.abort.abort();
+      await this.settle();
+      if (e instanceof Interrupted2) return this.finish("stopped");
+      const message = e instanceof RunGitError ? e.message : e.stack ?? String(e);
+      this.o.bus.emit({ type: "warning", text: `The team run failed: ${message}` });
+      this.state.warnings.push(message.split("\n")[0]);
+      return this.finish("error");
+    } finally {
+      if (this.reportTimer) clearTimeout(this.reportTimer);
+    }
+  }
+  waitsOnDeferred() {
+    const w = this.state.waiting;
+    return !!w && this.deferred.has(w.requestId);
+  }
+  async settle() {
+    if (this.reportTimer) clearTimeout(this.reportTimer);
+    await Promise.allSettled([...this.running.values()]);
+  }
+  async finish(outcome) {
+    if (outcome === "aborted") this.setPhase("ABORTED");
+    this.save();
+    if ((outcome === "done" || outcome === "aborted") && this.tg) await this.tg.remove().catch(() => void 0);
+    this.o.bus.emit({ type: "team.finished", runId: this.id, phase: this.state.phase, outcome, summary: this.state.summary });
+    this.abort = new AbortController();
+    this.stopRequested = false;
+    return outcome;
+  }
+  wake() {
+    this.woken = true;
+    this.wakeUp?.();
+  }
+  nextWake() {
+    if (this.woken) {
+      this.woken = false;
+      return Promise.resolve();
+    }
+    return new Promise((resolve14) => {
+      this.wakeUp = () => {
+        this.wakeUp = null;
+        this.woken = false;
+        resolve14();
+      };
+    });
+  }
+  save() {
+    this.o.store.save(this.state);
+  }
+  setPhase(phase) {
+    if (this.state.phase === phase) return;
+    this.state.phase = phase;
+    this.o.bus.emit({ type: "team.phase", runId: this.id, phase });
+  }
+  emitTask(t) {
+    this.o.bus.emit({ type: "team.task", task: taskView(t) });
+  }
+  log(t, text3) {
+    t.history.push({ at: nowIso2(), text: text3 });
+  }
+  report(from, text3) {
+    this.state.reports.push({ seq: nextSeq(this.state), at: nowIso2(), from, text: text3 });
+  }
+  member(name2) {
+    const m = this.members.find((x) => x.name === name2);
+    if (!m) throw new Error(`no member '${name2}' in this team`);
+    return m;
+  }
+  task(id) {
+    const t = this.state.tasks.find((x) => x.id === id);
+    if (!t) throw new Error(`no task '${id}' in this run`);
+    return t;
+  }
+  prepareIdentities() {
+    if (this.identities) return;
+    try {
+      this.identities = this.o.store.readJson("identities.json");
+    } catch {
+      this.identities = teamIdentities(this.o.cfg.team, this.members, identityDirs(this.o.workspace, this.env));
+      this.o.store.writeJson("identities.json", this.identities);
+      for (const w of this.identities.warnings) this.o.bus.emit({ type: "warning", text: w });
+    }
+  }
+  /** The run's repository and worktrees, set up the first time (before any member works in a worktree). */
+  async teamGit() {
+    if (this.tg) return this.tg;
+    const owner = {
+      taskId: this.id,
+      git: this.state.git,
+      base: this.state.base ? { ...this.state.base, head: null, branch: null } : null,
+      lastSnapshot: null
+    };
+    const { git, meta } = await prepareRunGit(owner, this.o.workspace, this.env);
+    if (!this.state.git) {
+      this.state.git = meta;
+      this.save();
+    }
+    const root2 = dataRoot(this.env);
+    if (!root2) throw new RunGitError("agentduo has no data folder for the team's worktrees (set LOCALAPPDATA on Windows)");
+    const runsRel = relativeInside(this.o.store.runsDir, this.o.workspace);
+    this.git = git;
+    this.tg = new TeamGit({
+      git,
+      workspace: this.o.workspace,
+      runId: this.id,
+      root: join22(root2, "teams", this.id),
+      exclude: runsRel ? [runsRel] : [],
+      setup: this.o.cfg.team.worktree.setup,
+      link: this.o.cfg.team.worktree.link,
+      onSetup: (member, command, ok, output) => {
+        if (!ok) this.o.bus.emit({ type: "warning", text: `${member}'s worktree: '${command}' failed: ${output.trim().split("\n").at(-1) ?? ""}` });
+      }
+    });
+    return this.tg;
+  }
+  // ------------------------------------------------------------------ deterministic steps
+  /** One step agentduo takes by itself (a phase change, a candidate, an approval to ask); true when it took one. */
+  async advance() {
+    const s = this.state;
+    const brief2 = latestBrief(s);
+    if (brief2 && !brief2.declined && s.approvedBrief !== brief2.version && !s.waiting) return this.ask("brief");
+    switch (s.phase) {
+      case "PLANNING": {
+        if (!s.base) {
+          const tg = await this.teamGit();
+          s.base = await tg.createBase(`agentduo team ${this.id}: base`);
+          this.save();
+          return true;
+        }
+        const set = this.planSet();
+        if (set && s.planPresented === planSignature(set) && s.approvedPlan !== planSignature(set) && !s.waiting) return this.ask("plan");
+        return false;
+      }
+      case "EXECUTION": {
+        let changed = false;
+        for (const t of s.tasks) {
+          if (t.status === "testing" && !t.candidate && testsWritten(t) && !this.runningFor(t.id)) {
+            await this.makeCandidate(t);
+            changed = true;
+          } else if (t.status === "testing" && t.candidate && checksComplete(t, this.o.cfg.gates.length > 0)) {
+            this.judge(t);
+            changed = true;
+          }
+        }
+        if (changed) {
+          this.save();
+          return true;
+        }
+        if (s.tasks.length && s.tasks.every(finished) && !this.running.size) {
+          const tg = await this.teamGit();
+          s.integration = { commit: await tg.integrationHead(), checks: [], triage: false, trouble: null, triageGroups: [] };
+          this.setPhase("INTEGRATION");
+          this.save();
+          return true;
+        }
+        return false;
+      }
+      case "INTEGRATION": {
+        const ig = s.integration;
+        if (!ig || ig.triage) return false;
+        const testers = new Set(s.tasks.flatMap((t) => t.testers));
+        const by = new Set(ig.checks.map((c) => c.by));
+        const complete = [...testers].every((t) => by.has(t)) && (!this.o.cfg.gates.length || by.has("gates"));
+        if (!complete) return false;
+        if (ig.checks.every((c) => c.verdict === "pass")) {
+          s.verifiedTree = (await this.git.run(["rev-parse", `${ig.commit}^{tree}`])).stdout.trim();
+          this.report("agentduo", "every test and check of the whole result passes");
+          this.setPhase(s.accepted ? "APPLY" : "ACCEPTANCE");
+        } else {
+          s.integrationRounds += 1;
+          if (s.integrationRounds > this.o.cfg.team.limits.max_task_attempts) {
+            this.escalate(null, "integration_limit", `The whole result still fails its checks after ${s.integrationRounds - 1} round(s) of fixes: ` + ig.checks.filter((c) => c.verdict === "fail").map((c) => `${c.by}: ${c.summary}`).join("; "));
+          } else {
+            ig.triage = true;
+            ig.trouble = "The check of the whole result (every task merged) failed.";
+            ig.triageGroups = this.failingGroups(ig.checks);
+          }
+        }
+        this.save();
+        return true;
+      }
+      case "ACCEPTANCE":
+        if (s.acceptance && !s.accepted && !s.waiting && !s.integration?.triage) return this.ask("acceptance");
+        return false;
+      case "APPLY":
+        if (s.applyConflict) {
+          if (!s.applyConflict.resolving && !s.waiting) return this.ask("apply_conflict");
+          return false;
+        }
+        return this.apply();
+      default:
+        return false;
+    }
+  }
+  runningFor(task) {
+    return [...this.running.keys()].some((k) => k.endsWith(`:${task}`));
+  }
+  async makeCandidate(t) {
+    const tg = await this.teamGit();
+    const commits = [t.code, ...t.testers.map((n) => t.tests[n]?.commit).filter((c) => !!c)];
+    const merged = await tg.merge(commits, `agentduo team ${this.id}: ${t.id} candidate`);
+    if ("conflicts" in merged) {
+      t.status = "triage";
+      t.trouble = `the code and the tests conflict in ${merged.conflicts.join(", ")}`;
+      this.log(t, t.trouble);
+    } else {
+      t.candidate = merged.commit;
+      t.checks = [];
+      await this.git.run(["update-ref", tg.refs.candidate(t.id), merged.commit]);
+      this.log(t, "code and tests merged for testing");
+    }
+    this.emitTask(t);
+  }
+  /** Every check of a candidate is in: it is merged, or the techlead decides (or, after two rounds without progress, you). */
+  judge(t) {
+    const failing = t.checks.filter((c) => c.verdict === "fail");
+    if (!failing.length) {
+      t.status = "merging";
+      this.log(t, `attempt ${t.attempt} passes every check`);
+      this.emitTask(t);
+      return;
+    }
+    const failures = failing.flatMap((c) => c.failures);
+    const keys = failures.map(failureKey);
+    t.stalls = madeProgress(t.lastFailureKeys, keys) ? 0 : t.stalls + 1;
+    t.lastFailureKeys = keys;
+    t.trouble = `the check of attempt ${t.attempt} failed: ${failing.map((c) => `${c.by}: ${c.summary}`).join("; ")}`;
+    this.log(t, t.trouble);
+    if (t.stalls >= 2) {
+      this.escalate(t, "review_stalled", `Task ${t.id} (${t.title}) fails the same way after two rounds of fixes: ${failures.map((f) => f.title).join("; ")}`);
+    } else t.status = "triage";
+    this.emitTask(t);
+  }
+  escalate(t, reason, text3, group) {
+    const n = this.state.escalations.filter((x) => x.task === (t?.id ?? null)).length + 1;
+    const owner = t ? t.group : group ?? null;
+    const to = (t || group !== void 0 ? this.group(owner).pm : null) ?? this.head;
+    const e = {
+      id: t ? `${t.id}-E${n}` : `E${n}`,
+      task: t?.id ?? null,
+      ...group !== void 0 ? { group } : {},
+      reason,
+      text: text3,
+      to: to.name,
+      told: false,
+      answer: null
+    };
+    this.state.escalations.push(e);
+    if (t) {
+      t.status = reason === "question" && t.status === "blocked" ? "blocked" : "escalated";
+      this.log(t, `waiting for the PM: ${text3}`);
+      this.emitTask(t);
+    }
+    this.report(this.group(owner).lead.name, text3);
+  }
+  /** A group of the team by name (null: the one group of a team without groups). */
+  group(name2) {
+    return this.groups.find((g) => g.name === name2) ?? this.groups[0];
+  }
+  get grouped() {
+    return this.groups[0].name !== null;
+  }
+  /** The groups that plan now: every group the first time; after a change of the brief, those with criteria no task serves yet. */
+  planningGroups() {
+    const s = this.state;
+    if (!this.grouped) return this.groups;
+    const areas = currentAreas(s);
+    const served = new Set(s.tasks.filter((t) => t.status !== "cancelled").flatMap((t) => t.criteria));
+    return this.groups.filter((g) => areas.some((a) => a.group === g.name && (s.replanning ? a.criteria.some((c) => !served.has(c)) : a.criteria.length > 0)));
+  }
+  /** The criteria a group's plan must serve now. */
+  requiredCriteria(g) {
+    const s = this.state;
+    const served = new Set(s.tasks.filter((t) => t.status !== "cancelled").flatMap((t) => t.criteria));
+    const own = this.grouped ? currentAreas(s).find((a) => a.group === g.name)?.criteria ?? [] : this.brief().criteria.map((c) => c.id);
+    return s.replanning ? own.filter((c) => !served.has(c)) : this.grouped ? own : true;
+  }
+  /** The plan of every group that plans now, when each has one its own PM approved (or none has to); else null. */
+  planSet() {
+    const plans = [];
+    for (const g of this.planningGroups()) {
+      const plan = latestPlan(this.state, g.name);
+      if (!plan || plan.declined || g.pm && plan.areaApproved !== true) return null;
+      plans.push(plan);
+    }
+    return plans.length ? plans : null;
+  }
+  /** The plans you approved last (one per group), for the PM to know what the team works to. */
+  approvedSet() {
+    const s = this.state;
+    if (!s.approvedPlan) return [];
+    const wanted = new Set(s.approvedPlan.split(","));
+    return s.plans.filter((p) => wanted.has(`${p.group ?? ""}:${p.version}`));
+  }
+  /** The groups an integration failure is for: those answering for its criteria, else the first. */
+  failingGroups(checks) {
+    if (!this.grouped) return [""];
+    const areas = currentAreas(this.state);
+    const keys = /* @__PURE__ */ new Set();
+    for (const f of checks.filter((c) => c.verdict === "fail").flatMap((c) => c.failures)) {
+      const owners = areas.filter((a) => f.criteria.some((c) => a.criteria.includes(c))).map((a) => a.group);
+      for (const o of owners.length ? owners : [this.groups[0].name]) keys.add(o);
+    }
+    return keys.size ? [...keys] : [this.groups[0].name];
+  }
+  /** Writes the accepted result into the workspace, once the tree going in is the one the last whole check passed. */
+  async apply() {
+    const s = this.state;
+    const tg = await this.teamGit();
+    const head = await tg.integrationHead();
+    const plan = await tg.planApply(head, `agentduo team ${this.id}`);
+    if (plan.kind === "conflicts") {
+      s.applyConflict = { ours: plan.ours, tree: plan.tree, files: plan.files, resolving: false };
+      this.save();
+      return true;
+    }
+    if (plan.tree !== s.verifiedTree) {
+      const commit = await this.git.commitTree(plan.tree, plan.kind === "merged" ? [head, plan.ours] : [head], `agentduo team ${this.id}: with the workspace's changes`);
+      await this.git.run(["update-ref", tg.refs.integration, commit, head]);
+      s.integration = { commit, checks: [], triage: false, trouble: null, triageGroups: [] };
+      this.report("agentduo", "the folder changed while the team worked; the result is checked again together with those changes");
+      this.setPhase("INTEGRATION");
+      this.save();
+      return true;
+    }
+    const files = await tg.write(plan.current.tree, plan.tree);
+    await tg.recordApplied(`agentduo team ${this.id}: applied`);
+    s.applied = { tree: plan.tree, files, at: nowIso2() };
+    s.summary = `The team's result is in your folder: ${files.length} file(s) changed, nothing committed. \`duo team undo ${this.id}\` puts the folder back as it was.`;
+    this.setPhase("DONE");
+    this.save();
+    return true;
+  }
+  // ------------------------------------------------------------------ approvals and questions
+  request(kind, questions) {
+    const pm = this.head;
+    return {
+      id: `tq-${this.id.slice(-6)}-${nextSeq(this.state)}`,
+      source: "team",
+      callId: `${this.id}:${kind}:${this.state.seq}`,
+      agent: pm.backend,
+      teamRunId: this.id,
+      member: pm.name,
+      questions,
+      at: nowIso2()
+    };
+  }
+  approvalQuestion(kind) {
+    const s = this.state;
+    const option = (id, label, description) => ({ id, label, description });
+    switch (kind) {
+      case "brief": {
+        const b = latestBrief(s);
+        return {
+          id: "decision",
+          header: "Brief",
+          multiSelect: false,
+          question: `Approve the PM's brief v${b.version} ("${b.title}")? ${s.plans.length ? "The techlead then plans what it adds." : "The techlead then plans the work."}`,
+          options: [option(APPROVE, "Approve", "Hand it to the techlead"), option(CHANGE, "Ask for changes", "Tell the PM what to change, in your own words")]
+        };
+      }
+      case "plan": {
+        const set = this.planSet() ?? [];
+        const tasks = set.reduce((n, p) => n + p.tasks.length, 0);
+        return {
+          id: "decision",
+          header: "Plan",
+          multiSelect: false,
+          question: `Approve the plan (${tasks} task(s)${this.grouped ? ` in ${set.length} group(s)` : ""})? The team starts working once you do.`,
+          options: [option(APPROVE, "Approve", "The team starts"), option(CHANGE, "Ask for changes", "Tell the PM what to change, in your own words")]
+        };
+      }
+      case "acceptance":
+        return {
+          id: "decision",
+          header: "Acceptance",
+          multiSelect: false,
+          question: "Accept the team's result? It is then written into your folder (nothing is committed, and it can be undone).",
+          options: [option(APPROVE, "Accept", "Write it into my folder"), option(CHANGE, "Ask for changes", "Tell the PM what to change, in your own words")]
+        };
+      case "apply_conflict":
+        return {
+          id: "decision",
+          header: "Conflicts",
+          multiSelect: false,
+          question: `Your folder changed while the team worked, and the result conflicts with it in ${s.applyConflict.files.join(", ")}. What now?`,
+          options: [
+            option(APPROVE, "Let the techlead resolve it", "On top of your changes; checked again before it is written"),
+            option(CHANGE, "Write it with conflict markers", "You resolve the markers yourself")
+          ]
+        };
+    }
+  }
+  /** Opens an approval with the decider; its answer comes back through `decided`. */
+  ask(kind) {
+    const request = this.request(kind, [this.approvalQuestion(kind)]);
+    ledgerOpen(this.state.clarifications, request);
+    this.state.waiting = { kind, requestId: request.id };
+    this.save();
+    this.listen(request, (response) => this.decided(kind, request, response));
+    return true;
+  }
+  /** Sends a request to the decider (when there is one); an answer wakes the loop. */
+  listen(request, done) {
+    this.o.bus.emit({ type: "clarification.requested", request });
+    if (!this.o.decider) return;
+    this.open.add(request.id);
+    this.o.decider.askClarification({ request }).then((response) => {
+      this.open.delete(request.id);
+      if (response.kind === "defer") {
+        this.deferred.add(request.id);
+        this.o.bus.emit({ type: "clarification.closed", id: request.id, callId: request.callId, status: "deferred" });
+      } else done(response);
+      this.wake();
+    }, () => {
+      this.open.delete(request.id);
+      this.deferred.add(request.id);
+      this.wake();
+    });
+  }
+  /** Reopens what this run asked and nobody answered yet (a run that continues an earlier one). */
+  reopen() {
+    const w = this.state.waiting;
+    if (!w || this.open.has(w.requestId) || this.deferred.has(w.requestId)) return;
+    const entry = this.state.clarifications.find((c) => c.id === w.requestId && c.status === "pending");
+    if (!entry) return;
+    const { seq: _seq, status: _status, ...request } = entry;
+    this.listen(request, (response) => this.decided(w.kind, request, response));
+  }
+  decided(kind, request, response) {
+    const s = this.state;
+    if (response.kind !== "answered") {
+      ledgerClose(s.clarifications, request.id, "cancelled", nowIso2(), request.callId);
+      this.deferred.add(request.id);
+      this.save();
+      return;
+    }
+    ledgerAnswer(s.clarifications, request.id, request.callId, response.answers, nowIso2());
+    this.o.bus.emit({ type: "clarification.answered", id: request.id, callId: request.callId, answers: response.answers });
+    const a = response.answers[0];
+    const approve = a.optionIds.includes(APPROVE);
+    const words2 = a.otherText?.trim() || null;
+    s.waiting = null;
+    switch (kind) {
+      case "brief": {
+        const b = latestBrief(s);
+        if (approve) {
+          s.approvedBrief = b.version;
+          if (s.plans.length) s.replanning = true;
+          this.setPhase("PLANNING");
+          if (words2) s.leadNotes.push({ group: null, text: `The user, approving the brief: ${words2}` });
+        } else {
+          b.declined = true;
+          this.userWords(`(about brief v${b.version}) ${words2 ?? "Please change the brief."}`);
+        }
+        break;
+      }
+      case "plan": {
+        const set = this.planSet() ?? [];
+        if (approve) this.startPlan(set, words2);
+        else {
+          for (const p of set) {
+            p.declined = true;
+            s.planFeedback[groupKey(p.group)] = `The user asked for changes (through the PM): ${words2 ?? "(no details)"}`;
+          }
+          this.userWords(`(about the plan) ${words2 ?? "Please change the plan."}`);
+        }
+        break;
+      }
+      case "acceptance":
+        if (approve) {
+          s.accepted = true;
+          this.setPhase("APPLY");
+        } else {
+          s.acceptance = null;
+          this.userWords(`(about the result) ${words2 ?? "Please change it."}`);
+        }
+        break;
+      case "apply_conflict":
+        if (approve) s.applyConflict.resolving = true;
+        else void this.writeWithMarkers();
+        break;
+    }
+    this.save();
+  }
+  /** What the user wrote with a decision goes into the conversation, for the PM. */
+  userWords(text3) {
+    const seq = nextSeq(this.state);
+    this.state.messages.push({ seq, at: nowIso2(), from: "user", text: text3 });
+    this.o.bus.emit({ type: "team.message", runId: this.id, from: "user", text: text3, seq });
+  }
+  startPlan(set, words2) {
+    const s = this.state;
+    s.approvedPlan = planSignature(set);
+    for (const p of set) {
+      for (const t of p.tasks) {
+        const task = newTask(t, p.group);
+        s.tasks.push(task);
+        this.emitTask(task);
+      }
+    }
+    s.replanning = false;
+    s.planFeedback = {};
+    if (words2) s.leadNotes.push({ group: null, text: `The user, approving the plan: ${words2}` });
+    if (s.integration?.triage) s.integration = null;
+    s.accepted = false;
+    s.acceptance = null;
+    this.setPhase("EXECUTION");
+  }
+  async writeWithMarkers() {
+    const s = this.state;
+    const tg = await this.teamGit();
+    const plan = await tg.planApply(await tg.integrationHead(), `agentduo team ${this.id}`);
+    const files = plan.kind === "conflicts" ? plan.files : [];
+    const written = await tg.write(plan.current.tree, plan.tree);
+    await tg.recordApplied(`agentduo team ${this.id}: applied with conflicts`);
+    s.applied = { tree: plan.tree, files: written, at: nowIso2() };
+    s.applyConflict = null;
+    s.summary = `The team's result is in your folder with conflict markers in ${files.join(", ")}: resolve them there. Nothing is committed.`;
+    this.setPhase("DONE");
+    this.save();
+    this.wake();
+  }
+  // ------------------------------------------------------------------ scheduling
+  used(extra = {}) {
+    const u = this.state.usage;
+    return {
+      tokens: u.tokens + (extra.tokens ?? 0),
+      cost: u.costUsd + (extra.cost ?? 0),
+      calls: u.calls + (extra.calls ?? 0),
+      minutes: (u.workSec + (extra.minutes ?? 0) * 60) / 60
+    };
+  }
+  budgetStop(extra = {}) {
+    const s = this.state;
+    s.budget ??= { limits: configLimits(this.o.cfg), warned: [] };
+    const used = this.used(extra);
+    const reached = reachedLimits(s.budget, used);
+    return reached.length ? reached.map((k) => describeLimit(k, used[k], s.budget.limits[k])).join("; ") : null;
+  }
+  callBudget() {
+    return {
+      stop: (call) => this.budgetStop({ tokens: call.tokens, cost: call.costUsd, calls: call.calls }),
+      costCap: () => null
+    };
+  }
+  /** The PM's next turn, if it has one now. */
+  pmOccasion() {
+    const s = this.state;
+    if (s.phase === "DONE" || s.phase === "ABORTED") return null;
+    if (s.phase === "ACCEPTANCE" && !s.acceptance && !s.integration?.triage && s.messages.length <= s.pmSeen) return { kind: "acceptance" };
+    if (s.phase === "PLANNING" && s.base && this.grouped && !currentAreas(s).length) return { kind: "areas" };
+    const set = s.phase === "PLANNING" ? this.planSet() : null;
+    if (set && s.planReviewed !== planSignature(set)) return { kind: "plan_review" };
+    if (s.messages.length > s.pmSeen && s.messages.at(-1).from === "user") return { kind: "conversation" };
+    if (s.escalations.some((e) => !e.told && e.answer === null && e.to === this.head.name)) return { kind: "escalation" };
+    if ((s.phase === "EXECUTION" || s.phase === "INTEGRATION") && s.reports.length > s.reportsSeen) {
+      const wait = s.lastReportAt ? (this.o.reportIntervalMs ?? REPORT_INTERVAL_MS) - (Date.now() - Date.parse(s.lastReportAt)) : 0;
+      if (wait <= 0) return { kind: "reports" };
+      if (!this.reportTimer) {
+        this.reportTimer = setTimeout(() => {
+          this.reportTimer = null;
+          this.wake();
+        }, wait);
+        this.reportTimer.unref?.();
+      }
+    }
+    return null;
+  }
+  /** The groups whose techlead must plan now: no plan of the approved brief yet, or theirs was sent back. */
+  groupsToPlan() {
+    const s = this.state;
+    if (s.phase !== "PLANNING" || !s.base || s.waiting || this.grouped && !currentAreas(s).length) return [];
+    return this.planningGroups().filter((g) => {
+      const plan = latestPlan(s, g.name);
+      return !plan || plan.declined;
+    });
+  }
+  /** A group's own PM's next turn: its techlead's question waiting, or its group's plan to check. */
+  areaOccasion(g) {
+    const s = this.state;
+    if (!g.pm) return null;
+    if (s.escalations.some((e) => e.to === g.pm.name && e.answer === null)) return { kind: "area_escalation" };
+    const plan = s.phase === "PLANNING" ? latestPlan(s, g.name) : null;
+    if (plan && !plan.declined && plan.areaApproved == null && this.planningGroups().includes(g)) return { kind: "area_review" };
+    return null;
+  }
+  schedule() {
+    this.reopen();
+    if (this.budgetReached) return;
+    if (!this.busy.has(this.head.name)) {
+      const occasion = this.pmOccasion();
+      if (occasion) this.start({ kind: "pm" }, () => this.pmTurn(occasion));
+    }
+    const agents = () => [...this.running.keys()].filter((k) => !/^(pm|area_pm|gates|merge):/.test(k)).length;
+    for (const g of this.groups) {
+      const occasion = this.areaOccasion(g);
+      if (occasion && !this.busy.has(g.pm.name)) this.start({ kind: "area_pm", member: g.pm.name }, () => this.areaTurn(g, occasion));
+    }
+    const max = this.o.cfg.team.max_parallel;
+    for (const g of this.groupsToPlan()) {
+      if (!this.busy.has(g.lead.name) && agents() < max) this.start({ kind: "plan", member: g.lead.name }, () => this.planTurn(g));
+    }
+    const jobs = boardJobs(this.state, {
+      members: this.members,
+      groups: this.groups,
+      busy: this.busy,
+      running: new Set(this.running.keys()),
+      gates: this.o.cfg.gates.length > 0
+    });
+    for (const job of jobs) {
+      if ((this.failures.get(jobKey(job)) ?? 0) >= 2) continue;
+      if (!ownJob(job) && agents() >= max) continue;
+      if ("member" in job && this.busy.has(job.member)) continue;
+      this.start(job, () => this.execute(job));
+    }
+  }
+  start(job, work) {
+    const key = jobKey(job);
+    if (this.running.has(key)) return;
+    const member = "member" in job ? job.member : job.kind === "pm" ? this.head.name : null;
+    if (member) {
+      this.busy.add(member);
+      this.o.bus.emit({ type: "team.member", member, state: "busy", job: job.kind, task: "task" in job ? job.task ?? null : null });
+    }
+    const p = (async () => {
+      try {
+        await work();
+        this.failures.delete(key);
+      } catch (e) {
+        if (e instanceof Interrupted2) return;
+        const n = (this.failures.get(key) ?? 0) + 1;
+        this.failures.set(key, n);
+        const text3 = e.message;
+        this.o.bus.emit({ type: "warning", text: `${member ?? "agentduo"} (${job.kind}${"task" in job && job.task ? ` ${job.task}` : ""}) failed: ${text3}` });
+        if (n >= 2 && job.kind === "pm") {
+          this.budgetReached = `the PM failed twice (${text3.split("\n")[0]})`;
+        } else if (n >= 2) {
+          const t = "task" in job && job.task ? this.state.tasks.find((x) => x.id === job.task) ?? null : null;
+          this.escalate(t, "agent_error", `${member ?? "agentduo"} could not do its ${job.kind} job${t ? ` on ${t.id}` : ""}: ${text3.split("\n")[0]}`);
+          this.save();
+        }
+      } finally {
+        this.running.delete(key);
+        if (member) {
+          this.busy.delete(member);
+          this.o.bus.emit({ type: "team.member", member, state: "idle", job: null, task: null });
+        }
+        this.wake();
+      }
+    })();
+    this.running.set(key, p);
+  }
+  execute(job) {
+    switch (job.kind) {
+      case "work":
+        return this.workTurn(job.member, job.task);
+      case "tests":
+        return this.testsTurn(job.member, job.task);
+      case "review":
+        return this.reviewTurn(job.member, job.task);
+      case "check":
+        return this.checkTurn(job.member, job.task);
+      case "triage":
+        return this.triageTurn(job.task);
+      case "answer":
+        return this.answerTurn(job.task);
+      case "resolve":
+        return this.resolveTurn(job.task);
+      case "gates":
+        return this.gatesRun(job.task);
+      case "merge":
+        return this.mergeTask(job.task);
+      case "integration_check":
+        return this.integrationCheckTurn(job.member);
+      case "integration_triage":
+        return this.integrationTriageTurn(job.member);
+      case "resolve_apply":
+        return this.resolveApplyTurn();
+      default:
+        return Promise.resolve();
+    }
+  }
+  // ------------------------------------------------------------------ member calls
+  /** One call of a member, in its session: the result's data, or an error (thrown). */
+  async call(m, kind, schemaName, build, o) {
+    const s = this.state;
+    const backend = this.runner.backends[m.backend];
+    const keep = backend.keepsSessions(void 0, m.args);
+    const session2 = s.sessions[m.name];
+    const read = s.leadNotes.slice(s.leadNotesSeen[m.name] ?? 0).filter((n) => n.group === null || n.group === m.group);
+    const notes2 = m.kind === "lead" && read.length ? `
+
+## Notes from the PM
+${read.map((n) => `- ${n.text}`).join("\n")}` : "";
+    const notesSeen = s.leadNotes.length;
+    const full = build(memberIdentity(this.identities, m)) + notes2;
+    const resume = keep && session2 && session2.backend === m.backend ? { id: session2.id, prompt: build(null) + notes2 } : void 0;
+    const profile = memberProfile(m);
+    if (m.backend === "claude") profile.args = [...implementerPermissionArgs(this.o.cfg.claude), ...profile.args];
+    const res = await this.runner.call({
+      member: { name: m.name, task: o.task, backend: m.backend, profile, cwd: o.cwd },
+      prompt: full,
+      schemaName,
+      logPrefix: `${String(nextSeq(s)).padStart(3, "0")}-${kind}-${m.name}${o.task ? `-${o.task}` : ""}`,
+      check: o.check,
+      signal: this.abort.signal,
+      session: { keep, ...resume ? { resume } : {} },
+      budget: this.callBudget()
+    });
+    s.usage.calls += res.calls;
+    s.usage.unpricedCalls += res.unpricedCalls;
+    s.usage.costUsd += res.costUsd ?? 0;
+    s.usage.tokens += res.tokens ?? 0;
+    s.usage.workSec += Math.max(0, res.durationSec - res.waitedSec);
+    const by = s.usage.byMember[m.name] ??= { calls: 0, costUsd: 0, tokens: 0 };
+    by.calls += res.calls;
+    by.costUsd += res.costUsd ?? 0;
+    by.tokens += res.tokens ?? 0;
+    if (res.interrupted) throw new Interrupted2();
+    if (res.budgetStop) {
+      this.budgetReached = res.budgetStop;
+      this.save();
+      throw new Interrupted2();
+    }
+    if (!res.ok) {
+      this.save();
+      throw new Error(res.error ?? "the call failed");
+    }
+    if (keep && res.sessionId) s.sessions[m.name] = { backend: m.backend, id: res.sessionId };
+    if (m.kind === "lead") s.leadNotesSeen[m.name] = notesSeen;
+    this.save();
+    return res.data;
+  }
+  parts(m) {
+    return { member: m, members: this.members, state: this.state };
+  }
+  brief() {
+    return approvedBrief(this.state) ?? latestBrief(this.state);
+  }
+  // ------------------------------------------------------------------ the PM
+  async pmTurn(occasion) {
+    const s = this.state;
+    const pm = this.head;
+    const seenMessages = s.pmSeen;
+    const messagesNow = s.messages.length;
+    const reports = s.reports.slice(s.reportsSeen);
+    const reportsNow = s.reports.length;
+    const open = s.escalations.filter((e) => e.answer === null && e.to === pm.name);
+    const set = this.planSet() ?? [];
+    const shown2 = occasion.kind === "plan_review" ? set : this.approvedSet();
+    const actions = pmActions(s, occasion);
+    let cwd = this.o.workspace;
+    if (s.base) {
+      const tg = await this.teamGit();
+      cwd = await tg.checkout(pm.name, await tg.integrationHead());
+    }
+    const out = await this.call(pm, "pm", "team_pm", (identity) => pmPrompt({
+      ...this.parts(pm),
+      identity,
+      occasion,
+      seenMessages: identity ? 0 : seenMessages,
+      reports,
+      openEscalations: open,
+      groups: this.groups,
+      plans: shown2,
+      areas: currentAreas(s)
+    }), { task: null, cwd, check: (d) => this.pmProblems(d, actions, open) });
+    s.pmSeen = Math.max(s.pmSeen, messagesNow);
+    s.reportsSeen = Math.max(s.reportsSeen, reportsNow);
+    if (reports.length) s.lastReportAt = nowIso2();
+    for (const e of open) e.told = true;
+    if (out.message?.trim()) {
+      const seq = nextSeq(s);
+      s.messages.push({ seq, at: nowIso2(), from: "pm", text: out.message.trim() });
+      s.pmSeen = s.messages.length;
+      this.o.bus.emit({ type: "team.message", runId: this.id, from: "pm", text: out.message.trim(), seq });
+    }
+    const a = out.action;
+    switch (a.kind) {
+      case "questions":
+        this.pmQuestions(a.questions);
+        break;
+      case "brief":
+        this.newBrief(a.brief);
+        break;
+      case "change_request":
+        this.newBrief(a.brief);
+        break;
+      case "plan_review": {
+        if (!set.length) break;
+        const signature = planSignature(set);
+        s.planReviewed = signature;
+        if (a.approve) {
+          for (const p of set) p.pmApproved = true;
+          s.planPresented = signature;
+          if (a.summary) this.document("plan", this.grouped ? `The plan (${set.length} groups)` : `Plan v${set[0].version}`, a.summary);
+        } else {
+          for (const p of set) {
+            const mine = a.issues.filter((i) => i.group === null || i.group === p.group);
+            if (!mine.length) continue;
+            p.declined = true;
+            p.pmApproved = false;
+            s.planFeedback[groupKey(p.group)] = `The PM sent it back:
+${mine.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
+          }
+        }
+        break;
+      }
+      case "areas": {
+        const version = s.approvedBrief;
+        s.areas = s.areas.filter((x) => x.briefVersion !== version);
+        for (const x of a.areas) s.areas.push({ briefVersion: version, group: x.group, area: x.area, criteria: [...x.criteria] });
+        this.document("plan", "The groups' parts", a.areas.map((x) => `- ${x.group}: ${x.area} (${x.criteria.join(", ")})`).join("\n"));
+        break;
+      }
+      case "lead_note":
+        if (s.phase === "ACCEPTANCE") {
+          const tg = await this.teamGit();
+          s.integration = {
+            commit: await tg.integrationHead(),
+            checks: [],
+            triage: true,
+            trouble: `The user asked for changes (through the PM): ${a.note}`,
+            triageGroups: a.group ? [a.group] : this.groups.map((g) => groupKey(g.name))
+          };
+        } else s.leadNotes.push({ group: a.group, text: a.note });
+        break;
+      case "team_answer":
+        this.answerEscalation(a.question_id, a.answer);
+        break;
+      case "acceptance":
+        s.acceptance = { criteria: a.criteria, summary: a.summary };
+        this.document("acceptance", "Acceptance report", [a.summary, ...a.criteria.map((c) => `- ${c.id}: ${c.status} \u2014 ${c.evidence}`)].join("\n"));
+        break;
+      default:
+        break;
+    }
+    this.save();
+  }
+  pmProblems(d, actions, open) {
+    const a = d.action;
+    if (!actions.includes(a.kind)) return [`the action '${a.kind}' is not allowed now; allowed: ${actions.join(", ")}`];
+    if (a.kind === "questions") {
+      const parsed = parseQuestions(a.questions.map((q) => ({ header: q.header, question: q.question, multiSelect: q.multi_select, options: q.options })));
+      if ("error" in parsed) return [`your questions cannot be shown: ${parsed.error}`];
+    }
+    if (a.kind === "brief" || a.kind === "change_request") {
+      const b = a.brief;
+      const ids = b.criteria.map((c) => c.id);
+      if (!b.criteria.length) return ["the brief needs at least one acceptance criterion"];
+      if (new Set(ids).size !== ids.length) return [`acceptance criteria ids must be unique (${ids.join(", ")})`];
+      if (b.criteria.some((c) => !c.criterion.trim())) return ["every acceptance criterion needs its text"];
+    }
+    const groupNames = this.groups.flatMap((g) => g.name ? [g.name] : []);
+    if (a.kind === "areas") {
+      const named = a.areas.map((x) => x.group);
+      const problems = [];
+      for (const g of named) if (!groupNames.includes(g)) problems.push(`'${g}' is not a group (${groupNames.join(", ")})`);
+      for (const g of groupNames) if (named.filter((n) => n === g).length !== 1) problems.push(`give group '${g}' exactly one part`);
+      const ids = this.brief().criteria.map((c) => c.id);
+      for (const x of a.areas) for (const c of x.criteria) if (!ids.includes(c)) problems.push(`'${c}' (in ${x.group}'s part) is not an acceptance criterion (${ids.join(", ")})`);
+      for (const c of ids) if (!a.areas.some((x) => x.criteria.includes(c))) problems.push(`acceptance criterion ${c} is no group's`);
+      return problems;
+    }
+    if (a.kind === "plan_review" && a.issues.some((i) => i.group !== null && !groupNames.includes(i.group)) || a.kind === "lead_note" && a.group !== null && !groupNames.includes(a.group)) {
+      return [`name a group of the team (${groupNames.join(", ") || "it has none: use null"}), or null`];
+    }
+    if (a.kind === "team_answer" && !open.some((e) => e.id === a.question_id)) {
+      return [`'${a.question_id}' is not an open question of the team (${open.map((e) => e.id).join(", ") || "none"})`];
+    }
+    if (a.kind === "plan_review" && a.approve && !a.summary?.trim()) return ["an approved plan needs your summary of it for the user"];
+    if (a.kind === "plan_review" && !a.approve && !a.issues.length) return ["say which issues send the plan back"];
+    if (a.kind === "acceptance") {
+      const missing = this.brief().criteria.filter((c) => !a.criteria.some((x) => x.id === c.id)).map((c) => c.id);
+      if (missing.length) return [`report every acceptance criterion of the brief; missing: ${missing.join(", ")}`];
+    }
+    return [];
+  }
+  newBrief(b) {
+    const s = this.state;
+    const version = (latestBrief(s)?.version ?? 0) + 1;
+    s.briefs.push({ ...b, version });
+    this.document("brief", `Brief v${version}: ${b.title}`, [b.goal, ...b.criteria.map((c) => `- ${c.id}: ${c.criterion}`)].join("\n"));
+  }
+  document(kind, title, text3) {
+    this.o.bus.emit({ type: "team.document", runId: this.id, kind, title, text: text3 });
+  }
+  pmQuestions(raw) {
+    const parsed = parseQuestions(raw.map((q) => ({ header: q.header, question: q.question, multiSelect: q.multi_select, options: q.options })));
+    if ("error" in parsed) return;
+    const request = this.request("questions", parsed.questions);
+    ledgerOpen(this.state.clarifications, request);
+    this.listen(request, (response) => {
+      if (response.kind !== "answered") {
+        ledgerClose(this.state.clarifications, request.id, "cancelled", nowIso2(), request.callId);
+        this.save();
+        return;
+      }
+      ledgerAnswer(this.state.clarifications, request.id, request.callId, response.answers, nowIso2());
+      this.o.bus.emit({ type: "clarification.answered", id: request.id, callId: request.callId, answers: response.answers });
+      this.userWords(answersText(request.questions, response.answers));
+      this.save();
+    });
+  }
+  answerEscalation(id, answer) {
+    const s = this.state;
+    const e = s.escalations.find((x) => x.id === id);
+    if (!e || e.answer !== null) return;
+    e.answer = answer;
+    for (const key of [...this.failures.keys()]) if (!e.task || key.endsWith(`:${e.task}`)) this.failures.delete(key);
+    if (e.task) {
+      const t = this.task(e.task);
+      if (t.status === "blocked" && t.question?.escalated) {
+        t.question.answer = answer;
+        t.status = "coding";
+      } else {
+        if (e.reason === "task_limit" || e.reason === "review_stalled") {
+          t.attempt = 1;
+          t.stalls = 0;
+          t.lastFailureKeys = [];
+        }
+        t.status = "triage";
+        t.trouble = `${t.trouble ?? ""}
+The PM answered (${e.reason}): ${answer}`.trim();
+      }
+      this.log(t, `the PM answered: ${answer}`);
+      this.emitTask(t);
+    } else if (e.reason === "planning") {
+      const key = groupKey(e.group ?? null);
+      s.planningExtra[key] = (s.planningExtra[key] ?? 0) + this.o.cfg.limits.max_planning_rounds;
+      s.planFeedback[key] = `${s.planFeedback[key] ?? ""}
+The PM answered: ${answer}`.trim();
+    } else if (e.reason === "integration_limit" || e.reason === "question") {
+      s.integrationRounds = 0;
+      if (s.integration) {
+        s.integration.triage = true;
+        s.integration.trouble = `${s.integration.trouble ?? ""}
+The PM answered: ${answer}`.trim();
+        const keys = e.group !== void 0 ? [groupKey(e.group ?? null)] : this.failingGroups(s.integration.checks);
+        s.integration.triageGroups = [.../* @__PURE__ */ new Set([...s.integration.triageGroups, ...keys])];
+      }
+    }
+  }
+  /** A group PM passes a question up: the head PM answers it now (or asks you). */
+  passUp(id, question, from) {
+    const e = this.state.escalations.find((x) => x.id === id);
+    if (!e || e.answer !== null) return;
+    e.to = this.head.name;
+    e.told = false;
+    e.text = `${e.text}
+${from.name} (the group's PM): ${question}`;
+  }
+  /** A group's own PM: checks its techlead's plan, or answers (or passes up) its techlead's question. Never talks to you. */
+  async areaTurn(g, occasion) {
+    const s = this.state;
+    const pm = g.pm;
+    const open = s.escalations.filter((e) => e.answer === null && e.to === pm.name);
+    const plan = latestPlan(s, g.name);
+    const area = currentAreas(s).find((a2) => a2.group === g.name) ?? null;
+    const actions = pmActions(s, occasion);
+    let cwd = this.o.workspace;
+    if (s.base) {
+      const tg = await this.teamGit();
+      cwd = await tg.checkout(pm.name, await tg.integrationHead());
+    }
+    const out = await this.call(pm, "pm", "team_pm", (identity) => areaPmPrompt({
+      ...this.parts(pm),
+      identity,
+      occasion,
+      brief: this.brief(),
+      group: g,
+      area,
+      plan: occasion.kind === "area_review" ? plan : null,
+      openEscalations: open,
+      head: this.head
+    }), {
+      task: null,
+      cwd,
+      check: (d) => {
+        const a2 = d.action;
+        if (!actions.includes(a2.kind)) return [`the action '${a2.kind}' is not allowed now; allowed: ${actions.join(", ")}`];
+        if ((a2.kind === "team_answer" || a2.kind === "escalate") && !open.some((e) => e.id === a2.question_id)) {
+          return [`'${a2.question_id}' is not an open question of your group (${open.map((e) => e.id).join(", ") || "none"})`];
+        }
+        if (a2.kind === "plan_review" && !a2.approve && !a2.issues.length) return ["say which issues send the plan back"];
+        return [];
+      }
+    });
+    const a = out.action;
+    if (a.kind === "plan_review" && plan && latestPlan(s, g.name) === plan) {
+      plan.areaApproved = a.approve;
+      if (!a.approve) {
+        plan.declined = true;
+        s.planFeedback[groupKey(g.name)] = `${pm.name} (your group's PM) sent it back:
+${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
+      }
+      this.report(pm.name, a.approve ? `${g.name}'s plan v${plan.version} is right for its part` : `${g.name}'s plan v${plan.version} goes back to ${g.lead.name}`);
+    } else if (a.kind === "team_answer") this.answerEscalation(a.question_id, a.answer);
+    else if (a.kind === "escalate") this.passUp(a.question_id, a.question, pm);
+    this.save();
+  }
+  // ------------------------------------------------------------------ the techlead
+  /** A group's techlead plans its part (the whole work, in a team without groups). */
+  async planTurn(g) {
+    const s = this.state;
+    const techlead = g.lead;
+    const key = groupKey(g.name);
+    const max = this.o.cfg.limits.max_planning_rounds + (s.planningExtra[key] ?? 0);
+    const rounds = s.plans.filter((p) => p.group === g.name && p.briefVersion === s.approvedBrief).length;
+    if (rounds >= max) {
+      if (!s.escalations.some((e) => e.reason === "planning" && e.answer === null && (e.group ?? null) === g.name)) {
+        this.escalate(null, "planning", `${g.name ? `Group ${g.name}'s planning` : "Planning"} did not converge in ${max} round(s): ${s.planFeedback[key] ?? ""}`, g.name);
+        this.save();
+      }
+      return;
+    }
+    const tg = await this.teamGit();
+    const cwd = await tg.checkout(techlead.name, await tg.integrationHead());
+    const brief2 = this.brief();
+    const additions = s.replanning;
+    const existing = s.tasks.filter((t) => t.status !== "cancelled");
+    const area = currentAreas(s).find((a) => a.group === g.name) ?? null;
+    const previous = latestPlan(s, g.name) ?? s.plans.filter((p) => p.group === g.name).at(-1) ?? null;
+    const required = this.requiredCriteria(g);
+    const out = await this.call(techlead, "plan", "team_plan", (identity) => planPrompt({
+      ...this.parts(techlead),
+      identity,
+      brief: brief2,
+      feedback: s.planFeedback[key] ?? null,
+      previous,
+      existing: additions ? existing : [],
+      additions,
+      area: this.grouped ? area : null,
+      group: this.grouped ? g : null
+    }), {
+      task: null,
+      cwd,
+      check: (d) => planProblems(d.tasks, [...g.members, techlead], brief2, additions ? s.tasks : [], required)
+    });
+    s.planningRounds += 1;
+    const version = s.plans.filter((p) => p.group === g.name).reduce((n, p) => Math.max(n, p.version), 0) + 1;
+    s.plans.push({
+      version,
+      group: g.name,
+      briefVersion: s.approvedBrief,
+      ...g.pm ? { areaApproved: null } : {},
+      summary: out.summary,
+      tasks: out.tasks,
+      risks: out.risks,
+      pmApproved: null,
+      additions
+    });
+    delete s.planFeedback[key];
+    this.report(techlead.name, out.report);
+    this.save();
+  }
+  async triageTurn(id) {
+    const s = this.state;
+    const t = this.task(id);
+    const g = this.group(t.group);
+    const techlead = g.lead;
+    const tg = await this.teamGit();
+    const cwd = await tg.checkout(techlead.name, t.code ?? await tg.integrationHead());
+    const workers = g.members.filter((m) => m.kind === "worker");
+    const max = this.o.cfg.team.limits.max_task_attempts;
+    const out = await this.call(techlead, "triage", "team_triage", (identity) => triagePrompt({
+      ...this.parts(techlead),
+      identity,
+      task: t,
+      brief: this.brief(),
+      maxAttempts: max,
+      workers
+    }), {
+      task: t.id,
+      cwd,
+      check: (d) => {
+        if (d.action === "add_tasks") return ["add_tasks is for the whole result, not a task: retry, reassign, fix_tests or escalate"];
+        if (d.action === "reassign" && !workers.some((w) => w.name === d.assignee)) return [`reassign names a member who takes tasks (${workers.map((w) => w.name).join(", ")})`];
+        if (d.action === "escalate" && !d.question?.trim()) return ["escalate needs the question for the PM"];
+        if (d.action === "fix_tests" && !t.checks.some((c) => c.verdict === "fail" && c.by !== "gates")) return ["fix_tests needs a failing tester's check; none failed"];
+        return [];
+      }
+    });
+    if (t.status !== "triage") return;
+    this.report(techlead.name, out.report);
+    t.guidance = out.guidance;
+    if (out.action === "escalate") {
+      t.question = { id: `${t.id}-q${nextSeq(s)}`, from: techlead.name, text: out.question, escalated: true, answer: null };
+      this.escalate(t, "question", `${t.id}: ${out.question}`);
+      this.save();
+      return;
+    }
+    t.attempt += 1;
+    if (t.attempt > max) {
+      this.escalate(t, "task_limit", `Task ${t.id} (${t.title}) still fails after ${max} attempt(s): ${t.trouble ?? ""}`);
+      this.save();
+      return;
+    }
+    t.reviewRound = 0;
+    t.candidate = null;
+    if (out.action === "fix_tests") {
+      for (const tester of t.testers) t.tests[tester].status = "fixing";
+      t.status = "testing";
+      this.log(t, `attempt ${t.attempt}: the techlead says the tests are wrong`);
+    } else {
+      t.review = null;
+      t.reviewer = null;
+      t.checks = [];
+      if (out.action === "reassign") t.assignee = out.assignee;
+      t.status = "coding";
+      this.log(t, `attempt ${t.attempt}: ${out.action}${out.action === "reassign" ? ` to ${t.assignee}` : ""}`);
+    }
+    this.emitTask(t);
+    this.save();
+  }
+  async answerTurn(id) {
+    const t = this.task(id);
+    const techlead = this.group(t.group).lead;
+    const tg = await this.teamGit();
+    const cwd = await tg.checkout(techlead.name, t.code ?? t.base);
+    const out = await this.call(techlead, "answer", "team_answer", (identity) => answerPrompt({ ...this.parts(techlead), identity, task: t, brief: this.brief() }), {
+      task: t.id,
+      cwd,
+      check: (d) => !d.answer?.trim() && !d.escalate?.trim() ? ["give an answer, or escalate with the question for the PM"] : []
+    });
+    if (t.status !== "blocked" || !t.question) return;
+    if (out.report) this.report(techlead.name, out.report);
+    if (out.answer?.trim()) {
+      t.question.answer = out.answer;
+      t.status = "coding";
+      this.log(t, `the techlead answered: ${out.answer}`);
+    } else {
+      t.question.escalated = true;
+      this.escalate(t, "question", `${t.id}: ${out.escalate}`);
+    }
+    this.emitTask(t);
+    this.save();
+  }
+  async resolveTurn(id) {
+    const t = this.task(id);
+    const techlead = this.group(t.group).lead;
+    const tg = await this.teamGit();
+    const head = await tg.integrationHead();
+    const files = await tg.startResolve(techlead.name, t.candidate);
+    const cwd = await tg.cwd(techlead.name);
+    await this.call(techlead, "resolve", "team_work", (identity) => resolvePrompt({ ...this.parts(techlead), identity, task: t, brief: this.brief(), cwd, files }), { task: t.id, cwd });
+    const done = await tg.finishResolve(techlead.name, t.candidate, head, `agentduo team ${this.id}: merge ${t.id} (resolved)`);
+    if ("problem" in done) {
+      this.escalate(t, "merge_conflict", `Task ${t.id} cannot be merged: ${done.problem}`);
+    } else {
+      t.status = "merged";
+      this.log(t, `merged after the techlead resolved conflicts in ${files.join(", ")}`);
+      this.report("agentduo", `${t.id} (${t.title}) is merged (conflicts resolved by the techlead)`);
+    }
+    this.emitTask(t);
+    this.save();
+  }
+  /** A group's techlead adds the tasks that fix its share of what the whole result failed (or of what you asked to change). */
+  async integrationTriageTurn(name2) {
+    const s = this.state;
+    const ig = s.integration;
+    const techlead = this.member(name2);
+    const g = this.group(techlead.group);
+    const key = groupKey(g.name);
+    if (!ig.triageGroups.includes(key)) return;
+    const tg = await this.teamGit();
+    const cwd = await tg.checkout(techlead.name, await tg.integrationHead());
+    const brief2 = this.brief();
+    const own = currentAreas(s).find((a) => a.group === g.name)?.criteria;
+    const first = g === this.groups[0];
+    const checks = ig.checks.filter((c) => c.verdict === "fail").map((c) => ({
+      ...c,
+      failures: !this.grouped ? c.failures : c.failures.filter((f) => f.criteria.some((x) => own?.includes(x)) || first && !f.criteria.length)
+    })).filter((c) => !this.grouped || c.failures.length || c.by === "gates");
+    const out = await this.call(techlead, "integration-triage", "team_triage", (identity) => integrationTriagePrompt({
+      ...this.parts(techlead),
+      identity,
+      brief: brief2,
+      trouble: ig.trouble ?? "",
+      checks
+    }), {
+      task: null,
+      cwd,
+      check: (d) => {
+        if (d.action === "escalate") return d.question?.trim() ? [] : ["escalate needs the question for the PM"];
+        if (d.action !== "add_tasks") return ["add the tasks that fix it (add_tasks), or escalate"];
+        return planProblems(d.tasks, [...g.members, techlead], brief2, s.tasks, null);
+      }
+    });
+    const now = s.integration;
+    if (!now?.triage || !now.triageGroups.includes(key)) return;
+    this.report(techlead.name, out.report);
+    now.triageGroups = now.triageGroups.filter((k) => k !== key);
+    if (out.action === "escalate") this.escalate(null, "question", out.question, g.name);
+    else {
+      for (const t of out.tasks) {
+        const task = newTask(t, g.name);
+        s.tasks.push(task);
+        this.emitTask(task);
+      }
+    }
+    if (!now.triageGroups.length && s.tasks.some((t) => !finished(t))) {
+      s.integration = null;
+      s.accepted = false;
+      s.acceptance = null;
+      this.setPhase("EXECUTION");
+    }
+    this.save();
+  }
+  async resolveApplyTurn() {
+    const s = this.state;
+    const conflict = s.applyConflict;
+    const techlead = this.groups[0].lead;
+    const tg = await this.teamGit();
+    const head = await tg.integrationHead();
+    const files = await tg.startResolve(techlead.name, conflict.ours);
+    const cwd = await tg.cwd(techlead.name);
+    await this.call(techlead, "resolve", "team_work", (identity) => resolvePrompt({ ...this.parts(techlead), identity, task: null, brief: this.brief(), cwd, files }), { task: null, cwd });
+    const done = await tg.finishResolve(techlead.name, conflict.ours, head, `agentduo team ${this.id}: the workspace's changes merged`);
+    if ("problem" in done) {
+      s.applyConflict.resolving = false;
+      this.escalate(null, "merge_conflict", `The result cannot be merged with your folder's changes: ${done.problem}`);
+    } else {
+      s.applyConflict = null;
+      s.integration = { commit: done.head, checks: [], triage: false, trouble: null, triageGroups: [] };
+      this.setPhase("INTEGRATION");
+    }
+    this.save();
+  }
+  // ------------------------------------------------------------------ workers and testers
+  async workTurn(name2, id) {
+    const t = this.task(id);
+    const m = this.member(name2);
+    const tg = await this.teamGit();
+    if (t.status === "pending") {
+      t.status = "coding";
+      t.base = await tg.integrationHead();
+      this.log(t, `${m.name} started it`);
+      this.emitTask(t);
+      this.save();
+    }
+    if (t.status !== "coding" || t.assignee !== m.name) return;
+    const cwd = await tg.checkout(m.name, t.code ?? t.base);
+    const out = await this.call(m, "work", "team_work", (identity) => workPrompt({
+      ...this.parts(m),
+      identity,
+      task: t,
+      brief: this.brief(),
+      others: this.state.tasks,
+      cwd
+    }), { task: t.id, cwd, check: (d) => d.status === "blocked" && !d.question?.trim() ? ["a blocked result needs your question for the techlead"] : [] });
+    if (t.status !== "coding" || t.assignee !== m.name) return;
+    const snap = await tg.snapshot(m.name, tg.refs.task(t.id, m.name), `agentduo team ${this.id}: ${t.id} by ${m.name}`);
+    t.code = snap.commit;
+    t.codeSummary = out.summary;
+    t.notes = out.notes;
+    if (out.status === "blocked") {
+      t.status = "blocked";
+      t.question = { id: `${t.id}-q${nextSeq(this.state)}`, from: m.name, text: out.question, escalated: false, answer: null };
+      this.log(t, `${m.name} asks: ${out.question}`);
+    } else {
+      t.status = "review";
+      t.reviewer = null;
+      t.question = null;
+      this.log(t, `${m.name}: ${out.summary}`);
+    }
+    this.emitTask(t);
+    this.save();
+  }
+  async testsTurn(name2, id) {
+    const t = this.task(id);
+    const m = this.member(name2);
+    const tests = t.tests[m.name];
+    if (!tests || tests.status === "written") return;
+    const tg = await this.teamGit();
+    const cwd = await tg.checkout(m.name, tests.commit ?? t.base ?? await tg.integrationHead());
+    const failures = t.checks.length ? t.checks : [];
+    const out = await this.call(m, "tests", "team_tests", (identity) => testsPrompt({
+      ...this.parts(m),
+      identity,
+      task: t,
+      brief: this.brief(),
+      cwd,
+      failures
+    }), { task: t.id, cwd });
+    const snap = await tg.snapshot(m.name, tg.refs.task(t.id, m.name), `agentduo team ${this.id}: ${t.id} tests by ${m.name}`);
+    tests.commit = snap.commit;
+    tests.status = "written";
+    tests.summary = out.summary;
+    tests.howToRun = out.how_to_run;
+    this.log(t, `${m.name} wrote tests: ${out.summary}`);
+    this.save();
+  }
+  async reviewTurn(name2, id) {
+    const t = this.task(id);
+    const m = this.member(name2);
+    if (t.status !== "review" || !t.code) return;
+    t.reviewer = m.name;
+    const tg = await this.teamGit();
+    const cwd = await tg.checkout(m.name, t.code);
+    const diff = (await this.git.diff(t.base, t.code)).slice(0, this.o.cfg.limits.max_diff_chars);
+    const blocking = this.o.cfg.quality_gates.blocking_severities;
+    const criteria2 = new Set(this.brief().criteria.map((c) => c.id));
+    const out = await this.call(m, "review", "team_review", (identity) => reviewPrompt({
+      ...this.parts(m),
+      identity,
+      task: t,
+      brief: this.brief(),
+      diff,
+      blocking
+    }), {
+      task: t.id,
+      cwd,
+      check: (d) => d.findings.flatMap((f) => f.criteria.filter((c) => !criteria2.has(c)).map((c) => `finding '${f.id}' cites '${c}', which is not an acceptance criterion (${[...criteria2].join(", ")})`))
+    });
+    if (t.status !== "review") return;
+    const blockers = out.findings.filter((f) => blocks(f, blocking));
+    if (out.verdict === "changes" && blockers.length) {
+      t.review = { reviewer: m.name, verdict: "changes", summary: out.summary, findings: out.findings };
+      t.reviewRound += 1;
+      this.log(t, `${m.name} asks for changes: ${blockers.map((f) => f.title).join("; ")}`);
+      if (t.reviewRound >= this.o.cfg.team.limits.max_review_rounds) {
+        t.status = "triage";
+        t.trouble = `the review still asks for changes after ${t.reviewRound} round(s): ${blockers.map((f) => f.title).join("; ")}`;
+      } else t.status = "coding";
+    } else {
+      t.review = { reviewer: m.name, verdict: "approve", summary: out.summary, findings: out.findings };
+      t.status = "testing";
+      t.candidate = null;
+      t.checks = [];
+      this.log(t, `${m.name} approves${out.findings.length ? ` (${out.findings.length} suggestion(s))` : ""}`);
+    }
+    this.emitTask(t);
+    this.save();
+  }
+  async checkTurn(name2, id) {
+    const t = this.task(id);
+    const m = this.member(name2);
+    if (t.status !== "testing" || !t.candidate) return;
+    const candidate = t.candidate;
+    const tg = await this.teamGit();
+    const cwd = await tg.checkout(m.name, candidate);
+    const out = await this.call(m, "check", "team_check", (identity) => checkPrompt({ ...this.parts(m), identity, task: t, brief: this.brief(), cwd }), {
+      task: t.id,
+      cwd,
+      check: (d) => d.verdict === "fail" && !d.failures.length ? ["a failing check lists its failures"] : []
+    });
+    if (t.candidate !== candidate) return;
+    const snap = await tg.snapshot(m.name, tg.refs.task(t.id, `${m.name}-check`), `agentduo team ${this.id}: ${t.id} checked by ${m.name}`);
+    const candidateTree = (await this.git.run(["rev-parse", `${candidate}^{tree}`])).stdout.trim();
+    t.checks = t.checks.filter((c) => c.by !== m.name);
+    t.checks.push({ by: m.name, verdict: out.verdict, summary: out.summary, failures: out.failures, commit: snap.tree !== candidateTree ? snap.commit : null });
+    this.log(t, `${m.name}: ${out.verdict} (${out.summary})`);
+    this.save();
+  }
+  async integrationCheckTurn(name2) {
+    const s = this.state;
+    const ig = s.integration;
+    if (!ig) return;
+    const m = this.member(name2);
+    const commit = ig.commit;
+    const tg = await this.teamGit();
+    const cwd = await tg.checkout(m.name, commit);
+    const out = await this.call(m, "integration-check", "team_check", (identity) => integrationCheckPrompt({ ...this.parts(m), identity, brief: this.brief(), cwd }), {
+      task: null,
+      cwd,
+      check: (d) => d.verdict === "fail" && !d.failures.length ? ["a failing check lists its failures"] : []
+    });
+    if (s.integration?.commit !== commit) return;
+    s.integration.checks = s.integration.checks.filter((c) => c.by !== m.name);
+    s.integration.checks.push({ by: m.name, verdict: out.verdict, summary: out.summary, failures: out.failures });
+    this.save();
+  }
+  /** The configured gates on a task's candidate (or the integration head), as one more check. */
+  async gatesRun(id) {
+    const s = this.state;
+    const t = id ? this.task(id) : null;
+    const commit = t ? t.candidate : s.integration?.commit;
+    if (!commit) return;
+    const tg = await this.teamGit();
+    const cwd = await tg.checkout(GATES, commit);
+    const results = await runGates({
+      gates: this.o.cfg.gates,
+      repo: cwd,
+      logDir: join22(this.o.store.dir, "logs"),
+      label: `${String(nextSeq(s)).padStart(3, "0")}-${id ?? "integration"}`,
+      defaultTimeoutSec: this.o.cfg.limits.gate_timeout_sec,
+      maxOutputChars: this.o.cfg.limits.max_gate_output_chars,
+      bus: this.o.bus,
+      signal: this.abort.signal
+    }).catch((e) => {
+      if (this.abort.signal.aborted) throw new Interrupted2();
+      throw e;
+    });
+    const passed = requiredPassed(results);
+    const check = {
+      by: "gates",
+      verdict: passed ? "pass" : "fail",
+      summary: describeGates(results, false),
+      failures: results.filter((r) => !r.passed && r.required).map((r) => ({
+        id: `G-${r.name}`,
+        title: `gate '${r.name}' fails`,
+        detail: r.outputTail,
+        reproduction: r.command,
+        expected: "exit code 0",
+        actual: r.timedOut ? "timed out" : `exit code ${r.exitCode}`,
+        criteria: [],
+        suspect: "code"
+      }))
+    };
+    if (t) {
+      if (t.candidate !== commit) return;
+      t.checks = t.checks.filter((c) => c.by !== "gates");
+      t.checks.push(check);
+      this.log(t, `gates: ${check.verdict}`);
+    } else if (s.integration?.commit === commit) {
+      s.integration.checks = s.integration.checks.filter((c) => c.by !== "gates");
+      s.integration.checks.push(check);
+    }
+    this.save();
+  }
+  async mergeTask(id) {
+    const t = this.task(id);
+    if (t.status !== "merging" || !t.candidate) return;
+    const tg = await this.teamGit();
+    const extras = t.checks.map((c) => c.commit).filter((c) => !!c);
+    const whole = await tg.merge([t.candidate, ...extras], `agentduo team ${this.id}: ${t.id} with the tests added while checking`);
+    const commit = "commit" in whole ? whole.commit : t.candidate;
+    const merged = await tg.mergeIntoIntegration(commit, `agentduo team ${this.id}: merge ${t.id} ${t.title}`);
+    if ("conflicts" in merged) {
+      t.candidate = commit;
+      t.conflicts = merged.conflicts;
+      t.status = "resolving";
+      this.log(t, `merging conflicts in ${merged.conflicts.join(", ")}`);
+    } else {
+      t.status = "merged";
+      this.log(t, "merged into the integration branch");
+      this.report("agentduo", `${t.id} (${t.title}) is done and merged`);
+    }
+    this.emitTask(t);
+    this.save();
+  }
+};
+function answersText(questions, answers) {
+  return ["My answers to your questions:", ...questions.map((q) => {
+    const a = answers.find((x) => x.questionId === q.id);
+    return `- ${q.question} \u2192 ${a ? answerText(q, a) : "(no answer)"}`;
+  })].join("\n");
+}
+var TASK_WORDS = {
+  pending: "waiting",
+  coding: "coding",
+  blocked: "asked a question",
+  review: "in review",
+  testing: "being tested",
+  triage: "with the techlead",
+  merging: "merging",
+  resolving: "resolving a conflict",
+  escalated: "waiting for the PM",
+  merged: "merged",
+  cancelled: "cancelled"
+};
+function teamStatusText(state) {
+  const u = state.usage;
+  const cost = u.costUsd ? `$${u.costUsd.toFixed(2)}` : "";
+  const waiting = state.waiting ? ` (waiting for your ${state.waiting.kind === "apply_conflict" ? "decision on conflicts" : `approval of the ${state.waiting.kind}`})` : "";
+  const lines = [`Team ${state.id} \u2014 ${state.phase}${waiting} \xB7 ${u.calls} call(s)${cost ? ` \xB7 ${cost}` : ""}${u.tokens ? ` \xB7 ${Math.round(u.tokens / 1e3)}k tok` : ""}`];
+  for (const t of state.tasks) lines.push(`  ${t.id} ${t.title} \u2014 ${t.assignee}, ${TASK_WORDS[t.status]}${t.attempt > 1 ? ` (attempt ${t.attempt})` : ""}`);
+  if (!state.tasks.length) lines.push(state.phase === "INTAKE" ? "  The PM is working out what you need." : "  No task yet.");
+  return lines.join("\n");
+}
+function teamRosterText(members) {
+  return ["The team:", ...members.map((m) => `  ${m.name} \u2014 ${m.role} (${m.level}${m.canReview && m.kind === "worker" ? ", reviews" : ""}), ${m.backend === "codex" ? "Codex" : "Claude"}${m.model ? ` ${m.model}` : ""}${m.effort ? ` \xB7 ${m.effort}` : ""}`)].join("\n");
+}
+function resumableTeam(runsDir) {
+  const latest = TeamStore.list(runsDir).at(-1);
+  return latest && latest.phase !== "DONE" && latest.phase !== "ABORTED" ? latest : null;
+}
+async function undoTeam(o) {
+  const env = o.env ?? process.env;
+  const store = TeamStore.open(o.runsDir, o.id);
+  const state = store.load();
+  if (!state.applied) return { problem: `team run ${state.id} has no result in the folder to take back out` };
+  const owner = { taskId: state.id, git: state.git, base: state.base ? { ...state.base, head: null, branch: null } : null, lastSnapshot: null };
+  const { git } = await prepareRunGit(owner, o.workspace, env);
+  const runsRel = relativeInside(o.runsDir, o.workspace);
+  const tg = new TeamGit({
+    git,
+    workspace: o.workspace,
+    runId: state.id,
+    root: join22(dataRoot(env) ?? o.workspace, "teams", state.id),
+    exclude: runsRel ? [runsRel] : [],
+    setup: [],
+    link: []
+  });
+  const undone = await tg.undo(`agentduo team ${state.id}: undone`);
+  if ("restored" in undone) {
+    state.applied = null;
+    state.summary = `The result was taken back out of the folder (${undone.restored.length} file(s)).`;
+    store.save(state);
+  }
+  return undone;
+}
+
 // packages/engine/src/chat/chat.ts
 var FILES_QUESTION = "Look at the attached file(s).";
 var FILES_NOTE = "See the attached file(s).";
@@ -23411,7 +26446,7 @@ function resumableRun(runsDir, workspace, runId) {
     const store = RunStore.open(runsDir, runId);
     const st = store.loadState();
     if (st.phase === "DONE" || st.phase === "ABORTED") return null;
-    if (st.workspace && resolve10(st.workspace) !== resolve10(workspace)) return null;
+    if (st.workspace && resolve11(st.workspace) !== resolve11(workspace)) return null;
     return store;
   } catch {
     return null;
@@ -23463,6 +26498,8 @@ var Chat = class {
   changes = [];
   /** Stopped with Esc: /resume continues it. */
   paused = null;
+  /** A team run stopped with Esc (or waiting where nobody could answer): /resume continues it. */
+  pausedTeam = null;
   last = null;
   escaped = false;
   conversation;
@@ -23534,6 +26571,8 @@ var Chat = class {
     if (note) this.o.ui.info(note);
     const hint = resumeHint(this.o.runsDir, this.o.workspace);
     if (hint) this.o.ui.info(hint);
+    const team = hint ? null : resumableTeam(this.o.runsDir);
+    if (team) this.o.ui.info(`Team run ${team.id} (${firstLine(team.request, 60)}) is ${team.waiting ? "waiting for you" : "stopped"} in ${team.phase}. Type /resume to continue it.`);
   }
   /**
    * Reads a line of input and acts on it. Returns once the work it starts has started, never waiting for an answer or a
@@ -23562,8 +26601,10 @@ var Chat = class {
         return this.withFiles(o, (files) => this.startPipeline(input.task, files, input.profile));
       case "discuss":
         return this.withFiles(o, (files) => this.discuss(input.question, files));
+      case "team":
+        return this.teamCommand(input);
       case "attach":
-        return this.attachTyped(input.home ? join19(homedir5(), input.path) : resolve10(this.o.workspace, input.path));
+        return this.attachTyped(input.home ? join23(homedir5(), input.path) : resolve11(this.o.workspace, input.path));
       case "detach":
         return this.detach(input.target);
       case "setting":
@@ -23589,6 +26630,19 @@ var Chat = class {
     }
     if (await this.cannotSnapshot()) return;
     this.withFiles(o, (files) => this.startPipeline(text3, files));
+  }
+  /** The Team route of the composer: the text is the request for a new team (or a message to the running team's PM); a slash command goes as typed. */
+  async submitTeam(raw, o = {}) {
+    const text3 = raw.trim();
+    if (text3.startsWith("/")) return this.submit(text3, o);
+    if (this.active?.kind === "team") return this.submit(text3, o);
+    this.line = `/team ${text3}`;
+    if (!text3) {
+      this.o.ui.info("usage: a request for the team, e.g. Add a CSV export to the reports page (you then talk to its PM)");
+      return;
+    }
+    if (await this.cannotSnapshot()) return;
+    this.startTeam(text3);
   }
   /** The Discuss route of the sidebar: the text is the question, unless it is a slash command, which goes as typed. */
   async submitDiscuss(raw, o = {}) {
@@ -23618,12 +26672,17 @@ var Chat = class {
   /** A plain message: a note for the running pipeline, or a question for the recipient. */
   message(text3, files) {
     if (this.active?.kind === "pipeline") return this.note(this.active, text3, files);
+    if (this.active?.kind === "team") {
+      if (files.length) this.o.ui.info("The team takes no files yet: describe them to the PM, or put them in the folder; they stay waiting.");
+      if (text3) this.active.run.message(text3);
+      return;
+    }
     this.ask(this.recipient, text3 || FILES_QUESTION, null, files);
   }
-  note(exec, text3, files) {
-    const copies = this.copyInto(exec.store, files);
+  note(exec2, text3, files) {
+    const copies = this.copyInto(exec2.store, files);
     if (!copies) return;
-    exec.workflow.addNote(text3 || FILES_NOTE, copies);
+    exec2.workflow.addNote(text3 || FILES_NOTE, copies);
     this.sentFiles(files);
     const with_ = files.length ? ` (with ${files.length} file${files.length === 1 ? "" : "s"})` : "";
     this.o.ui.info(`Noted${with_}: the agents get this from the next step. Esc stops the current step to apply it now; to ask Claude or Codex, wait until the run stops.`);
@@ -23798,6 +26857,11 @@ var Chat = class {
   escape() {
     const a = this.active;
     if (!a) return;
+    if (a.kind === "team") {
+      this.escaped = true;
+      a.run.stop();
+      return;
+    }
     if (a.kind !== "pipeline") {
       a.abort.abort();
       return;
@@ -23845,7 +26909,8 @@ var Chat = class {
   async stop() {
     this.usageAbort?.abort();
     const a = this.active;
-    if (a && a.kind !== "pipeline") a.abort.abort();
+    if (a?.kind === "team") a.run.stop();
+    else if (a && a.kind !== "pipeline") a.abort.abort();
     else a?.workflow.interrupt();
     await this.idle();
     this.offBus();
@@ -23855,7 +26920,7 @@ var Chat = class {
   // ------------------------------------------------------------------ conversation
   busy() {
     const a = this.active;
-    this.o.ui.info(a.kind === "pipeline" ? "A pipeline run is going: wait for it, or press Esc to stop its current step first. (A plain message is a note for its next step.)" : a.kind === "discussion" ? `${AGENT_NAMES[a.answerer]} and ${AGENT_NAMES[a.critic]} are still discussing: wait for it, or press Esc to stop it. Settings you change apply to its next turn.` : `${AGENT_NAMES[a.backend]} is still answering: wait for it, or press Esc to stop it. Settings you change apply to the next question.`);
+    this.o.ui.info(a.kind === "team" ? "The team is working: your messages go to its PM. Esc stops the team (/resume continues it); /team status shows the board." : a.kind === "pipeline" ? "A pipeline run is going: wait for it, or press Esc to stop its current step first. (A plain message is a note for its next step.)" : a.kind === "discussion" ? `${AGENT_NAMES[a.answerer]} and ${AGENT_NAMES[a.critic]} are still discussing: wait for it, or press Esc to stop it. Settings you change apply to its next turn.` : `${AGENT_NAMES[a.backend]} is still answering: wait for it, or press Esc to stop it. Settings you change apply to the next question.`);
   }
   ask(backend, question, hint, files = []) {
     if (this.active) return this.busy();
@@ -23903,10 +26968,10 @@ var Chat = class {
     const { turn, prompt, omitted } = this.conversation.begin(backend, question, this.conversation.earlier, this.o.workspace, files, this.canAsk());
     this.sentFiles(files);
     this.noteOmitted(omitted);
-    const exec = { kind: "conversation", turnId: turn.id, backend, abort: new AbortController(), done: Promise.resolve(), release };
-    this.active = exec;
+    const exec2 = { kind: "conversation", turnId: turn.id, backend, abort: new AbortController(), done: Promise.resolve(), release };
+    this.active = exec2;
     this.o.ui.setStatus("answering");
-    exec.done = this.callTurn(turn, prompt, exec.abort.signal).then(() => void 0).finally(() => this.settled(exec));
+    exec2.done = this.callTurn(turn, prompt, exec2.abort.signal).then(() => void 0).finally(() => this.settled(exec2));
   }
   /** Work holding `release` has started (it gives the workspace back itself when it is over). */
   runsWith(release) {
@@ -23916,10 +26981,10 @@ var Chat = class {
    * Whatever ran is over, all it wrote saved and its agents gone: the workspace is given back, and unless something else
    * started meanwhile, the chat is idle (or a run stays stopped).
    */
-  settled(exec) {
-    exec.release();
-    if (this.active === exec) this.active = null;
-    if (!this.active) this.o.ui.setStatus(this.paused ? "paused" : "idle");
+  settled(exec2) {
+    exec2.release();
+    if (this.active === exec2) this.active = null;
+    if (!this.active) this.o.ui.setStatus(this.paused || this.pausedTeam ? "paused" : "idle");
   }
   /**
    * One agent call of the conversation, with its turn's events around it. `turn.started` goes out now; the call itself
@@ -24015,22 +27080,22 @@ var Chat = class {
     const d = conversation2.beginDiscussion(answerer, critic, question, maxRounds, files);
     this.sentFiles(files);
     this.noteOmitted(d.context.omitted);
-    const exec = { kind: "discussion", id: d.id, answerer, critic, abort: new AbortController(), done: Promise.resolve(), release };
-    this.active = exec;
+    const exec2 = { kind: "discussion", id: d.id, answerer, critic, abort: new AbortController(), done: Promise.resolve(), release };
+    this.active = exec2;
     this.o.ui.setStatus("answering");
     const ids = { conversationId: conversation2.id, discussionId: d.id };
     this.o.bus.emit({ type: "discussion.started", ...ids, question, answerer, critic, maxRounds });
     const total = { durationSec: 0, costUsd: 0, tokens: 0 };
     const step = async (kind, round2) => {
-      if (exec.abort.signal.aborted) return { status: "interrupted", answer: null, error: null, verdict: null, durationSec: 0, costUsd: 0, tokens: 0 };
+      if (exec2.abort.signal.aborted) return { status: "interrupted", answer: null, error: null, verdict: null, durationSec: 0, costUsd: 0, tokens: 0 };
       const { turn, prompt } = conversation2.discussionTurn(d.id, kind, round2, conversation2.earlier, this.o.workspace, this.canAsk());
-      const out = await this.callTurn(turn, prompt, exec.abort.signal, { id: d.id, step: kind, round: round2 }, runner);
+      const out = await this.callTurn(turn, prompt, exec2.abort.signal, { id: d.id, step: kind, round: round2 }, runner);
       total.durationSec += out.durationSec;
       total.costUsd += out.costUsd;
       total.tokens += out.tokens;
       return out;
     };
-    exec.done = (async () => {
+    exec2.done = (async () => {
       await Promise.resolve();
       let status = "error";
       let answer = null;
@@ -24068,7 +27133,7 @@ var Chat = class {
       if (version.status !== "success") failed2(version);
       if (reviewed) {
         const synthesis = await step("synthesis", rounds);
-        if (synthesis.status === "interrupted" || exec.abort.signal.aborted) {
+        if (synthesis.status === "interrupted" || exec2.abort.signal.aborted) {
           status = "interrupted";
         } else if (synthesis.status === "success") {
           status = reviewed;
@@ -24099,7 +27164,174 @@ var Chat = class {
         tokens: total.tokens || void 0,
         logDir: conversation2.logDir
       });
-    })().finally(() => this.settled(exec));
+    })().finally(() => this.settled(exec2));
+  }
+  // ------------------------------------------------------------------ team
+  /** /team <request>, status, members, abort, undo. */
+  async teamCommand(input) {
+    const ui = this.o.ui;
+    const active2 = this.active?.kind === "team" ? this.active.run : null;
+    switch (input.action) {
+      case "start":
+        if (await this.cannotSnapshot()) return;
+        return this.startTeam(input.request);
+      case "status": {
+        const state = active2?.state ?? this.latestTeamState();
+        ui.info(state ? teamStatusText(state) : "No team run yet. /team <request> starts one.");
+        return;
+      }
+      case "members":
+        ui.info(teamRosterText(active2?.members ?? teamMembers(this.cfg.team)));
+        return;
+      case "abort": {
+        if (active2) {
+          active2.abortRun();
+          return;
+        }
+        const id = this.pausedTeam ?? resumableTeam(this.o.runsDir)?.id;
+        if (!id) {
+          ui.info("No team run to abort.");
+          return;
+        }
+        const store = TeamStore.open(this.o.runsDir, id);
+        const state = store.load();
+        state.phase = "ABORTED";
+        store.save(state);
+        this.pausedTeam = null;
+        ui.info(`Team run ${id} is aborted; nothing of it went into your folder.`);
+        return;
+      }
+      case "undo": {
+        if (this.active) return this.busy();
+        const id = input.runId ?? TeamStore.list(this.o.runsDir).filter((s) => s.applied).at(-1)?.id;
+        if (!id) {
+          ui.info("No team run has written a result into this folder.");
+          return;
+        }
+        const release = this.takeWorkspace();
+        if (!release) return;
+        try {
+          const undone = await undoTeam({ runsDir: this.o.runsDir, workspace: this.o.workspace, id, env: this.env });
+          ui.info(
+            "restored" in undone ? `Team run ${id}'s result is taken back out: ${undone.restored.length} file(s) are as they were.` : `Cannot undo team run ${id}: ${undone.problem}.`,
+            "restored" in undone ? "info" : "error"
+          );
+        } catch (e) {
+          ui.info(`Cannot undo team run ${id}: ${e.message}`, "error");
+        } finally {
+          release();
+        }
+        return;
+      }
+    }
+  }
+  latestTeamState() {
+    try {
+      return TeamStore.list(this.o.runsDir).at(-1) ?? null;
+    } catch {
+      return null;
+    }
+  }
+  startTeam(request) {
+    if (this.active) return this.busy();
+    if (this.elsewhere()) return;
+    const release = this.takeWorkspace();
+    if (!release) return;
+    try {
+      const errors = teamConfigErrors(this.cfg.team);
+      if (errors.length) {
+        release();
+        this.o.ui.info(`The team's configuration has problems:
+  - ${errors.join("\n  - ")}`, "error");
+        return;
+      }
+      const problem = missingCli(this.cfg, [...new Set(teamMembers(this.cfg.team).map((m) => m.backend))], this.env);
+      if (problem) {
+        release();
+        this.o.ui.info(problem.message, "error");
+        return;
+      }
+      const run = TeamRun.create({
+        runsDir: this.o.runsDir,
+        request,
+        cfg: structuredClone(this.cfg),
+        workspace: this.o.workspace,
+        bus: this.o.bus,
+        decider: this.o.clarifier,
+        permissions: this.o.permissions,
+        env: this.env
+      });
+      this.entitle(request);
+      this.pausedTeam = null;
+      this.o.ui.info(`The team takes it from here (run ${run.id}). Your messages now go to the PM; Esc stops the team, /team status shows the board.`);
+      this.runTeam(run, release, request);
+    } catch (e) {
+      if (!this.runsWith(release)) release();
+      throw e;
+    }
+  }
+  /** The team run /resume continues: one named by id, else the stopped one, else the latest that is not over. */
+  teamToResume(arg) {
+    if (arg && RUN_ID2.test(arg) && !arg.includes("..")) {
+      try {
+        const state = TeamStore.open(this.o.runsDir, arg).load();
+        return state.phase !== "DONE" && state.phase !== "ABORTED" ? state.id : null;
+      } catch {
+        return null;
+      }
+    }
+    if (this.pausedTeam) return this.pausedTeam;
+    if (this.paused || latestResumable(this.o.runsDir, this.o.workspace)) return null;
+    return resumableTeam(this.o.runsDir)?.id ?? null;
+  }
+  resumeTeam(id, note) {
+    if (this.elsewhere()) return;
+    const release = this.takeWorkspace();
+    if (!release) return;
+    try {
+      const run = TeamRun.resume({ runsDir: this.o.runsDir, id, workspace: this.o.workspace, bus: this.o.bus, decider: this.o.clarifier, permissions: this.o.permissions, env: this.env });
+      const problem = missingCli(this.cfg, [...new Set(run.members.map((m) => m.backend))], this.env);
+      if (problem) {
+        release();
+        this.o.ui.info(problem.message, "error");
+        return;
+      }
+      const raised = run.raiseBudget();
+      if (raised.length) this.o.ui.info(`Budget: ${raised.join("; ")}.`);
+      if (note) run.message(note);
+      this.pausedTeam = null;
+      this.o.ui.info(`Team run ${id} goes on. Your messages go to the PM.`);
+      this.runTeam(run, release, run.state.request);
+    } catch (e) {
+      if (!this.runsWith(release)) release();
+      throw e;
+    }
+  }
+  runTeam(run, release, request) {
+    const exec2 = { kind: "team", run, done: Promise.resolve(), release };
+    const conversation2 = this.conversation;
+    this.active = exec2;
+    this.escaped = false;
+    this.o.ui.setStatus("running");
+    exec2.done = (async () => {
+      await Promise.resolve();
+      let outcome = "error";
+      try {
+        outcome = await run.run();
+      } catch (e) {
+        this.o.ui.info(`error: ${e.message}`, "error");
+      }
+      const st = run.state;
+      if (outcome === "done") {
+        this.o.ui.info(st.summary ?? `Team run ${run.id} is done.`);
+        conversation2.addEarlier({ task: firstLine(request, 200), outcome: `done by a team; ${firstLine(st.summary ?? "", 200)}`, runId: run.id });
+      } else if (outcome === "aborted") {
+        this.o.ui.info(`Team run ${run.id} is aborted; nothing of it went into your folder.`);
+      } else {
+        this.pausedTeam = run.id;
+        this.o.ui.info(outcome === "stopped" ? `The team stopped. /resume continues it (/resume <message> also tells the PM something); /team abort ends it.` : `The team waits (${st.waiting ? `for your ${st.waiting.kind === "apply_conflict" ? "decision on conflicts" : `approval of the ${st.waiting.kind}`}` : "for you"}). /resume continues it.`);
+      }
+    })().finally(() => this.settled(exec2));
   }
   // ------------------------------------------------------------------ pipeline
   /**
@@ -24171,11 +27403,11 @@ var Chat = class {
     this.models.refresh();
     const workflow = new Workflow({ cfg, repo: this.o.workspace, store, state, bus: this.o.bus, decider: this.o.decider, permissions: this.o.permissions, clarifier: this.o.clarifier, env: this.env });
     this.escaped = false;
-    const exec = { kind: "pipeline", store, workflow, cfg, done: Promise.resolve(), release };
+    const exec2 = { kind: "pipeline", store, workflow, cfg, done: Promise.resolve(), release };
     const conversation2 = this.conversation;
-    this.active = exec;
+    this.active = exec2;
     this.o.ui.setStatus("running");
-    exec.done = (async () => {
+    exec2.done = (async () => {
       await Promise.resolve();
       let code = EXIT.ERROR;
       let unprepared = false;
@@ -24204,7 +27436,7 @@ var Chat = class {
         this.o.ui.info(st.humanReview?.reason === "clarification_required" ? "The run is waiting for your answers to an agent's questions; type /resume to answer them." : "The run is waiting for your decision; type /resume to decide.");
       }
       conversation2.addEarlier({ ...await this.outcome(st), runId: store.taskId });
-    })().finally(() => this.settled(exec));
+    })().finally(() => this.settled(exec2));
     return true;
   }
   async outcome(st) {
@@ -24238,6 +27470,8 @@ var Chat = class {
    */
   resume(arg, o = {}) {
     if (this.active) return this.busy();
+    const teamId = this.teamToResume(arg.trim());
+    if (teamId) return this.resumeTeam(teamId, arg.trim() === teamId ? "" : arg.trim());
     if (this.elsewhere()) return;
     const release = this.takeWorkspace();
     if (!release) return;
@@ -24451,17 +27685,17 @@ ${plan.trimEnd()}` : "There is no plan yet.");
       }
       case "diff": {
         const st = store?.loadState();
-        let stat = "";
+        let stat2 = "";
         if (st?.base && st.lastSnapshot) {
           try {
-            stat = (await openRunGit(st, this.o.workspace, this.env).diffStat(st.base.commit, st.lastSnapshot.commit)).trimEnd();
+            stat2 = (await openRunGit(st, this.o.workspace, this.env).diffStat(st.base.commit, st.lastSnapshot.commit)).trimEnd();
           } catch (e) {
             ui.info(`Cannot read the snapshots of run ${st.taskId}: ${e.message}`, "error");
             return;
           }
         }
-        ui.info(stat ? `\u2500\u2500 diff stat \u2500\u2500
-${stat}` : "No changes yet.");
+        ui.info(stat2 ? `\u2500\u2500 diff stat \u2500\u2500
+${stat2}` : "No changes yet.");
         return;
       }
       case "status": {
@@ -24518,13 +27752,13 @@ var ClarificationBroker = class {
   closedFor = false;
   askClarification({ request }, signal) {
     if (this.closedFor || this.o.interactive === false || signal?.aborted || this.waiting.has(request.id)) return Promise.resolve({ kind: "defer" });
-    return new Promise((resolve13) => {
+    return new Promise((resolve14) => {
       const settle = (response) => {
         if (this.waiting.get(request.id)?.settle !== settle) return;
         this.waiting.delete(request.id);
         signal?.removeEventListener("abort", onAbort);
         this.o.closed?.(request, response.kind);
-        resolve13(response);
+        resolve14(response);
       };
       const onAbort = () => settle({ kind: "defer" });
       signal?.addEventListener("abort", onAbort, { once: true });
@@ -24586,18 +27820,18 @@ var DecisionBroker = class {
   decide(review) {
     if (this.closed) return Promise.resolve("defer");
     const id = `decision-${++this.count}-${randomUUID5().slice(0, 8)}`;
-    return new Promise((resolve13) => {
-      this.waiting.set(id, resolve13);
+    return new Promise((resolve14) => {
+      this.waiting.set(id, resolve14);
       this.o.opened(id, review);
     });
   }
   /** False when `id` is not waiting (answered already, or from an earlier question). */
   answer(id, answer) {
-    const resolve13 = this.waiting.get(id);
-    if (!resolve13) return false;
+    const resolve14 = this.waiting.get(id);
+    if (!resolve14) return false;
     this.waiting.delete(id);
     this.o.closed(id);
-    resolve13(answer.decision === "defer" ? "defer" : { decision: answer.decision, note: answer.note ?? void 0 });
+    resolve14(answer.decision === "defer" ? "defer" : { decision: answer.decision, note: answer.note ?? void 0 });
     return true;
   }
   pending() {
@@ -24614,11 +27848,11 @@ var PermissionBroker = class {
   closed = false;
   askPermission({ request }, signal) {
     if (this.closed || signal?.aborted || this.waiting.has(request.id)) return Promise.resolve({ decision: "deny" });
-    return new Promise((resolve13) => {
+    return new Promise((resolve14) => {
       const done = (answer) => {
         this.waiting.delete(request.id);
         signal?.removeEventListener("abort", onAbort);
-        resolve13(answer);
+        resolve14(answer);
       };
       const onAbort = () => done({ decision: "deny" });
       signal?.addEventListener("abort", onAbort, { once: true });
@@ -24686,6 +27920,9 @@ function agentsFor(text3, route2, cfg, recipient) {
   const input = parseInput(text3);
   if (input.kind === "pipeline" || route2 === "pipeline" && input.kind === "message") return Object.values(cfg.agents);
   if (input.kind === "discuss" || route2 === "discuss" && input.kind === "message") return ["codex", "claude"];
+  if (input.kind === "team" && input.action === "start" || route2 === "team" && input.kind === "message") {
+    return teamConfigErrors(cfg.team).length ? [] : [...new Set(teamMembers(cfg.team).map((m) => m.backend))];
+  }
   if (input.kind === "ask") return [input.backend];
   return input.kind === "message" ? [recipient] : [];
 }
@@ -24771,7 +28008,7 @@ var RuntimeSession = class {
   }
   /** The folder this worker works in. */
   get workspace() {
-    return resolve11(this.o.workspace);
+    return resolve12(this.o.workspace);
   }
   async prepare() {
     this.env = await prepareEnvironment({ cwd: this.o.workspace, configPath: this.o.configPath ?? void 0, env: this.o.env });
@@ -24783,7 +28020,7 @@ var RuntimeSession = class {
     const result = {
       version: packageVersion(),
       node: process.versions.node,
-      workspace: resolve11(this.o.workspace),
+      workspace: resolve12(this.o.workspace),
       runsDir: null,
       configFile: null,
       configSources: [],
@@ -24930,7 +28167,7 @@ var RuntimeSession = class {
       }
       const chat = await this.ensureSession(conversation2, (cfg) => agentsFor(text3 || (attachments.length ? "files" : ""), route2, cfg, this.recipientOf(conversation2)));
       const o = { attachments };
-      await (route2 === "pipeline" ? chat.submitPipeline(text3, o) : route2 === "discuss" ? chat.submitDiscuss(text3, o) : chat.submit(text3, o));
+      await (route2 === "pipeline" ? chat.submitPipeline(text3, o) : route2 === "discuss" ? chat.submitDiscuss(text3, o) : route2 === "team" ? chat.submitTeam(text3, o) : chat.submit(text3, o));
     });
   }
   /**
@@ -24998,7 +28235,7 @@ var RuntimeSession = class {
   }
   // ------------------------------------------------------------ configuration (the desktop's Settings)
   configurationOptions(session2) {
-    return { workspace: resolve11(this.o.workspace), configPath: this.o.configPath, env: this.o.env, session: session2 };
+    return { workspace: resolve12(this.o.workspace), configPath: this.o.configPath, env: this.o.env, session: session2 };
   }
   /**
    * What new work of this session gets: a tab's chat config (they all follow the same settings), or, with none yet,
@@ -25144,8 +28381,8 @@ var RuntimeSession = class {
    */
   async deferQuestions(tab, close) {
     const open = new Set(tab.clarifications.pending().map((r) => r.id));
-    const recorded = new Promise((resolve13) => {
-      if (!open.size) return resolve13();
+    const recorded = new Promise((resolve14) => {
+      if (!open.size) return resolve14();
       const timer = setTimeout(done, 500);
       const off = tab.bus.on((e) => {
         if (e.type === "clarification.closed" && open.delete(e.id) && !open.size) done();
@@ -25153,7 +28390,7 @@ var RuntimeSession = class {
       function done() {
         clearTimeout(timer);
         off();
-        resolve13();
+        resolve14();
       }
     });
     tab.clarifications.deferAll(close);
@@ -25165,8 +28402,8 @@ var RuntimeSession = class {
    */
   async denyPermissions(tab, close) {
     const open = new Set(tab.permissions.pending());
-    const written = new Promise((resolve13) => {
-      if (!open.size) return resolve13();
+    const written = new Promise((resolve14) => {
+      if (!open.size) return resolve14();
       const timer = setTimeout(done, 500);
       const off = tab.bus.on((e) => {
         if (e.type === "permission.answered" && open.delete(e.id) && !open.size) done();
@@ -25174,7 +28411,7 @@ var RuntimeSession = class {
       function done() {
         clearTimeout(timer);
         off();
-        resolve13();
+        resolve14();
       }
     });
     tab.permissions.denyAll(close);
@@ -25217,7 +28454,7 @@ var RuntimeSession = class {
   }
   // ------------------------------------------------------------ run artifacts
   sameWorkspace(st) {
-    return !st.workspace || resolve11(st.workspace) === resolve11(this.env?.workspace ?? this.o.workspace);
+    return !st.workspace || resolve12(st.workspace) === resolve12(this.env?.workspace ?? this.o.workspace);
   }
   /** The run a tab talks about: its chat's, or else the workspace's latest (after a reload, or with no tab named). */
   focus(conversation2) {
@@ -25378,7 +28615,7 @@ ${findingsMarkdown(r.findings)}
    */
   async findFiles(query) {
     if (this.closing) throw new SessionError("shutting_down", "the worker is shutting down");
-    const runsDir = this.env?.runsDir ?? join20(this.workspace, ".agentduo", "runs");
+    const runsDir = this.env?.runsDir ?? join24(this.workspace, ".agentduo", "runs");
     if (this.paths?.runsDir !== runsDir) this.paths = { runsDir, paths: new WorkspacePaths(this.workspace, { exclude: workspaceExcludes(this.workspace, [runsDir]) }) };
     return this.paths.paths.find(query);
   }
@@ -25408,9 +28645,9 @@ var generation = -1;
 var session = null;
 var exiting = false;
 function send(message) {
-  return new Promise((resolve13) => {
-    if (!process.connected) return resolve13();
-    process.send(message, void 0, void 0, () => resolve13());
+  return new Promise((resolve14) => {
+    if (!process.connected) return resolve14();
+    process.send(message, void 0, void 0, () => resolve14());
   });
 }
 var tag = () => ({ protocol: PROTOCOL_VERSION, generation });
@@ -25475,7 +28712,7 @@ async function dispatch(s, request) {
     case "updateConfiguration":
     case "clearConfiguration":
     case "syncConfiguration":
-      if (request.workspace && resolve12(request.workspace) !== resolve12(s.workspace)) throw new SessionError("bad_request", `this worker is for ${s.workspace}, not ${request.workspace}`);
+      if (request.workspace && resolve13(request.workspace) !== resolve13(s.workspace)) throw new SessionError("bad_request", `this worker is for ${s.workspace}, not ${request.workspace}`);
       if (request.type === "readConfiguration") return s.readConfiguration();
       if (request.type === "syncConfiguration") return s.syncConfiguration();
       if (request.type === "updateConfiguration") return s.updateConfiguration(request.scope, request.key, request.value);

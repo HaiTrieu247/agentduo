@@ -84,7 +84,7 @@ export function QuestionPrompt({ request, onSubmit, onLater, onDismiss }: Props)
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
       <Text color="cyan" bold wrap="truncate-end">
-        {`? ${whoLabel(request.agent, request.role)} asks you ${questions.length === 1 ? "a question" : `${questions.length} questions`}`}
+        {`? ${whoLabel(request.agent, request.role, request.member)} asks you ${questions.length === 1 ? "a question" : `${questions.length} questions`}`}
         {questions.length > 1 ? ` — ${qi + 1} of ${questions.length}` : ""}
       </Text>
       {questions.length > 1 ? (

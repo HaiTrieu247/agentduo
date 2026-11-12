@@ -1,0 +1,87 @@
+{
+  "title": "A code review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "summary",
+    "findings"
+  ],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "approve",
+        "changes"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "severity",
+          "file",
+          "line",
+          "title",
+          "detail",
+          "criteria",
+          "origin"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "R1, R2…"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "file": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "criteria": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The acceptance criteria it concerns"
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "in_scope",
+              "out_of_scope"
+            ],
+            "description": "out_of_scope: a suggestion, never work for this task"
+          }
+        }
+      }
+    }
+  }
+}

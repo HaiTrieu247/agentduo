@@ -1,0 +1,57 @@
+{
+  "title": "The tests a tester wrote",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "test_files",
+    "cases",
+    "how_to_run"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "test_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "criterion",
+          "description"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "C1, C2…"
+          },
+          "criterion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The acceptance criterion it checks, or null"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "how_to_run": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The command that runs these tests, or null"
+    }
+  }
+}

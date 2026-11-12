@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { copyFile, mkdtemp, readdir, rename, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, readdir, rename, rm, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 
@@ -173,7 +173,13 @@ export class Git {
     try {
       // Seeding from the real index keeps its stat data, so `git add -A` only rehashes files that changed.
       const real = join((await this.run(["rev-parse", "--absolute-git-dir"])).stdout.trim(), "index");
-      if (existsSync(real)) await copyFile(real, index);
+      if (existsSync(real)) {
+        await copyFile(real, index);
+        // With the real index's own time: git rehashes an entry no older than its index ("racily clean"), so a file
+        // rewritten at the same size in the second the index was written is seen. A copy dated now would hide it.
+        const { atime, mtime } = await stat(real);
+        await utimes(index, atime, mtime);
+      }
       // An unmerged path outside the scope would survive `git add` and make write-tree fail, so start from HEAD then.
       if (!existsSync(real) || (await this.run(["ls-files", "-u", "--", ":/"], { env })).stdout) {
         const head = await this.head();
@@ -203,6 +209,9 @@ export class Git {
       let seeded = false;
       if (existsSync(cache)) {
         await copyFile(cache, index);
+        // Dated as the cache is, for git's racily-clean check (see worktreeTree).
+        const { atime, mtime } = await stat(cache);
+        await utimes(index, atime, mtime);
         const listed = await this.run(["ls-files", "-z", "--stage"], { env, check: false });
         if (listed.code === 0) {
           seeded = true;
@@ -327,4 +336,58 @@ export class Git {
   async diffStat(a: string, b: string): Promise<string> {
     return (await this.run(["diff", "--no-color", "--stat", "--relative", a, b, "--", "."])).stdout;
   }
+
+  /** A commit of `tree` with these parents, made by agentduo (never by the user's identity). */
+  async commitTree(tree: string, parents: string[], message: string): Promise<string> {
+    return (await this.run(["commit-tree", tree, ...parents.flatMap((p) => ["-p", p]), "-m", message], { env: IDENTITY })).stdout.trim();
+  }
+
+  /**
+   * Commits `a` and `b` merged, without a working tree (`git merge-tree --write-tree`, git 2.38 or later): the merged
+   * tree, or the paths that conflict (relative to the workspace, which a merge of whole-repository trees may lie in).
+   */
+  async mergeTree(a: string, b: string): Promise<{ tree: string; conflicts: string[] }> {
+    const r = await this.run(["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", a, b], { check: false });
+    if (r.code !== 0 && r.code !== 1) throw new GitError(`git merge-tree ${a} ${b} failed: ${(r.stderr || r.stdout).trim()}`);
+    const [tree = "", ...paths] = r.stdout.split("\0").filter(Boolean);
+    if (!/^[0-9a-f]{40,64}$/.test(tree)) throw new GitError(`git merge-tree ${a} ${b} gave no tree: ${(r.stderr || r.stdout).trim()}`);
+    const prefix = await this.prefix();
+    const conflicts = [...new Set(paths)].map((p) => (prefix ? posix.relative(prefix, p) : p));
+    return { tree, conflicts: r.code === 1 ? conflicts : [] };
+  }
+
+  /** The files that differ between two trees inside the workspace, with their modes and blobs (`git diff --raw`). */
+  async rawChanges(a: string, b: string): Promise<RawChange[]> {
+    const out = (await this.run(["diff", "--raw", "-z", "--no-renames", "--relative", a, b, "--", "."])).stdout;
+    const parts = out.split("\0");
+    const changes: RawChange[] = [];
+    for (let i = 0; i + 1 < parts.length; i += 2) {
+      const meta = parts[i]!;
+      if (!meta.startsWith(":")) break;
+      const [srcMode, dstMode, srcBlob, dstBlob, status] = meta.slice(1).split(" ");
+      changes.push({ srcMode: srcMode!, dstMode: dstMode!, srcBlob: srcBlob!, dstBlob: dstBlob!, status: status!.charAt(0), path: parts[i + 1]! });
+    }
+    return changes;
+  }
+
+  /** A blob's bytes. */
+  async blob(id: string): Promise<Buffer> {
+    const call = await this.invocation(["cat-file", "blob", id]);
+    return new Promise((resolvePromise, reject) => {
+      execFile("git", call.args, { cwd: this.dir, env: call.env, encoding: "buffer", maxBuffer: 512 * 1024 * 1024 }, (error, stdout, stderr) => {
+        if (error) reject(new GitError(`git cat-file blob ${id} failed: ${stderr.toString().trim() || error.message}`));
+        else resolvePromise(stdout);
+      });
+    });
+  }
+}
+
+/** One file of `git diff --raw`: its modes and blobs before and after (zeros: none), and A, M, D or T. */
+export interface RawChange {
+  srcMode: string;
+  dstMode: string;
+  srcBlob: string;
+  dstBlob: string;
+  status: string;
+  path: string;
 }

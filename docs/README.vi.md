@@ -125,6 +125,42 @@ Thay đổi áp dụng từ câu hỏi hoặc lần gọi agent kế tiếp; câ
 
 `duo "<task>"` và `duo run "<task>"` vẫn chạy pipeline cho một việc rồi thoát; đây là cách dùng cho script và CI.
 
+## Chế độ Team
+
+`/team <yêu cầu>` trong chat (hoặc `duo team "<yêu cầu>"`, hoặc chọn **Team** trong menu của ô nhập ở VS Code và app
+desktop) giao yêu cầu cho một phòng ban agent. Từ lúc đó bạn chỉ nói chuyện với PM:
+
+- **PM** hỏi cho tới khi mục tiêu, phạm vi và tiêu chí nghiệm thu đã rõ, viết bản yêu cầu và xin bạn duyệt.
+- **Techlead** chia việc thành task: ai làm, ai test, đụng file nào, phục vụ tiêu chí nào. PM soát kế hoạch so với bản
+  yêu cầu trước khi trình bạn duyệt.
+- **Các thành viên** làm song song, mỗi người trong một git worktree riêng dưới thư mục dữ liệu của agentduo. Tester
+  viết test cho mỗi task trong lúc task đang được code (dựa trên kế hoạch, không nhìn code), rồi chạy test. Code của
+  junior/mid do senior review; code của senior do techlead review. Lỗi được chuyển về techlead để giao lại, đổi
+  người, sửa test, hoặc hỏi PM (PM chỉ hỏi bạn những gì team không tự quyết được).
+- **Bạn nghiệm thu.** Khi mọi task đã gộp và toàn bộ qua kiểm tra, PM báo theo từng tiêu chí. Chỉ khi bạn chấp nhận,
+  kết quả mới được ghi vào thư mục của bạn: chỉ các file thay đổi, không commit, có bản dự phòng (`/team undo` để hoàn
+  tác). Nếu bạn đã sửa thư mục trong lúc team làm, phần sửa của bạn được gộp vào và cả bản được kiểm tra lại trước.
+
+Trong lúc team làm, PM trả lời bạn ngay (`/team status` xem bảng task); Esc dừng team, `/resume` chạy tiếp. File bạn
+đính kèm vào yêu cầu hoặc tin nhắn gửi PM (ảnh chụp cần bắt chước, tài liệu…) đến được mọi thành viên, ảnh gửi dạng ảnh,
+như các bước của pipeline. Cơ cấu team
+nằm ở khoá `team:` trong config (cấp độ, chức vụ, thành viên, `max_parallel`, giới hạn, `worktree`), xem
+[README tiếng Anh](../README.md#team-mode).
+
+**Nhiều nhóm.** Gán `group` (frontend, backend…) cho thành viên để chia team lớn. PM không thuộc nhóm nào là PM trưởng,
+người duy nhất nói chuyện với bạn; mỗi nhóm có techlead, dev, QA riêng và tối đa một PM phụ. PM trưởng chia phần việc cho
+từng nhóm, các techlead lập kế hoạch song song, PM phụ soát kế hoạch của nhóm, PM trưởng soát cả bản rồi bạn duyệt một
+lần. Câu hỏi của techlead đi lên PM phụ, rồi PM trưởng, rồi mới tới bạn.
+
+Mỗi thành viên có `IDENTITY.md` của chức vụ, của level và `AGENT.md` riêng. Mỗi file là một nội dung đầy đủ: file của dự
+án (`.agentduo/team/…`) nếu có, không thì file trong `team/` của user config (mọi dự án), không thì nội dung mặc định
+của agentduo. File bắt đầu bằng nội dung mặc định, bạn viết thêm hoặc viết lại. Settings → Team của app desktop hiện
+team thành một danh sách: "Add a member" mở một form chọn chức vụ, level, CLI, model, nhóm và số lượng (tạo được chức vụ,
+level hay nhóm mới ngay trong form), và danh sách nói rõ team còn thiếu gì mới chạy được. Khi bạn chưa lưu team nào,
+`/team` dùng team mặc định của agentduo (PM, techlead, 2 dev, QA); nút "Start from agentduo's team" đưa team đó vào danh
+sách để sửa. Mỗi dòng mở identity của chức vụ, của level và của chính thành viên đó để sửa tại chỗ (lưu cho mọi dự án
+hoặc dự án này, hoặc quay về mặc định), và trang có nút ghi sẵn các file mặc định vào dự án.
+
 ## Extension VS Code
 
 `apps/vscode` đưa chat này vào sidebar của VS Code. Sidebar có timeline của hai agent, phần trả lời HUMAN_REVIEW và quyền của Claude ngay trên ô nhập, cùng các nút mở plan, review, report và xem thay đổi của run bằng diff editor. Extension chạy engine của agentduo bằng Node của bạn (≥ 22.12). Nó dùng chung cấu hình, thư mục run và lock với `duo`, nên run bắt đầu ở bên này có thể tiếp tục ở bên kia.
@@ -246,6 +282,7 @@ duo resume --answers answers.json   # có cấu trúc: file ghi requestId và id
 |---|---|
 | `duo` | Mở [chat](#chat) (trong terminal) |
 | `duo "<task>"` | Tạo run mới (`--task-file`; task bắt đầu bằng `-` thì gõ `duo -- "-x …"`) |
+| `duo team "<yêu cầu>"` | Mở chat và giao yêu cầu cho [team](#chế-độ-team): bạn nói chuyện với PM |
 | `duo resume [id]` | Chạy tiếp với config lúc run bắt đầu (thêm `--reload-config` để dùng config hiện tại); `--decision resume\|revise\|abort [--note "..."]` để trả lời quyết định đang chờ; `--answers F` để trả lời [câu hỏi của agent](#câu-hỏi-từ-các-agent) |
 | `duo status`, `duo list` | Xem tiến độ |
 | `duo doctor`, `duo init` | Kiểm tra môi trường, tạo config (và hỏi có `git init` không; pipeline không cần) |

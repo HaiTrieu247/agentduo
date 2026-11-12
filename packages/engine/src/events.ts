@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { ClarificationAnswer, ClarificationRequest, ClarificationResponse, ClarificationStatus } from "./clarification/clarification.js";
 import type { ProfileName } from "./config/config.js";
+import type { TeamMemberView, TeamPhase, TeamTaskView } from "./team/model.js";
 
 export type Phase =
   | "PLAN" | "PLAN_REVIEW" | "PLAN_FINALIZE" | "IMPLEMENT" | "VERIFY" | "CODE_REVIEW"
@@ -139,7 +140,11 @@ export type DiscussionStatus = "agreed" | "disputed" | "interrupted" | "error";
  * Who a permission prompt or an activity belongs to: a pipeline role, or a turn of the conversation. A conversation
  * turn is not a pipeline role, so it has none.
  */
-export type CallContext = { role: Role; turnId?: undefined } | { role?: undefined; turnId: string };
+export type CallContext =
+  | { role: Role; turnId?: undefined; member?: undefined }
+  | { role?: undefined; turnId: string; member?: undefined }
+  /** A team member's call (packages/engine/src/team), by the member's name. */
+  | { role?: undefined; turnId?: undefined; member: string };
 
 export type DuoEvent =
   /** `profile`: the pipeline profile in effect (packages/engine/src/workflow/profiles.ts); absent from older emitters (standard). */
@@ -186,6 +191,21 @@ export type DuoEvent =
   }
   /** Running totals for the current agent call (all attempts so far). */
   | { type: "agent.usage"; agent: Party; costUsd?: number; tokens?: number }
+  /** A team run (packages/engine/src/team): its members, phases, tasks, what the PM tells the user, and how it ended. */
+  | { type: "team.started"; runId: string; request: string; runDir: string; members: TeamMemberView[] }
+  | { type: "team.phase"; runId: string; phase: TeamPhase }
+  | { type: "team.member"; member: string; state: "idle" | "busy"; job: string | null; task: string | null }
+  | { type: "team.task"; task: TeamTaskView }
+  /** What the PM says to the user (the only agent the user hears from), or the user's message to the PM. */
+  | { type: "team.message"; runId: string; from: "pm" | "user"; text: string; seq: number }
+  /** Something the PM shows the user beside its message: the brief, the plan as the PM summed it up, the acceptance report. */
+  | { type: "team.document"; runId: string; kind: "brief" | "plan" | "acceptance"; title: string; text: string }
+  | { type: "team.finished"; runId: string; phase: TeamPhase; outcome: "done" | "waiting" | "stopped" | "aborted" | "error"; summary: string | null }
+  /** A team member's call (packages/engine/src/team): what it does, its usage so far, its model, its retries. */
+  | { type: "team.activity"; member: string; task: string | null; agent: Party; activity: Activity }
+  | { type: "team.usage"; member: string; agent: Party; costUsd?: number; tokens?: number }
+  | { type: "team.model"; member: string; model: string }
+  | { type: "team.retry"; member: string; agent: Party; attempt: number; max: number; reason: string }
   | { type: "gate.started"; name: string; command: string }
   | { type: "gate.completed"; name: string; command: string; passed: boolean; exitCode: number | null }
   | { type: "message"; message: Message }

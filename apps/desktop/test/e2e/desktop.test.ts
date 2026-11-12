@@ -716,4 +716,55 @@ describe("agentduo desktop", () => {
     await showsChange();
     await quit();
   });
+
+  it("offers Team in the composer's menu, builds the team in Settings from one list and its form, and edits a role's identity from a row", async () => {
+    await launch();
+    await page.locator(`${SHOWN} .composer-input`).waitFor({ timeout: 30_000 });
+    await page.locator(`${SHOWN} .chip.target`).click();
+    await page.locator(`${SHOWN} .menu-item[role="menuitemradio"]`, { hasText: "Team" }).click();
+    await expect.poll(async () => page.locator(`${SHOWN} .chip.target`).textContent()).toContain("Team");
+    expect(await page.locator(`${SHOWN} .composer-input`).getAttribute("placeholder")).toContain("A request for the team");
+    const { projectId } = await activeConversation();
+    const team = () => invoke<{ members: Array<{ name: string }>; membersFrom: string | null }>({ method: "team.read", projectId });
+    expect((await team()).membersFrom).toBeNull();
+    await openSettings("Team");
+    const settings = page.locator(".settings");
+    // No team is saved: the list starts empty, and agentduo's team is one click away.
+    await settings.locator(".team-empty").waitFor({ timeout: 10_000 });
+    await settings.locator("button", { hasText: "Start from agentduo's team" }).click();
+    expect(await settings.locator(".team-member").count()).toBe(5);
+    expect(await settings.locator(".team-strip").textContent()).toContain("Ready: 5 members");
+    // One form: the role, level, CLI and name of a new member, with what it will be before it is added.
+    await settings.locator("button", { hasText: "Add a member" }).click();
+    const form = settings.locator(".team-form");
+    await form.locator('select[aria-label="Role"]').selectOption("qa");
+    await form.locator('select[aria-label="Level"]').selectOption("senior");
+    // The model is picked from what the CLI takes, the level's first; another is typed in.
+    const models = () => form.locator('select[aria-label="Model"] option').allTextContents();
+    expect(await models()).toEqual(expect.arrayContaining(["Opus (senior's)", "Sonnet", "Haiku", "Other model…"]));
+    await form.locator('.segmented[aria-label="CLI"] button', { hasText: "Codex" }).click();
+    await expect.poll(models).toEqual(expect.arrayContaining(["The CLI's own model", "Other model…"]));
+    await form.locator('select[aria-label="Model"]').selectOption({ label: "Other model…" });
+    await form.locator('input[aria-label="Model name"]').fill("gpt-5-codex");
+    await form.locator('input[aria-label="Name"]').fill("qa-lead");
+    await expect.poll(async () => form.locator(".team-preview").textContent()).toContain("Adds qa-lead · qa · senior · Codex · gpt-5-codex · high");
+    await form.locator("button", { hasText: "Add to the team" }).click();
+    await settings.locator(".team-member", { hasText: "qa-lead" }).waitFor({ timeout: 10_000 });
+    expect(await settings.locator(".unsaved").textContent()).toBe("Unsaved changes");
+    await settings.locator("button", { hasText: "Save the team" }).click();
+    await expect.poll(async () => (await team()).members.map((m) => m.name), { timeout: 10_000 }).toContain("qa-lead");
+    expect((await team()).membersFrom).toBe("project");
+    // A member's row opens its role's, its level's and its own identity text.
+    await settings.locator(".team-member", { hasText: "dev-1" }).locator('button[title^="Identity of"]').click();
+    const panel = settings.locator(".identity-panel");
+    const text = panel.locator("textarea.identity-text");
+    await text.waitFor({ timeout: 10_000 });
+    await expect.poll(async () => text.inputValue(), { timeout: 10_000 }).toContain("You are a developer on the team.");
+    await text.fill("You are a developer here. Use pnpm.");
+    await panel.locator("button", { hasText: "Save" }).click();
+    const file = join(scratch.path, "plain project", ".agentduo", "team", "roles", "dev", "IDENTITY.md");
+    await expect.poll(() => (existsSync(file) ? readFileSync(file, "utf8") : ""), { timeout: 10_000 }).toBe("You are a developer here. Use pnpm.\n");
+    await closeSettings();
+    await quit();
+  });
 });

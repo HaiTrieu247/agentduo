@@ -91,6 +91,13 @@ export type ParsedInput =
   | { kind: "pipeline"; task: string; profile?: PipelineProfile }
   /** /discuss: the current recipient answers, the other agent reviews, until they agree. */
   | { kind: "discuss"; question: string }
+  /**
+   * /team <request>: a team run (packages/engine/src/team) whose PM you talk to; /team status|members|abort, and
+   * /team undo [run] (the result written into the folder taken back out).
+   */
+  | { kind: "team"; action: "start"; request: string }
+  | { kind: "team"; action: "status" | "members" | "abort" }
+  | { kind: "team"; action: "undo"; runId: string | null }
   /** `save`: --save, into the workspace's config file; `global`: --global, into the user config file. */
   | { kind: "setting"; setting: SettingCommand; save: boolean; global: boolean; yes: boolean }
   /** /attach <path>: `path` as the shell would read the word; `home`: it started with ~ (relative to the home directory). */
@@ -115,6 +122,7 @@ export const COMMANDS: CommandInfo[] = [
   { name: "/codex", usage: "/codex <question>", description: "ask Codex; /codex alone sends your next messages to Codex", args: true },
   { name: "/pipeline", usage: "/pipeline [--profile lightweight|standard|thorough] <task>", description: "run the full workflow: plan → critique → finalize → implement → verify → review", args: true },
   { name: "/discuss", usage: "/discuss <question>", description: "the recipient answers, the other agent reviews, they revise until they agree, then Codex sums it up", args: true },
+  { name: "/team", usage: "/team <request> | status | members | abort | undo [run]", description: "hand the request to a team (PM, techlead, devs, testers): you talk to the PM only", args: true },
   { name: "/plan", usage: "/plan", description: "show the final plan of the current run", args: false },
   { name: "/diff", usage: "/diff", description: "show what the current run changed", args: false },
   { name: "/status", usage: "/status", description: "show where the current run is, and what it has cost", args: false },
@@ -304,6 +312,18 @@ export function parsePathArg(input: string, platform?: NodeJS.Platform): { path:
 
 const ATTACH_USAGE = 'usage: /attach <path>, e.g. /attach screenshots/bug.png or /attach "~/Desktop/My notes.pdf" (one file at a time)';
 
+const TEAM_USAGE = "usage: /team <request> (e.g. /team Add a CSV export to the reports page), or /team status|members|abort|undo [run]";
+
+/** /team <request>, or one of its words alone (so a request may start with one). */
+function teamCommand(rest: string): ParsedInput {
+  if (!rest) return usage(TEAM_USAGE);
+  const words = rest.split(/\s+/);
+  const word = words[0]!.toLowerCase();
+  if (words.length === 1 && (word === "status" || word === "members" || word === "abort")) return { kind: "team", action: word };
+  if (word === "undo" && words.length <= 2) return { kind: "team", action: "undo", runId: words[1] ?? null };
+  return { kind: "team", action: "start", request: rest };
+}
+
 const PIPELINE_USAGE = `usage: /pipeline [--profile ${PIPELINE_PROFILES.join("|")}] <task>, e.g. /pipeline --profile lightweight Fix the typo in README`;
 
 /** /pipeline [--profile <name>] <task>: the profile only as the first words, so a task may mention one. */
@@ -331,6 +351,8 @@ export function parseInput(raw: string, platform?: NodeJS.Platform): ParsedInput
       return pipelineCommand(rest);
     case "discuss":
       return rest ? { kind: "discuss", question: rest } : usage("usage: /discuss <question>, e.g. /discuss Redis or Postgres for the job queue?");
+    case "team":
+      return teamCommand(rest);
     case "settings":
       return settingsCommand(rest);
     case "mode":

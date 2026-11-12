@@ -326,7 +326,7 @@ export function earlierTasks(list: EarlierTask[] = [], current = true): string {
 }
 
 /** `text` as inline code that a backtick of its own cannot close. */
-function inlineCode(text: string): string {
+export function inlineCode(text: string): string {
   const ticks = "`".repeat(Math.max(0, ...[...text.matchAll(/`+/g)].map((m) => m[0].length)) + 1);
   const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
   return `${ticks}${pad}${text}${pad}${ticks}`;

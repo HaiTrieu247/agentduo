@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentRunner, type CallBudget, type CallSession } from "../../src/agents/runner.js";
@@ -9,6 +9,7 @@ import { png } from "../helpers/images.js";
 import type { ClarificationRequest, ClarificationResponse } from "../../src/clarification/clarification.js";
 import { EventBus, type ClarificationDecider, type DuoEvent, type PermissionAnswer, type PermissionDecider } from "../../src/events.js";
 import { critique, impl, plan } from "../helpers/builders.js";
+import { teamCheck, teamWork } from "../helpers/team-builders.js";
 import { testConfig, type ConfigOverrides } from "../helpers/config.js";
 import { FakeClis } from "../helpers/fake-clis.js";
 import { tempDir } from "../helpers/tmp.js";
@@ -63,6 +64,46 @@ const bashAsk = (command: string, write: Record<string, string> = {}) =>
 const prompt = (role: string) => `[orchestrator-role: ${role}]\nhello`;
 
 describe("AgentRunner", () => {
+  it("runs a team member's call with the member's CLI, model, effort and args, in its worktree, and names the member", async () => {
+    const worktree = join(t.path, "wt", "dev-1");
+    mkdirSync(worktree, { recursive: true });
+    fake.setScenario({ team_work: [{ activities: [{ command: "ls" }], output: teamWork(), write: { "made.txt": "x" } }] });
+    const r = await runner({ codex: { role_models: { implementer: "should-not-apply" } } }).call({
+      member: { name: "dev-1", task: "T1", backend: "codex", profile: { model: "gpt-x", effort: "high", args: ["--foo"] }, cwd: worktree },
+      prompt: "[orchestrator-role: team_work]\n[agentduo-member: dev-1]\nDo T1.", schemaName: "team_work", logPrefix: "t1-dev-1",
+    });
+    expect(r).toMatchObject({ ok: true, backend: "codex" });
+    const call = fake.calls("team_work")[0]!;
+    expect(call.member).toBe("dev-1");
+    expect(realpathSync(call.cwd!)).toBe(realpathSync(worktree));
+    expect(existsSync(join(worktree, "made.txt"))).toBe(true);
+    expect(call.args).toEqual(expect.arrayContaining(["--cd", worktree, "--model", "gpt-x", "-c", "model_reasoning_effort=high", "--foo"]));
+    expect(call.args).not.toContain("should-not-apply");
+    expect(events.find((e) => e.type === "team.activity")).toMatchObject({ member: "dev-1", task: "T1", agent: "codex" });
+    expect(events.some((e) => e.type === "agent.activity")).toBe(false);
+    expect(events.find((e) => e.type === "team.usage")).toMatchObject({ member: "dev-1", tokens: 1234 });
+  });
+
+  it("gives Claude members their model and effort, and never lets them ask the user", async () => {
+    const worktree = join(t.path, "wt", "qa-1");
+    mkdirSync(worktree, { recursive: true });
+    fake.setScenario({
+      team_check: [{ questions: [{ questions: [{ header: "Q", question: "Which?", multiSelect: false, options: [{ label: "A", description: "" }, { label: "B", description: "" }] }] }], output: teamCheck() }],
+    });
+    const asked: ClarificationRequest[] = [];
+    const clarifications: ClarificationDecider = { askClarification: async ({ request }) => (asked.push(request), { kind: "cancelled" }) };
+    const permissions: PermissionDecider = { askPermission: async () => ({ decision: "deny" }) };
+    const r = await new AgentRunner(testConfig(fake), t.path, join(t.path, "logs"), bus, { permissions, clarifications }).call({
+      member: { name: "qa-1", task: "T1", backend: "claude", profile: { model: "sonnet", effort: "low", args: [] }, cwd: worktree },
+      prompt: "[orchestrator-role: team_check]\n[agentduo-member: qa-1]\nTest T1.", schemaName: "team_check", logPrefix: "t1-qa-1",
+    });
+    expect(r.ok).toBe(true);
+    const call = fake.calls("team_check")[0]!;
+    expect(call.args).toEqual(expect.arrayContaining(["--model", "sonnet", "--effort", "low"]));
+    expect(asked).toEqual([]);
+    expect(fake.questionReplies()[0]!.message).toContain("only the PM talks to the user");
+  });
+
   it("returns validated output and streams activities (codex)", async () => {
     fake.setScenario({ planner: [{ activities: [{ command: "cat README.md" }], output: plan() }] });
     const r = await runner().call({ role: "planner", agentRole: "planner", prompt: prompt("planner"), schemaName: "plan", logPrefix: "001-plan-r1" });

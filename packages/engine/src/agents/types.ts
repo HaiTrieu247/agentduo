@@ -3,6 +3,7 @@ import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import type { AgentRole } from "../config/config.js";
 import type { ClarificationAnswer, ClarificationQuestion } from "../clarification/clarification.js";
 import type { Activity, PermissionAnswer, PermissionRequest } from "../events.js";
+import type { CallProfile } from "../team/config.js";
 import type { SchemaName } from "./schema.js";
 
 export interface PermissionDenial {
@@ -83,8 +84,12 @@ export type BuildArgs =
   | ({
     mode?: "structured";
     schemaName: SchemaName;
-    /** Config role of the call (plan sign-off uses "planner"); selects <backend>.role_args. */
-    role: AgentRole;
+    /** Config role of the call (plan sign-off uses "planner"); selects <backend>.role_args. Absent for a team member's call. */
+    role?: AgentRole;
+    /** A team member's call: its model, effort and args, in place of a role's. */
+    profile?: CallProfile;
+    /** Where the CLI works when it is not the workspace (a team member's worktree); Codex gets it as --cd. */
+    cwd?: string;
     /** The workspace may be in no git repository (a run with agentduo's own snapshot repository). */
     skipGitRepoCheck?: boolean;
     /** The most this call may cost, from the run's budget; a CLI that can cap a call itself (Claude) does. */
@@ -106,7 +111,7 @@ export interface AgentBackend {
    * Whether sessions can be continued later: without a role this checks conversation args only; with a role,
    * its role_args count too. False when the user turns session persistence off (Codex's --ephemeral, Claude's --no-session-persistence), which agentduo respects.
    */
-  keepsSessions(role?: AgentRole): boolean;
+  keepsSessions(role?: AgentRole, extraArgs?: string[]): boolean;
   createParser(): StreamParser;
   /** Extract the final JSON (or, in text mode, the answer); throws AgentFailure (carrying whatever meta is known) when unusable. */
   finalize(parser: StreamParser, stdout: string, lastMessageFile: string, mode?: CallMode): FinalOutput;

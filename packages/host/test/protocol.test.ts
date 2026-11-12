@@ -37,8 +37,8 @@ describe("worker requests", () => {
     expect([init({}), init({ discover: true }), init({ discover: false })].map((r) => r.type === "initialize" && r.discover)).toEqual([true, true, false]);
   });
 
-  it("is protocol 12 (windows taking turns in a workspace); takes only the permission modes the chat offers", () => {
-    expect(PROTOCOL_VERSION).toBe(12);
+  it("is protocol 13 (teams); takes only the permission modes the chat offers", () => {
+    expect(PROTOCOL_VERSION).toBe(13);
     const setting = (s: unknown) => parseRequestEnvelope(envelope({ type: "setting", conversation: "c-1", setting: s })).request;
     for (const mode of ["manual", "acceptEdits", "auto"]) expect(setting({ target: "mode", mode })).toMatchObject({ setting: { target: "mode", mode } });
     expect(setting({ target: "mode" })).toMatchObject({ setting: { target: "mode" } });
@@ -147,6 +147,7 @@ describe("webview messages", () => {
   it("only names things: submit text, answers to pending ids, and commands from a fixed list", () => {
     expect(parseWebviewMessage({ type: "submit", text: "hi" })).toEqual({ type: "submit", text: "hi", route: "message", attachments: [] });
     expect(parseWebviewMessage({ type: "submit", text: "Which queue?", route: "discuss" })).toEqual({ type: "submit", text: "Which queue?", route: "discuss", attachments: [] });
+    expect(parseWebviewMessage({ type: "submit", text: "Add a CSV export", route: "team" })).toEqual({ type: "submit", text: "Add a CSV export", route: "team", attachments: [] });
     expect(() => parseWebviewMessage({ type: "submit", text: "x", route: "debate" })).toThrow();
     expect(parseWebviewMessage({ type: "command", name: "openChanges" })).toEqual({ type: "command", name: "openChanges" });
     expect(parseWebviewMessage({ type: "usage", extra: "ignored" })).toEqual({ type: "usage" });

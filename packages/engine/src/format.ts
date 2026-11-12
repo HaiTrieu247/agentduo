@@ -115,8 +115,12 @@ export const PROVIDERS: Record<Agent, { agent: string; company: string; mark: st
   codex: { agent: "Codex", company: "OpenAI", mark: "◎" },
 };
 
-/** "Claude (implementer)", or just "Claude" for a call that belongs to no pipeline role (a chat answer). */
-export const whoLabel = (agent: Party | string, role?: Role): string => `${partyLabel(agent)}${role ? ` (${roleLabel(role)})` : ""}`;
+/**
+ * "Claude (implementer)", or just "Claude" for a call that belongs to no pipeline role (a chat answer); a team member
+ * by its name, the PM as "PM" (the one member the user talks to).
+ */
+export const whoLabel = (agent: Party | string, role?: Role, member?: string): string =>
+  member ? (member === "pm" ? "PM" : member) : `${partyLabel(agent)}${role ? ` (${roleLabel(role)})` : ""}`;
 
 /** The turn's identity once the agent's own stream named its model. */
 export const withObserved = (m: ModelIdentity, model: string): ModelIdentity => ({ ...m, resolved: model, source: "observed", status: "resolved", reason: null });

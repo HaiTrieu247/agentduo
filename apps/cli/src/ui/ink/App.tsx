@@ -82,8 +82,15 @@ export function StaticItemView({ item }: { item: StaticItem }) {
       return (
         <Text dimColor wrap="wrap">
           <Text color={item.status === "answered" ? "green" : "yellow"}>{item.status === "answered" ? "✓" : "⊘"}</Text>
-          {` ${whoLabel(item.agent, item.role)} asked${item.header ? ` [${item.header}]` : ""} — ${item.text}`}
+          {` ${whoLabel(item.agent, item.role, item.member)} asked${item.header ? ` [${item.header}]` : ""} — ${item.text}`}
         </Text>
+      );
+    case "pm":
+      return (
+        <Box marginTop={1} flexDirection="column">
+          <Text color="magenta" bold>PM</Text>
+          <Text wrap="wrap">{item.text}</Text>
+        </Box>
       );
     case "review":
       return (

@@ -1,0 +1,33 @@
+{
+  "title": "The techlead's answer to a member's question",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "answer",
+    "escalate",
+    "report"
+  ],
+  "properties": {
+    "answer": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Your answer to the member, or null when you escalate"
+    },
+    "escalate": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The question for the PM, when you cannot answer it yourself"
+    },
+    "report": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "A line for the PM, or null"
+    }
+  }
+}

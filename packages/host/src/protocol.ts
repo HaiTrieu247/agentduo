@@ -35,12 +35,14 @@ import type { ViewAction, ViewState } from "./viewState.js";
  * 12: windows take turns in a workspace: the worker holds the workspace lock only while one of its chats works (`session`
  *    active, then dormant), a line that could not run because another agentduo works there comes back as `refused` (the
  *    host gives it back to the composer: `restoreDraft`), and the host follows what other windows write to a conversation.
+ * 13: teams (packages/engine/src/team): the composer's `team` route, and the `team.*` events.
  */
-export const PROTOCOL_VERSION = 12;
+export const PROTOCOL_VERSION = 13;
 
 export const BACKENDS = ["codex", "claude"] as const;
 /** How the composer's text is meant: a message (to the recipient, or a slash command), a pipeline task, or a question to discuss. */
-export const ROUTES = ["message", "pipeline", "discuss"] as const;
+/** How the composer sends a line: as typed, as a pipeline task, as a question to discuss, or as a request for a team. */
+export const ROUTES = ["message", "pipeline", "discuss", "team"] as const;
 export type Route = (typeof ROUTES)[number];
 
 /** A setting changed from the sidebar's controls; the worker applies it as the chat's own command would. */

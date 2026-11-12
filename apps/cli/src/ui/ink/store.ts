@@ -7,6 +7,16 @@ import type { PipelineProfile } from "@agentduo/engine/chat/commands";
 import { answerActivities, PROVIDERS, withObserved } from "@agentduo/engine/format";
 import type { PermissionAsk } from "./PermissionPrompt.js";
 import type { EarlierTask, Exchange } from "@agentduo/engine/workflow/state";
+import type { TeamMemberView, TeamPhase, TeamTaskView } from "@agentduo/engine/team/model";
+
+/** A team run as the footer shows it: its phase, its members and what each does now, its tasks. */
+export interface TeamView {
+  runId: string;
+  phase: TeamPhase;
+  members: TeamMemberView[];
+  tasks: TeamTaskView[];
+  working: Record<string, { job: string; task: string | null; since: number; last: string | null }>;
+}
 
 /** A question of the chat and its answer: live while the agent works, then printed once, whole. */
 export interface TurnView {
@@ -71,8 +81,10 @@ type StaticContent =
   | { kind: "answer"; turn: TurnView }
   | { kind: "discussion"; discussion: DiscussionView }
   | { kind: "permission"; agent: Party; role?: Role; label: string; rules: string[]; answer: PermissionAnswer }
-  /** A question an agent asked the user, once it is over: what was answered, or how it ended. */
-  | { kind: "question"; agent: Party; role?: Role; header: string; text: string; status: ClarificationStatus | "deferred" };
+  /** A question an agent asked the user, once it is over: what was answered, or how it ended. `member`: a team's (its PM). */
+  | { kind: "question"; agent: Party; role?: Role; member?: string; header: string; text: string; status: ClarificationStatus | "deferred" }
+  /** What a team's PM says to the user. */
+  | { kind: "pm"; text: string };
 export type StaticItem = { id: string } & StaticContent;
 
 export interface ViewState {
@@ -103,6 +115,8 @@ export interface ViewState {
   seq: number;
   /** One chat session hosts many runs: one header, a separator per run, chat-style finish lines. */
   chat: boolean;
+  /** The team run going in this chat (packages/engine/src/team), while it runs or waits for you. */
+  team: TeamView | null;
 }
 
 export type ViewAction =
@@ -118,7 +132,7 @@ export function initialView(version: string, verbose = false, chat?: { workspace
   const s: ViewState = {
     version, items: [], current: null, turn: null, discussion: null, planning: { round: 1, limit: 0 }, impl: { round: 0, limit: 0 }, budget: null, reached: [],
     totals: { costUsd: 0, tokens: 0 }, live: { costUsd: 0, tokens: 0 }, humanReview: null, permissions: [], questions: [], finished: null, verbose, stopping: false, seq: 0,
-    chat: !!chat,
+    chat: !!chat, team: null,
   };
   return chat ? push(s, { kind: "header", runId: "", repo: chat.workspace, version, chat: true }) : s;
 }
@@ -149,7 +163,10 @@ function endQuestion(s: ViewState, id: string, status: ClarificationStatus | "de
   if (!request) return s;
   const rest = { ...s, questions: s.questions.filter((r) => r.id !== id) };
   const text = status === "deferred" ? "answer later" : answerSummary({ questions: request.questions, answers, status: status as ClarificationStatus });
-  return push(rest, { kind: "question", agent: request.agent, role: request.role, header: request.questions.length === 1 ? request.questions[0]!.header : "", text, status });
+  return push(rest, {
+    kind: "question", agent: request.agent, role: request.role, ...(request.member ? { member: request.member } : {}),
+    header: request.questions.length === 1 ? request.questions[0]!.header : "", text, status,
+  });
 }
 
 export function reduce(s: ViewState, action: ViewAction): ViewState {
@@ -260,7 +277,7 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
       return { ...push(s, { kind: "discussion", discussion: view }), discussion: null };
     }
     case "permission.requested":
-      return { ...s, permissions: [...s.permissions, { role: e.role, agent: e.agent, request: e.request }] };
+      return { ...s, permissions: [...s.permissions, { role: e.role, ...(e.member ? { member: e.member } : {}), agent: e.agent, request: e.request }] };
     case "permission.answered": {
       const ask = s.permissions.find((p) => p.request.id === e.id);
       const rest = { ...s, permissions: s.permissions.filter((p) => p.request.id !== e.id) };
@@ -273,6 +290,44 @@ function onEvent(s: ViewState, e: DuoEvent, now: number): ViewState {
       return endQuestion(s, e.id, "answered", e.answers);
     case "clarification.closed":
       return endQuestion(s, e.id, e.status);
+    case "team.started":
+      return {
+        ...push(s, { kind: "info", text: `── team run ${e.runId}: ${e.members.map((m) => m.name).join(", ")} ──` }),
+        team: { runId: e.runId, phase: "INTAKE", members: e.members, tasks: [], working: {} },
+      };
+    case "team.phase":
+      if (!s.team || s.team.runId !== e.runId) return s;
+      return s.team.phase === e.phase ? s : { ...push(s, { kind: "info", text: `── team: ${e.phase.toLowerCase()} ──` }), team: { ...s.team, phase: e.phase } };
+    case "team.task": {
+      if (!s.team) return s;
+      const tasks = s.team.tasks.some((x) => x.id === e.task.id) ? s.team.tasks.map((x) => (x.id === e.task.id ? e.task : x)) : [...s.team.tasks, e.task];
+      return { ...s, team: { ...s.team, tasks } };
+    }
+    case "team.member": {
+      if (!s.team) return s;
+      const working = { ...s.team.working };
+      if (e.state === "busy") working[e.member] = { job: e.job ?? "work", task: e.task, since: now, last: null };
+      else delete working[e.member];
+      return { ...s, team: { ...s.team, working } };
+    }
+    case "team.activity": {
+      const w = s.team?.working[e.member];
+      if (!s.team || !w || e.activity.kind === "think") return s;
+      return { ...s, team: { ...s.team, working: { ...s.team.working, [e.member]: { ...w, last: e.activity.label } } } };
+    }
+    case "team.retry":
+      return push(s, { kind: "note", text: `${e.member} retries (${e.attempt}/${e.max}): ${e.reason.split("\n")[0]}` });
+    case "team.message":
+      // Your own words are on the screen already; a decision's words come with its answer.
+      return e.from === "pm" ? push(s, { kind: "pm", text: e.text }) : s;
+    case "team.document":
+      return push(s, { kind: "artifact", title: e.title, body: e.text });
+    case "team.finished":
+      return {
+        ...push(s, { kind: "info", text: e.outcome === "done" ? `── team run ${e.runId}: done ──` : `── team run ${e.runId}: ${e.outcome} ──` }),
+        team: e.outcome === "done" || e.outcome === "aborted" ? null : s.team ? { ...s.team, working: {} } : null,
+        questions: s.questions.filter((r) => r.teamRunId !== e.runId || e.outcome === "waiting"),
+      };
     case "run.finished": {
       // A deferred decision (non-interactive, or "Decide later") keeps the reason in scrollback.
       const withReview = e.phase === "HUMAN_REVIEW" && s.humanReview ? push(s, { kind: "review", review: s.humanReview }) : s;
