@@ -35,6 +35,9 @@ async function work(tg: TeamGit, member: string, task: string, files: Record<str
 describe("a team's worktrees", () => {
   it("start from the workspace as it is, uncommitted and untracked files included, without the runs folder", async () => {
     const repo = makeRepo(t.path);
+    // A native repository's worktrees are checked out with its own line-ending settings, and Windows runners set
+    // core.autocrlf=true system-wide (LF becomes CRLF): pinned off here so the bytes compare on every machine.
+    git(repo, "config", "core.autocrlf", "false");
     writeFileSync(join(repo, "README.md"), "edited, not committed\n");
     writeFileSync(join(repo, "new.txt"), "untracked\n");
     mkdirSync(join(repo, ".agentduo", "runs"), { recursive: true });
