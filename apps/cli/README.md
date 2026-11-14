@@ -268,7 +268,7 @@ agentduo 0.5.0 · chat
     the workspace (others, and anything outside it, are left out), for the agent to read with its own tools: nothing is
     copied, unlike `/attach`. It works in questions, `/discuss`, `/pipeline` tasks (every role's first prompt) and notes.
 - **Commands:** `/claude`, `/codex`, `/pipeline`, `/discuss`, `/plan`, `/diff`, `/status`, `/usage`, `/attach`,
-  `/attachments`, `/detach`, `/resume` (continue a stopped or waiting run, also from an earlier session), `/new`,
+  `/attachments`, `/detach`, `/resume` (continue this conversation's stopped or waiting run, also from an earlier session; `/resume <id>` another), `/new`,
   `/settings`, `/config`, `/help`, `/quit`. Ctrl-C twice also quits; a running run stops at its current step and stays
   resumable.
 
@@ -322,6 +322,7 @@ The team is `team:` in the config, layered like every other key:
 
 ```yaml
 team:
+  id: default   # the team's name for what it keeps across runs: its RULES.md (below)
   levels:   # lowest first; a level's model and effort per CLI, and whether it reviews others
     junior: { can_review: false, claude: { model: sonnet, effort: low },  codex: { effort: low } }
     senior: { can_review: true,  claude: { model: opus,   effort: high }, codex: { effort: high } }
@@ -354,6 +355,30 @@ then you.
     - { role: dev, level: senior, cli: claude, group: backend }
     - { role: qa, level: mid, cli: claude, group: backend }
 ```
+
+**The team's rules.** Each team keeps a `RULES.md` of what it learned, which every run of that team reads and adds to:
+
+- **Whose it is.** `team.id` names the team (default `default`). Its rules are in
+  `<data>/agentduo/team-rules/<folder key>/<team id>/RULES.md` (`<data>` as in [Folders without a git repository](#folders-without-a-git-repository)),
+  apart from every run: a run, its worktrees, `/team undo` and their cleanup never touch it, and two teams (another id, or
+  another folder) never share one. A run keeps the team it started with, also if you change `team.id` before `/resume`.
+- **Every member works by it.** Each member call is given the rules as the file holds them at that moment, a continued
+  session too, so a rule added in a run reaches the calls after it, and the next runs.
+- **The PM adds to it.** When a review asked for changes, a check failed, the whole result failed its check, the PM sent a
+  plan back, a member reported a disagreement or a result that differs from what you asked, or you asked to change the
+  brief, the plan or the result, that is an incident. Once the team settled it (the fix was approved, the task merged, you
+  approved), the head PM writes a short preventive rule for it, or says why none is needed (one rule for several incidents
+  of one cause), before the result is written into your folder. It learns from every incident settled so far in one turn:
+  while members work, that turn waits until they are idle (at most a minute), so incidents settled meanwhile go in it
+  too. Rules are only appended (`R1`, `R2`…, each with where it came from): nothing in the file is deleted or
+  rewritten, and lines you write yourself stay as they are.
+- **An exception goes through the PM to you.** A member for whom a rule does not fit its work asks for an exception (the
+  rules, why, what it would do instead); that work waits, while the rest goes on. A group's own PM may refuse it or pass
+  it up; the head PM refuses it, or shows it to you with the reason, the alternative and the exact work it covers, and you
+  approve or refuse; when the PM cannot tell, it asks you first. Only your approval of that very request lets the team
+  depart from the rule, for that work of that run only: the rule itself stays, another task and a later run get nothing
+  of it, and a request you put off, close or leave unanswered is asked again when the run goes on (`/resume`), never
+  taken as a yes.
 
 Each member's prompt carries its role's `IDENTITY.md`, its level's, and its own `AGENT.md`. Each is one whole text: the
 project's file (`.agentduo/team/roles/<role>/IDENTITY.md`, `levels/<level>/IDENTITY.md`, `agents/<name>/AGENT.md`), else
@@ -426,8 +451,10 @@ from one to another without quitting the first.
   waits for you, is not archived or deleted until that is done. Working again in an archived conversation that is
   still open in a window brings it back to the list; a window still showing a deleted one sends nothing more in it
   (`/new` starts another) and never writes it back.
-- **Runs** stopped or waiting for you can be resumed in any window: `/resume`, the desktop's *Resumable runs*, or
-  `duo resume`.
+- **Runs** stopped or waiting for you can be resumed in any window. A run belongs to the conversation that started it:
+  `/resume` there continues it (never another conversation's: it says so, and `/resume <run id>` continues that one),
+  the desktop's *Resumable runs* opens its conversation and resumes it there (a run with none, from `duo run`, in a new
+  one), and `duo resume` continues the latest.
 - **Settings.** A setting saved to a file (`--save`, `--global`, the desktop's Settings) reaches every window before its
   next agent call or new work, with the usual timing (*next call* settings reach a run that is going, *next run* ones
   only new work). A setting changed without saving it stays in the window that changed it, and wins there over the
