@@ -3,7 +3,7 @@
 // action. Fake CLIs, real git worktrees; the stops between writing RULES.md and saving the state are made on the files.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClarificationRequest, ClarificationResponse } from "../../src/clarification/clarification.js";
 import { EventBus, type ClarificationDecider, type DuoEvent } from "../../src/events.js";
 import { beginLesson, recordIncident, resolveIncident } from "../../src/team/rule-governance.js";
@@ -13,6 +13,7 @@ import { TeamRun, undoTeam } from "../../src/team/team.js";
 import { testConfig, userDataEnv } from "../helpers/config.js";
 import { FakeClis } from "../helpers/fake-clis.js";
 import { git, makeRepo } from "../helpers/repo.js";
+import { recordRuleReads } from "../helpers/rule-reads.js";
 import { brief, reportIssue, task, teamCheck, teamPlan, teamPm, teamReview, teamTests, teamTriage, teamWork } from "../helpers/team-builders.js";
 import { tempDir } from "../helpers/tmp.js";
 
@@ -31,6 +32,7 @@ beforeEach(() => {
   bus.on((e) => events.push(e));
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   fake.restore();
   t.cleanup();
 });
@@ -207,10 +209,12 @@ describe("the PM learns from what was settled (AC3)", () => {
   it("adds a rule after a disagreement was settled, keeping the earlier rules, and gives it to the calls that follow", async () => {
     rulesOf().append(SEED);
     const seeded = readFileSync(rulesOf().path, "utf8");
+    const lesson = "A reviewer names the file and the criterion of every change it asks for.";
+    const reads = recordRuleReads(() => rulesOf());
     fake.setScenario(happy({
       team_review: [{ output: teamReview("changes") }, { output: teamReview("approve") }],
       "team_work:dev-1": [{ output: teamWork(), write: { "app.txt": "first\n" } }, { output: teamWork(), write: { "app.txt": "fixed\n" } }],
-      team_pm_rule_lesson: [{ output: teamPm.ruleLesson("I1", "A reviewer names the file and the criterion of every change it asks for.", "Vague requests cost a round.") }],
+      team_pm_rule_lesson: [{ output: teamPm.ruleLesson("I1", lesson, "Vague requests cost a round.") }],
     }));
     expect(await teamRun().run()).toBe("done");
     const state = stateOf();
@@ -223,16 +227,17 @@ describe("the PM learns from what was settled (AC3)", () => {
     expect(now.startsWith(seeded)).toBe(true);
     const rules = rulesOf().rules();
     expect(rules.map((r) => r.id)).toEqual(["R1", "R2"]);
-    expect(rules[1]).toMatchObject({ text: "A reviewer names the file and the criterion of every change it asks for.", opId: `lesson:${state.id}:I1` });
+    expect(rules[1]).toMatchObject({ text: lesson, opId: `lesson:${state.id}:I1` });
     expect(rules[1]!.incident).toContain(state.id);
     expect(rules[1]!.incident).toContain("I1");
-    // The PM's turn came before the run ended, and the rule reached the next calls (the PM's own included).
+    // The PM's turn came before the run ended, and the rule reached every call that started once it was written (the PM's
+    // own included). A call already on its way then (the lesson turn runs beside the jobs started with it) has the rules it read.
     expect(fake.calls("team_pm_rule_lesson")).toHaveLength(1);
     expect(fake.calls("team_pm_rule_lesson")[0]!.prompt).toContain("rule_lesson");
     expect(events.at(-1)).toMatchObject({ type: "team.finished", outcome: "done" });
-    const later = fake.calls().filter((c) => c.member).slice(fake.calls().findIndex((c) => c.role === "team_pm_rule_lesson") + 1);
+    const later = reads.filter((r) => r.rules.includes(lesson));
     expect(later.length).toBeGreaterThan(0);
-    for (const c of later) expect(c.prompt).toContain("R2: A reviewer names the file and the criterion");
+    for (const r of later) for (const prompt of r.prompts) expect(prompt, r.schema ?? undefined).toContain("R2: A reviewer names the file and the criterion");
   });
 
   it("adds a rule after a deviation a member reported was settled, naming only rules the team has", async () => {

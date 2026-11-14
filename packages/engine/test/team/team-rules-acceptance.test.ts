@@ -11,6 +11,7 @@ import { TeamRun, undoTeam } from "../../src/team/team.js";
 import { testConfig, userConfigEnv, userDataEnv } from "../helpers/config.js";
 import { FakeClis } from "../helpers/fake-clis.js";
 import { git, makeRepo } from "../helpers/repo.js";
+import { recordRuleReads } from "../helpers/rule-reads.js";
 import { brief, reportIssue, task, teamAnswer, teamCheck, teamPlan, teamPm, teamReview, teamTests, teamTriage, teamWork } from "../helpers/team-builders.js";
 import { tempDir } from "../helpers/tmp.js";
 
@@ -234,6 +235,7 @@ describe("TeamRun's persistent team rules (T4)", () => {
   it.each(["review finding", "requirement failure", "incorrect test"] as const)("AC3: resolving a %s schedules the PM to append a preventive rule", async (problem) => {
     const store = seed();
     const before = store.read();
+    const reads = recordRuleReads(() => store);
     const over: Record<string, unknown[]> = problem === "review finding" ? {
       team_review: [{ output: teamReview("changes") }, { output: teamReview("approve") }],
     } : {
@@ -254,9 +256,11 @@ describe("TeamRun's persistent team rules (T4)", () => {
     expect(store.read().startsWith(before)).toBe(true);
     // The PM's next call must receive the rule it just added, in the same session.
     expect(fake.calls("team_pm_acceptance").at(-1)!.prompt).toContain(LESSON);
-    const calls = fake.calls().filter((c) => !c.lost);
-    const lastLesson = calls.findLastIndex((c) => c.role === "team_pm_rule_lesson");
-    for (const call of calls.slice(lastLesson + 1)) expect(call.prompt, call.role).toContain(LESSON);
+    // So must every call that started once RULES.md held it. A call already on its way then (a lesson turn runs beside the
+    // jobs started with it, the PM's turns outside max_parallel) has the rules it read.
+    const later = reads.filter((r) => r.rules.includes(LESSON));
+    expect(later.length).toBeGreaterThan(0);
+    for (const r of later) for (const prompt of r.prompts) expect(prompt, r.schema ?? undefined).toContain(LESSON);
   });
 
   it("AC3: retains the member's structured incident, its source and its eventual resolution", async () => {
