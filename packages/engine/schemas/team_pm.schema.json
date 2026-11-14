@@ -489,6 +489,229 @@
               "type": "string"
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "lessons"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "rule_lesson"
+              ]
+            },
+            "lessons": {
+              "type": "array",
+              "description": "One entry for every settled incident listed, in this one turn",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "incident_id",
+                  "rule",
+                  "rationale"
+                ],
+                "properties": {
+                  "incident_id": {
+                    "type": "string",
+                    "description": "The resolved incident the lesson is from"
+                  },
+                  "rule": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "The preventive rule to append to the team's RULES.md, or null when no new rule is needed (also when another entry's rule covers it). Never a rule that removes or replaces another"
+                  },
+                  "rationale": {
+                    "type": "string",
+                    "description": "Why this rule prevents it happening again (or why none is needed, naming the rule that covers it)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "exception_id",
+            "rule_ids",
+            "reason",
+            "alternative",
+            "task_ids",
+            "unit",
+            "summary"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "exception_proposal"
+              ]
+            },
+            "exception_id": {
+              "type": "string",
+              "description": "The request you assessed"
+            },
+            "rule_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The rules it would depart from (some of the request's)"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "alternative": {
+              "type": "string",
+              "description": "What the team would do instead"
+            },
+            "task_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The tasks it would cover (some of the request's); empty when it is for a unit"
+            },
+            "unit": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "id"
+              ],
+              "description": "Work outside a task: the one unit it is about (null when the exception is for tasks)",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "planning",
+                    "integration",
+                    "apply",
+                    "acceptance"
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "description": "Its identity exactly as the prompt names it (copy it from the request)"
+                }
+              }
+            },
+            "summary": {
+              "type": "string",
+              "description": "The proposal as the user reads it: the rules, the reason, the alternative and what work it covers"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "exception_id",
+            "reason"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "exception_decline"
+              ]
+            },
+            "exception_id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string",
+              "description": "Why the rules stand, for the member who asked"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "incident_id",
+            "exception_id",
+            "questions"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "rule_question"
+              ]
+            },
+            "incident_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The incident you cannot decide on, or null"
+            },
+            "exception_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The exception request you cannot decide on, or null; its work waits for the answer"
+            },
+            "questions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "header",
+                  "question",
+                  "multi_select",
+                  "options"
+                ],
+                "properties": {
+                  "header": {
+                    "type": "string"
+                  },
+                  "question": {
+                    "type": "string"
+                  },
+                  "multi_select": {
+                    "type": "boolean"
+                  },
+                  "options": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "label",
+                        "description"
+                      ],
+                      "properties": {
+                        "label": {
+                          "type": "string"
+                        },
+                        "description": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       ]
     }

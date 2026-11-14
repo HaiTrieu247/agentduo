@@ -4,6 +4,11 @@
 import type { Attachment } from "../inputs/attachment-types.js";
 import { attachmentLines, inlineCode, type Locate } from "../workflow/prompts.js";
 import type { Member, TeamGroup } from "./config.js";
+import {
+  exceptionStatus, exceptionsFor, governanceWork, planningUnit, resolveUnit, RUN_UNIT, scopeCovers, type ExceptionScope, type GovernedState, type RuleException,
+  type UnitRef, type WorkRef,
+} from "./rule-governance.js";
+import type { RuleEntry } from "./rules.js";
 import type { Area, Brief, Escalation, Report, TaskCheck, TaskState, TeamMessage, TeamPlan, TeamState } from "./state.js";
 
 export type PmOccasion =
@@ -15,7 +20,11 @@ export type PmOccasion =
   | { kind: "acceptance" }
   /** A group's own PM: it checks its group's plan, or answers (or passes up) its techlead's question. */
   | { kind: "area_review" }
-  | { kind: "area_escalation" };
+  | { kind: "area_escalation" }
+  /** The head PM learns from resolved incidents: a preventive rule for RULES.md, or none. */
+  | { kind: "rule_lesson" }
+  /** The head PM assesses the exception requests members made: a proposal for the user, or a refusal. */
+  | { kind: "rule_exception" };
 
 /** What a PM turn may answer with, by phase and occasion. */
 export function pmActions(state: TeamState, occasion: PmOccasion): string[] {
@@ -24,6 +33,8 @@ export function pmActions(state: TeamState, occasion: PmOccasion): string[] {
     case "areas": return ["areas"];
     case "area_escalation": return ["none", "team_answer", "escalate"];
     case "acceptance": return ["acceptance"];
+    case "rule_lesson": return ["rule_lesson", "rule_question"];
+    case "rule_exception": return ["exception_proposal", "exception_decline", "rule_question"];
     case "reports": return ["none"];
     case "escalation": return ["none", "questions", "team_answer"];
     case "conversation":
@@ -98,9 +109,16 @@ const checkLines = (checks: TaskCheck[]) => checks.flatMap((c) => [
 
 const json = "\n\n## Your output\nReply with one JSON object that matches the required schema exactly; nothing else.";
 
-/** The parts of a prompt every member gets: the role line, its identity (fresh sessions), the team and the brief. */
-function frame(kind: string, member: Member, identity: string | null, members: Member[], brief: Brief | null): string[] {
-  return [header(kind, member) + intro(member), identity ?? "", roster(members), brief ? briefSection(brief) : ""].filter(Boolean);
+/**
+ * The parts of a prompt every member gets: the role line, its identity (fresh sessions), the team, the brief, and (for fresh
+ * and continued sessions alike, since they are written into the prompt, never into the identity) the team's rules, what the
+ * user approved for this very work, the requests that wait, and how to bring a rule problem to the PM.
+ */
+function frame(kind: string, p: PromptParts, brief: Brief | null, work: WorkRef | null): string[] {
+  return [
+    header(kind, p.member) + intro(p.member), p.identity ?? "", roster(p.members), brief ? briefSection(brief) : "",
+    rulesSection(p.rules), exceptionsSection(p.state, p.member, work), p.member.kind === "pm" ? "" : memberGovernanceGuidance(),
+  ].filter(Boolean);
 }
 
 export interface PromptParts {
@@ -109,6 +127,126 @@ export interface PromptParts {
   /** The member's identity, for a fresh session; null when the session continues. */
   identity: string | null;
   state: TeamState;
+  /** The team's rules as RULES.md holds them now (`TeamRules.rules()`), read for this call; absent: not given (the section is left out). */
+  rules?: readonly RuleEntry[] | null;
+}
+
+// ─── The team's rules, requests and exceptions ──────────────────────────────────────────────────────────────────────
+
+/** The unit of work a call outside a task is about. */
+export const integrationWork = (): WorkRef => ({ unit: { kind: "integration", id: RUN_UNIT } });
+/** The user's own changes merged into the integration branch belong to the apply unit, not the integration's. */
+export const applyWork = (): WorkRef => ({ unit: { kind: "apply", id: RUN_UNIT } });
+export const planningWork = (group: string | null): WorkRef => ({ unit: planningUnit(group) });
+
+/** The rules in force, every one with its id: members cite these ids. Empty: the team has none yet. */
+export function rulesSection(rules: readonly RuleEntry[] | null | undefined): string {
+  if (!rules) return "";
+  const head = "## The team's rules\nThese rules come from what this team settled before. They hold for all of your work, whatever you were told " +
+    "earlier in this session. A rule is never lifted by anything but the user's approval of an exception, which is granted for named work only.";
+  if (!rules.length) return `${head}\n(none yet)`;
+  return `${head}\n${rules.map((r) => `- ${r.id}: ${r.text}${r.incident ? ` (source: ${r.incident})` : ""}`).join("\n")}`;
+}
+
+const scopeText = (scope: ExceptionScope): string =>
+  scope.unit ? `the ${scope.unit.kind}${scope.unit.id === RUN_UNIT ? "" : ` of ${scope.unit.id}`} (${scope.unit.occurrence})` : `task${scope.taskIds.length === 1 ? "" : "s"} ${scope.taskIds.join(", ")}`;
+
+/** Whether a request's own scope (what was asked for, not what an assessment narrowed it to) is the work of this call. */
+function requestedHere(state: GovernedState, ex: RuleException, work: WorkRef): boolean {
+  if (work.task !== undefined) return scopeCovers(ex.requested, state.id, { task: work.task });
+  const unit = resolveUnit(state, work.unit);
+  return !!unit && scopeCovers(ex.requested, state.id, { unit });
+}
+
+/**
+ * What the user decided that touches this call, and nothing else:
+ *  - the exceptions the user approved for exactly this work (`exceptionsFor`): the only departure from a rule there is;
+ *  - this member's requests for this work that are not approved: waiting, or refused, which grant nothing.
+ * Another task's or unit's exception, an approved one for other work, a pending one and a refused one never read as permission.
+ */
+export function exceptionsSection(state: TeamState | GovernedState, member: Member, work: WorkRef | null): string {
+  if (!work || member.kind === "pm") return "";
+  const gov = state as GovernedState;
+  const lines: string[] = [];
+  const approved = exceptionsFor(gov, work);
+  for (const ex of approved) {
+    const a = ex.assessment!;
+    lines.push(`- ${ex.id}, approved by the user for ${scopeText(a.scope)} only. You may depart from ${a.ruleIds.join(", ")} in the way the user approved: ${a.alternative}. ` +
+      `Reason shown to the user: ${a.reason}. The rule itself stays in force for everything else.`);
+  }
+  const approvedIds = new Set(approved.map((e) => e.id));
+  for (const ex of state.governance?.exceptions ?? []) {
+    if (approvedIds.has(ex.id) || ex.from !== member.name || !requestedHere(gov, ex, work)) continue;
+    const status = exceptionStatus(ex);
+    if (status === "approved") continue; // approved for narrower work: it covers none of this
+    lines.push(status === "rejected"
+      ? `- ${ex.id} (${ex.ruleIds.join(", ")}): refused. The rules stand; do not depart from them.`
+      : `- ${ex.id} (${ex.ruleIds.join(", ")}): not decided yet. It is no permission: do not act on it, and do not do the part of the work it needs.`);
+  }
+  if (!lines.length) return "";
+  return `## Exceptions to the rules for this work\n${lines.join("\n")}`;
+}
+
+/** How a member brings a problem with the rules to the PM. The user is never asked by a member. */
+export function memberGovernanceGuidance(): string {
+  return "## When a rule does not fit, or something went wrong\n" +
+    "You never ask the user, and you never decide an exception yourself: the PM does, and only the user can agree to one.\n" +
+    "- A disagreement with a member, or a result that differs from what the user asked, that you saw: put it in `governance.issues` (kind `disagreement` or `deviation`, " +
+    "what happened, the ids of the rules involved).\n" +
+    "- A rule that does not fit this work: put it in `governance.exception` with the rule ids (as written in the list above), why the rule does not fit " +
+    "this work, and what you would do instead. Then stop the part of the work that needs the exception: do only what the rules allow, and leave the rest undone. " +
+    "A request for an exception never means you may go ahead.\n" +
+    "- Otherwise leave `governance` with no issue and no exception. An exception you ask for covers the work of this call only.";
+}
+
+const ruleLines = (ids: string[], rules: readonly RuleEntry[] | null | undefined) =>
+  ids.map((id) => { const r = rules?.find((x) => x.id === id); return r ? `${id} (${r.text})` : id; }).join("; ");
+
+/**
+ * What the PM has before it about the team's rules: the incidents settled that it may learn from, the requests for
+ * exceptions (to assess, shown to the user and waiting, decided), and the questions it asked the user. Waiting is not
+ * approval: the PM is told so. Empty when there is nothing.
+ */
+export function pmGovernanceSection(state: TeamState, rules: readonly RuleEntry[] | null | undefined): string {
+  const g = state.governance;
+  if (!g || (!g.incidents.length && !g.exceptions.length)) return "";
+  const work = governanceWork(state);
+  const out: string[] = [];
+  if (work.lessons.length) {
+    out.push("Settled incidents to learn from (answer them all in one rule_lesson, one entry per id):\n" + work.lessons.map((i) =>
+      `- ${i.id} (${i.kind}, from ${i.reportedBy}${i.ruleIds.length ? `, rules ${i.ruleIds.join(", ")}` : ""}): ${i.summary}. Resolved: ${i.resolution ?? "(not said)"}.` +
+      `${i.status === "recording" && i.lesson ? ` You already wrote this rule, which is being recorded; give the same text again: ${i.lesson.text}` : ""}` +
+      `${i.direction && i.direction.answer === null ? " You asked the user about it; it waits for their answer (leave it out until then)." : ""}`).join("\n"));
+  }
+  const req = (e: RuleException) => `- ${e.id} from ${e.from} for ${ruleLines(e.ruleIds, rules)}: ${e.reason}${e.alternative ? ` Instead: ${e.alternative}.` : ""} It asked for ${scopeText(e.requested)}.`;
+  if (work.assess.length) out.push(`Exception requests to assess (exception_proposal, or exception_decline, with its id):\n${work.assess.map(req).join("\n")}`);
+  if (work.present.length) out.push(`Your proposals not shown to the user yet (they grant nothing):\n${work.present.map((e) => `- ${e.id}: ${e.assessment!.summary}`).join("\n")}`);
+  if (work.pending.length) {
+    out.push("Exception requests the user has been shown and has not decided. They grant nothing yet, and the work they hold waits:\n" + work.pending.map((e) =>
+      `- ${e.id}: ${e.assessment?.summary ?? e.reason}`).join("\n"));
+  }
+  if (work.questions.length) out.push(`Questions you asked the user about the rules, not answered yet: ${work.questions.map((q) => q.exceptionId ?? q.incidentId).join(", ")}. The work that depends on them waits.`);
+  const answered = [...g.exceptions.map((e) => ({ id: e.id, d: e.direction })), ...g.incidents.map((i) => ({ id: i.id, d: i.direction }))].filter((x) => x.d?.answer);
+  if (answered.length) {
+    out.push("The user's answers to your questions about the rules (information for your decision; they approve nothing):\n" + answered.map((x) => `- ${x.id}: ${x.d!.answer}`).join("\n"));
+  }
+  const decided = g.exceptions.filter((e) => e.decision && e.decision.status !== "pending");
+  if (decided.length) {
+    out.push("Decided:\n" + decided.map((e) => `- ${e.id}: ${e.decision!.status}${e.decision!.status === "approved" && e.assessment ? ` for ${scopeText(e.assessment.scope)} only` : "; the rules stand"}`).join("\n"));
+  }
+  return out.length ? `## The team's rules: incidents and exceptions\n${out.join("\n\n")}` : "";
+}
+
+/** What the PM does about the rules, in every PM turn: learn after an incident, present exceptions, ask when unsure. */
+function pmGovernanceGuidance(grouped: boolean): string {
+  return "## Rules, lessons and exceptions\n" +
+    "- After a disagreement between members or a mistake against what the user asked has been settled, you write a preventive rule (rule_lesson): short, general, " +
+    "so that it does not happen again. Rules are only added: never write one that removes, replaces or weakens an earlier rule. Say null when no new rule is needed.\n" +
+    "- A member may ask for an exception to a rule. Assess it: when the rule really does not fit, propose it to the user (exception_proposal) with the rules involved, the reason, " +
+    "what the team does instead and exactly which work it covers (never more than was asked); when the rule should stand, decline it (exception_decline). " +
+    "Nothing is done differently until the user agrees; a refused or unanswered request changes nothing, and an approved one covers only the work you named and does not remove the rule.\n" +
+    "- When you cannot tell what to do about a rule or an incident, ask the user (rule_question): the work that depends on it waits for the answer, which is information and never an approval.\n" +
+    (grouped ? "- In a team with groups only the head PM asks the user; a group's PM passes the question up to the head PM.\n" : "");
 }
 
 const attached = (m: TeamMessage) => (m.attachments?.length ? `\n(attached: ${m.attachments.map((a) => inlineCode(a.name)).join(", ")})` : "");
@@ -134,7 +272,7 @@ export function pmPrompt(p: PromptParts & {
   const brief = s.briefs.at(-1) ?? null;
   const actions = pmActions(s, p.occasion);
   // The occasion is part of the role tag: logs (and test scenarios) tell a plan review from a report.
-  const parts = frame(`pm_${p.occasion.kind}`, p.member, p.identity, p.members, null);
+  const parts = frame(`pm_${p.occasion.kind}`, p, null, null);
   const groups = groupsSection(p.groups);
   if (groups) parts.push(`${groups}\nYou are the head PM: the only one who talks with the user. Each group's techlead plans its part; a group's own PM checks it first.`);
   parts.push(`## Where the work is\nPhase: ${s.phase}.${s.approvedBrief ? ` The user approved brief v${s.approvedBrief}.` : ""}` +
@@ -155,6 +293,9 @@ export function pmPrompt(p: PromptParts & {
   if (feedback.length && p.occasion.kind === "plan_review") {
     parts.push(`## What was asked of the techleads last time\n${feedback.map(([group, text]) => (group ? `- ${group}: ${text}` : text)).join("\n")}`);
   }
+  const governed = pmGovernanceSection(s, p.rules);
+  if (governed) parts.push(governed);
+  parts.push(pmGovernanceGuidance(!!groups));
   parts.push(`## What to do now\n${pmTask(s, p.occasion)}\n\nAllowed actions now: ${actions.join(", ")}. ` +
     "`message` is what the user reads (in the user's language), or null. Use `questions` to ask the user up to 4 questions with 2 to 6 options each; " +
     "they can always answer in their own words too." + json);
@@ -174,6 +315,18 @@ function pmTask(s: TeamState, occasion: PmOccasion): string {
         "Split along the groups' strengths and so that they rarely touch the same files.";
     case "area_review": case "area_escalation":
       return "";
+    case "rule_lesson":
+      return "Incidents above were settled (a disagreement between members, or a result that differed from what the user asked). Answer all of them in this one turn: " +
+        "rule_lesson with one entry in `lessons` per incident (except one that waits for the user's answer), each with its incident_id, the rule that prevents it from " +
+        "happening again, as one short, general sentence that members can follow, and why it prevents it. " +
+        "The rules above stay as they are: add to them, never remove, replace or contradict one. Give rule null when no new rule is needed (say why in rationale); " +
+        "when several incidents come from the same cause, write the rule once and give the others rule null with a rationale that names it. " +
+        "When you cannot tell which way the team should go about one of them, ask the user with rule_question and that incident's id instead (the others wait for your next turn).";
+    case "rule_exception":
+      return "A member asked for an exception to a rule (the requests above). Look at the rules it names and its reason. When the rule really does not fit that work, propose the exception " +
+        "(exception_proposal with the request's id): the rules involved, the reason, what the team does instead and the work it covers, which is the work the member asked for or less. " +
+        "The user reads your summary and decides; nothing changes until they agree, and until then the work stays held. When the rule should stand, decline (exception_decline) and say why " +
+        "for the member. When you cannot decide, ask the user with rule_question and the request's id (its work waits). One request per turn.";
     case "acceptance":
       return `Every task is merged and the testers' last check of the whole passed: ${s.integration ? checkLines(s.integration.checks).join("\n") : ""}\n` +
         "Report to the user, criterion by criterion, whether it is met, with the evidence (the tests and checks that show it). Then the user accepts or asks for changes.";
@@ -208,7 +361,7 @@ export function planSection(plan: TeamPlan): string {
 export function planPrompt(p: PromptParts & {
   brief: Brief; feedback: string | null; previous: TeamPlan | null; existing: TaskState[]; additions: boolean; area: Area | null; group: TeamGroup | null;
 }): string {
-  const parts = frame("plan", p.member, p.identity, p.members, p.brief);
+  const parts = frame("plan", p, p.brief, planningWork(p.group?.name ?? null));
   if (p.area && p.group) {
     parts.push(`${areaSection(p.area)}\nPlan only your group's part, and give its tasks only to your group: ` +
       `${p.group.members.filter((m) => m.kind === "worker").map((m) => m.name).join(", ")} take tasks, ` +
@@ -229,7 +382,7 @@ export function planPrompt(p: PromptParts & {
 
 export function workPrompt(p: PromptParts & { task: TaskState; brief: Brief; others: TaskState[]; cwd: string }): string {
   const t = p.task;
-  const parts = frame("work", p.member, p.identity, p.members, p.brief);
+  const parts = frame("work", p, p.brief, { task: t.id });
   parts.push(taskSection(t));
   const inFlight = p.others.filter((o) => o.id !== t.id && !["merged", "cancelled"].includes(o.status));
   if (inFlight.length) parts.push(`## Other tasks in progress (stay out of their areas)\n${inFlight.map((o) => `- ${o.id} ${o.title} (${o.assignee}): ${o.area.join(", ")}`).join("\n")}`);
@@ -247,7 +400,7 @@ export function workPrompt(p: PromptParts & { task: TaskState; brief: Brief; oth
 
 export function testsPrompt(p: PromptParts & { task: TaskState; brief: Brief; cwd: string; failures: TaskCheck[] }): string {
   const t = p.task;
-  const parts = frame("tests", p.member, p.identity, p.members, p.brief);
+  const parts = frame("tests", p, p.brief, { task: t.id });
   parts.push(taskSection(t));
   const fixing = t.tests[p.member.name]?.status === "fixing";
   if (fixing) {
@@ -261,7 +414,7 @@ export function testsPrompt(p: PromptParts & { task: TaskState; brief: Brief; cw
 
 export function reviewPrompt(p: PromptParts & { task: TaskState; brief: Brief; diff: string; blocking: readonly string[] }): string {
   const t = p.task;
-  const parts = frame("review", p.member, p.identity, p.members, p.brief);
+  const parts = frame("review", p, p.brief, { task: t.id });
   parts.push(taskSection(t));
   if (t.codeSummary) parts.push(`## ${t.assignee}'s report\n${t.codeSummary}${t.notes.length ? `\n${t.notes.map((n) => `- ${n}`).join("\n")}` : ""}`);
   const fence = "`".repeat(Math.max(3, ...[...p.diff.matchAll(/`+/g)].map((m) => m[0].length + 1)));
@@ -275,7 +428,7 @@ export function reviewPrompt(p: PromptParts & { task: TaskState; brief: Brief; d
 export function checkPrompt(p: PromptParts & { task: TaskState; brief: Brief; cwd: string }): string {
   const t = p.task;
   const tests = t.tests[p.member.name];
-  const parts = frame("check", p.member, p.identity, p.members, p.brief);
+  const parts = frame("check", p, p.brief, { task: t.id });
   parts.push(taskSection(t));
   if (tests?.summary) parts.push(`## Your tests\n${tests.summary}${tests.howToRun ? `\nRun them with: ${tests.howToRun}` : ""}`);
   if (t.codeSummary) parts.push(`## ${t.assignee}'s report\n${t.codeSummary}`);
@@ -287,7 +440,7 @@ export function checkPrompt(p: PromptParts & { task: TaskState; brief: Brief; cw
 
 export function triagePrompt(p: PromptParts & { task: TaskState; brief: Brief; maxAttempts: number; workers: Member[] }): string {
   const t = p.task;
-  const parts = frame("triage", p.member, p.identity, p.members, p.brief);
+  const parts = frame("triage", p, p.brief, { task: t.id });
   parts.push(taskSection(t));
   parts.push(`## What went wrong (attempt ${t.attempt} of ${p.maxAttempts})\n${t.trouble ?? "(not said)"}${t.checks.length ? `\n${checkLines(t.checks).join("\n")}` : ""}`);
   if (t.history.length) parts.push(`## The task's history\n${t.history.slice(-12).map((h) => `- ${h.text}`).join("\n")}`);
@@ -299,7 +452,7 @@ export function triagePrompt(p: PromptParts & { task: TaskState; brief: Brief; m
 
 export function answerPrompt(p: PromptParts & { task: TaskState; brief: Brief }): string {
   const t = p.task;
-  const parts = frame("answer", p.member, p.identity, p.members, p.brief);
+  const parts = frame("answer", p, p.brief, { task: t.id });
   parts.push(taskSection(t));
   parts.push(`## ${t.question?.from} asks\n${t.question?.text}`);
   parts.push("## What to do now\nAnswer from the brief, the plan and the repository. When only the PM or the user can decide it (the product, the scope), " +
@@ -309,7 +462,7 @@ export function answerPrompt(p: PromptParts & { task: TaskState; brief: Brief })
 
 export function resolvePrompt(p: PromptParts & { task: TaskState | null; brief: Brief; cwd: string; files: string[] }): string {
   const t = p.task;
-  const parts = frame("resolve", p.member, p.identity, p.members, p.brief);
+  const parts = frame("resolve", p, p.brief, t ? { task: t.id } : applyWork());
   if (t) parts.push(taskSection(t));
   const what = t ? `Merging task ${t.id} into the integration branch` : "Merging the user's own changes to their folder (made while the team worked) into the integration branch";
   parts.push(`## What to do now\n${what} conflicts in: ${p.files.join(", ")}. In ${p.cwd} the integration branch is checked out ` +
@@ -318,7 +471,7 @@ export function resolvePrompt(p: PromptParts & { task: TaskState | null; brief: 
 }
 
 export function integrationCheckPrompt(p: PromptParts & { brief: Brief; cwd: string }): string {
-  const parts = frame("check", p.member, p.identity, p.members, p.brief);
+  const parts = frame("check", p, p.brief, integrationWork());
   parts.push(boardSection(p.state.tasks));
   parts.push(`## What to do now\nEvery task is merged; ${p.cwd} holds the whole result. Run every test of the repository and every test the team wrote, ` +
     "and check the result against every acceptance criterion of the brief. Report pass only when all of it passes." + json);
@@ -326,7 +479,7 @@ export function integrationCheckPrompt(p: PromptParts & { brief: Brief; cwd: str
 }
 
 export function integrationTriagePrompt(p: PromptParts & { brief: Brief; trouble: string; checks: TaskCheck[] }): string {
-  const parts = frame("triage", p.member, p.identity, p.members, p.brief);
+  const parts = frame("triage", p, p.brief, integrationWork());
   parts.push(boardSection(p.state.tasks));
   parts.push(`## What must be fixed\n${p.trouble}${p.checks.length ? `\n${checkLines(p.checks).join("\n")}` : ""}`);
   parts.push("## What to do now\nAdd the tasks that fix it (action add_tasks, new ids, with assignees and testers), or escalate with a question only the PM " +
@@ -338,8 +491,10 @@ export function integrationTriagePrompt(p: PromptParts & { brief: Brief; trouble
 export function areaPmPrompt(p: PromptParts & {
   occasion: PmOccasion; brief: Brief; group: TeamGroup; area: Area | null; plan: TeamPlan | null; openEscalations: Escalation[]; head: Member;
 }): string {
-  const parts = frame(`pm_${p.occasion.kind}`, p.member, p.identity, p.members, p.brief);
+  const parts = frame(`pm_${p.occasion.kind}`, p, p.brief, null);
   parts.push(`You are the PM of group ${p.group.name}. You never talk to the user: ${p.head.name}, the head PM, does. You answer for your group's part.`);
+  parts.push("## Rules and exceptions\nThe team's rules above hold for your group too. A request to depart from a rule, and any question to the user about one, goes up to " +
+    `${p.head.name} (escalate, naming the rules, the reason, the alternative and the work), who alone shows it to the user. You never approve an exception, and you never ask the user.`);
   if (p.area) parts.push(areaSection(p.area));
   if (p.plan) parts.push(planSection(p.plan));
   if (p.openEscalations.length) {

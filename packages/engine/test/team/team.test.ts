@@ -15,7 +15,7 @@ import { testConfig, userDataEnv } from "../helpers/config.js";
 import { FakeClis, type FakeCall } from "../helpers/fake-clis.js";
 import { png } from "../helpers/images.js";
 import { git, makeRepo } from "../helpers/repo.js";
-import { brief, task, teamCheck, teamPlan, teamPm, teamReview, teamTests, teamTriage, teamWork } from "../helpers/team-builders.js";
+import { brief, task, teamAnswer, teamCheck, teamPlan, teamPm, teamReview, teamTests, teamTriage, teamWork } from "../helpers/team-builders.js";
 import { tempDir } from "../helpers/tmp.js";
 
 let t: { path: string; cleanup(): void };
@@ -154,6 +154,8 @@ describe("a team run", () => {
   it("asks the PM to revise the brief and the techlead the plan when you ask for changes", async () => {
     fake.setScenario(happy({
       team_pm_conversation: [{ output: teamPm.brief(two) }, { output: teamPm.brief(two) }, { output: teamPm.none("I passed it on.") }],
+      // What the user asked to change is settled once they approve: the PM sees both and needs no new rule.
+      team_pm_rule_lesson: [{ output: teamPm.ruleLesson("I1", null, "A change of scope is not a mistake.") }, { output: teamPm.ruleLesson("I2", null, "Nor is a change of plan.") }],
     }));
     const d = decider({ Brief: [{ option: 1, text: "Mention the docs folder" }, { option: 0 }], Plan: [{ option: 1, text: "Split it more" }, { option: 0 }] });
     expect(await teamRun({ decider: d }).run()).toBe("done");
@@ -170,6 +172,7 @@ describe("a team run", () => {
       team_plan: [{ output: teamPlan([task("T1", { criteria: ["AC1", "AC2"] })]) }],
       team_check: [{ output: teamCheck("fail") }, { output: teamCheck("pass") }],
       team_triage: [{ output: teamTriage("retry") }],
+      team_pm_rule_lesson: [{ output: teamPm.ruleLesson("I1", null, "The failure was fixed by the retry.") }],
       "team_work:dev-1": [{ output: teamWork(), write: { "app.txt": "broken\n" } }, { output: teamWork(), write: { "app.txt": "fixed\n" } }],
     }));
     expect(await teamRun({ decider: decider() }).run()).toBe("done");
@@ -185,7 +188,7 @@ describe("a team run", () => {
     fake.setScenario(happy({
       team_plan: [{ output: teamPlan([task("T1", { criteria: ["AC1", "AC2"] })]) }],
       "team_work:dev-1": [{ output: teamWork("blocked") }, { output: teamWork(), write: { "app.txt": "fixed\n" } }],
-      team_answer: [{ output: { answer: "Integers only.", escalate: null, report: null } }],
+      team_answer: [{ output: teamAnswer("Integers only.") }],
     }));
     expect(await teamRun({ decider: decider() }).run()).toBe("done");
     expect(fake.calls("team_answer")[0]!.prompt).toContain("## dev-1 asks\nIntegers or floats?");
@@ -225,6 +228,7 @@ describe("a team run", () => {
       team_plan: [{ output: teamPlan([task("T1", { criteria: ["AC1", "AC2"] })]) }],
       team_check: [{ output: teamCheck("pass") }, { output: teamCheck("fail") }, { output: teamCheck("pass") }],
       team_triage: [{ output: teamTriage("add_tasks", { tasks: [task("T9", { assignee: "dev-2", criteria: ["AC1"], area: ["fix.txt"] })] }) }],
+      team_pm_rule_lesson: [{ output: teamPm.ruleLesson("I1", null, "The repair was routine.") }],
       "team_work:dev-2": [{ output: teamWork(), write: { "fix.txt": "fix\n" } }],
     }));
     expect(await teamRun({ decider: decider() }).run()).toBe("done");
@@ -238,7 +242,7 @@ describe("a team run", () => {
     fake.setScenario(happy({
       team_plan: [{ output: teamPlan([task("T1", { criteria: ["AC1", "AC2"] })]) }],
       "team_work:dev-1": [{ output: teamWork("blocked") }, { output: teamWork(), write: { "app.txt": "fixed\n" } }],
-      team_answer: [{ output: { answer: null, escalate: "Should it round?", report: null } }],
+      team_answer: [{ output: teamAnswer(null, "Should it round?") }],
       team_pm_escalation: [{ output: teamPm.teamAnswer("T1-E1", "Never round.") }],
     }));
     expect(await teamRun({ decider: decider() }).run()).toBe("done");
@@ -408,7 +412,7 @@ describe("a team run", () => {
     it("sends a group's question to its own PM first, who passes it up to the head PM", async () => {
       fake.setScenario(grouped({
         "team_work:dev-backend-1": [{ output: teamWork("blocked") }, { output: teamWork(), write: { "app.txt": "fixed\n" } }],
-        team_answer: [{ output: { answer: null, escalate: "Should it round?", report: null } }],
+        team_answer: [{ output: teamAnswer(null, "Should it round?") }],
         "team_pm_area_escalation:pm-backend": [{ output: teamPm.escalate("B1-E1", "The brief does not say; the user must.") }],
         team_pm_escalation: [{ output: teamPm.teamAnswer("B1-E1", "Never round.") }],
       }));

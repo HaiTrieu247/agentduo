@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { loadSchema, SCHEMA_NAMES, strictProblems, validateOutput } from "../../src/agents/schema.js";
 import { approval, critique, finding, impl, issue, plan, plannerAsk, plannerPlan, plannerQuestion, review } from "../helpers/builders.js";
-import { teamAnswer, teamCheck, teamPm, teamPlan, teamReview, teamTests, teamTriage, teamWork } from "../helpers/team-builders.js";
+import { askException, governance, reportIssue, teamAnswer, teamCheck, teamPm, teamPlan, teamReview, teamTests, teamTriage, teamWork } from "../helpers/team-builders.js";
 
 describe("schemas", () => {
   it("are compatible with OpenAI strict structured outputs", () => {
@@ -20,9 +20,51 @@ describe("schemas", () => {
 
   it("accept every action of the PM's turn", () => {
     const turns = [teamPm.none(), teamPm.questions(), teamPm.brief(), teamPm.planReview(true), teamPm.planReview(false), teamPm.leadNote(),
-      teamPm.teamAnswer("q1"), teamPm.changeRequest(), teamPm.acceptance("partly"), teamPm.escalate("T1-E1"), teamPm.areas([{ group: "web", criteria: ["AC1"] }])];
+      teamPm.teamAnswer("q1"), teamPm.changeRequest(), teamPm.acceptance("partly"), teamPm.escalate("T1-E1"), teamPm.areas([{ group: "web", criteria: ["AC1"] }]),
+      teamPm.ruleLesson("I1"), teamPm.ruleLesson("I1", null), teamPm.exceptionProposal("X1"), teamPm.exceptionProposal("X2", { unit: { kind: "integration", id: "run" } }),
+      teamPm.exceptionDecline("X1"), teamPm.ruleQuestion({ exceptionId: "X1" }), teamPm.ruleQuestion({ incidentId: "I1" })];
     for (const turn of turns) expect(validateOutput("team_pm", turn), turn.action.kind).toEqual([]);
     expect(validateOutput("team_pm", { message: null, action: { kind: "brief" } })).not.toEqual([]);
+  });
+
+  describe("rules governance", () => {
+    const member = ["team_plan", "team_work", "team_review", "team_tests", "team_check", "team_triage", "team_answer"] as const;
+    const outputs = {
+      team_plan: teamPlan, team_work: (g: ReturnType<typeof governance>) => teamWork("done", null, g), team_review: (g: ReturnType<typeof governance>) => teamReview("approve", g),
+      team_tests: teamTests, team_check: (g: ReturnType<typeof governance>) => teamCheck("pass", "code", g), team_triage: (g: ReturnType<typeof governance>) => teamTriage("retry", { governance: g }),
+      team_answer: (g: ReturnType<typeof governance>) => teamAnswer("ok", null, g),
+    } as const;
+    const withGov = (name: (typeof member)[number], g: ReturnType<typeof governance>) => name === "team_plan" ? teamPlan(undefined, g) : (outputs[name] as (g: ReturnType<typeof governance>) => unknown)(g);
+
+    it("lets every member's result report an issue or ask for an exception, in one shared shape", () => {
+      const shape = (loadSchema("team_work").properties as Record<string, unknown>).governance;
+      for (const name of member) {
+        expect((loadSchema(name).properties as Record<string, unknown>).governance, name).toEqual(shape);
+        expect(validateOutput(name, withGov(name, governance())), name).toEqual([]);
+        expect(validateOutput(name, withGov(name, askException())), name).toEqual([]);
+        expect(validateOutput(name, withGov(name, reportIssue("disagreement", "x", ["R1"]))), name).toEqual([]);
+        expect(validateOutput(name, withGov(name, { issues: [], exception: { rule_ids: ["R1"], reason: "x", alternative: null } })), name).toEqual([]);
+      }
+    });
+
+    it("requires the field, and refuses a scope or a decision an agent might try to give itself", () => {
+      for (const name of member) {
+        const out = withGov(name, governance()) as Record<string, unknown>;
+        delete out.governance;
+        expect(validateOutput(name, out), name).toContain("$: missing required property 'governance'");
+        const grant = withGov(name, { issues: [], exception: { rule_ids: ["R1"], reason: "x", alternative: null, approved: true, task_ids: ["T9"] } as never });
+        expect(validateOutput(name, grant).join(" "), name).toContain("unexpected property 'approved'");
+      }
+    });
+
+    it("gives the PM no way to approve: its actions only propose, decline, ask or write a lesson", () => {
+      const kinds = ((loadSchema("team_pm").properties as { action: { anyOf: Array<{ properties: { kind: { enum: string[] } } }> } }).action.anyOf).map((a) => a.properties.kind.enum[0]);
+      expect(kinds).toEqual(expect.arrayContaining(["rule_lesson", "exception_proposal", "exception_decline", "rule_question"]));
+      expect(kinds.filter((k) => /approv|grant|allow/.test(k!))).toEqual([]);
+      const bad = teamPm.exceptionProposal("X1") as { action: Record<string, unknown> };
+      bad.action.approved = true;
+      expect(validateOutput("team_pm", bad)).not.toEqual([]);
+    });
   });
 
   it("report readable errors", () => {

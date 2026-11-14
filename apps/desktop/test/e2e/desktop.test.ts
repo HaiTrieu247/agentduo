@@ -335,6 +335,75 @@ describe("agentduo desktop", () => {
     expect(await page.locator(`${SHOWN} .question-history`).last().textContent()).toContain("Session");
   });
 
+  it("hides a question's form to read the conversation and shows it again, with the choices and words kept and the agent still waiting", async () => {
+    fake.setScenario({
+      chat_claude: [{
+        answer: "Claude protected the pages it was told",
+        questions: [{ questions: [
+          { question: "Which auth should the pages use?", header: "Auth", multiSelect: false, options: [{ label: "Token", description: "a bearer token" }, { label: "Session", description: "a cookie" }] },
+          { question: "Which pages need it?", header: "Pages", multiSelect: true, options: [{ label: "Admin", description: "the admin area" }, { label: "Profile", description: "the user's page" }] },
+        ] }],
+      }],
+    });
+    const replies = fake.questionReplies().length;
+    await send("/claude Protect the pages");
+    const card = page.locator(`${SHOWN} .card.question`);
+    await card.waitFor({ timeout: 30_000 });
+    await card.locator(".q-option", { hasText: "Session" }).click();
+    await card.locator(".q-option", { hasText: "Admin" }).click();
+    await card.getByRole("textbox", { name: "Your own answer to question 2" }).fill("Billing");
+    const pendingHeight = () => page.locator(`${SHOWN} .pending`).evaluate((p) => p.getBoundingClientRect().height);
+    const open = await pendingHeight();
+
+    // From the keyboard: the button is in the tab order, says what it does and whether the form is shown.
+    const hide = card.getByRole("button", { name: "Hide the questions" });
+    expect(await hide.getAttribute("aria-expanded")).toBe("true");
+    await hide.focus();
+    await page.keyboard.press("Enter");
+    const show = card.getByRole("button", { name: "Show the questions" });
+    expect(await show.getAttribute("aria-expanded")).toBe("false");
+    expect(await show.evaluate((b) => b === document.activeElement)).toBe(true);
+    expect(await card.locator(".q-group").first().isVisible()).toBe(false);
+    expect(await card.getByRole("button", { name: "Submit answers" }).isVisible()).toBe(false);
+    // A bar stays, saying the question waits; the conversation gets the room.
+    const bar = (await card.textContent()) ?? "";
+    expect(bar).toContain("asks you 2 questions");
+    expect(bar).toContain("All 2 answered, not submitted yet");
+    expect(await pendingHeight()).toBeLessThan(open / 2);
+
+    // Nothing was answered, put off or dismissed: the agent keeps waiting, through renders of the waiting cards (a file
+    // attached, then removed).
+    await page.evaluate(([selector, b64]) => {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const data = new DataTransfer();
+      data.items.add(new File([bytes], "while-hidden.png", { type: "image/png" }));
+      document.querySelector(selector)!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+    }, [`${SHOWN} .composer-input`, png(4, 4).toString("base64")] as const);
+    const chip = page.locator(`${SHOWN} .composer-files .file-chip.file-ready`, { hasText: "while-hidden.png" });
+    await chip.waitFor({ timeout: 20_000 });
+    expect(await card.getByRole("button", { name: "Show the questions" }).getAttribute("aria-expanded")).toBe("false");
+    await chip.getByRole("button", { name: "Remove while-hidden.png" }).click();
+    await chip.waitFor({ state: "detached", timeout: 10_000 });
+    expect(await card.locator(".q-group").first().isVisible()).toBe(false);
+    await page.waitForTimeout(500);
+    expect(fake.questionReplies()).toHaveLength(replies);
+    expect(await page.locator(`${SHOWN} .card.question`).count()).toBe(1);
+
+    // Shown again (Space, as on any button): the choices and the words are as they were, and they go as the answer.
+    await card.getByRole("button", { name: "Show the questions" }).focus();
+    await page.keyboard.press("Space");
+    expect(await card.getByRole("button", { name: "Hide the questions" }).getAttribute("aria-expanded")).toBe("true");
+    expect(await card.locator(".q-option", { hasText: "Session" }).locator("input").isChecked()).toBe(true);
+    expect(await card.locator(".q-option", { hasText: "Admin" }).locator("input").isChecked()).toBe(true);
+    expect(await card.locator(".q-option", { hasText: "Profile" }).locator("input").isChecked()).toBe(false);
+    expect(await card.getByRole("textbox", { name: "Your own answer to question 2" }).inputValue()).toBe("Billing");
+    await card.getByRole("button", { name: "Submit answers" }).click();
+    await seeInChat("Claude protected the pages it was told");
+    expect(fake.questionReplies().slice(replies)).toMatchObject([{
+      behavior: "allow", updatedInput: { answers: { "Which auth should the pages use?": "Session", "Which pages need it?": "Admin, Billing" } },
+    }]);
+  });
+
   it("discusses a question until both agents agree, and shows the final answer", async () => {
     fake.setScenario({ discuss_answer: [{ answer: "Use SQLite." }], discuss_synthesis: [{ answer: "Final: SQLite it is." }] });
     await send("/discuss Which database should the demo use?");
@@ -724,9 +793,15 @@ describe("agentduo desktop", () => {
     expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe("dark");
     expect(await page.locator(".overlay.onboarding").isHidden()).toBe(true);
 
+    // From another conversation: the run goes on in the conversation that started it, not in the one shown.
+    await page.locator(".sidebar .nav-head", { hasText: "Conversations" }).getByTitle("New conversation").click();
+    await expect.poll(async () => (await activeConversation()).conversationId, { timeout: 10_000 }).not.toBe(before.conversationId);
+    const elsewhere = (await activeConversation()).conversationId!;
     await page.locator(".sidebar .nav-head.toggle", { hasText: "Resumable runs" }).click();
     await page.locator(".sidebar .nav-item.run", { hasText: "Tidy app.txt" }).click();
+    await expect.poll(async () => (await activeConversation()).conversationId, { timeout: 10_000 }).toBe(before.conversationId);
     await waitUntil(() => runOf("Tidy app.txt")?.phase === "DONE", 90_000, "the resumed run to finish");
+    expect(existsSync(join(runsDir, "conversations", elsewhere, "conversation.json")), "nothing was said in the other conversation").toBe(false);
     await quit();
     expect(existsSync(join(runsDir, ".lock"))).toBe(false);
     expect(log.some((l) => / up: agentduo .* on Node \d+/.test(l))).toBe(true);
@@ -780,7 +855,7 @@ describe("agentduo desktop", () => {
     await expect.poll(async () => page.locator(`${SHOWN} .chip.target`).textContent()).toContain("Team");
     expect(await page.locator(`${SHOWN} .composer-input`).getAttribute("placeholder")).toContain("A request for the team");
     const { projectId } = await activeConversation();
-    const team = () => invoke<{ members: Array<{ name: string }>; membersFrom: string | null }>({ method: "team.read", projectId });
+    const team = () => invoke<{ members: Array<{ name: string; model: string | null }>; membersFrom: string | null }>({ method: "team.read", projectId });
     expect((await team()).membersFrom).toBeNull();
     await openSettings("Team");
     const settings = page.locator(".settings");
@@ -819,6 +894,22 @@ describe("agentduo desktop", () => {
     await panel.locator("button", { hasText: "Save" }).click();
     const file = join(scratch.path, "plain project", ".agentduo", "team", "roles", "dev", "IDENTITY.md");
     await expect.poll(() => (existsSync(file) ? readFileSync(file, "utf8") : ""), { timeout: 10_000 }).toBe("You are a developer here. Use pnpm.\n");
+    // A member changed and saved for every project while this project has a team of its own: that one would win here
+    // and show again, as if the change were lost, so the page says so and the save asks to remove it.
+    await settings.locator(".team-member", { hasText: "dev-1" }).locator('button[title^="Edit"]').click();
+    const edit = settings.locator(".team-form");
+    await edit.locator('select[aria-label="Model"]').selectOption({ label: "Haiku" });
+    await edit.locator("button", { hasText: "Update the member" }).click();
+    await settings.locator('select[aria-label="Where the team is saved"]').selectOption("global");
+    await settings.locator(".warn-note").waitFor({ timeout: 5000 });
+    await settings.locator("button", { hasText: "Save the team" }).click();
+    const ask = page.getByRole("alertdialog");
+    await expect.poll(() => ask.getByRole("heading").textContent(), { timeout: 5000 }).toBe("This project has a team of its own");
+    await ask.getByRole("button", { name: "Remove it" }).click();
+    await expect.poll(async () => (await team()).membersFrom, { timeout: 10_000 }).toBe("global");
+    expect((await team()).members.find((m) => m.name === "dev-1")?.model).toBe("haiku");
+    await expect.poll(() => settings.locator(".team-member", { hasText: "dev-1" }).textContent(), { timeout: 5000 }).toContain("haiku");
+    expect(readFileSync(join(scratch.path, "plain project", ".agentduo", "config.yaml"), "utf8")).not.toContain("members:");
     await closeSettings();
     await quit();
   });

@@ -6,13 +6,14 @@ import { Chat, type ChatUi } from "../../src/chat/chat.js";
 import { parseInput } from "../../src/chat/commands.js";
 import { EventBus, type DuoEvent, type ModelMap } from "../../src/events.js";
 import type { Attachment } from "../../src/inputs/attachment-types.js";
+import { TeamRules, teamRulesDir } from "../../src/team/rules.js";
 import { TeamStore } from "../../src/team/state.js";
 import { testConfig } from "../helpers/config.js";
 import { FakeClis } from "../helpers/fake-clis.js";
 import { pickFirst, ScriptedClarifier, ScriptedDecider } from "../helpers/harness.js";
 import { png } from "../helpers/images.js";
 import { git, makeRepo } from "../helpers/repo.js";
-import { brief, task, teamCheck, teamPlan, teamPm, teamReview, teamTests, teamWork } from "../helpers/team-builders.js";
+import { askException, brief, task, teamCheck, teamPlan, teamPm, teamReview, teamTests, teamWork } from "../helpers/team-builders.js";
 import { tempDir } from "../helpers/tmp.js";
 import { waitUntil } from "../helpers/wait.js";
 
@@ -61,11 +62,11 @@ afterEach(async () => {
   t.cleanup();
 });
 
-const newChat = () => {
+const newChat = (conversationId?: string, clarifier = new ScriptedClarifier([pickFirst])) => {
   const cfg = testConfig(fake, { gates: [] });
   const chat = new Chat({
     cfg, workspace: repo, runsDir, configFile: join(repo, ".agentduo", "config.yaml"), userConfigFile: join(t.path, "xdg", "agentduo", "config.yaml"),
-    bus, decider: new ScriptedDecider(), ui, clarifier: new ScriptedClarifier([pickFirst]),
+    bus, decider: new ScriptedDecider(), ui, clarifier, conversationId,
   });
   chats.push(chat);
   return chat;
@@ -166,10 +167,46 @@ describe("/team in the chat", () => {
     await chat.submit("/team status");
     expect(ui.lines.at(-1)).toMatch(/Team .* — EXECUTION/);
     expect(ui.lines.at(-1)).toContain("T1 Task T1 — dev-1, coding");
-    await chat.submit("/resume");
-    await chat.idle();
+    // Another conversation's /resume does not take this conversation's team.
+    const other = newChat();
+    await other.submit("/resume");
+    expect(ui.lines.at(-1)).toContain("Nothing to resume in this conversation.");
+    expect(TeamStore.open(runsDir, "latest").load().conversationId).toBe(chat.conversationId);
+    // Its own conversation, opened again (no memory of the stop): /resume continues it.
+    const again = newChat(chat.conversationId);
+    await again.submit("/resume");
+    await again.idle();
     expect(readFileSync(join(repo, "app.txt"), "utf8")).toBe("fixed\n");
     expect(TeamStore.open(runsDir, "latest").load().phase).toBe("DONE");
+  });
+
+  it("brings a member's request for an exception to the team's rules to you through the PM, and the team goes on only once you approved it", async () => {
+    const rules = new TeamRules(teamRulesDir(process.env, repo, "default"));
+    rules.append({ opId: "seed:1", text: "Never change app.txt without a test.", incident: "an earlier run" });
+    const before = readFileSync(rules.path, "utf8");
+    fake.setScenario({
+      ...scenario(),
+      team_work: [{ output: teamWork("done", null, askException(["R1"])) }, { output: teamWork(), write: { "app.txt": "fixed\n" } }],
+      team_pm_rule_exception: [{ output: teamPm.exceptionProposal("X1") }],
+    });
+    const clarifier = new ScriptedClarifier([pickFirst]);
+    const chat = newChat(undefined, clarifier);
+    await chat.submit("/team Make app.txt fixed");
+    await chat.idle();
+    // The request reached you as the team's (the PM's) question, with the rule, the work and a choice to approve or refuse.
+    const asked = clarifier.seen.filter((r) => r.questions[0]!.header === "Exception");
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatchObject({ source: "team", member: "pm" });
+    expect(asked[0]!.questions[0]!.question).toContain("R1 (Never change app.txt without a test.)");
+    expect(asked[0]!.questions[0]!.options.map((o) => o.id)).toEqual(["approve", "reject"]);
+    // Only the PM talks to you; dev-1 worked again, told of the approval, and the rule itself is unchanged.
+    expect(events.filter((e) => e.type === "team.message" && e.from !== "user").every((e) => e.type === "team.message" && e.from === "pm")).toBe(true);
+    const works = fake.calls("team_work");
+    expect(works).toHaveLength(2);
+    expect(works[1]!.prompt).toContain("X1, approved by the user for task T1 only");
+    expect(TeamStore.open(runsDir, "latest").load().governance.exceptions[0]!.decision).toMatchObject({ status: "approved", by: "user" });
+    expect(readFileSync(join(repo, "app.txt"), "utf8")).toBe("fixed\n");
+    expect(readFileSync(rules.path, "utf8")).toBe(before);
   });
 
   it("shows the team, and takes a result back out with /team undo", async () => {

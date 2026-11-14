@@ -24,11 +24,18 @@ import { relativeInside } from "../workflow/workflow.js";
 import {
   blocks, boardJobs, checksComplete, failureKey, finished, jobKey, leadOf, madeProgress, newTask, ownJob, planProblems, testsWritten, type Job,
 } from "./board.js";
-import { headPm, memberProfile, teamGroups, teamMembers, type Member, type TeamGroup } from "./config.js";
+import { headPm, memberProfile, teamGroups, teamId, teamMembers, type Member, type TeamGroup } from "./config.js";
 import { identityDirs, memberIdentity, teamIdentities, type TeamIdentities } from "./identity.js";
 import type { TeamTaskView } from "./model.js";
 import {
-  answerPrompt, areaPmPrompt, checkPrompt, filesSection, integrationCheckPrompt, integrationTriagePrompt, planPrompt, pmActions, pmPrompt, resolvePrompt,
+  answerDirection, APPROVE_OPTION, askDirection, assessException, callScope, beginLesson, completeLesson, declineException, declineLesson, decideException, decisionFromAnswer,
+  deliverDecision, governanceWork, heldTaskIds, holdsWork, issueOccurrence, planningUnit, presentException, recordIncident, repointRequest, REJECT_OPTION,
+  requestException, resolveIncident, RUN_UNIT, unitHeld, type ExceptionScope, type GovernanceReport, type GovernedState, type Incident, type IncidentInput,
+  type RuleException, type ScopeUnitKind, type WorkRef,
+} from "./rule-governance.js";
+import { ruleInputProblem, TeamRules, teamRulesDir, workspaceKey, RulesError, type RuleEntry } from "./rules.js";
+import {
+  answerPrompt, applyWork, areaPmPrompt, checkPrompt, filesSection, integrationCheckPrompt, integrationTriagePrompt, integrationWork, planningWork, planPrompt, pmActions, pmPrompt, resolvePrompt,
   reviewPrompt, testsPrompt, triagePrompt, workPrompt, type PmOccasion,
 } from "./prompts.js";
 import {
@@ -72,6 +79,16 @@ type PmOutput = {
     | { kind: "plan_review"; approve: boolean; issues: Array<{ id: string; issue: string; group: string | null }>; summary: string | null }
     | { kind: "lead_note"; note: string; group: string | null }
     | { kind: "team_answer"; question_id: string; answer: string }
+    | { kind: "rule_lesson"; lessons: LessonAnswer[] }
+    | {
+      kind: "exception_proposal"; exception_id: string; rule_ids: string[]; reason: string; alternative: string; task_ids: string[];
+      unit: { kind: ScopeUnitKind; id: string } | null; summary: string;
+    }
+    | { kind: "exception_decline"; exception_id: string; reason: string }
+    | {
+      kind: "rule_question"; incident_id: string | null; exception_id: string | null;
+      questions: Array<{ header: string; question: string; multi_select: boolean; options: Array<{ label: string; description: string }> }>;
+    }
     | { kind: "escalate"; question_id: string; question: string }
     | { kind: "areas"; areas: Array<{ group: string; area: string; criteria: string[] }> }
     | { kind: "change_request"; brief: Omit<Brief, "version"> }
@@ -84,8 +101,32 @@ type TestsOutput = { summary: string; test_files: string[]; cases: unknown[]; ho
 type CheckOutput = { verdict: "pass" | "fail"; summary: string; results: unknown[]; failures: CheckFailure[]; added_tests: string[] };
 type TriageOutput = { action: "retry" | "reassign" | "fix_tests" | "add_tasks" | "escalate"; assignee: string | null; guidance: string; question: string | null; tasks: PlanTask[]; report: string };
 type AnswerOutput = { answer: string | null; escalate: string | null; report: string | null };
+/** The PM's lesson for one settled incident: a rule to append, or null and why none is needed. */
+type LessonAnswer = { incident_id: string; rule: string | null; rationale: string };
 
 class Interrupted extends Error {}
+
+/**
+ * A member's call asked for an exception to the team's rules: the request is saved and the work it is about waits for the
+ * decision, so the rest of the call's result is not used (an exception request never completes the work). Not a failure.
+ */
+class Held extends Error {}
+
+/** A scope as the user and the PMs read it: the tasks (with their titles) or the unit of work. */
+const scopeWords = (scope: ExceptionScope, tasks: readonly TaskState[]): string =>
+  scope.unit
+    ? `the ${scope.unit.kind}${scope.unit.id === RUN_UNIT ? "" : ` of ${scope.unit.id}`} (${scope.unit.occurrence})`
+    : scope.taskIds.map((id) => `task ${id}${tasks.find((t) => t.id === id) ? ` (${tasks.find((t) => t.id === id)!.title})` : ""}`).join(", ");
+
+/** Which team's rules a run uses: its configuration's team id and the key of its workspace. */
+const rulesIdentity = (cfg: ConfigData, workspace: string): NonNullable<TeamState["rulesStore"]> => ({ teamId: teamId(cfg.team), workspaceKey: workspaceKey(workspace) });
+
+/** The operation that adds an incident's rule to RULES.md: the run's and the incident's, so the rule is added once however often it is tried. */
+const lessonOp = (runId: string, incidentId: string): string => `lesson:${runId}:${incidentId}`;
+
+/** The line RULES.md shows under a rule: where it came from (never agentduo's own marker, whatever an agent wrote). */
+const lessonSource = (runId: string, i: Incident): string =>
+  `run ${runId}, ${i.id} (${i.kind}): ${i.summary}`.replace(/\s+/g, " ").replaceAll("<!-- agentduo-rule", "<!-- agentduo rule").slice(0, 500);
 
 const taskView = (t: TaskState): TeamTaskView => ({
   id: t.id, title: t.title, status: t.status, assignee: t.assignee, testers: [...t.testers], attempt: t.attempt, dependsOn: [...t.depends_on],
@@ -121,9 +162,22 @@ export class TeamRun {
   private budgetReached: string | null = null;
   private reportTimer: NodeJS.Timeout | null = null;
   private readonly env: NodeJS.ProcessEnv;
+  /** The team's RULES.md, opened by the first call or step that needs it (`rulesStore`). */
+  private rules: TeamRules | null = null;
+  /** The rules a prompt being built is given: read once per call, so a full prompt and a continued one carry the same (`call`, `parts`). */
+  private promptRules: readonly RuleEntry[] | null = null;
+  /** PM turns for a lesson in this process that left no incident settled: after two, none is offered again until a later run. */
+  private lessonStalled = 0;
+  /** When lessons first became due while members worked, in this process (null: none due); `lessonOwed` waits from there. */
+  private lessonsOwedSince: number | null = null;
+  private lessonTimer: NodeJS.Timeout | null = null;
+  /** Requests about the rules shown (or offered to nobody) in this process: a reopened run asks each once. */
+  private readonly announced = new Set<string>();
 
   constructor(private readonly o: TeamRunOptions) {
     this.env = o.env ?? process.env;
+    // A run from before the rules takes the team its configuration names (saved with the run's next write).
+    o.state.rulesStore ??= rulesIdentity(o.cfg, o.workspace);
     this.members = teamMembers(o.cfg.team);
     this.groups = teamGroups(this.members);
     this.head = headPm(this.members);
@@ -134,8 +188,15 @@ export class TeamRun {
    * A new team run in `runsDir` for the user's `request`: its state, the configuration and the identities it keeps.
    * `attachments` (kept elsewhere in `runsDir`, a conversation's) go with the request: the run keeps copies of its own.
    */
-  static create(o: Omit<TeamRunOptions, "store" | "state"> & { runsDir: string; request: string; attachments?: Attachment[] }): TeamRun {
+  static create(o: Omit<TeamRunOptions, "store" | "state"> & { runsDir: string; request: string; attachments?: Attachment[]; conversationId?: string }): TeamRun {
+    // The run's rules are its team's (RULES.md outside the run), named in its state from the start. A team that has none gets
+    // its file now, before any run exists: a team whose rules cannot be kept does not start (and leaves no run behind).
+    const identity = rulesIdentity(o.cfg, o.workspace);
+    new TeamRules(teamRulesDir(o.env ?? process.env, o.workspace, identity.teamId)).init();
     const { store, state } = TeamStore.create(o.runsDir, o.request);
+    state.rulesStore = identity;
+    if (o.conversationId) state.conversationId = o.conversationId;
+    store.save(state);
     if (o.attachments?.length) {
       const files = new AttachmentStore(o.runsDir, store.dir);
       try {
@@ -230,12 +291,13 @@ export class TeamRun {
     this.o.bus.emit({ type: "team.phase", runId: this.id, phase: this.state.phase });
     for (const t of this.state.tasks) this.o.bus.emit({ type: "team.task", task: taskView(t) });
     try {
+      this.prepareRules();
       for (;;) {
         if (this.abortRequested) {
           await this.settle();
           return this.finish("aborted");
         }
-        if (this.state.phase === "DONE") return this.finish("done");
+        if (this.state.phase === "DONE" && !this.lessonsPending()) return this.finish("done");
         if (this.stopRequested) {
           await this.settle();
           return this.finish("stopped");
@@ -243,6 +305,11 @@ export class TeamRun {
         if (await this.advance()) continue;
         this.schedule();
         if (!this.running.size) {
+          // A lesson the PM has not recorded (and does not, turn after turn) keeps the result from being written and the run from ending.
+          if (this.lessonsStuck()) {
+            this.o.bus.emit({ type: "warning", text: `The team stopped: the PM has not recorded a lesson for ${this.pendingLessons().map((i) => i.id).join(", ")}. /resume asks it again.` });
+            return this.finish("waiting");
+          }
           if (this.budgetReached) {
             this.o.bus.emit({ type: "warning", text: `The team stopped: ${this.budgetReached}. /resume goes on${this.state.budget && reachedLimits(this.state.budget, this.used()).length ? " (and raises the limit)" : ""}.` });
             return this.finish("waiting");
@@ -255,22 +322,31 @@ export class TeamRun {
       this.abort.abort();
       await this.settle();
       if (e instanceof Interrupted) return this.finish("stopped");
-      const message = e instanceof RunGitError ? e.message : (e as Error).stack ?? String(e);
+      const message = e instanceof RunGitError || e instanceof RulesError ? e.message : (e as Error).stack ?? String(e);
       this.o.bus.emit({ type: "warning", text: `The team run failed: ${message}` });
       this.state.warnings.push(message.split("\n")[0]!);
       return this.finish("error");
     } finally {
       if (this.reportTimer) clearTimeout(this.reportTimer);
+      if (this.lessonTimer) clearTimeout(this.lessonTimer);
     }
   }
 
+  /** Every request the run waits on (the approval, exceptions shown and not decided, the PM's questions about the rules) was put off, and none is open. */
   private waitsOnDeferred(): boolean {
+    const ids = this.waitingRequests();
+    return ids.length > 0 && ids.every((id) => this.deferred.has(id));
+  }
+
+  private waitingRequests(): string[] {
     const w = this.state.waiting;
-    return !!w && this.deferred.has(w.requestId);
+    const work = governanceWork(this.state);
+    return [...(w ? [w.requestId] : []), ...work.pending.map((e) => e.decision!.requestId!), ...work.questions.map((q) => q.requestId)];
   }
 
   private async settle(): Promise<void> {
     if (this.reportTimer) clearTimeout(this.reportTimer);
+    if (this.lessonTimer) clearTimeout(this.lessonTimer);
     await Promise.allSettled([...this.running.values()]);
   }
 
@@ -379,6 +455,14 @@ export class TeamRun {
   /** One step agentduo takes by itself (a phase change, a candidate, an approval to ask); true when it took one. */
   private async advance(): Promise<boolean> {
     const s = this.state;
+    // What the run has settled becomes a lesson to learn (the PM's turn), and a lesson the PM wrote is finished before anything else.
+    const settled = this.settleIncidents();
+    if (this.finishLessons() || settled) {
+      this.save();
+      return true;
+    }
+    // A decision about an exception is released to the work it held only once it is saved; a proposal is shown to the user once it is saved.
+    if (this.deliverDecisions() || this.presentAssessed()) return true;
     const brief = latestBrief(s);
     // A brief the PM wrote and the user has not decided on yet (the first, or a change of scope later).
     if (brief && !brief.declined && s.approvedBrief !== brief.version && !s.waiting) return this.ask("brief");
@@ -396,7 +480,10 @@ export class TeamRun {
       }
       case "EXECUTION": {
         let changed = false;
+        // A task an exception request holds does not move (no candidate, no verdict) until the request is decided and delivered.
+        const held = heldTaskIds(s);
         for (const t of s.tasks) {
+          if (held.has(t.id)) continue;
           if (t.status === "testing" && !t.candidate && testsWritten(t) && !this.runningFor(t.id)) {
             await this.makeCandidate(t);
             changed = true;
@@ -420,7 +507,7 @@ export class TeamRun {
       }
       case "INTEGRATION": {
         const ig = s.integration;
-        if (!ig || ig.triage) return false;
+        if (!ig || ig.triage || this.heldRunUnit()) return false;
         const testers = new Set(s.tasks.flatMap((t) => t.testers));
         const by = new Set(ig.checks.map((c) => c.by));
         const complete = [...testers].every((t) => by.has(t)) && (!this.o.cfg.gates.length || by.has("gates"));
@@ -431,6 +518,11 @@ export class TeamRun {
           this.setPhase(s.accepted ? "APPLY" : "ACCEPTANCE");
         } else {
           s.integrationRounds += 1;
+          // The whole result failing is a mistake to learn from once the checks pass (the occurrence is this head's round).
+          this.note({
+            kind: "deviation", source: { kind: "member_report", member: "agentduo", task: null, occurrence: `integration:r${s.integrationRounds}:${ig.commit}` }, reportedBy: ig.checks.find((c) => c.verdict === "fail")!.by,
+            summary: `The check of the whole result failed: ${ig.checks.filter((c) => c.verdict === "fail").map((c) => `${c.by}: ${c.summary}`).join("; ")}`,
+          });
           if (s.integrationRounds > this.o.cfg.team.limits.max_task_attempts) {
             this.escalate(null, "integration_limit", `The whole result still fails its checks after ${s.integrationRounds - 1} round(s) of fixes: ` +
               ig.checks.filter((c) => c.verdict === "fail").map((c) => `${c.by}: ${c.summary}`).join("; "));
@@ -444,9 +536,11 @@ export class TeamRun {
         return true;
       }
       case "ACCEPTANCE":
-        if (s.acceptance && !s.accepted && !s.waiting && !s.integration?.triage) return this.ask("acceptance");
+        if (s.acceptance && !s.accepted && !s.waiting && !s.integration?.triage && !this.heldRunUnit()) return this.ask("acceptance");
         return false;
       case "APPLY":
+        // The PM learns from what was settled before the result is written and the run ends.
+        if (this.lessonsPending() || this.heldRunUnit()) return false;
         if (s.applyConflict) {
           if (!s.applyConflict.resolving && !s.waiting) return this.ask("apply_conflict");
           return false;
@@ -493,6 +587,10 @@ export class TeamRun {
     t.lastFailureKeys = keys;
     t.trouble = `the check of attempt ${t.attempt} failed: ${failing.map((c) => `${c.by}: ${c.summary}`).join("; ")}`;
     this.log(t, t.trouble);
+    this.note({
+      kind: "deviation", source: { kind: "check", task: t.id, occurrence: `a${t.attempt}r${t.reviewRound}` }, reportedBy: failing[0]!.by,
+      summary: `Task ${t.id} (${t.title}): ${t.trouble}`,
+    });
     if (t.stalls >= 2) {
       this.escalate(t, "review_stalled", `Task ${t.id} (${t.title}) fails the same way after two rounds of fixes: ${failures.map((f) => f.title).join("; ")}`);
     } else t.status = "triage";
@@ -606,7 +704,7 @@ export class TeamRun {
 
   // ------------------------------------------------------------------ approvals and questions
 
-  private request(kind: "brief" | "plan" | "acceptance" | "apply_conflict" | "questions", questions: ClarificationQuestion[]): ClarificationRequest {
+  private request(kind: "brief" | "plan" | "acceptance" | "apply_conflict" | "questions" | "exception" | "direction", questions: ClarificationQuestion[]): ClarificationRequest {
     const pm = this.head;
     return {
       id: `tq-${this.id.slice(-6)}-${nextSeq(this.state)}`, source: "team", callId: `${this.id}:${kind}:${this.state.seq}`, agent: pm.backend,
@@ -663,6 +761,7 @@ export class TeamRun {
 
   /** Sends a request to the decider (when there is one); an answer wakes the loop. */
   private listen(request: ClarificationRequest, done: (response: ClarificationResponse) => void): void {
+    this.announced.add(request.id);
     this.o.bus.emit({ type: "clarification.requested", request });
     if (!this.o.decider) return;
     this.open.add(request.id);
@@ -682,6 +781,7 @@ export class TeamRun {
 
   /** Reopens what this run asked and nobody answered yet (a run that continues an earlier one). */
   private reopen(): void {
+    this.reopenGovernance();
     const w = this.state.waiting;
     if (!w || this.open.has(w.requestId) || this.deferred.has(w.requestId)) return;
     const entry = this.state.clarifications.find((c) => c.id === w.requestId && c.status === "pending");
@@ -712,22 +812,25 @@ export class TeamRun {
           if (s.plans.length) s.replanning = true;
           this.setPhase("PLANNING");
           if (words) s.leadNotes.push({ group: null, text: `The user, approving the brief: ${words}` });
+          this.settleUser("brief");
         } else {
           b.declined = true;
-          this.userWords(`(about brief v${b.version}) ${words ?? "Please change the brief."}`);
+          this.userChanges(`(about brief v${b.version}) ${words ?? "Please change the brief."}`);
         }
         break;
       }
       case "plan": {
         const set = this.planSet() ?? [];
-        if (approve) this.startPlan(set, words);
-        else {
+        if (approve) {
+          this.startPlan(set, words);
+          this.settleUser("plan");
+        } else {
           // Every techlead of the set reads your words; one whose part they do not concern may plan the same again.
           for (const p of set) {
             p.declined = true;
             s.planFeedback[groupKey(p.group)] = `The user asked for changes (through the PM): ${words ?? "(no details)"}`;
           }
-          this.userWords(`(about the plan) ${words ?? "Please change the plan."}`);
+          this.userChanges(`(about the plan) ${words ?? "Please change the plan."}`);
         }
         break;
       }
@@ -735,9 +838,10 @@ export class TeamRun {
         if (approve) {
           s.accepted = true;
           this.setPhase("APPLY");
+          this.settleUser("acceptance");
         } else {
           s.acceptance = null;
-          this.userWords(`(about the result) ${words ?? "Please change it."}`);
+          this.userChanges(`(about the result) ${words ?? "Please change it."}`);
         }
         break;
       case "apply_conflict":
@@ -749,10 +853,17 @@ export class TeamRun {
   }
 
   /** What the user wrote with a decision goes into the conversation, for the PM. */
-  private userWords(text: string): void {
+  private userWords(text: string): number {
     const seq = nextSeq(this.state);
     this.state.messages.push({ seq, at: nowIso(), from: "user", text });
     this.o.bus.emit({ type: "team.message", runId: this.id, from: "user", text, seq });
+    return seq;
+  }
+
+  /** The user asked for changes instead of approving: the result differed from what they wanted, an incident to learn from once they approve. */
+  private userChanges(text: string): void {
+    const seq = this.userWords(text);
+    this.note({ kind: "deviation", source: { kind: "user_message", seq }, reportedBy: "agentduo", summary: text });
   }
 
   private startPlan(set: TeamPlan[], words: string | null): void {
@@ -817,13 +928,17 @@ export class TeamRun {
   /** The PM's next turn, if it has one now. */
   private pmOccasion(): PmOccasion | null {
     const s = this.state;
-    if (s.phase === "DONE" || s.phase === "ABORTED") return null;
+    if (s.phase === "ABORTED") return null;
+    // The result is written; the run ends once the PM has learned from what was settled.
+    if (s.phase === "DONE") return this.lessonOwed() ? { kind: "rule_lesson" } : null;
     if (s.phase === "ACCEPTANCE" && !s.acceptance && !s.integration?.triage && s.messages.length <= s.pmSeen) return { kind: "acceptance" };
     if (s.phase === "PLANNING" && s.base && this.grouped && !currentAreas(s).length) return { kind: "areas" };
     const set = s.phase === "PLANNING" ? this.planSet() : null;
     if (set && s.planReviewed !== planSignature(set)) return { kind: "plan_review" };
     if (s.messages.length > s.pmSeen && s.messages.at(-1)!.from === "user") return { kind: "conversation" };
-    if (s.escalations.some((e) => !e.told && e.answer === null && e.to === this.head.name)) return { kind: "escalation" };
+    if (s.escalations.some((e) => !e.told && e.answer === null && e.to === this.head.name && !e.exceptionId && !this.escalationHeld(e))) return { kind: "escalation" };
+    if (this.exceptionsToAssess().length) return { kind: "rule_exception" };
+    if (this.lessonOwed()) return { kind: "rule_lesson" };
     if ((s.phase === "EXECUTION" || s.phase === "INTEGRATION") && s.reports.length > s.reportsSeen) {
       const wait = s.lastReportAt ? (this.o.reportIntervalMs ?? REPORT_INTERVAL_MS) - (Date.now() - Date.parse(s.lastReportAt)) : 0;
       if (wait <= 0) return { kind: "reports" };
@@ -843,6 +958,8 @@ export class TeamRun {
     const s = this.state;
     if (s.phase !== "PLANNING" || !s.base || s.waiting || (this.grouped && !currentAreas(s).length)) return [];
     return this.planningGroups().filter((g) => {
+      // A group whose planning waits for the decision on an exception request does not plan.
+      if (unitHeld(s, planningUnit(g.name))) return false;
       const plan = latestPlan(s, g.name);
       return !plan || plan.declined;
     });
@@ -852,7 +969,7 @@ export class TeamRun {
   private areaOccasion(g: TeamGroup): PmOccasion | null {
     const s = this.state;
     if (!g.pm) return null;
-    if (s.escalations.some((e) => e.to === g.pm!.name && e.answer === null)) return { kind: "area_escalation" };
+    if (s.escalations.some((e) => e.to === g.pm!.name && e.answer === null && !this.escalationHeld(e))) return { kind: "area_escalation" };
     const plan = s.phase === "PLANNING" ? latestPlan(s, g.name) : null;
     if (plan && !plan.declined && plan.areaApproved == null && this.planningGroups().includes(g)) return { kind: "area_review" };
     return null;
@@ -861,9 +978,13 @@ export class TeamRun {
   private schedule(): void {
     this.reopen();
     if (this.budgetReached) return;
+    let lesson = false;
     if (!this.busy.has(this.head.name)) {
       const occasion = this.pmOccasion();
-      if (occasion) this.start({ kind: "pm" }, () => this.pmTurn(occasion));
+      // A lesson turn is decided once the jobs that can start now have started: then the team is not idle, and the
+      // incidents that settle meanwhile are learned from in the same turn (`lessonOwed`).
+      if (occasion?.kind === "rule_lesson") lesson = true;
+      else if (occasion) this.start({ kind: "pm" }, () => this.pmTurn(occasion));
     }
     // The PMs' turns do not count against max_parallel: you (or the team) wait for them.
     const agents = () => [...this.running.keys()].filter((k) => !/^(pm|area_pm|gates|merge):/.test(k)).length;
@@ -884,6 +1005,7 @@ export class TeamRun {
       if ("member" in job && this.busy.has(job.member)) continue;
       this.start(job, () => this.execute(job));
     }
+    if (lesson && !this.busy.has(this.head.name) && this.lessonOwed()) this.start({ kind: "pm" }, () => this.pmTurn({ kind: "rule_lesson" }));
   }
 
   private start(job: Job, work: () => Promise<void>): void {
@@ -899,6 +1021,10 @@ export class TeamRun {
         await work();
         this.failures.delete(key);
       } catch (e) {
+        if (e instanceof Held) {
+          this.failures.delete(key);
+          return;
+        }
         if (e instanceof Interrupted) return;
         const n = (this.failures.get(key) ?? 0) + 1;
         this.failures.set(key, n);
@@ -946,7 +1072,7 @@ export class TeamRun {
 
   /** One call of a member, in its session: the result's data, or an error (thrown). */
   private async call<T>(m: Member, kind: string, schemaName: SchemaName,
-    build: (identity: string | null) => string, o: { task: string | null; cwd: string; check?: (data: T) => string[] }): Promise<T> {
+    build: (identity: string | null) => string, o: { task: string | null; cwd: string; check?: (data: T) => string[]; work?: WorkRef | null }): Promise<T> {
     const s = this.state;
     const backend = this.runner.backends[m.backend];
     const keep = backend.keepsSessions(undefined, m.args);
@@ -971,18 +1097,36 @@ export class TeamRun {
       const text = filesSection(list, locate, next);
       return text ? `\n\n${text}` : "";
     };
-    const full = build(memberIdentity(this.identities!, m)) + leadNotes(0) + listed(files, false);
-    const resume = continued
-      ? { id: continued.id, prompt: build(null) + leadNotes(continued.notes ?? s.leadNotesSeen[m.name] ?? 0) + listed(unseen, true), attachments: unseen }
-      : undefined;
+    // The team's rules as RULES.md holds them now, read for this call: the full prompt, the continued one and the fresh
+    // session a failed resume falls back to are all built from this one reading (the prompts take them from `parts`).
+    const rules = this.rulesStore().rules();
+    this.promptRules = rules;
+    let full: string;
+    let resume: { id: string; prompt: string; attachments: Attachment[] } | undefined;
+    try {
+      full = build(memberIdentity(this.identities!, m)) + leadNotes(0) + listed(files, false);
+      resume = continued
+        ? { id: continued.id, prompt: build(null) + leadNotes(continued.notes ?? s.leadNotesSeen[m.name] ?? 0) + listed(unseen, true), attachments: unseen }
+        : undefined;
+    } finally {
+      this.promptRules = null;
+    }
     // Claude's permission mode as you set it (/mode, Shift+Tab, --accept-edits) holds for its members as for the
     // implementer and the chat; a member's own args come after it and win.
     const profile = memberProfile(m);
     if (m.backend === "claude") profile.args = [...implementerPermissionArgs(this.o.cfg.claude), ...profile.args];
+    const callId = `${String(nextSeq(s)).padStart(3, "0")}-${kind}-${m.name}${o.task ? `-${o.task}` : ""}`;
+    // What the call is about: a request for an exception made in it covers exactly this work, and no other.
+    const work = o.work !== undefined ? o.work : o.task ? { task: o.task } : null;
+    // A result that asks for an exception (and will be held) is not a result: the ordinary checks of what completes the work do not apply to it.
+    const check = (data: T): string[] => {
+      const asked = this.exceptionVerdict(m, work, data, rules);
+      return asked.holds ? [] : [...(o.check?.(data) ?? []), ...asked.problems];
+    };
     const res = await this.runner.call({
       member: { name: m.name, task: o.task, backend: m.backend, profile, cwd: o.cwd },
-      prompt: full, schemaName, logPrefix: `${String(nextSeq(s)).padStart(3, "0")}-${kind}-${m.name}${o.task ? `-${o.task}` : ""}`,
-      check: o.check as ((data: unknown) => string[]) | undefined, signal: this.abort.signal, session: { keep, ...(resume ? { resume } : {}) },
+      prompt: full, schemaName, logPrefix: callId,
+      check: check as (data: unknown) => string[], signal: this.abort.signal, session: { keep, ...(resume ? { resume } : {}) },
       budget: this.callBudget(), attachments: files,
     });
     s.usage.calls += res.calls;
@@ -1007,8 +1151,574 @@ export class TeamRun {
     if (keep && res.sessionId) {
       s.sessions[key] = { backend: m.backend, id: res.sessionId, ...(files.length ? { files: files.map((a) => a.id) } : {}), ...(m.kind === "lead" ? { notes: notesSeen } : {}) };
     }
+    const report = (res.data as { governance?: GovernanceReport | null }).governance ?? null;
+    this.noteIssues(m, o.task, callId, report, rules);
+    // A result that asks for an exception does not complete the work: the request is saved, and the work waits for the decision.
+    this.holdForException(m, work, report, rules);
     this.save();
     return res.data as T;
+  }
+
+  // ------------------------------------------------------------------ the team's rules
+
+  /** The team's RULES.md: the folder is the team's (`state.rulesStore`), apart from this run, its worktrees and its cleanup. */
+  private rulesStore(): TeamRules {
+    if (this.rules) return this.rules;
+    const id = this.state.rulesStore!;
+    const store = new TeamRules(teamRulesDir(this.env, this.o.workspace, id.teamId));
+    store.init();
+    this.rules = store;
+    return store;
+  }
+
+  /** Opens the team's rules when the run starts (RULES.md is created when the team has none) and checks it is the run's own team's. */
+  private prepareRules(): void {
+    const id = this.state.rulesStore!;
+    const key = workspaceKey(this.o.workspace);
+    if (id.workspaceKey !== key) {
+      this.o.bus.emit({ type: "warning", text: `This run was started in another folder: it now uses the rules of team '${id.teamId}' of this folder.` });
+      id.workspaceKey = key;
+      this.save();
+    }
+    this.rulesStore();
+  }
+
+  /** Records an incident of this run (the same occurrence twice is one); a refusal is a warning, never a stop of the run. */
+  private note(input: IncidentInput): Incident | null {
+    const made = recordIncident(this.state, input);
+    if (!made.ok) {
+      this.o.bus.emit({ type: "warning", text: `An incident was not recorded: ${made.reason}` });
+      return null;
+    }
+    return made.value;
+  }
+
+  /** The disagreements and deviations a member reported in its result (`governance.issues`); the rules they name must be the team's. */
+  private noteIssues(m: Member, task: string | null, callId: string, report: GovernanceReport | null, rules: readonly RuleEntry[]): void {
+    const known = new Set(rules.map((r) => r.id));
+    (report?.issues ?? []).forEach((issue, index) => {
+      this.note({
+        kind: issue.kind, source: { kind: "member_report", member: m.name, task, occurrence: issueOccurrence(callId, index) }, reportedBy: m.name,
+        ruleIds: issue.rule_ids.filter((id) => known.has(id)), summary: issue.summary,
+      });
+    });
+  }
+
+  /** Why a reported incident is settled by what the run did since, or null when it is not yet (a pure reading of the state). */
+  private settledBy(i: Incident): string | null {
+    const s = this.state;
+    const task = (id: string) => s.tasks.find((x) => x.id === id);
+    const taskEnd = (id: string) => {
+      const t = task(id);
+      return t && (t.status === "merged" || t.status === "cancelled") ? `task ${id} was ${t.status}` : null;
+    };
+    const src = i.source;
+    const accepted = s.phase === "APPLY" || s.phase === "DONE" ? "the user accepted the result" : null;
+    switch (src.kind) {
+      case "review":
+        return (task(src.task)?.review?.verdict === "approve" ? `the review of ${src.task} approved it after the changes` : null) ?? taskEnd(src.task) ?? accepted;
+      case "check":
+        return taskEnd(src.task) ?? accepted;
+      case "member_report": {
+        if (src.task) return taskEnd(src.task) ?? accepted;
+        const plan = /^plan:(.*):v(\d+)$/.exec(src.occurrence);
+        // The whole result failed its checks: settled once it passes them (the run is past the integration).
+        if (src.occurrence.startsWith("integration:")) return s.phase === "ACCEPTANCE" || s.phase === "APPLY" || s.phase === "DONE" ? "the whole result passes its checks" : null;
+        if (plan) {
+          const later = (s.approvedPlan ?? "").split(",").some((e) => e.slice(0, e.lastIndexOf(":")) === plan[1] && Number(e.slice(e.lastIndexOf(":") + 1)) > Number(plan[2]));
+          return later ? "the techlead revised the plan and the plan was approved" : accepted;
+        }
+        return accepted;
+      }
+      case "user_message": return accepted;
+      case "escalation": return null;
+    }
+  }
+
+  /** Marks the reported incidents the run has settled; true when one changed. Idempotent. */
+  private settleIncidents(): boolean {
+    let changed = false;
+    for (const i of this.state.governance.incidents) {
+      if (i.status !== "reported") continue;
+      const why = this.settledBy(i);
+      if (why && resolveIncident(this.state, i.id, why).ok) changed = true;
+    }
+    return changed;
+  }
+
+  /** What the user's message (by its seq) was about, as `decided` words it. */
+  private userTopic(seq: number): "brief" | "plan" | "acceptance" | null {
+    const text = this.state.messages.find((m) => m.seq === seq)?.text ?? "";
+    return text.startsWith("(about brief") ? "brief" : text.startsWith("(about the plan)") ? "plan" : text.startsWith("(about the result)") ? "acceptance" : null;
+  }
+
+  /** The user approved what they had asked to change: the incidents of that request are settled. */
+  private settleUser(topic: "brief" | "plan" | "acceptance"): void {
+    for (const i of this.state.governance.incidents) {
+      if (i.status === "reported" && i.source.kind === "user_message" && this.userTopic(i.source.seq) === topic) resolveIncident(this.state, i.id, `the user approved the ${topic} after the change`);
+    }
+  }
+
+  /** Lessons the PM wrote that RULES.md may not hold yet (a run stopped between its two writes): finished here, without the PM. */
+  private finishLessons(): boolean {
+    const recording = this.state.governance.incidents.filter((i) => i.status === "recording" && i.lesson);
+    for (const i of recording) this.appendLesson(i);
+    return recording.length > 0;
+  }
+
+  /**
+   * Appends an incident's lesson to RULES.md and records the rule's id in the run. The operation id is the run's and the
+   * incident's, so a second attempt (the run stopped after the file was written and before the state was) adds nothing.
+   */
+  private appendLesson(i: Incident): void {
+    const added = this.rulesStore().append({ opId: lessonOp(this.id, i.id), text: i.lesson!.text, incident: lessonSource(this.id, i) });
+    const done = completeLesson(this.state, i.id, added.rule.id);
+    if (!done.ok) throw new Error(done.reason);
+    this.save();
+  }
+
+  /**
+   * The PM's structured `rule_lesson`, for every incident it answered in the turn: a rule (the only way a rule is added), or
+   * the decision that none is needed. Every rule is saved as `recording` before RULES.md is written, so a stop between the
+   * two is finished by the next run (`finishLessons`), and each is appended once (its own operation id).
+   */
+  private pmLessons(lessons: readonly LessonAnswer[]): void {
+    const begun: Incident[] = [];
+    for (const a of lessons) {
+      const text = a.rule?.trim();
+      if (!text) {
+        declineLesson(this.state, a.incident_id, a.rationale);
+        continue;
+      }
+      const made = beginLesson(this.state, a.incident_id, text);
+      if (!made.ok) {
+        this.o.bus.emit({ type: "warning", text: `The PM's rule for ${a.incident_id} was not recorded: ${made.reason}` });
+        continue;
+      }
+      begun.push(made.value);
+    }
+    this.save();
+    for (const i of begun) this.appendLesson(i);
+  }
+
+  /** The settled incidents the PM has not decided on yet: an obligation of the run, whether or not the PM can be asked now. */
+  private pendingLessons(): Incident[] {
+    return governanceWork(this.state).lessons.filter((i) => i.status === "resolved");
+  }
+
+  private lessonsPending(): boolean {
+    return this.pendingLessons().length > 0;
+  }
+
+  /** The settled incidents the PM is to decide on now: one it asked the user about waits for the answer (the run still owes it). */
+  private lessonsDue(): Incident[] {
+    return this.pendingLessons().filter((i) => !i.direction || i.direction.answer !== null);
+  }
+
+  private lessonsOwedNow(): number {
+    return this.lessonsDue().length;
+  }
+
+  /**
+   * Whether the PM is asked for its lessons now: some are due, and its lesson turns in this process have not stalled (backoff,
+   * not release). While other members work (execution, integration), more incidents may settle, so the turn waits for the
+   * team to be idle, or for the report interval since the first was due, and learns from all of them at once; elsewhere (the
+   * result about to be written, or written) it is now.
+   */
+  private lessonOwed(): boolean {
+    if (this.lessonStalled >= 2 || !this.lessonsOwedNow()) {
+      this.lessonsOwedSince = null;
+      return false;
+    }
+    const s = this.state;
+    if (s.phase !== "EXECUTION" && s.phase !== "INTEGRATION") return true;
+    if (![...this.running.keys()].some((k) => !k.startsWith("pm:"))) return true;
+    const now = Date.now();
+    this.lessonsOwedSince ??= now;
+    const wait = (this.o.reportIntervalMs ?? REPORT_INTERVAL_MS) - (now - this.lessonsOwedSince);
+    if (wait <= 0) return true;
+    if (!this.lessonTimer) {
+      this.lessonTimer = setTimeout(() => {
+        this.lessonTimer = null;
+        this.wake();
+      }, wait);
+      this.lessonTimer.unref?.();
+    }
+    return false;
+  }
+
+  /** A lesson is pending where it holds the run (the result is being written, or has been) and the PM is no longer asked in this process. */
+  private lessonsStuck(): boolean {
+    return (this.state.phase === "APPLY" || this.state.phase === "DONE") && this.lessonsPending() && this.lessonStalled >= 2;
+  }
+
+  // ------------------------------------------------------------------ exceptions to the rules
+  //
+  // A member asks for an exception in its result (`governance.exception`). agentduo records the request for the work of that
+  // call (rule-governance.ts), and that work waits: its jobs do not start (board.ts), a result already given is not used, and
+  // no answer, merge, acceptance or apply goes past it. The PM who answers for the work assesses the request (a group's own PM
+  // may refuse or pass it up; only the head PM proposes it to the user, or asks the user what it cannot tell). The user's
+  // answer to the very request that showed the proposal is the only thing that approves it; the member is told only after
+  // the request, the assessment and the decision are saved.
+
+  /**
+   * What the exception a member asks for comes to: what is wrong with it (it is retried with that), or that it can be recorded and
+   * will hold the work (`holds`: its result is not used, so the checks of a completed result are not made), or neither (none asked,
+   * or one already decided and delivered: the result is judged as any other).
+   */
+  private exceptionVerdict(m: Member, work: WorkRef | null, data: unknown, rules: readonly RuleEntry[]): { problems: string[]; holds: boolean } {
+    const asked = (data as { governance?: GovernanceReport | null }).governance?.exception ?? null;
+    if (!asked || m.kind === "pm") return { problems: [], holds: false };
+    if (!work) return { problems: ["no exception can be asked for in this call: leave governance.exception null and do only what the rules allow"], holds: false };
+    // Tried on a copy: the request is recorded once the answer is accepted.
+    const trial: GovernedState = { ...this.state, governance: structuredClone(this.state.governance) };
+    const made = requestException(trial, {
+      from: m.name, ruleIds: asked.rule_ids, reason: asked.reason, alternative: asked.alternative, work, known: new Set(rules.map((r) => r.id)),
+    });
+    return made.ok
+      ? { problems: [], holds: holdsWork(made.value) }
+      : { problems: [`${made.reason}; if no exception is possible, leave governance.exception null and do only what the rules allow`], holds: false };
+  }
+
+  /** Records a member's request for an exception and stops its call's result there (Held); the same request again changes nothing. */
+  private holdForException(m: Member, work: WorkRef | null, report: GovernanceReport | null, rules: readonly RuleEntry[]): void {
+    const asked = report?.exception;
+    if (!asked || m.kind === "pm" || !work) return;
+    const made = requestException(this.state, {
+      from: m.name, ruleIds: asked.rule_ids, reason: asked.reason, alternative: asked.alternative, work, known: new Set(rules.map((r) => r.id)),
+    });
+    // Not recorded: the result is not used either (it asked for something that is not a result).
+    if (!made.ok) throw new Error(`the exception request was not recorded: ${made.reason}`);
+    const ex = made.value;
+    // Decided and delivered before (the member asks for what it was already given or refused): the result stands as it is.
+    if (!holdsWork(ex)) return;
+    if (made.changed) this.routeException(ex);
+    this.save();
+    throw new Held();
+  }
+
+  /** The PM who answers for the work of a request: the group's own PM when its work is a group's and the group has one, else the head PM. */
+  private exceptionOwner(ex: RuleException): Member {
+    const taskId = ex.requested.taskIds[0];
+    const unit = ex.requested.unit;
+    const group = taskId ? this.state.tasks.find((t) => t.id === taskId)?.group ?? null : unit?.kind === "planning" && unit.id.startsWith("group:") ? unit.id.slice("group:".length) : null;
+    return (group === null ? null : this.groups.find((g) => g.name === group)?.pm) ?? this.head;
+  }
+
+  /** A new request is announced in the run's reports, and sent to its group's PM first when there is one (the head PM otherwise sees it at once). */
+  private routeException(ex: RuleException): void {
+    const s = this.state;
+    const scope = scopeWords(ex.requested, s.tasks);
+    this.report("agentduo", `${ex.from} asks for an exception to ${ex.ruleIds.join(", ")} for ${scope}. That work waits for the user's decision.`);
+    this.logException(ex, `${ex.from} asked for an exception to ${ex.ruleIds.join(", ")} (${ex.id}): ${ex.reason}; the task waits for the decision`);
+    const owner = this.exceptionOwner(ex);
+    if (owner.name === this.head.name) return;
+    const unit = ex.requested.unit;
+    s.escalations.push({
+      id: `${ex.id}-E1`, task: ex.requested.taskIds.length === 1 ? ex.requested.taskIds[0]! : null,
+      ...(unit?.kind === "planning" ? { group: unit.id.slice("group:".length) } : {}), reason: "rule_exception", exceptionId: ex.id, to: owner.name, told: false, answer: null,
+      text: `${ex.from} asks for an exception to the team's rules ${ex.ruleIds.join(", ")} for ${scope} (${ex.id}).\nReason: ${ex.reason}` +
+        `${ex.alternative ? `\nInstead it would: ${ex.alternative}` : ""}\nThe work waits. Refuse it yourself (team_answer: say why the rules stand), or pass it up (escalate) ` +
+        `so that ${this.head.name} can propose it to the user. You never approve it.`,
+    });
+  }
+
+  /** A line in the history of the task a request is about (and the screen's view of it). */
+  private logException(ex: RuleException, text: string): void {
+    for (const id of ex.requested.taskIds) {
+      const t = this.state.tasks.find((x) => x.id === id);
+      if (!t) continue;
+      this.log(t, text);
+      this.emitTask(t);
+    }
+  }
+
+  /** Requests that wait for the head PM's assessment: not with a group's PM, who answers or passes them up first. */
+  private exceptionsToAssess(): RuleException[] {
+    const s = this.state;
+    return governanceWork(s).assess.filter((ex) => !s.escalations.some((e) => e.exceptionId === ex.id && e.answer === null && e.to !== this.head.name));
+  }
+
+  /** The head PM took the request (proposed, declined or asked about it): what a group's PM was holding for it is closed. */
+  private closeExceptionEscalations(id: string, note: string): void {
+    for (const e of this.state.escalations) if (e.exceptionId === id && e.answer === null) e.answer = note;
+  }
+
+  /** A group's own PM answers a request for an exception: the rules stand. It grants nothing and cannot approve; the member is told once it is saved. */
+  private refuseByGroupPm(e: Escalation, answer: string): void {
+    const ex = this.state.governance.exceptions.find((x) => x.id === e.exceptionId);
+    e.answer = answer;
+    if (!ex) return;
+    const made = declineException(this.state, ex.id);
+    if (!made.ok) {
+      this.o.bus.emit({ type: "warning", text: `${e.to}'s refusal of ${ex.id} was not recorded: ${made.reason}` });
+      return;
+    }
+    this.logException(ex, `${e.to} refused the exception ${ex.id}: ${answer}`);
+  }
+
+  /** The tasks and units an unanswered request or question holds, as `heldTaskIds` and `unitHeld` read them. */
+  private heldRunUnit(): boolean {
+    return (["integration", "apply", "acceptance"] as const).some((kind) => unitHeld(this.state, { kind, id: RUN_UNIT }));
+  }
+
+  /** Whether the work behind a question to the PM waits for a decision about an exception: no answer of the PM's releases it. */
+  private escalationHeld(e: Escalation): boolean {
+    if (e.exceptionId) return false;
+    const s = this.state;
+    if (e.task) return heldTaskIds(s).has(e.task);
+    if (e.reason === "planning") return unitHeld(s, planningUnit(e.group ?? null));
+    return unitHeld(s, { kind: "integration", id: RUN_UNIT }) || unitHeld(s, { kind: "apply", id: RUN_UNIT });
+  }
+
+  private rulesKnown(): Set<string> {
+    return new Set(this.rulesStore().rules().map((r) => r.id));
+  }
+
+  private pmProposal(a: Extract<PmOutput["action"], { kind: "exception_proposal" }>): void {
+    const made = assessException(this.state, a.exception_id, {
+      by: this.head.name, ruleIds: a.rule_ids, reason: a.reason, alternative: a.alternative, taskIds: a.task_ids, unit: a.unit, summary: a.summary, known: this.rulesKnown(),
+    });
+    if (!made.ok) {
+      this.o.bus.emit({ type: "warning", text: `The PM's proposal for ${a.exception_id} was not recorded: ${made.reason}` });
+      return;
+    }
+    this.closeExceptionEscalations(a.exception_id, `${this.head.name} proposed it to the user`);
+    this.logException(made.value, `${this.head.name} assessed the exception ${a.exception_id}; it goes to the user`);
+    this.save();
+  }
+
+  private pmDecline(a: Extract<PmOutput["action"], { kind: "exception_decline" }>): void {
+    const made = declineException(this.state, a.exception_id);
+    if (!made.ok) {
+      this.o.bus.emit({ type: "warning", text: `The PM's refusal of ${a.exception_id} was not recorded: ${made.reason}` });
+      return;
+    }
+    this.closeExceptionEscalations(a.exception_id, `${this.head.name} declined it: ${a.reason}`);
+    this.logException(made.value, `${this.head.name} declined the exception ${a.exception_id}: ${a.reason}`);
+    this.save();
+  }
+
+  /**
+   * The work that waits for the user's answer about an incident: its source's task, or for what had none the unit it was about (the
+   * escalation's group planning, the integration, the apply; a plan's group). Null when nothing is running there now: nothing waits.
+   */
+  private incidentWork(id: string): WorkRef | null {
+    const s = this.state;
+    const i = s.governance.incidents.find((x) => x.id === id);
+    if (!i) return null;
+    const src = i.source;
+    let ref: WorkRef | null = null;
+    if (src.kind === "escalation") {
+      const e = s.escalations.find((x) => x.id === src.escalationId);
+      if (e) ref = e.task ? { task: e.task } : e.reason === "planning" ? planningWork(e.group ?? null) : e.reason === "merge_conflict" ? applyWork() : integrationWork();
+    } else if ("task" in src && src.task) ref = { task: src.task };
+    else if (src.kind === "member_report") {
+      const plan = /^plan:(.*):v\d+$/.exec(src.occurrence);
+      if (src.occurrence.startsWith("integration:")) ref = integrationWork();
+      else if (plan) ref = planningWork(plan[1] === "" ? null : plan[1]!);
+    }
+    return ref && callScope(s, ref).ok ? ref : null;
+  }
+
+  /** The PM cannot decide and asks the user (through the broker): the work that depends on it waits, and the answer is information, never an approval. */
+  private pmRuleQuestion(a: Extract<PmOutput["action"], { kind: "rule_question" }>): void {
+    const parsed = parseQuestions(a.questions.map((q) => ({ header: q.header, question: q.question, multiSelect: q.multi_select, options: q.options })));
+    if ("error" in parsed) return;
+    const request = this.request("direction", parsed.questions);
+    ledgerOpen(this.state.clarifications, request);
+    const target = a.exception_id !== null ? { exceptionId: a.exception_id } : { incidentId: a.incident_id! };
+    const asked = askDirection(this.state, target, request.id, a.exception_id === null ? this.incidentWork(a.incident_id!) : undefined);
+    if (!asked.ok) {
+      ledgerClose(this.state.clarifications, request.id, "cancelled", nowIso(), request.callId);
+      this.o.bus.emit({ type: "warning", text: `The PM's question about the rules was not asked: ${asked.reason}` });
+      return;
+    }
+    if (a.exception_id !== null) this.closeExceptionEscalations(a.exception_id, `${this.head.name} asked the user`);
+    this.save();
+    this.listen(request, (response) => this.directionAnswered(request, response));
+  }
+
+  /**
+   * A request about the rules the user closed without answering is put off like one they deferred: it stays pending, as it was
+   * (the same request, the same words), and the run asks it again when it is reopened. Nothing is decided by it.
+   */
+  private putOff(request: ClarificationRequest): void {
+    this.deferred.add(request.id);
+    this.o.bus.emit({ type: "clarification.closed", id: request.id, callId: request.callId, status: "deferred" });
+    this.save();
+  }
+
+  private directionAnswered(request: ClarificationRequest, response: ClarificationResponse): void {
+    const s = this.state;
+    if (response.kind !== "answered") return this.putOff(request);
+    if (!ledgerAnswer(s.clarifications, request.id, request.callId, response.answers, nowIso())) {
+      this.deferred.add(request.id);
+      return;
+    }
+    this.o.bus.emit({ type: "clarification.answered", id: request.id, callId: request.callId, answers: response.answers });
+    // The answer is the PM's information: it decides nothing and approves nothing.
+    const made = answerDirection(s, request.id, answersText(request.questions, response.answers));
+    if (!made.ok) this.o.bus.emit({ type: "warning", text: `The user's answer was not recorded: ${made.reason}` });
+    this.save();
+  }
+
+  private proposalProblems(a: Extract<PmOutput["action"], { kind: "exception_proposal" }>): string[] {
+    const waiting = this.exceptionsToAssess();
+    if (!waiting.some((x) => x.id === a.exception_id)) return [`'${a.exception_id}' is not an exception request waiting for you (${waiting.map((x) => x.id).join(", ") || "none"})`];
+    const trial: GovernedState = { ...this.state, governance: structuredClone(this.state.governance) };
+    const made = assessException(trial, a.exception_id, {
+      by: this.head.name, ruleIds: a.rule_ids, reason: a.reason, alternative: a.alternative, taskIds: a.task_ids, unit: a.unit, summary: a.summary, known: this.rulesKnown(),
+    });
+    return made.ok ? [] : [made.reason];
+  }
+
+  private declineProblems(a: Extract<PmOutput["action"], { kind: "exception_decline" }>): string[] {
+    const waiting = this.exceptionsToAssess();
+    if (!waiting.some((x) => x.id === a.exception_id)) return [`'${a.exception_id}' is not an exception request waiting for you (${waiting.map((x) => x.id).join(", ") || "none"})`];
+    return a.reason.trim() ? [] : ["say why the rules stand, for the member who asked"];
+  }
+
+  private questionProblems(a: Extract<PmOutput["action"], { kind: "rule_question" }>): string[] {
+    if ((a.exception_id === null) === (a.incident_id === null)) return ["ask about one thing: an exception request (exception_id) or an incident (incident_id), the other null"];
+    const parsed = parseQuestions(a.questions.map((q) => ({ header: q.header, question: q.question, multiSelect: q.multi_select, options: q.options })));
+    if ("error" in parsed) return [`your questions cannot be shown: ${parsed.error}`];
+    if (a.exception_id !== null && !this.exceptionsToAssess().some((x) => x.id === a.exception_id)) return [`'${a.exception_id}' is not an exception request waiting for you`];
+    if (a.incident_id !== null && !governanceWork(this.state).lessons.some((i) => i.id === a.incident_id && i.status === "resolved")) return [`'${a.incident_id}' is not a settled incident waiting for you`];
+    const trial: GovernedState = { ...this.state, governance: structuredClone(this.state.governance) };
+    const made = askDirection(trial, a.exception_id !== null ? { exceptionId: a.exception_id } : { incidentId: a.incident_id! }, "trial", a.exception_id === null ? this.incidentWork(a.incident_id!) : undefined);
+    return made.ok ? [] : [made.reason];
+  }
+
+  /** What the user reads when an assessed request is shown: the rules, the reason, the alternative and the work it covers, to approve or refuse. */
+  private exceptionQuestion(ex: RuleException): ClarificationQuestion {
+    const a = ex.assessment!;
+    const rules = this.rulesStore().rules();
+    const named = a.ruleIds.map((id) => { const r = rules.find((x) => x.id === id); return r ? `${id} (${r.text})` : id; }).join("; ");
+    return {
+      id: "decision", header: "Exception", multiSelect: false,
+      question: `${ex.from} asks to depart from ${named} for ${scopeWords(a.scope, this.state.tasks)} only.\nReason: ${a.reason}\nInstead: ${a.alternative}\n${a.summary}\n` +
+        "Approve this exception for that work only? The rules stay in force everywhere else, and refusing keeps the work under the rules as written.",
+      options: [
+        { id: APPROVE_OPTION, label: "Approve for this work only", description: "The team departs from the rules as proposed, for that work and nothing else" },
+        { id: REJECT_OPTION, label: "Refuse", description: "The rules stand; the work goes on as the rules say" },
+      ],
+    };
+  }
+
+  /** Shows the proposals the PM assessed and the user has not seen yet. Saved before the user is asked; true when it showed one. */
+  private presentAssessed(): boolean {
+    const ex = governanceWork(this.state).present[0];
+    if (!ex) return false;
+    const request = this.request("exception", [this.exceptionQuestion(ex)]);
+    ledgerOpen(this.state.clarifications, request);
+    const shown = presentException(this.state, ex.id, request.id);
+    if (!shown.ok) {
+      ledgerClose(this.state.clarifications, request.id, "cancelled", nowIso(), request.callId);
+      throw new Error(`the exception ${ex.id} could not be shown to the user: ${shown.reason}`);
+    }
+    this.save();
+    this.listen(request, (response) => this.exceptionAnswered(request, response));
+    return true;
+  }
+
+  /** The user's response to a request that showed an exception. Only the approve or the refuse option decides; anything else is words for the PM. */
+  private exceptionAnswered(request: ClarificationRequest, response: ClarificationResponse): void {
+    const s = this.state;
+    if (response.kind !== "answered") return this.putOff(request);
+    // A request that is closed already (a replaced one, a repeated answer) is refused by the ledger: it decides nothing.
+    if (!ledgerAnswer(s.clarifications, request.id, request.callId, response.answers, nowIso())) {
+      this.deferred.add(request.id);
+      return;
+    }
+    this.o.bus.emit({ type: "clarification.answered", id: request.id, callId: request.callId, answers: response.answers });
+    const answer = response.answers[0]!;
+    const verdict = decisionFromAnswer(answer);
+    const ex = s.governance.exceptions.find((x) => x.decision?.requestId === request.id);
+    if (verdict === null) {
+      if (!ex) return;
+      // Words, or no clear choice: guidance for the PM, never an approval. The same proposal is shown again under a new request.
+      this.userWords(`(about exception ${ex.id}) ${answer.otherText?.trim() || "No decision yet."}`);
+      this.askExceptionAgain(ex);
+      return;
+    }
+    const decided = decideException(s, { requestId: request.id, source: "user", approved: verdict === "approved" });
+    if (!decided.ok) {
+      this.o.bus.emit({ type: "warning", text: `The user's answer decides nothing: ${decided.reason}` });
+      this.save();
+      return;
+    }
+    this.logException(decided.value, `the user ${verdict === "approved" ? "approved" : "refused"} the exception ${decided.value.id}`);
+    this.save();
+  }
+
+  /** A shown request nobody decided (closed unanswered, or answered in words) is shown again, under a new id; the old id decides nothing. */
+  private askExceptionAgain(ex: RuleException): void {
+    const old = ex.decision!.requestId!;
+    const request = this.request("exception", [this.exceptionQuestion(ex)]);
+    ledgerOpen(this.state.clarifications, request);
+    const moved = repointRequest(this.state, old, request.id);
+    if (!moved.ok) {
+      ledgerClose(this.state.clarifications, request.id, "cancelled", nowIso(), request.callId);
+      this.o.bus.emit({ type: "warning", text: `The exception ${ex.id} could not be asked again: ${moved.reason}` });
+      return;
+    }
+    ledgerClose(this.state.clarifications, old, "cancelled", nowIso());
+    this.save();
+    this.listen(request, (response) => this.exceptionAnswered(request, response));
+  }
+
+  /** Asks again the requests about the rules that nobody answered (a reopened run): the same request when it is still pending, a new one otherwise. */
+  private reopenGovernance(): void {
+    const s = this.state;
+    const work = governanceWork(s);
+    const free = (id: string) => !this.open.has(id) && !this.deferred.has(id) && !this.announced.has(id);
+    for (const ex of work.pending) {
+      const id = ex.decision!.requestId!;
+      if (!free(id)) continue;
+      const entry = s.clarifications.find((c) => c.id === id);
+      if (entry?.status === "pending") {
+        const { seq: _seq, status: _status, ...request } = entry;
+        this.listen(request, (response) => this.exceptionAnswered(request, response));
+      } else if (this.o.decider) this.askExceptionAgain(ex);
+    }
+    for (const q of work.questions) {
+      if (!free(q.requestId)) continue;
+      const entry = s.clarifications.find((c) => c.id === q.requestId);
+      if (!entry) continue;
+      if (entry.status === "pending") {
+        const { seq: _seq, status: _status, ...request } = entry;
+        this.listen(request, (response) => this.directionAnswered(request, response));
+        continue;
+      }
+      if (!this.o.decider) continue;
+      const request = this.request("direction", entry.questions);
+      ledgerOpen(s.clarifications, request);
+      if (!repointRequest(s, q.requestId, request.id).ok) {
+        ledgerClose(s.clarifications, request.id, "cancelled", nowIso(), request.callId);
+        continue;
+      }
+      this.save();
+      this.listen(request, (response) => this.directionAnswered(request, response));
+    }
+  }
+
+  /** Releases decided requests to the work they held: the member's next prompt carries the decision. Saved before the work wakes. */
+  private deliverDecisions(): boolean {
+    let changed = false;
+    for (const ex of governanceWork(this.state).undelivered) {
+      const done = deliverDecision(this.state, ex.id);
+      if (!done.ok || !done.changed) continue;
+      changed = true;
+      const approved = ex.decision!.status === "approved";
+      const text = approved
+        ? `The user approved the exception ${ex.id} (${ex.assessment!.ruleIds.join(", ")}) for ${scopeWords(ex.assessment!.scope, this.state.tasks)} only; the rules stand everywhere else.`
+        : `${ex.decision!.by === "pm" ? "The PM declined" : "The user refused"} the exception ${ex.id}; the work goes on under the rules as written.`;
+      this.report("agentduo", text);
+      this.logException(ex, text);
+    }
+    if (changed) this.save();
+    return changed;
   }
 
   /** The files the user attached to the request and to messages since, oldest first: every member is given them. */
@@ -1018,7 +1728,8 @@ export class TeamRun {
   }
 
   private parts(m: Member) {
-    return { member: m, members: this.members, state: this.state };
+    if (!this.promptRules) throw new Error("a prompt is built inside a call, which reads the team's rules first");
+    return { member: m, members: this.members, state: this.state, rules: this.promptRules };
   }
 
   private brief(): Brief {
@@ -1034,10 +1745,14 @@ export class TeamRun {
     const messagesNow = s.messages.length;
     const reports = s.reports.slice(s.reportsSeen);
     const reportsNow = s.reports.length;
-    const open = s.escalations.filter((e) => e.answer === null && e.to === pm.name);
+    const open = s.escalations.filter((e) => e.answer === null && e.to === pm.name && !e.exceptionId && !this.escalationHeld(e));
     const set = this.planSet() ?? [];
     const shown = occasion.kind === "plan_review" ? set : this.approvedSet();
     const actions = pmActions(s, occasion);
+    const owedBefore = this.lessonsOwedNow();
+    // A lesson turn answers every incident owed now (the prompt lists them all), so that one turn learns from all of them.
+    const due = occasion.kind === "rule_lesson" ? this.lessonsDue().map((i) => i.id) : [];
+    if (occasion.kind === "rule_lesson") this.lessonsOwedSince = null;
     let cwd = this.o.workspace;
     if (s.base) {
       const tg = await this.teamGit();
@@ -1046,7 +1761,7 @@ export class TeamRun {
     const out = await this.call<PmOutput>(pm, "pm", "team_pm", (identity) => pmPrompt({
       ...this.parts(pm), identity, occasion, seenMessages: identity ? 0 : seenMessages, reports, openEscalations: open, groups: this.groups, plans: shown,
       areas: currentAreas(s),
-    }), { task: null, cwd, check: (d) => this.pmProblems(d, actions, open) });
+    }), { task: null, cwd, check: (d) => this.pmProblems(d, actions, open, due) });
     s.pmSeen = Math.max(s.pmSeen, messagesNow);
     s.reportsSeen = Math.max(s.reportsSeen, reportsNow);
     if (reports.length) s.lastReportAt = nowIso();
@@ -1078,6 +1793,7 @@ export class TeamRun {
             p.declined = true;
             p.pmApproved = false;
             s.planFeedback[groupKey(p.group)] = `The PM sent it back:\n${mine.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
+            this.planSentBack(pm, p, mine.map((i) => i.issue));
           }
         }
         break;
@@ -1099,6 +1815,10 @@ export class TeamRun {
         } else s.leadNotes.push({ group: a.group, text: a.note });
         break;
       case "team_answer": this.answerEscalation(a.question_id, a.answer); break;
+      case "rule_lesson": this.pmLessons(a.lessons); break;
+      case "exception_proposal": this.pmProposal(a); break;
+      case "exception_decline": this.pmDecline(a); break;
+      case "rule_question": this.pmRuleQuestion(a); break;
       case "acceptance":
         s.acceptance = { criteria: a.criteria, summary: a.summary };
         this.document("acceptance", "Acceptance report", [a.summary, ...a.criteria.map((c) => `- ${c.id}: ${c.status} — ${c.evidence}`)].join("\n"));
@@ -1106,10 +1826,14 @@ export class TeamRun {
       default:
         break;
     }
+    if (occasion.kind === "rule_lesson") {
+      this.lessonStalled = this.lessonsOwedNow() < owedBefore ? 0 : this.lessonStalled + 1;
+    }
     this.save();
   }
 
-  private pmProblems(d: PmOutput, actions: string[], open: Escalation[]): string[] {
+  /** What is wrong with the PM's answer; `due`: the incidents its lesson turn must answer (those it was shown that wait for nothing). */
+  private pmProblems(d: PmOutput, actions: string[], open: Escalation[], due: readonly string[] = []): string[] {
     const a = d.action;
     if (!actions.includes(a.kind)) return [`the action '${a.kind}' is not allowed now; allowed: ${actions.join(", ")}`];
     if (a.kind === "questions") {
@@ -1140,6 +1864,10 @@ export class TeamRun {
     if (a.kind === "team_answer" && !open.some((e) => e.id === a.question_id)) {
       return [`'${a.question_id}' is not an open question of the team (${open.map((e) => e.id).join(", ") || "none"})`];
     }
+    if (a.kind === "rule_lesson") return this.lessonProblems(a.lessons, due);
+    if (a.kind === "exception_proposal") return this.proposalProblems(a);
+    if (a.kind === "exception_decline") return this.declineProblems(a);
+    if (a.kind === "rule_question") return this.questionProblems(a);
     if (a.kind === "plan_review" && a.approve && !a.summary?.trim()) return ["an approved plan needs your summary of it for the user"];
     if (a.kind === "plan_review" && !a.approve && !a.issues.length) return ["say which issues send the plan back"];
     if (a.kind === "acceptance") {
@@ -1147,6 +1875,58 @@ export class TeamRun {
       if (missing.length) return [`report every acceptance criterion of the brief; missing: ${missing.join(", ")}`];
     }
     return [];
+  }
+
+  /**
+   * What is wrong with the PM's lessons, each said for its incident: an entry that is no incident waiting for one, a rule
+   * RULES.md would refuse, another text for one being recorded, an incident answered twice, the same rule twice (it is
+   * written once: the other entry says null and names it), or an incident of `due` left out (one turn answers them all).
+   */
+  private lessonProblems(lessons: readonly LessonAnswer[], due: readonly string[]): string[] {
+    const owed = governanceWork(this.state).lessons;
+    const problems: string[] = [];
+    const answered = new Set<string>();
+    const rules = new Map<string, string>();
+    for (const a of lessons) {
+      if (answered.has(a.incident_id)) {
+        problems.push(`${a.incident_id} is answered twice: give one entry per incident`);
+        continue;
+      }
+      answered.add(a.incident_id);
+      const i = owed.find((x) => x.id === a.incident_id);
+      if (!i) {
+        problems.push(`'${a.incident_id}' is not an incident waiting for a lesson (${owed.map((x) => x.id).join(", ") || "none"})`);
+        continue;
+      }
+      const text = a.rule?.trim();
+      if (!text) {
+        if (!a.rationale.trim()) problems.push(`${i.id}: say in rationale why no new rule is needed`);
+        continue;
+      }
+      if (i.status === "recording" && i.lesson?.text !== text) {
+        problems.push(`the rule for ${i.id} is being recorded; give exactly this text: ${i.lesson?.text}`);
+        continue;
+      }
+      const problem = ruleInputProblem({ text, incident: lessonSource(this.id, i) });
+      if (problem) problems.push(`${i.id}: ${problem}`);
+      const same = rules.get(text);
+      if (same) problems.push(`${i.id} repeats the rule of ${same}: write it once, and give ${i.id} rule null with a rationale that names it`);
+      else rules.set(text, i.id);
+    }
+    const missing = due.filter((id) => !answered.has(id) && owed.some((x) => x.id === id && x.status === "resolved"));
+    if (missing.length) {
+      problems.push(`answer every settled incident in this one turn: ${missing.join(", ")} ${missing.length === 1 ? "has" : "have"} no entry ` +
+        "(rule null and why, when no new rule is needed)");
+    } else if (!lessons.length) problems.push("give a lesson for each settled incident listed");
+    return problems;
+  }
+
+  /** A PM objected to a plan: a disagreement with its techlead, settled once a later plan of the group is approved. */
+  private planSentBack(pm: Member, plan: TeamPlan, issues: string[]): void {
+    this.note({
+      kind: "disagreement", source: { kind: "member_report", member: pm.name, task: null, occurrence: `plan:${groupKey(plan.group)}:v${plan.version}` }, reportedBy: pm.name,
+      summary: `${pm.name} sent ${plan.group ? `group ${plan.group}'s ` : "the "}plan v${plan.version} back: ${issues.join("; ")}`,
+    });
   }
 
   private newBrief(b: Omit<Brief, "version">): void {
@@ -1182,7 +1962,15 @@ export class TeamRun {
     const s = this.state;
     const e = s.escalations.find((x) => x.id === id);
     if (!e || e.answer !== null) return;
+    // A request for an exception is not a question that an answer settles: its PM refuses it (the rules stand), nothing more.
+    if (e.exceptionId) return this.refuseByGroupPm(e, answer);
+    // The work behind an exception request that waits is not released by an answer to something else.
+    if (this.escalationHeld(e)) return;
     e.answer = answer;
+    // What the PM had to settle because the team could not (planning, fixes or the integration that did not converge) is an incident to learn from.
+    if (e.reason === "planning" || e.reason === "review_stalled" || e.reason === "task_limit" || e.reason === "integration_limit") {
+      this.note({ kind: e.reason === "planning" ? "disagreement" : "deviation", source: { kind: "escalation", escalationId: e.id }, reportedBy: "agentduo", summary: e.text });
+    }
     // The jobs that failed on it may run again: the answer is something new.
     for (const key of [...this.failures.keys()]) if (!e.task || key.endsWith(`:${e.task}`)) this.failures.delete(key);
     if (e.task) {
@@ -1229,7 +2017,7 @@ export class TeamRun {
   private async areaTurn(g: TeamGroup, occasion: PmOccasion): Promise<void> {
     const s = this.state;
     const pm = g.pm!;
-    const open = s.escalations.filter((e) => e.answer === null && e.to === pm.name);
+    const open = s.escalations.filter((e) => e.answer === null && e.to === pm.name && !this.escalationHeld(e));
     const plan = latestPlan(s, g.name);
     const area = currentAreas(s).find((a) => a.group === g.name) ?? null;
     const actions = pmActions(s, occasion);
@@ -1257,6 +2045,7 @@ export class TeamRun {
       if (!a.approve) {
         plan.declined = true;
         s.planFeedback[groupKey(g.name)] = `${pm.name} (your group's PM) sent it back:\n${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
+        this.planSentBack(pm, plan, a.issues.map((i) => i.issue));
       }
       this.report(pm.name, a.approve ? `${g.name}'s plan v${plan.version} is right for its part` : `${g.name}'s plan v${plan.version} goes back to ${g.lead.name}`);
     } else if (a.kind === "team_answer") this.answerEscalation(a.question_id, a.answer);
@@ -1292,7 +2081,7 @@ export class TeamRun {
       ...this.parts(techlead), identity, brief, feedback: s.planFeedback[key] ?? null, previous, existing: additions ? existing : [], additions,
       area: this.grouped ? area : null, group: this.grouped ? g : null,
     }), {
-      task: null, cwd, check: (d) => planProblems(d.tasks, [...g.members, techlead], brief, additions ? s.tasks : [], required),
+      task: null, cwd, work: planningWork(g.name), check: (d) => planProblems(d.tasks, [...g.members, techlead], brief, additions ? s.tasks : [], required),
     });
     s.planningRounds += 1;
     const version = s.plans.filter((p) => p.group === g.name).reduce((n, p) => Math.max(n, p.version), 0) + 1;
@@ -1422,7 +2211,7 @@ export class TeamRun {
     const out = await this.call<TriageOutput>(techlead, "integration-triage", "team_triage", (identity) => integrationTriagePrompt({
       ...this.parts(techlead), identity, brief, trouble: ig.trouble ?? "", checks,
     }), {
-      task: null, cwd, check: (d) => {
+      task: null, cwd, work: integrationWork(), check: (d) => {
         if (d.action === "escalate") return d.question?.trim() ? [] : ["escalate needs the question for the PM"];
         if (d.action !== "add_tasks") return ["add the tasks that fix it (add_tasks), or escalate"];
         return planProblems(d.tasks, [...g.members, techlead], brief, s.tasks, null);
@@ -1458,7 +2247,7 @@ export class TeamRun {
     const head = await tg.integrationHead();
     const files = await tg.startResolve(techlead.name, conflict.ours);
     const cwd = await tg.cwd(techlead.name);
-    await this.call<WorkOutput>(techlead, "resolve", "team_work", (identity) => resolvePrompt({ ...this.parts(techlead), identity, task: null, brief: this.brief(), cwd, files }), { task: null, cwd });
+    await this.call<WorkOutput>(techlead, "resolve", "team_work", (identity) => resolvePrompt({ ...this.parts(techlead), identity, task: null, brief: this.brief(), cwd, files }), { task: null, cwd, work: applyWork() });
     const done = await tg.finishResolve(techlead.name, conflict.ours, head, `agentduo team ${this.id}: the workspace's changes merged`);
     if ("problem" in done) {
       s.applyConflict!.resolving = false;
@@ -1549,6 +2338,10 @@ export class TeamRun {
       t.review = { reviewer: m.name, verdict: "changes", summary: out.summary, findings: out.findings };
       t.reviewRound += 1;
       this.log(t, `${m.name} asks for changes: ${blockers.map((f) => f.title).join("; ")}`);
+      this.note({
+        kind: "disagreement", source: { kind: "review", task: t.id, occurrence: `a${t.attempt}r${t.reviewRound}` }, reportedBy: m.name,
+        summary: `${m.name} asked for changes to ${t.id} (${t.title}) by ${t.assignee}: ${blockers.map((f) => f.title).join("; ")}`,
+      });
       if (t.reviewRound >= this.o.cfg.team.limits.max_review_rounds) {
         t.status = "triage";
         t.trouble = `the review still asks for changes after ${t.reviewRound} round(s): ${blockers.map((f) => f.title).join("; ")}`;
@@ -1592,7 +2385,7 @@ export class TeamRun {
     const tg = await this.teamGit();
     const cwd = await tg.checkout(m.name, commit);
     const out = await this.call<CheckOutput>(m, "integration-check", "team_check", (identity) => integrationCheckPrompt({ ...this.parts(m), identity, brief: this.brief(), cwd }), {
-      task: null, cwd, check: (d) => (d.verdict === "fail" && !d.failures.length ? ["a failing check lists its failures"] : []),
+      task: null, cwd, work: integrationWork(), check: (d) => (d.verdict === "fail" && !d.failures.length ? ["a failing check lists its failures"] : []),
     });
     if (s.integration?.commit !== commit) return;
     s.integration.checks = s.integration.checks.filter((c) => c.by !== m.name);
@@ -1637,7 +2430,7 @@ export class TeamRun {
 
   private async mergeTask(id: string): Promise<void> {
     const t = this.task(id);
-    if (t.status !== "merging" || !t.candidate) return;
+    if (t.status !== "merging" || !t.candidate || heldTaskIds(this.state).has(t.id)) return;
     const tg = await this.teamGit();
     const extras = t.checks.map((c) => c.commit).filter((c): c is string => !!c);
     const whole = await tg.merge([t.candidate, ...extras], `agentduo team ${this.id}: ${t.id} with the tests added while checking`);
@@ -1677,7 +2470,8 @@ export function teamStatusText(state: TeamState): string {
   const cost = u.costUsd ? `$${u.costUsd.toFixed(2)}` : "";
   const waiting = state.waiting
     ? ` (waiting for your ${state.waiting.kind === "apply_conflict" ? "decision on conflicts" : `approval of the ${state.waiting.kind}`})` : "";
-  const lines = [`Team ${state.id} — ${state.phase}${waiting} · ${u.calls} call(s)${cost ? ` · ${cost}` : ""}${u.tokens ? ` · ${Math.round(u.tokens / 1000)}k tok` : ""}`];
+  const exceptions = (state.governance?.exceptions ?? []).filter((e) => e.decision?.status === "pending").length;
+  const lines = [`Team ${state.id} — ${state.phase}${waiting}${exceptions ? ` (${exceptions} exception request(s) wait for your decision)` : ""} · ${u.calls} call(s)${cost ? ` · ${cost}` : ""}${u.tokens ? ` · ${Math.round(u.tokens / 1000)}k tok` : ""}`];
   for (const t of state.tasks) lines.push(`  ${t.id} ${t.title} — ${t.assignee}, ${TASK_WORDS[t.status]}${t.attempt > 1 ? ` (attempt ${t.attempt})` : ""}`);
   if (!state.tasks.length) lines.push(state.phase === "INTAKE" ? "  The PM is working out what you need." : "  No task yet.");
   return lines.join("\n");
@@ -1693,6 +2487,11 @@ export function teamRosterText(members: Member[]): string {
 export function resumableTeam(runsDir: string): TeamState | null {
   const latest = TeamStore.list(runsDir).at(-1);
   return latest && latest.phase !== "DONE" && latest.phase !== "ABORTED" ? latest : null;
+}
+
+/** The latest team run conversation `conversationId` started that is not over, or null. */
+export function conversationTeam(runsDir: string, conversationId: string): TeamState | null {
+  return TeamStore.list(runsDir).filter((s) => s.conversationId === conversationId && s.phase !== "DONE" && s.phase !== "ABORTED").at(-1) ?? null;
 }
 
 /**

@@ -4,7 +4,7 @@
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { userConfigPath } from "@agentduo/engine/config/config";
-import { configFiles, filesConfiguration, teamMembersSource, updateTeam, type ConfigurationView } from "@agentduo/engine/config/configuration";
+import { configFiles, filesConfiguration, resetTeam, teamMembersSource, updateTeam, type ConfigurationView } from "@agentduo/engine/config/configuration";
 import {
   builtInIdentity, identityDirs, identityPath, readIdentity, resetIdentity, teamInfo, writeDefaultIdentities, writeIdentity,
 } from "@agentduo/engine/team/identity";
@@ -186,6 +186,14 @@ export class Dispatcher {
         if (!t.workspace && r.scope !== "global") throw new Error("with no project open, only the user config can be changed");
         updateTeam({ workspace: t.workspace, env: t.env, pid: process.pid }, r.scope, r.team);
         // Every live worker the file concerns reads it again (a team run already going keeps the team it started with).
+        await projects.syncConfiguration(r.scope, r.projectId);
+        const files = { workspace: t.workspace, env: t.env };
+        return teamInfo(filesConfiguration(files).team, identityDirs(t.workspace, t.env), teamMembersSource(files));
+      }
+      case "team.reset": {
+        const t = this.target(r.projectId);
+        if (!t.workspace && r.scope !== "global") throw new Error("with no project open, only the user config can be changed");
+        resetTeam({ workspace: t.workspace, env: t.env, pid: process.pid }, r.scope);
         await projects.syncConfiguration(r.scope, r.projectId);
         const files = { workspace: t.workspace, env: t.env };
         return teamInfo(filesConfiguration(files).team, identityDirs(t.workspace, t.env), teamMembersSource(files));

@@ -191,6 +191,46 @@ of a member had started with all its earlier ones (dev-1's review of another tas
 call at 44k), about a third of the run's Claude tokens. A techlead's notes from the PM are counted per session
 (`MemberSession.notes`): a fresh one gets all of its group's.
 
+## The team's rules (added 2026-11-14)
+
+A team learns from what it settled, and keeps it beyond its runs; the user grants every departure from it.
+
+- **Where.** `team.id` (default `default`, a name like a member's) names the team. Its rules are one append-only file,
+  `<data root>/team-rules/<workspaceKey>/<team id>/RULES.md` (`team/rules.ts`: `workspaceKey` is the canonical folder's
+  name and a hash of its path), outside every run, worktree and undo. `TeamRun.create` creates it (a team whose file
+  cannot be made does not start, and leaves no run) and records `state.rulesStore` (team id, workspace key), so a resumed
+  run reads the same team whatever the configuration says now. Writes take the folder's lock; a rule is a block with a
+  marker (`<!-- agentduo-rule id=R<n> op=<opId> at=… -->`), its text and its `Source:`; the same operation id adds it once
+  (`lesson:<run>:<incident>`), and whatever the file held, the user's own lines too, stays byte for byte.
+- **Every call.** `TeamRun.call` reads the rules once per call (`promptRules`); every prompt's frame carries them
+  (`rulesSection`), the full prompt, the continued one and the fresh session a lost resume falls back to alike, with the
+  decisions about exceptions for that very work (`exceptionsSection`) and how a member raises a problem
+  (`memberGovernanceGuidance`). Every member schema has `governance: { issues, exception }`.
+- **Incidents and lessons** (`team/rule-governance.ts`, pure). The flow records incidents itself: a review that asked
+  for changes and a failed check (per attempt and round), a failed check of the whole result, a PM that sent a plan back,
+  an escalation of planning or of a task or integration that did not converge (once answered), the user asking to change
+  the brief, plan or result; and a member's `governance.issues`. Each is keyed by its occurrence, so a retried turn
+  records it once. The run marks one resolved when what it was about is settled (`settledBy`: the review approved, the task
+  merged or cancelled, a later plan approved, the whole passes, the user approved), and the head PM's `rule_lesson` turn
+  appends a rule for it or says why none is needed (`rule: null`). One turn answers every incident due (`lessons`, one
+  entry each, checked against the incidents its prompt listed; the same rule twice is refused, the other entry names it):
+  in EXECUTION and INTEGRATION the turn is decided after the jobs that can start have started (`schedule`), and waits
+  while other jobs run, up to the report interval since the first was due (`lessonOwed`), so that incidents settling
+  meanwhile join it; elsewhere it is at once. A lesson is saved `recording` before RULES.md is
+  written and `recorded` after, so a stop between the two is finished on resume without the PM and never doubles the
+  rule. The apply waits for the lessons owed, and so does the end of a run already written; a PM that settles none in two
+  turns stops the run `waiting` (resume asks again).
+- **Exceptions.** A member's `governance.exception` (rules, reason, alternative) is a request for exactly the work of its
+  call (a task, or a unit: a group's planning, the integration, the apply, each with the occurrence it had); its result is
+  not used (`Held`), and every job, merge, answer, acceptance and apply of that work waits (`heldByException`,
+  `heldTaskIds`, `unitHeld`) until the decision is delivered, while other work goes on. A group's own PM refuses it or
+  passes it up (escalation `rule_exception`); the head PM declines it, asks the user (`rule_question`, whose answer is
+  information) or proposes it (`exception_proposal`: rules, reason, alternative, a scope within the request). agentduo
+  shows the proposal as a request of source `team` with the options `approve` and `reject`; only exactly one of those, in
+  answer to that very request, decides; words, a deferral, a closed request or no decider leave it pending, asked again on
+  reopening (the same request while its ledger entry is pending). Approved, it covers its scope in this run only
+  (`exceptionsFor`), the rule stays as written, and no other task or later run inherits it.
+
 ## Engine
 
 `packages/engine/src/team/`:
@@ -203,6 +243,8 @@ call at 44k), about a third of the run's Claude tokens. A techlead's notes from 
 | `scheduler.ts` | the loop that starts member calls up to `max_parallel` and applies their results |
 | `worktrees.ts` | worktrees, task refs, merges, applying to the workspace, undo |
 | `prompts.ts` | the protocol section of each turn |
+| `rules.ts` | the team's RULES.md: where it is, read, append under a lock, once per operation |
+| `rule-governance.ts` | incidents, lessons and exception requests, their scopes and decisions (pure) |
 | `team.ts` | `TeamRun`: prepare, run, the user's messages to the PM, decisions, resume |
 
 - Schemas `packages/engine/schemas/team_*.schema.json` (OpenAI-strict like the others).
@@ -235,7 +277,10 @@ call at 44k), about a third of the run's Claude tokens. A techlead's notes from 
   way. A line above the list says, in words, what the team still needs to start (per group too). With no file setting
   `team.members` (`teamMembersSource`, `TeamInfo.membersFrom`) the list starts empty and agentduo's team runs until one
   is saved; "Start from agentduo's team" fills the list with it. Saved into the user config or the project's file
-  (`team.save`, refused while the team could not start); custom roles and levels no member uses are left out. A row
+  (`team.save`, refused while the team could not start); custom roles and levels no member uses are left out. A
+project's team wins over the user config's, so saving for every project while the project has a team of its own says
+so beside the save and asks whether to remove the project's (`team.reset`, `resetTeam`): kept, the list would show the
+project's team again after the save, as if the edit were lost. A row
   opens its role's, level's and own identity texts, edited in place for every project or this project, reset to what
   they fall back to, or opened in the editor (`team.identity.*`, `team.openIdentity`; main acts only on names the saved
   team has); and the default IDENTITY.md files can be written into the project (`team.identity.defaults`). A task's

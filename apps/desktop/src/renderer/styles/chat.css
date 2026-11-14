@@ -96,6 +96,9 @@ body.agentduo-desktop .card {
 }
 body.agentduo-desktop .card.permission, body.agentduo-desktop .card.question { border-color: var(--accent-c); }
 body.agentduo-desktop .card h2 { font-size: var(--text-md); font-weight: var(--weight-medium); }
+/* A question hidden to read the conversation: its bar alone, on the card's surface, still in the accent. */
+body.agentduo-desktop .card.question.folded { padding-block: var(--space-2); }
+body.agentduo-desktop .q-waiting { color: var(--fg-muted); font-size: var(--text-sm); }
 
 /* ---------------------------------------------------------------- the composer */
 /* Raised above the chat, rounded, at the column's width; its edge darkens while you type in it. */

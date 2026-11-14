@@ -15,12 +15,14 @@ team:
     - role: dev
       level: senior
       cli: claude
+      model: sonnet
     - role: dev
       level: mid
       cli: claude
     - role: qa
-      level: mid
-      cli: claude
+      level: senior
+      cli: codex
+      model: gpt-6.1-sol
   roles:
     pm:
       kind: pm

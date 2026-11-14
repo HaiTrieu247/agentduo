@@ -295,9 +295,7 @@ function drawSidebar(): void {
       if (model.runsOpen && snapshot?.active.projectId !== CONVERSATIONS_PROJECT_ID) void loadRuns();
       drawSidebar();
     },
-    resume: (runId) => {
-      if (!chats.submit(`/resume ${runId}`)) showError("Open a conversation first.");
-    },
+    resume: (runId) => void resumeRun(runId),
     toggleAccount: () => {
       const open = !(snapshot?.prefs.accountOpen ?? true);
       void setPrefs({ accountOpen: open }).then(() => freshenUsage(USAGE_STALE_MS), showError);
@@ -373,6 +371,23 @@ async function newConversation(): Promise<void> {
   try {
     const { conversationId } = await call({ method: "conversation.new", projectId });
     await openConversation(conversationId);
+  } catch (e) {
+    showError(e);
+  }
+}
+
+/**
+ * A run of the list goes on in the conversation that started it (shown first); one with none left (a `duo run`, an
+ * older run, a deleted conversation) in a new conversation, never in the one that happens to be open.
+ */
+async function resumeRun(runId: string): Promise<void> {
+  const projectId = snapshot?.active.projectId;
+  if (!projectId || !snapshot) return;
+  try {
+    const conversationId = model.runs?.find((r) => r.id === runId)?.conversationId
+      ?? (await call({ method: "conversation.new", projectId })).conversationId;
+    if (snapshot.active.conversationId !== conversationId) setSnapshot({ ...snapshot, active: { projectId, conversationId } });
+    await chats.submitTo(projectId, conversationId, `/resume ${runId}`);
   } catch (e) {
     showError(e);
   }

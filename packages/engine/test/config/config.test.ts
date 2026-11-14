@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { configFromSaved, ConfigError, defaultConfig, loadConfig, userConfigPath, validateConfig } from "../../src/config/config.js";
 import {
-  clearConfiguration, ConfigurationError, filesConfiguration, readConfiguration, teamMembersSource, updateConfiguration, updateTeam, type ConfigurationOptions, type ConfigurationView,
+  clearConfiguration, ConfigurationError, filesConfiguration, readConfiguration, resetTeam, teamMembersSource, updateConfiguration, updateTeam, type ConfigurationOptions, type ConfigurationView,
 } from "../../src/config/configuration.js";
 import { TEAM_DEFAULTS } from "../../src/team/config.js";
 import { userConfigEnv } from "../helpers/config.js";
@@ -228,6 +228,26 @@ describe("the team in Settings", () => {
     expect(teamMembersSource(o)).toBe("global");
     updateTeam(o, "project", structuredClone(TEAM_DEFAULTS));
     expect(teamMembersSource(o)).toBe("project");
+  });
+});
+
+describe("the team in Settings: a layer's team removed", () => {
+  it("removes the project's team so the user config's holds there, keeping the file's other keys", () => {
+    const { dir, env } = setup("# mine\nteam:\n  worktree:\n    setup: [npm ci]\nlimits:\n  max_retries: 2\n");
+    const o = { workspace: dir, env };
+    const everywhere = structuredClone(TEAM_DEFAULTS);
+    everywhere.members = everywhere.members.map((m) => (m.role === "dev" ? { ...m, model: "sonnet" } : m));
+    updateTeam({ workspace: null, env }, "global", everywhere);
+    updateTeam(o, "project", structuredClone(TEAM_DEFAULTS));
+    expect(teamMembersSource(o)).toBe("project");
+    resetTeam(o, "project");
+    expect(teamMembersSource(o)).toBe("global");
+    expect(filesConfiguration(o).team.members.filter((m) => m.role === "dev").every((m) => m.model === "sonnet")).toBe(true);
+    const text = readFileSync(join(dir, ".agentduo", "config.yaml"), "utf8");
+    for (const kept of ["# mine", "max_retries: 2", "setup:"]) expect(text).toContain(kept);
+    for (const gone of ["members:", "roles:", "levels:", "max_parallel"]) expect(text).not.toContain(gone);
+    // Nothing to remove is no error.
+    resetTeam(o, "project");
   });
 });
 

@@ -84,6 +84,8 @@ export interface RunItem {
   task: string;
   phase: string;
   updatedAt: string | null;
+  /** The conversation that started it, when it is still there: resuming the run goes on in it. */
+  conversationId: string | null;
 }
 
 /** Where the app's own update is (main/updates.ts). */
@@ -224,6 +226,8 @@ export type DesktopRequest =
   | { method: "team.openIdentity"; projectId: string | null; scope: "global" | "project"; kind: TeamIdentityFile["kind"]; name: string }
   /** Saves the team (members, roles, levels, how many work at once) into the user config or the project's file. */
   | { method: "team.save"; projectId: string | null; scope: "global" | "project"; team: TeamEdit }
+  /** The team Settings saved into that file is taken out of it: the other file's (or agentduo's own) holds again. */
+  | { method: "team.reset"; projectId: string | null; scope: "global" | "project" }
   /** One identity's whole text in a scope, as it is or as it falls back (the user config's, agentduo's). */
   | { method: "team.identity.read"; projectId: string | null; scope: "global" | "project"; kind: TeamIdentityFile["kind"]; name: string }
   | { method: "team.identity.write"; projectId: string | null; scope: "global" | "project"; kind: TeamIdentityFile["kind"]; name: string; text: string }
@@ -275,6 +279,7 @@ export interface DesktopResults {
   "team.read": TeamInfo;
   "team.openIdentity": { opened: string };
   "team.save": TeamInfo;
+  "team.reset": TeamInfo;
   "team.identity.read": { text: string; source: "project" | "global" | "default" | "none" };
   "team.identity.write": { text: string; source: "project" | "global" | "default" | "none" };
   "team.identity.reset": { text: string; source: "project" | "global" | "default" | "none" };
@@ -398,7 +403,7 @@ export function parsePreferences(v: unknown): Partial<Preferences> {
 const METHODS: readonly DesktopMethod[] = [
   "app.state", "prefs.set", "project.open", "project.select", "project.forget", "project.restart", "project.runs", "conversation.new", "conversation.open",
   "conversation.select", "conversation.archive", "conversation.archived", "conversation.restore", "conversation.delete", "chat.message", "chat.draft", "run.inspect", "artifact.read", "changes.list", "changes.file", "settings.read", "settings.update",
-  "settings.clear", "settings.openFile", "team.read", "team.openIdentity", "team.save", "team.identity.read", "team.identity.write", "team.identity.reset",
+  "settings.clear", "settings.openFile", "team.read", "team.openIdentity", "team.save", "team.reset", "team.identity.read", "team.identity.write", "team.identity.reset",
   "team.identity.defaults", "folder.open", "cli.status", "cli.pick", "doctor.run", "account.usage", "diagnostics.collect", "diagnostics.export",
   "link.open", "update.check", "update.install",
 ];
@@ -557,6 +562,8 @@ export function parseDesktopRequest(v: unknown): DesktopRequest {
       return { method, projectId: projectId(o.projectId) };
     case "team.save":
       return { method, projectId: maybeProject(o.projectId), scope: oneOf(o.scope, ["global", "project"] as const, "scope"), team: teamEdit(o.team) };
+    case "team.reset":
+      return { method, projectId: maybeProject(o.projectId), scope: oneOf(o.scope, ["global", "project"] as const, "scope") };
     case "folder.open":
       return { method, projectId: maybeProject(o.projectId), folder: oneOf(o.folder, ["runs", "userData", "logs", "project"] as const, "folder") };
     case "cli.pick":

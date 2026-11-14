@@ -50,6 +50,11 @@ export interface TeamMemberEntry {
 }
 
 export interface TeamConfig {
+  /**
+   * The team's name for what it keeps across runs (its RULES.md, `team/rules.ts`): one workspace's teams with the same id
+   * share it, so a team's rules outlive its runs and its members. Default `default`; a name like a member's.
+   */
+  id?: string;
   /** Lowest first: the order ranks them. */
   levels: Record<string, TeamLevel>;
   roles: Record<string, TeamRole>;
@@ -69,7 +74,11 @@ export interface TeamConfig {
   worktree: { setup: string[]; link: string[] };
 }
 
+/** The id of a team that names none. */
+export const DEFAULT_TEAM_ID = "default";
+
 export const TEAM_DEFAULTS: TeamConfig = {
+  id: DEFAULT_TEAM_ID,
   levels: {
     junior: { can_review: false, claude: { model: "sonnet", effort: "low" }, codex: { effort: "low" } },
     mid: { can_review: false, claude: { model: "sonnet", effort: "medium" }, codex: { effort: "medium" } },
@@ -92,6 +101,9 @@ export const TEAM_DEFAULTS: TeamConfig = {
   limits: { max_review_rounds: 3, max_task_attempts: 3 },
   worktree: { setup: [], link: [] },
 };
+
+/** The team's id: `team.id`, else `default`. */
+export const teamId = (team: Pick<TeamConfig, "id">): string => team.id ?? DEFAULT_TEAM_ID;
 
 /** A member of a team as a run knows it. */
 export interface Member {
@@ -238,6 +250,7 @@ export function teamConfigErrors(raw: unknown): string[] {
   if (!isPlainObject(raw)) return ["team must be a mapping"];
   const team = raw as unknown as TeamConfig;
   const errors: string[] = [];
+  if (team.id !== undefined && (typeof team.id !== "string" || !NAME.test(team.id))) errors.push(`team.id ${describeName}`);
   const levels = isPlainObject(team.levels) ? Object.keys(team.levels) : [];
   if (!isPlainObject(team.levels) || !levels.length) errors.push("team.levels must be a mapping of at least one level");
   else {

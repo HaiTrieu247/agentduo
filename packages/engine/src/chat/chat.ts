@@ -27,7 +27,7 @@ import type {
 import { formatCost, formatTokens, modelText, usageReportText } from "../format.js";
 import { teamConfigErrors, teamMembers } from "../team/config.js";
 import { TeamStore } from "../team/state.js";
-import { resumableTeam, TeamRun, teamRosterText, teamStatusText, undoTeam, type TeamOutcome } from "../team/team.js";
+import { conversationTeam, resumableTeam, TeamRun, teamRosterText, teamStatusText, undoTeam, type TeamOutcome } from "../team/team.js";
 
 /** idle: ready; running: a pipeline run is going; answering: an agent answers a question; paused: a run was stopped with Esc. */
 export type ChatStatus = "idle" | "running" | "answering" | "paused";
@@ -135,9 +135,10 @@ export interface ChatOptions {
  * attached to the task (so the run needs neither the originals nor the chat they came from).
  */
 export function newRun(runsDir: string, workspace: string, task: string, cfg: ConfigData, earlier: EarlierTask[] = [],
-  conversation?: ConversationContext, attachments: Attachment[] = []): { store: RunStore; state: RunState } {
+  conversation?: ConversationContext, attachments: Attachment[] = [], conversationId?: string): { store: RunStore; state: RunState } {
   const { store, state } = RunStore.create(runsDir, task, cfg.limits);
   state.workspace = workspace;
+  if (conversationId) state.conversationId = conversationId;
   if (earlier.length) state.earlier = earlier;
   if (conversation?.exchanges.length) state.conversationContext = conversation;
   if (attachments.length) {
@@ -169,15 +170,29 @@ function resumableRun(runsDir: string, workspace: string, runId?: string): RunSt
   }
 }
 
-/** What the chat says on opening about a run an earlier session left stopped or waiting, or null. */
-export function resumeHint(runsDir: string, workspace: string): string | null {
-  const store = latestResumable(runsDir, workspace);
+/**
+ * The latest run conversation `conversationId` started that is stopped or waiting, in this workspace, or null: what its
+ * /resume continues. A run that recorded no conversation (`duo run`, an older one) is none's.
+ */
+export function conversationRun(runsDir: string, workspace: string, conversationId: string): RunStore | null {
+  const own = RunStore.list(runsDir).filter((st) => st.conversationId === conversationId && st.phase !== "DONE" && st.phase !== "ABORTED"
+    && (!st.workspace || resolve(st.workspace) === resolve(workspace)));
+  const last = own.at(-1);
+  return last ? RunStore.open(runsDir, last.taskId) : null;
+}
+
+/**
+ * What the chat says on opening about a run an earlier session left stopped or waiting, or null: in a conversation
+ * (`conversationId`), its own run, which /resume continues; else the workspace's latest, named, which /resume <id> does.
+ */
+export function resumeHint(runsDir: string, workspace: string, conversationId: string | null = null): string | null {
+  const store = conversationId ? conversationRun(runsDir, workspace, conversationId) : latestResumable(runsDir, workspace);
   if (!store) return null;
   const st = store.loadState();
   const where = st.phase === "HUMAN_REVIEW"
     ? (st.humanReview?.reason === "clarification_required" ? "is waiting for your answers to an agent's questions" : "is waiting for your decision")
     : `stopped during ${st.inProgress?.phase ?? st.phase}`;
-  return `Run ${st.taskId} (${firstLine(st.task, 60)}) ${where}. Type /resume to continue it.`;
+  return `Run ${st.taskId} (${firstLine(st.task, 60)}) ${where}. Type ${conversationId ? "/resume" : `/resume ${st.taskId}`} to continue it.`;
 }
 
 /** What the chat says as it opens outside a git repository (the extension too). */
@@ -342,9 +357,10 @@ export class Chat {
     }
     const note = snapshotNote(await preflightSnapshots(this.o.workspace, this.env));
     if (note) this.o.ui.info(note);
-    const hint = resumeHint(this.o.runsDir, this.o.workspace);
+    // Only this conversation's own run: another conversation's is continued there (or here by its id).
+    const hint = resumeHint(this.o.runsDir, this.o.workspace, this.conversation.id);
     if (hint) this.o.ui.info(hint);
-    const team = hint ? null : resumableTeam(this.o.runsDir);
+    const team = hint ? null : conversationTeam(this.o.runsDir, this.conversation.id);
     if (team) this.o.ui.info(`Team run ${team.id} (${firstLine(team.request, 60)}) is ${team.waiting ? "waiting for you" : "stopped"} in ${team.phase}. Type /resume to continue it.`);
   }
 
@@ -1006,7 +1022,7 @@ export class Chat {
           active.abortRun();
           return;
         }
-        const id = this.pausedTeam ?? resumableTeam(this.o.runsDir)?.id;
+        const id = this.pausedTeam ?? conversationTeam(this.o.runsDir, this.conversation.id)?.id;
         if (!id) {
           ui.info("No team run to abort.");
           return;
@@ -1072,7 +1088,7 @@ export class Chat {
       try {
         run = TeamRun.create({
           runsDir: this.o.runsDir, request, cfg: structuredClone(this.cfg), workspace: this.o.workspace, bus: this.o.bus,
-          decider: this.o.clarifier, permissions: this.o.permissions, env: this.env, attachments: files,
+          decider: this.o.clarifier, permissions: this.o.permissions, env: this.env, attachments: files, conversationId: this.conversation.id,
         });
       } catch (e) {
         if (!(e instanceof AttachmentError)) throw e;
@@ -1103,9 +1119,9 @@ export class Chat {
       }
     }
     if (this.pausedTeam) return this.pausedTeam;
-    // A pipeline run waiting or stopped goes first, as it always did.
-    if (this.paused || latestResumable(this.o.runsDir, this.o.workspace)) return null;
-    return resumableTeam(this.o.runsDir)?.id ?? null;
+    // This conversation's own: a pipeline run waiting or stopped goes first, as it always did.
+    if (this.paused || conversationRun(this.o.runsDir, this.o.workspace, this.conversation.id)) return null;
+    return conversationTeam(this.o.runsDir, this.conversation.id)?.id ?? null;
   }
 
   private resumeTeam(id: string, note: string): void {
@@ -1201,7 +1217,7 @@ export class Chat {
     const context = this.conversation.context();
     let run: { store: RunStore; state: RunState };
     try {
-      run = newRun(this.o.runsDir, this.o.workspace, task, cfg, this.conversation.earlier, context, files);
+      run = newRun(this.o.runsDir, this.o.workspace, task, cfg, this.conversation.earlier, context, files, this.conversation.id);
     } catch (e) {
       if (!(e instanceof AttachmentError)) throw e;
       release();
@@ -1326,6 +1342,15 @@ export class Chat {
     }
   }
 
+  /** /resume found no run of this conversation: how to continue another one, named when there is one. */
+  private nothingToResume(): string {
+    const other = latestResumable(this.o.runsDir, this.o.workspace)?.loadState();
+    const team = other ? null : resumableTeam(this.o.runsDir);
+    const named = other ? `${other.taskId} is ${other.phase === "HUMAN_REVIEW" ? "waiting" : "stopped"}`
+      : team ? `team run ${team.id} is ${team.waiting ? "waiting" : "stopped"}` : null;
+    return `Nothing to resume in this conversation. /resume <run id> continues another run${named ? ` (/status lists the latest; ${named})` : ""}.`;
+  }
+
   private resumeHeld(arg: string, o: SubmitOptions, release: () => void): void {
     let files: Attachment[];
     try {
@@ -1339,10 +1364,11 @@ export class Chat {
     let note = arg.trim();
     const byId = RUN_ID.test(note) && !note.includes("..") ? resumableRun(this.o.runsDir, this.o.workspace, note) : null;
     if (byId) note = "";
-    const target = byId ?? this.paused ?? latestResumable(this.o.runsDir, this.o.workspace);
+    // Without an id: this conversation's own run, never another conversation's.
+    const target = byId ?? this.paused ?? conversationRun(this.o.runsDir, this.o.workspace, this.conversation.id);
     if (!target) {
       release();
-      this.o.ui.info("Nothing to resume.");
+      this.o.ui.info(this.nothingToResume());
       return;
     }
     const cfg = this.configOf(target);

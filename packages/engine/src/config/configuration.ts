@@ -313,7 +313,27 @@ export type TeamEdit = Pick<ConfigData["team"], "members" | "roles" | "levels" |
 export function updateTeam(o: ConfigurationOptions, scope: "global" | "project", team: TeamEdit): ConfigurationView {
   const file = fileFor(o, scope);
   const doc = documentOf(file);
-  for (const key of ["members", "roles", "levels", "max_parallel"] as const) doc.setIn(["team", key], structuredClone(team[key]));
+  for (const key of TEAM_KEYS) doc.setIn(["team", key], structuredClone(team[key]));
+  guard(o, scope, doc);
+  atomicWrite(file, configText(doc));
+  return readConfiguration(o);
+}
+
+/** The team keys Settings → Team writes (`updateTeam`); a file's other team keys (worktree, limits…) are not its. */
+const TEAM_KEYS = ["members", "roles", "levels", "max_parallel"] as const;
+
+/**
+ * Removes the team Settings wrote into the user config or the workspace's file, so the team comes from the other file
+ * (or agentduo's own) again: a project's team wins over the user config's, so removing it is how the one saved for
+ * every project reaches this project. The file's other keys and comments stay.
+ */
+export function resetTeam(o: ConfigurationOptions, scope: "global" | "project"): ConfigurationView {
+  const file = fileFor(o, scope);
+  if (!existsSync(file)) return readConfiguration(o);
+  const doc = documentOf(file);
+  const paths = TEAM_KEYS.map((key) => ["team", key]).filter((path) => doc.hasIn(path));
+  if (!paths.length) return readConfiguration(o);
+  removeKeys(doc, paths);
   guard(o, scope, doc);
   atomicWrite(file, configText(doc));
   return readConfiguration(o);

@@ -23,6 +23,7 @@ import {
   sendStops, teamActive, uploading, type AttachmentChip, type DiscussionCard, type PendingDecision, type PendingPermission, type PickOption, type StageStatus, type StepCard,
   type TeamCard, type TimelineItem, type TurnCard, type ViewState,
 } from "@agentduo/host/viewState";
+import { foldButton, QuestionFolds, waitingText } from "./questionFold.js";
 import { FileQueue } from "./uploads.js";
 
 export interface Actions {
@@ -526,12 +527,15 @@ const drafts = new Map<string, FormState>();
 /** The questions whose answer is on its way: the form waits for the outcome (a retry is possible after a few seconds, if none came). */
 const sending = new Map<string, number>();
 const RESEND_MS = 4000;
+/** The questions whose form the user hid to read the conversation: the card shrinks to a bar, the question still waits. */
+const folds = new QuestionFolds();
 let optionSeq = 0;
 
 /**
  * An agent's question, whole: each question with its header, each option with its description, a way to choose one or several and
  * to write something else. Nothing is chosen until the user does it; Submit is enabled once every question has an answer. There
- * is no "always allow": an answer is information, not a permission.
+ * is no "always allow": an answer is information, not a permission. Hide folds the form into a bar, so what the question is
+ * about can be read; it changes nothing of the request, and Show brings the form back as it was.
  */
 function questionCard(request: ClarificationRequest, actions: Actions): HTMLElement {
   let form = drafts.get(request.id) ?? emptyForm();
@@ -588,9 +592,34 @@ function questionCard(request: ClarificationRequest, actions: Actions): HTMLElem
     problem.textContent = waiting ? "Sending your answer…" : formComplete(questions, form) ? "" : `Not yet: ${formProblems(questions, form).join("; ")}.`;
   }
   sync();
-  return h("section", { class: "card question", role: "group", label: `Question from ${whoLabel(request.agent, request.role)}` },
-    h("h2", {}, icon("question", "card-icon"), `${whoLabel(request.agent, request.role, request.member)} asks you ${questions.length === 1 ? "a question" : `${questions.length} questions`}`),
-    ...groups, problem, h("div", { class: "choices" }, submit, later, dismiss));
+  const body = h("div", { class: "q-body", attrs: { id: `agentduo-qbody${++optionSeq}` } }, ...groups, problem, h("div", { class: "choices" }, submit, later, dismiss));
+  const note = h("span", { class: "q-waiting muted small" });
+  const fold = h("button", { class: "btn small q-fold", attrs: { type: "button", "aria-controls": body.id, "data-fold": request.id } });
+  const card = h("section", { class: "card question", role: "group", label: `Question from ${whoLabel(request.agent, request.role)}` },
+    h("div", { class: "q-bar" },
+      h("h2", {}, icon("question", "card-icon"), h("span", { class: "q-title" },
+        `${whoLabel(request.agent, request.role, request.member)} asks you ${questions.length === 1 ? "a question" : `${questions.length} questions`}`, note)),
+      fold),
+    body);
+  /** Hidden: only the bar, which says the question waits and how far the answer got; the form keeps its inputs as they are. */
+  function drawFold(): void {
+    const hidden = folds.isHidden(request.id);
+    const b = foldButton(hidden, questions.length);
+    body.hidden = hidden;
+    card.classList.toggle("folded", hidden);
+    const at = sending.get(request.id);
+    note.textContent = hidden ? ` · ${waitingText(questions, form, at !== undefined && Date.now() - at < RESEND_MS)}` : "";
+    fold.replaceChildren(icon(hidden ? "chevron-up" : "chevron-down"), b.text);
+    fold.title = b.title;
+    fold.setAttribute("aria-label", b.label);
+    fold.setAttribute("aria-expanded", String(!hidden));
+  }
+  fold.addEventListener("click", () => {
+    folds.toggle(request.id);
+    drawFold();
+  });
+  drawFold();
+  return card;
 }
 
 /** A question once over, in the timeline: what was asked, and the answer (or that there was none). */
@@ -1422,17 +1451,25 @@ export function createUi(root: HTMLElement, actions: Actions, initialDraft = "")
     const questions = s.questions ?? [];
     if (lastPending.decision === s.decision && lastPending.permissions === s.permissions && lastPending.questions === questions && lastPending.files === waiting) return;
     const hadFocus = pending.contains(document.activeElement);
+    // The Hide/Show of a question keeps the focus when the cards are rebuilt (a file attached meanwhile).
+    const foldFocused = hadFocus ? (document.activeElement as HTMLElement).dataset.fold : undefined;
     lastPending = { decision: s.decision, permissions: s.permissions, questions, files: waiting };
-    // Drafts of questions no longer waiting are let go.
+    // Drafts of questions no longer waiting are let go, and whether they were hidden.
     for (const id of [...drafts.keys()]) if (!questions.some((q) => q.id === id)) drafts.delete(id);
     for (const id of [...sending.keys()]) if (!questions.some((q) => q.id === id)) sending.delete(id);
+    folds.keep(questions.map((q) => q.id));
     const cards = [...s.permissions.map((p) => permissionCard(p, actions)), ...questions.map((q) => questionCard(q, actions)),
       ...(s.decision ? [decisionCard(s.decision, s.generation, actions, waiting)] : [])];
     pending.replaceChildren(...cards);
     if (cards.length) {
       announce.textContent = s.permissions.length ? `${partyLabel(s.permissions[0]!.agent)} asks to use ${s.permissions[0]!.request.tool}`
         : questions.length ? `${whoLabel(questions[0]!.agent, undefined, questions[0]!.member)} asks you a question` : "Your decision is needed";
-      if (hadFocus || document.activeElement === input || document.activeElement === document.body) cards[0]!.querySelector<HTMLButtonElement>("button.primary")?.focus();
+      const fold = foldFocused ? [...pending.querySelectorAll<HTMLButtonElement>("button[data-fold]")].find((b) => b.dataset.fold === foldFocused) : undefined;
+      // A hidden question's form takes no focus: the user put it away to read or to type elsewhere.
+      if (fold) fold.focus();
+      else if (hadFocus || document.activeElement === input || document.activeElement === document.body) {
+        cards.map((c) => c.querySelector<HTMLButtonElement>("button.primary")).find((b) => b && !b.closest("[hidden]"))?.focus();
+      }
     } else if (hadFocus) input.focus();
   }
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { boardJobs, chooseReviewer, failureKey, madeProgress, newTask, planProblems, ready, type BoardContext } from "../../src/team/board.js";
+import { boardJobs, chooseReviewer, heldByException, failureKey, madeProgress, newTask, planProblems, ready, type BoardContext } from "../../src/team/board.js";
 import { TEAM_DEFAULTS, teamMembers, type TeamConfig } from "../../src/team/config.js";
+import { assessException, deliverDecision, decideException, presentException, requestException, emptyGovernance, type RuleGovernance } from "../../src/team/rule-governance.js";
 import type { Brief, TaskState } from "../../src/team/state.js";
 import { brief as briefOutput, task } from "../helpers/team-builders.js";
 
@@ -106,6 +107,104 @@ describe("the board's jobs", () => {
     const tasks = [t("T1", { status: "merged" })];
     const jobs = boardJobs({ phase: "INTEGRATION", tasks, integration: { commit: "c", checks: [], triage: false, trouble: null, triageGroups: [] }, applyConflict: null }, ctx({ gates: true }));
     expect(jobs).toEqual([{ kind: "integration_check", member: "qa-1" }, { kind: "gates", task: null }]);
+  });
+});
+
+describe("work held by an exception request", () => {
+  const board = (tasks: TaskState[], governance: RuleGovernance | undefined, phase: "EXECUTION" | "INTEGRATION" = "EXECUTION", c = ctx()) =>
+    boardJobs({ phase, tasks, integration: null, applyConflict: null, governance }, c);
+  const withGov = (tasks: TaskState[], steps: (g: { id: string; tasks: TaskState[]; governance: RuleGovernance }) => void) => {
+    const s = { id: "run-1", tasks, governance: emptyGovernance() };
+    steps(s);
+    return s.governance;
+  };
+  const open = (s: { id: string; tasks: TaskState[]; governance: RuleGovernance }, taskId = "T1", from = "dev-1") =>
+    (requestException(s, { from, ruleIds: ["R1"], reason: "x", work: { task: taskId } }) as { value: { id: string } }).value.id;
+  const assessment = { by: "pm", ruleIds: ["R1"], reason: "x", alternative: "y", taskIds: ["T1"], unit: null, summary: "s" };
+
+  it("start as before when the run has no governance state, or no request", () => {
+    const tasks = [t("T1"), t("T2", { assignee: "dev-2" })];
+    expect(board(tasks, undefined)).toEqual(board(tasks, emptyGovernance()));
+    expect(board(tasks, undefined).filter((j) => j.kind === "work")).toEqual([{ kind: "work", member: "dev-1", task: "T1" }, { kind: "work", member: "dev-2", task: "T2" }]);
+  });
+
+  it("keep every job of the task back while the request is open, and leave the other tasks alone", () => {
+    const tasks = [t("T1", { status: "testing", candidate: "c1" }), t("T2", { assignee: "dev-2" })];
+    const gov = withGov(tasks, (s) => open(s, "T1"));
+    const jobs = board(tasks, gov, "EXECUTION", ctx({ gates: true }));
+    expect(jobs.filter((j) => "task" in j && j.task === "T1")).toEqual([]);
+    expect(jobs).toContainEqual({ kind: "work", member: "dev-2", task: "T2" });
+  });
+
+  it.each(["pending", "coding", "review", "testing", "triage", "merging", "resolving"] as const)("keep a task in '%s' back", (status) => {
+    const tasks = [t("T1", { status, candidate: "c1", question: null })];
+    expect(board(tasks, emptyGovernance())).not.toEqual([]);
+    const gov = withGov(tasks, (s) => open(s, "T1"));
+    expect(board(tasks, gov)).toEqual([]);
+  });
+
+  it("keep holding through the PM's assessment, the user's pending request and a refusal until the member is told", () => {
+    const tasks = [t("T1")];
+    const steps: Array<[string, (s: { id: string; tasks: TaskState[]; governance: RuleGovernance }, id: string) => void, boolean]> = [
+      ["assessed", (s, id) => assessException(s, id, assessment), true],
+      ["pending", (s, id) => presentException(s, id, "REQ1"), true],
+      ["rejected", (s) => decideException(s, { requestId: "REQ1", source: "user", approved: false }), true],
+      ["told", (s, id) => deliverDecision(s, id), false],
+    ];
+    const s = { id: "run-1", tasks, governance: emptyGovernance() };
+    const id = open(s);
+    for (const [name, step, holds] of steps) {
+      step(s, id);
+      expect(board(tasks, s.governance).length === 0, name).toBe(holds);
+    }
+    expect(board(tasks, s.governance)).toEqual([{ kind: "work", member: "dev-1", task: "T1" }]);
+  });
+
+  it("let an approved exception release only its own task, once the member is told", () => {
+    const tasks = [t("T1"), t("T2", { assignee: "dev-2" })];
+    const s = { id: "run-1", tasks, governance: emptyGovernance() };
+    const a = open(s, "T1");
+    open(s, "T2", "dev-2");
+    assessException(s, a, assessment);
+    presentException(s, a, "REQ1");
+    decideException(s, { requestId: "REQ1", source: "user", approved: true });
+    expect(board(tasks, s.governance)).toEqual([]);
+    deliverDecision(s, a);
+    const jobs = board(tasks, s.governance);
+    expect(jobs.filter((j) => "task" in j && j.task === "T1").length).toBeGreaterThan(0);
+    expect(jobs.filter((j) => "task" in j && j.task === "T2")).toEqual([]);
+  });
+
+  it("keep a dependent task waiting through its dependency, and a held unit's jobs, while the PM's jobs are never held", () => {
+    const tasks = [t("T1", { status: "pending" }), t("T2", { depends_on: ["T1"], assignee: "dev-2" })];
+    const s = { id: "run-1", tasks, governance: emptyGovernance() };
+    open(s, "T1");
+    expect(board(tasks, s.governance)).toEqual([]);
+    expect(heldByException({ kind: "pm" }, s)).toBe(false);
+    expect(heldByException({ kind: "area_pm", member: "pm" }, s)).toBe(false);
+    expect(heldByException({ kind: "work", member: "dev-1", task: "T1" }, s)).toBe(true);
+
+    const merged = [t("T1", { status: "merged" })];
+    const head = (commit: string) => ({ commit, checks: [], triage: false, trouble: null, triageGroups: [] });
+    const unit = { id: "run-1", tasks: merged, integration: head("c1"), verifiedTree: "tree1", governance: emptyGovernance() };
+    requestException(unit, { from: "dev-1", ruleIds: ["R1"], reason: "x", work: { unit: { kind: "integration", id: "run" } } });
+    const integration = { phase: "INTEGRATION" as const, tasks: merged, integration: head("c1"), verifiedTree: "tree1", applyConflict: null, governance: unit.governance };
+    expect(boardJobs(integration, ctx())).toEqual([]);
+    expect(boardJobs({ ...integration, governance: emptyGovernance() }, ctx())).toEqual([{ kind: "integration_check", member: "qa-1" }]);
+    expect(heldByException({ kind: "resolve_apply", member: "techlead" }, unit)).toBe(false);
+    expect(heldByException({ kind: "gates", task: null }, unit)).toBe(true);
+    // The result is replaced by another: the request was about the first, so the new head's jobs start.
+    expect(boardJobs({ ...integration, integration: head("c2") }, ctx())).toEqual([{ kind: "integration_check", member: "qa-1" }]);
+    expect(heldByException({ kind: "gates", task: null }, { ...unit, integration: head("c2") })).toBe(false);
+  });
+
+  it("hold the apply's conflict resolution for the tree it was asked about only", () => {
+    const merged = [t("T1", { status: "merged" })];
+    const unit = { id: "run-1", tasks: merged, integration: null, verifiedTree: "tree1", governance: emptyGovernance() };
+    requestException(unit, { from: "dev-1", ruleIds: ["R1"], reason: "x", work: { unit: { kind: "apply", id: "run" } } });
+    const conflict = { phase: "APPLY" as const, tasks: merged, integration: null, verifiedTree: "tree1", applyConflict: { ours: "o", tree: "tree1", files: ["a"], resolving: true }, governance: unit.governance };
+    expect(boardJobs(conflict, ctx())).toEqual([]);
+    expect(boardJobs({ ...conflict, verifiedTree: "tree2" }, ctx())).toEqual([{ kind: "resolve_apply", member: "techlead" }]);
   });
 });
 

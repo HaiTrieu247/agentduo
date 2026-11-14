@@ -10,6 +10,7 @@ import { atomicWrite } from "../workflow/state.js";
 import type { Snapshot } from "../git/git.js";
 import type { TeamBackend } from "./config.js";
 import type { TaskStatus, TeamPhase } from "./model.js";
+import { emptyGovernance, type RuleGovernance } from "./rule-governance.js";
 
 export type { TaskStatus, TeamPhase } from "./model.js";
 
@@ -206,7 +207,13 @@ export interface Escalation {
   task: string | null;
   /** The group it is about when no task is (its planning, its share of an integration failure); absent: none. */
   group?: string | null;
-  reason: "question" | "planning" | "task_limit" | "review_stalled" | "integration_limit" | "merge_conflict" | "agent_error";
+  reason: "question" | "planning" | "task_limit" | "review_stalled" | "integration_limit" | "merge_conflict" | "agent_error" | "rule_exception";
+  /**
+   * A member's request for an exception to the team's rules (`governance.exceptions`, reason `rule_exception`), sent to the
+   * PM who answers for the work. Its PM may refuse it (team_answer: the rules stand) or pass it up (escalate); only the
+   * head PM proposes it to the user, and nothing here approves anything.
+   */
+  exceptionId?: string;
   text: string;
   /** Who answers it now: the group's PM, or the head PM (who asks the user what it cannot answer). */
   to: string;
@@ -231,6 +238,8 @@ export interface TeamState {
   kind: "team";
   id: string;
   request: string;
+  /** The conversation that started it (its /resume continues it); absent: none recorded (an older run, `duo team`). */
+  conversationId?: string;
   phase: TeamPhase;
   createdAt: string;
   updatedAt: string;
@@ -284,6 +293,14 @@ export interface TeamState {
   escalations: Escalation[];
   sessions: Record<string, MemberSession>;
   clarifications: ClarificationEntry[];
+  /** The incidents the team learns from and the exceptions to its rules (rule-governance.ts); absent in a run from before it. */
+  governance: RuleGovernance;
+  /**
+   * Which team's RULES.md this run reads and adds to (team/rules.ts): the team's id and its workspace's key, fixed when the
+   * run is created, so that a reopened run finds the same rules whatever the configuration says now. Absent in a run from
+   * before the rules: it takes the configuration's team when it next runs.
+   */
+  rulesStore?: { teamId: string; workspaceKey: string };
   waiting: Approval | null;
   usage: TeamUsage;
   budget: RunBudget | null;
@@ -303,9 +320,20 @@ export function newTeamState(id: string, request: string): TeamState {
     briefs: [], approvedBrief: null, areas: [], plans: [], planReviewed: null, planPresented: null, approvedPlan: null, planFeedback: {}, planningRounds: 0, planningExtra: {},
     tasks: [], integrationRounds: 0,
     integration: null, verifiedTree: null, accepted: false, applyConflict: null, lastReportAt: null, changeRequest: null, acceptance: null, messages: [{ seq: 1, at, from: "user", text: request }], pmSeen: 0,
-    reports: [], reportsSeen: 0, replanning: false, leadNotes: [], leadNotesSeen: {}, escalations: [], sessions: {}, clarifications: [], waiting: null,
+    reports: [], reportsSeen: 0, replanning: false, leadNotes: [], leadNotesSeen: {}, escalations: [], sessions: {}, clarifications: [], governance: emptyGovernance(), waiting: null,
     usage: { calls: 0, unpricedCalls: 0, costUsd: 0, tokens: 0, workSec: 0, byMember: {} }, budget: null, applied: null, summary: null, warnings: [], seq: 1,
   };
+}
+
+/** A saved governance state in any shape an older or damaged file can have: missing parts are empty, never granted. */
+export function normalizeGovernance(saved: Partial<RuleGovernance> | null | undefined): RuleGovernance {
+  const g = { ...emptyGovernance(), ...(saved && typeof saved === "object" ? saved : {}) };
+  g.incidents = Array.isArray(g.incidents) ? g.incidents : [];
+  g.exceptions = Array.isArray(g.exceptions) ? g.exceptions : [];
+  const next = (items: Array<{ id: string }>, n: unknown) => Math.max(typeof n === "number" ? n : 1, items.length + 1);
+  g.nextIncident = next(g.incidents, g.nextIncident);
+  g.nextException = next(g.exceptions, g.nextException);
+  return g;
 }
 
 /** The next number of the run's sequence (messages, reports, ids of its own). */
@@ -377,6 +405,8 @@ export class TeamStore {
   load(): TeamState {
     const state = JSON.parse(readFileSync(this.path("state.json"), "utf8")) as TeamState;
     if (state.kind !== "team" || state.version !== TEAM_STATE_VERSION) throw new Error(`unsupported team state in ${this.dir}`);
+    // A run from before the rules' governance has none: it starts empty (no incident, no exception), never as an approval.
+    state.governance = normalizeGovernance(state.governance);
     return state;
   }
 

@@ -166,6 +166,19 @@ export class ChatHost {
   }
 
   /** Sends a line as if typed in the active chat (Resume from the sidebar). */
+  /**
+   * Shows conversation `conversationId` and sends `text` as typed into its chat, once the chat is open (its view has
+   * come from main): what resuming a run in the conversation that started it does.
+   */
+  async submitTo(projectId: string, conversationId: string, text: string): Promise<void> {
+    const mount = await this.show(projectId, conversationId);
+    for (let waited = 0; !mount.view || !mount.state; waited += 100) {
+      if (waited > 15_000 || this.mounts.get(mountKey(projectId, conversationId)) !== mount) throw new Error("the conversation did not open: try again");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    this.send(mount, { type: "submit", text, route: "message", attachments: [] });
+  }
+
   submit(text: string): boolean {
     const mount = this.active();
     if (!mount) return false;

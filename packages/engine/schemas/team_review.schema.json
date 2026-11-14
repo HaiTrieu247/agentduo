@@ -5,7 +5,8 @@
   "required": [
     "verdict",
     "summary",
-    "findings"
+    "findings",
+    "governance"
   ],
   "properties": {
     "verdict": {
@@ -79,6 +80,83 @@
               "out_of_scope"
             ],
             "description": "out_of_scope: a suggestion, never work for this task"
+          }
+        }
+      }
+    },
+    "governance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issues",
+        "exception"
+      ],
+      "description": "Problems you saw with the team's rules and, only when a rule really does not fit your work, a request for an exception. Never act on an exception before the user has agreed to it",
+      "properties": {
+        "issues": {
+          "type": "array",
+          "description": "A disagreement with a member, or a deviation from what the user asked, that you saw; empty: none",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "summary",
+              "rule_ids"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "disagreement",
+                  "deviation"
+                ]
+              },
+              "summary": {
+                "type": "string",
+                "description": "What happened, in a few sentences"
+              },
+              "rule_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The ids of the rules involved (empty: none)"
+              }
+            }
+          }
+        },
+        "exception": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "rule_ids",
+            "reason",
+            "alternative"
+          ],
+          "description": "Ask for an exception to the rules for the work of this call, or null. The PM decides what to show the user. Asking is not finishing: your result does not complete the work while you ask",
+          "properties": {
+            "rule_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The ids of the rules that do not fit this work"
+            },
+            "reason": {
+              "type": "string",
+              "description": "Why they do not fit"
+            },
+            "alternative": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "What you would do instead, or null"
+            }
           }
         }
       }

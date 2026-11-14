@@ -1,6 +1,7 @@
 // The team's task board as rules (packages/engine/src/team): which jobs can run now, who reviews whom, what a plan
 // must say, what blocks a review, and whether a fix round made progress. Pure: no Node, no git, no agents.
 import { teamGroups, type Member, type TeamGroup } from "./config.js";
+import { heldTaskIds, RUN_UNIT, unitHeld, type OccurrenceState, type RuleGovernance } from "./rule-governance.js";
 import type { Brief, CheckFailure, PlanTask, ReviewFinding, TaskState, TeamPhase, TeamState } from "./state.js";
 
 /** A member's call agentduo can start, or a step of its own (gates, a merge). */
@@ -26,6 +27,19 @@ export type Job =
 /** A job's identity while it runs: nothing starts the same job twice. */
 export const jobKey = (job: Job): string =>
   `${job.kind}:${"member" in job ? job.member : "-"}:${"task" in job ? job.task ?? "-" : "-"}`;
+
+/**
+ * Whether an exception request still holds a job (rule-governance.ts): a job of a task an open request is about, or one
+ * of the integration or the apply while a request about that unit is open. The PMs' own jobs are never held: they are
+ * who decides it.
+ */
+export function heldByException(job: Job, state: { governance?: RuleGovernance } & OccurrenceState, heldTasks: ReadonlySet<string> = heldTaskIds(state)): boolean {
+  if (job.kind === "pm" || job.kind === "area_pm") return false;
+  if ("task" in job && job.task) return heldTasks.has(job.task);
+  if (job.kind === "integration_check" || job.kind === "integration_triage" || (job.kind === "gates" && job.task === null)) return unitHeld(state, { kind: "integration", id: RUN_UNIT });
+  if (job.kind === "resolve_apply") return unitHeld(state, { kind: "apply", id: RUN_UNIT });
+  return false;
+}
 
 /** Jobs of agentduo's own (no agent): they never count against `max_parallel`. */
 export const ownJob = (job: Job): boolean => job.kind === "gates" || job.kind === "merge";
@@ -185,13 +199,16 @@ export const testsWritten = (task: TaskState): boolean => Object.values(task.tes
  * The jobs that can start now, most urgent first (the techlead's, then reviews, checks, work and tests). The PM's turn
  * and the phases' own steps are the run's to decide; this is the task board's part.
  */
-export function boardJobs(state: Pick<TeamState, "phase" | "tasks" | "integration" | "applyConflict">, ctx: BoardContext): Job[] {
+export function boardJobs(state: Pick<TeamState, "phase" | "tasks" | "integration" | "applyConflict"> & OccurrenceState & { governance?: RuleGovernance }, ctx: BoardContext): Job[] {
   const jobs: Job[] = [];
   const groups = ctx.groups ?? teamGroups(ctx.members);
   const techleadOf = (t: TaskState) => leadOf(groups, t.group ?? null).name;
   const free = (m: string) => !ctx.busy.has(m);
+  // The work an open exception request is about waits for the decision (and, once decided, for the member to be told).
+  const held = heldTaskIds(state);
   const add = (job: Job) => {
     if (ctx.running.has(jobKey(job))) return;
+    if (heldByException(job, state, held)) return;
     if ("member" in job && !free(job.member)) return;
     if (jobs.some((j) => "member" in j && "member" in job && j.member === job.member)) return;
     jobs.push(job);

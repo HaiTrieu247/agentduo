@@ -84,7 +84,7 @@
       { "command": "agentduo.archiveConversation", "title": "Archive Conversation", "category": "agentduo", "icon": "$(archive)" },
       { "command": "agentduo.archivedConversations", "title": "Archived Conversations", "category": "agentduo", "icon": "$(archive)" },
       { "command": "agentduo.stop", "title": "Stop the Current Step", "category": "agentduo", "enablement": "agentduo.running" },
-      { "command": "agentduo.resume", "title": "Resume the Latest Run", "category": "agentduo", "icon": "$(debug-continue)" },
+      { "command": "agentduo.resume", "title": "Resume This Conversation's Run", "category": "agentduo", "icon": "$(debug-continue)" },
       { "command": "agentduo.openSettings", "title": "Settings: Models, Effort and Permissions", "category": "agentduo", "icon": "$(settings-gear)" },
       { "command": "agentduo.openPlan", "title": "Open Plan", "category": "agentduo" },
       { "command": "agentduo.openChanges", "title": "Open Changes", "category": "agentduo" },

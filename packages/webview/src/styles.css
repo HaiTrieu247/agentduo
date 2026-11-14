@@ -323,6 +323,13 @@ body {
 }
 .card.permission, .card.question { border-color: var(--vscode-focusBorder, var(--accent)); }
 .card.question .card-icon { color: var(--accent); }
+/* Who asks, and Hide/Show at the end of the line. Hidden, the card is this bar alone: the question still waits. */
+.q-bar { display: flex; align-items: center; gap: 8px; }
+.q-bar h2 { flex: 1; min-width: 0; }
+.q-waiting { font-weight: normal; }
+.q-fold { flex: none; display: inline-flex; align-items: center; gap: 4px; }
+.q-body { display: flex; flex-direction: column; gap: inherit; }
+.card.question.folded { padding-top: 6px; padding-bottom: 6px; }
 .q-group { border: 0; margin: 4px 0 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .q-text { font-weight: 600; padding: 0; overflow-wrap: anywhere; }
 .q-header { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 8px; font-size: 11px; font-weight: 600; background: var(--vscode-badge-background, var(--accent)); color: var(--vscode-badge-foreground, #fff); }

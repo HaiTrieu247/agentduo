@@ -32,6 +32,7 @@ describe("parseDesktopRequest", () => {
     expect(parseDesktopRequest({ method: "conversation.archived", projectId: "0123456789abcdef" })).toEqual({ method: "conversation.archived", projectId: "0123456789abcdef" });
     const team = { members: [{ role: "dev", level: "mid", cli: "claude", count: 2, group: "web", model: null }], roles: { dev: { kind: "worker" } }, levels: { mid: { can_review: false, claude: { model: "sonnet" } } }, max_parallel: 3 };
     expect(parseDesktopRequest({ method: "team.save", projectId: null, scope: "project", team })).toEqual({ method: "team.save", projectId: null, scope: "project", team });
+    expect(parseDesktopRequest({ method: "team.reset", projectId: null, scope: "project", team })).toEqual({ method: "team.reset", projectId: null, scope: "project" });
     expect(parseDesktopRequest({ method: "team.openIdentity", projectId: null, scope: "global", kind: "role", name: "frontend-dev" }))
       .toEqual({ method: "team.openIdentity", projectId: null, scope: "global", kind: "role", name: "frontend-dev" });
   });
@@ -62,6 +63,7 @@ describe("parseDesktopRequest", () => {
       { method: "team.openIdentity", projectId: null, scope: "/", kind: "role", name: "dev" },
       { method: "team.identity.write", projectId: null, scope: "global", kind: "role", name: "dev", text: "x".repeat(60_000) },
       { method: "team.save", projectId: null, scope: "global", team: { members: [{ role: "../x", level: "mid", cli: "claude" }], roles: {}, levels: {}, max_parallel: 1 } },
+      { method: "team.reset", projectId: null, scope: "/" },
       { method: "team.save", projectId: null, scope: "global", team: { members: [{ role: "dev", level: "mid", cli: "gemini" }], roles: {}, levels: {}, max_parallel: 1 } },
       { method: "team.save", projectId: null, scope: "global", team: { members: [], roles: { "a/b": { kind: "worker" } }, levels: {}, max_parallel: 1 } },
       "app.state",
@@ -213,6 +215,11 @@ describe("Dispatcher", () => {
     const broken = { ...team, members: team.members.filter((m) => m.role !== "pm") };
     const refused = await d.handle(good, { method: "team.save", projectId: null, scope: "global", team: broken });
     expect(refused).toMatchObject({ ok: false, error: expect.stringContaining("exactly one member whose role is of kind pm") });
+    // The saved team taken out of the file again: agentduo's own holds, and the file keeps nothing of it.
+    expect(await d.handle(good, { method: "team.reset", projectId: null, scope: "global" })).toMatchObject({ ok: true, result: { membersFrom: null } });
+    expect(readFileSync(join(dir, "config", "agentduo", "config.yaml"), "utf8")).not.toContain("qa-lead");
+    expect(await d.handle(good, { method: "team.reset", projectId: null, scope: "project" })).toEqual({ ok: false, error: "with no project open, only the user config can be changed" });
+    await d.handle(good, { method: "team.save", projectId: null, scope: "global", team });
     const ref = { projectId: null, scope: "global" as const, kind: "role" as const, name: "dev" };
     expect(await d.handle(good, { method: "team.identity.read", ...ref })).toMatchObject({ ok: true, result: { source: "default", text: expect.stringContaining("You are a developer") } });
     expect(await d.handle(good, { method: "team.identity.write", ...ref, text: "Use pnpm." })).toEqual({ ok: true, result: { source: "global", text: "Use pnpm." } });

@@ -8,6 +8,7 @@ import type { TeamEdit } from "@agentduo/engine/config/configuration";
 import { memberNames, TEAM_DEFAULTS, teamConfigErrors, type RoleKind } from "@agentduo/engine/team/config";
 import type { TeamIdentityFile } from "@agentduo/engine/team/model";
 import { busy, button, call, el, icon } from "./bridge.js";
+import { confirmDialog } from "./dialog.js";
 
 type Scope = "global" | "project";
 type Entry = TeamEdit["members"][number];
@@ -607,19 +608,35 @@ export async function teamPage(projectId: string | null, o: { codexModels(): rea
 
   // ------------------------------------------------------------------ the page
 
+  /** Saving for every project while this project has a team of its own: that one wins here, whatever is saved. */
+  const projectWins = () => !!projectId && scope === "global" && info.membersFrom === "project";
   const save = button("Save the team", () => void busy(save, status, async () => {
     if (!readiness().ready) throw new Error("Not saved: the team is not ready yet (what it needs is above).");
     const at = scope;
+    // Asked first: otherwise the list would show the project's team again after the save, as if the edit were lost.
+    const dropProject = projectWins() && await confirmDialog({
+      title: "This project has a team of its own",
+      message: "A project's team wins over the one for every project, so this project would keep running its own. " +
+        "Remove this project's team, so the one you save is used here too?",
+      confirm: "Remove it",
+      cancel: "Keep it",
+    });
     info = await call({ method: "team.save", projectId, scope: at, team: pruned(draft) });
+    if (dropProject) info = await call({ method: "team.reset", projectId, scope: "project" });
     draft = startDraft();
     form = null;
     identityOf = null;
-    status.textContent = at === "global" && info.membersFrom === "project"
-      ? "Saved for every project. This project has a team of its own, which it keeps: that is the team shown."
-      : `Saved in ${at === "global" ? "your user config (every project)" : "this project's .agentduo/config.yaml"}; the next team run uses it.`;
+    status.textContent = dropProject
+      ? "Saved for every project, and this project's own team removed: this project runs it too."
+      : at === "global" && info.membersFrom === "project"
+        ? "Saved for every project. This project has a team of its own, which it keeps: that is the team shown."
+        : `Saved in ${at === "global" ? "your user config (every project)" : "this project's .agentduo/config.yaml"}; the next team run uses it.`;
     draw();
   }), { class: "primary", icon: "save" });
-  const where = projectId ? select([["project", SCOPE_WORD.project], ["global", SCOPE_WORD.global]], scope, (v) => (scope = v as Scope), "Where the team is saved")
+  const where = projectId ? select([["project", SCOPE_WORD.project], ["global", SCOPE_WORD.global]], scope, (v) => {
+    scope = v as Scope;
+    draw();
+  }, "Where the team is saved")
     : el("span", { class: "muted small", text: SCOPE_WORD.global });
 
   function draw(): void {
@@ -634,7 +651,12 @@ export async function teamPage(projectId: string | null, o: { codexModels(): rea
     }
     const from = info.membersFrom === "project" ? "this project's team" : info.membersFrom === "global" ? "your team for every project" : "agentduo's team (none saved yet)";
     parts.push(el("div", { class: "team-save" }, el("span", { class: "muted small from", text: `/team runs ${from}.` }),
-      el("span", { class: "muted small", text: "Save in" }), where, unsaved, save), status);
+      el("span", { class: "muted small", text: "Save in" }), where, unsaved, save));
+    if (projectWins()) {
+      parts.push(el("p", { class: "small warn-note", attrs: { role: "note" } }, icon("warning"),
+        el("span", { text: "This project has a team of its own, which wins here: saving asks whether to remove it." })));
+    }
+    parts.push(status);
     body.replaceChildren(...parts);
     markDirty();
   }

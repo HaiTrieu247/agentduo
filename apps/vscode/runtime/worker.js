@@ -24887,6 +24887,10 @@ var TeamRun = class _TeamRun {
    */
   static create(o) {
     const { store, state } = TeamStore.create(o.runsDir, o.request);
+    if (o.conversationId) {
+      state.conversationId = o.conversationId;
+      store.save(state);
+    }
     if (o.attachments?.length) {
       const files = new AttachmentStore(o.runsDir, store.dir);
       try {
@@ -26493,6 +26497,9 @@ function resumableTeam(runsDir) {
   const latest = TeamStore.list(runsDir).at(-1);
   return latest && latest.phase !== "DONE" && latest.phase !== "ABORTED" ? latest : null;
 }
+function conversationTeam(runsDir, conversationId2) {
+  return TeamStore.list(runsDir).filter((s) => s.conversationId === conversationId2 && s.phase !== "DONE" && s.phase !== "ABORTED").at(-1) ?? null;
+}
 async function undoTeam(o) {
   const env = o.env ?? process.env;
   const store = TeamStore.open(o.runsDir, o.id);
@@ -26523,9 +26530,10 @@ async function undoTeam(o) {
 var FILES_QUESTION = "Look at the attached file(s).";
 var FILES_NOTE = "See the attached file(s).";
 var DECISION_FILES = "The files waiting to be sent do not go with a decision. To give them to the run, send them with a message before you decide (it becomes a note for the run's next step), or decide later and /resume with a note: the files go with it.";
-function newRun(runsDir, workspace, task, cfg, earlier2 = [], conversation2, attachments = []) {
+function newRun(runsDir, workspace, task, cfg, earlier2 = [], conversation2, attachments = [], conversationId2) {
   const { store, state } = RunStore.create(runsDir, task, cfg.limits);
   state.workspace = workspace;
+  if (conversationId2) state.conversationId = conversationId2;
   if (earlier2.length) state.earlier = earlier2;
   if (conversation2?.exchanges.length) state.conversationContext = conversation2;
   if (attachments.length) {
@@ -26552,12 +26560,17 @@ function resumableRun(runsDir, workspace, runId) {
     return null;
   }
 }
-function resumeHint(runsDir, workspace) {
-  const store = latestResumable(runsDir, workspace);
+function conversationRun(runsDir, workspace, conversationId2) {
+  const own = RunStore.list(runsDir).filter((st) => st.conversationId === conversationId2 && st.phase !== "DONE" && st.phase !== "ABORTED" && (!st.workspace || resolve11(st.workspace) === resolve11(workspace)));
+  const last = own.at(-1);
+  return last ? RunStore.open(runsDir, last.taskId) : null;
+}
+function resumeHint(runsDir, workspace, conversationId2 = null) {
+  const store = conversationId2 ? conversationRun(runsDir, workspace, conversationId2) : latestResumable(runsDir, workspace);
   if (!store) return null;
   const st = store.loadState();
   const where = st.phase === "HUMAN_REVIEW" ? st.humanReview?.reason === "clarification_required" ? "is waiting for your answers to an agent's questions" : "is waiting for your decision" : `stopped during ${st.inProgress?.phase ?? st.phase}`;
-  return `Run ${st.taskId} (${firstLine(st.task, 60)}) ${where}. Type /resume to continue it.`;
+  return `Run ${st.taskId} (${firstLine(st.task, 60)}) ${where}. Type ${conversationId2 ? "/resume" : `/resume ${st.taskId}`} to continue it.`;
 }
 var NOT_REPO_NOTE = "This folder is not inside a git repository, and a pipeline run needs none: it keeps its snapshots in a Git repository of agentduo's own, outside the folder (no .git is created here).";
 var HOME_NOTE = "This is your home folder: you can ask Claude and Codex and /discuss here, but a pipeline run needs a project folder: open one (it needs no git repository).";
@@ -26669,9 +26682,9 @@ var Chat = class {
     }
     const note = snapshotNote(await preflightSnapshots(this.o.workspace, this.env));
     if (note) this.o.ui.info(note);
-    const hint = resumeHint(this.o.runsDir, this.o.workspace);
+    const hint = resumeHint(this.o.runsDir, this.o.workspace, this.conversation.id);
     if (hint) this.o.ui.info(hint);
-    const team = hint ? null : resumableTeam(this.o.runsDir);
+    const team = hint ? null : conversationTeam(this.o.runsDir, this.conversation.id);
     if (team) this.o.ui.info(`Team run ${team.id} (${firstLine(team.request, 60)}) is ${team.waiting ? "waiting for you" : "stopped"} in ${team.phase}. Type /resume to continue it.`);
   }
   /**
@@ -27304,7 +27317,7 @@ var Chat = class {
           active2.abortRun();
           return;
         }
-        const id = this.pausedTeam ?? resumableTeam(this.o.runsDir)?.id;
+        const id = this.pausedTeam ?? conversationTeam(this.o.runsDir, this.conversation.id)?.id;
         if (!id) {
           ui.info("No team run to abort.");
           return;
@@ -27378,7 +27391,8 @@ var Chat = class {
           decider: this.o.clarifier,
           permissions: this.o.permissions,
           env: this.env,
-          attachments: files
+          attachments: files,
+          conversationId: this.conversation.id
         });
       } catch (e) {
         if (!(e instanceof AttachmentError)) throw e;
@@ -27408,8 +27422,8 @@ var Chat = class {
       }
     }
     if (this.pausedTeam) return this.pausedTeam;
-    if (this.paused || latestResumable(this.o.runsDir, this.o.workspace)) return null;
-    return resumableTeam(this.o.runsDir)?.id ?? null;
+    if (this.paused || conversationRun(this.o.runsDir, this.o.workspace, this.conversation.id)) return null;
+    return conversationTeam(this.o.runsDir, this.conversation.id)?.id ?? null;
   }
   resumeTeam(id, note) {
     if (this.elsewhere()) return;
@@ -27497,7 +27511,7 @@ var Chat = class {
     const context = this.conversation.context();
     let run;
     try {
-      run = newRun(this.o.runsDir, this.o.workspace, task, cfg, this.conversation.earlier, context, files);
+      run = newRun(this.o.runsDir, this.o.workspace, task, cfg, this.conversation.earlier, context, files, this.conversation.id);
     } catch (e) {
       if (!(e instanceof AttachmentError)) throw e;
       release();
@@ -27609,6 +27623,13 @@ var Chat = class {
       throw e;
     }
   }
+  /** /resume found no run of this conversation: how to continue another one, named when there is one. */
+  nothingToResume() {
+    const other2 = latestResumable(this.o.runsDir, this.o.workspace)?.loadState();
+    const team = other2 ? null : resumableTeam(this.o.runsDir);
+    const named = other2 ? `${other2.taskId} is ${other2.phase === "HUMAN_REVIEW" ? "waiting" : "stopped"}` : team ? `team run ${team.id} is ${team.waiting ? "waiting" : "stopped"}` : null;
+    return `Nothing to resume in this conversation. /resume <run id> continues another run${named ? ` (/status lists the latest; ${named})` : ""}.`;
+  }
   resumeHeld(arg, o, release) {
     let files;
     try {
@@ -27622,10 +27643,10 @@ var Chat = class {
     let note = arg.trim();
     const byId = RUN_ID2.test(note) && !note.includes("..") ? resumableRun(this.o.runsDir, this.o.workspace, note) : null;
     if (byId) note = "";
-    const target = byId ?? this.paused ?? latestResumable(this.o.runsDir, this.o.workspace);
+    const target = byId ?? this.paused ?? conversationRun(this.o.runsDir, this.o.workspace, this.conversation.id);
     if (!target) {
       release();
-      this.o.ui.info("Nothing to resume.");
+      this.o.ui.info(this.nothingToResume());
       return;
     }
     const cfg = this.configOf(target);

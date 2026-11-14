@@ -99,7 +99,7 @@ Code và Codex; pipeline đầy đủ chỉ chạy khi bạn yêu cầu:
     workspace (đường dẫn không có, hoặc nằm ngoài workspace, bị bỏ qua), để agent tự đọc bằng tool của nó: không chép gì
     cả, khác với `/attach`. Dùng được trong câu hỏi, `/discuss`, task `/pipeline` (prompt đầu của mỗi role) và ghi chú.
 - **Lệnh:** `/claude`, `/codex`, `/pipeline`, `/discuss`, `/plan`, `/diff`, `/status`, `/usage`, `/attach`,
-  `/attachments`, `/detach`, `/resume` (chạy tiếp run đang dừng hoặc đang chờ, kể cả từ phiên trước), `/new`,
+  `/attachments`, `/detach`, `/resume` (chạy tiếp run đang dừng hoặc đang chờ của chính cuộc trò chuyện này, kể cả từ phiên trước; `/resume <id>` cho run khác; mục *Resumable runs* của app desktop mở đúng cuộc trò chuyện của run rồi chạy tiếp ở đó), `/new`,
   `/settings`, `/config`, `/help`, `/quit`. Bấm Ctrl-C hai lần cũng thoát; run đang chạy sẽ dừng ở bước hiện tại và vẫn
   resume được.
 
@@ -159,6 +159,29 @@ nằm ở khoá `team:` trong config (cấp độ, chức vụ, thành viên, `m
 người duy nhất nói chuyện với bạn; mỗi nhóm có techlead, dev, QA riêng và tối đa một PM phụ. PM trưởng chia phần việc cho
 từng nhóm, các techlead lập kế hoạch song song, PM phụ soát kế hoạch của nhóm, PM trưởng soát cả bản rồi bạn duyệt một
 lần. Câu hỏi của techlead đi lên PM phụ, rồi PM trưởng, rồi mới tới bạn.
+
+**Quy tắc của team (`RULES.md`).** Mỗi team có một `RULES.md` ghi những gì team đã rút ra, mọi lần chạy của team đó đều
+đọc và bổ sung vào:
+
+- **Thuộc về ai.** `team.id` là tên team (mặc định `default`). File nằm ở
+  `<data>/agentduo/team-rules/<khoá thư mục>/<team id>/RULES.md` (`<data>` như ở mục repository nội bộ của README tiếng
+  Anh), tách khỏi mọi run: run, worktree, `/team undo` hay việc dọn dẹp đều không đụng tới nó, và hai team (khác id hoặc
+  khác thư mục) không bao giờ dùng chung. Một run giữ đúng team lúc nó bắt đầu, kể cả khi bạn đổi `team.id` trước `/resume`.
+- **Mọi thành viên làm theo.** Mỗi lần gọi một thành viên đều kèm các quy tắc đúng như file đang có lúc đó (cả session nối
+  tiếp), nên quy tắc vừa thêm có hiệu lực ngay từ lần gọi sau và cho các run sau.
+- **PM bổ sung.** Review đòi sửa, check thất bại, kiểm tra toàn bộ kết quả thất bại, PM trả kế hoạch về, thành viên báo
+  bất đồng hoặc kết quả lệch yêu cầu, hay bạn yêu cầu sửa brief, kế hoạch, kết quả: đó là một sự cố. Khi team đã giải quyết
+  xong (bản sửa được duyệt, task được merge, bạn đồng ý), PM trưởng viết một quy tắc phòng ngừa ngắn, hoặc nói vì sao không
+  cần (nhiều sự cố cùng nguyên nhân thì chung một quy tắc), trước khi kết quả được ghi vào thư mục của bạn. PM xử lý mọi sự
+  cố đã giải quyết trong một lượt: khi các thành viên còn đang làm, lượt đó chờ tới lúc họ rảnh (tối đa một phút), để những
+  sự cố được giải quyết trong lúc đó vào cùng lượt. Quy tắc chỉ được thêm vào (`R1`, `R2`…, kèm nguồn gốc): không gì
+  trong file bị xoá hay viết lại, kể cả những dòng bạn tự viết.
+- **Ngoại lệ đi qua PM tới bạn.** Thành viên thấy một quy tắc không hợp với việc cụ thể thì xin ngoại lệ (quy tắc nào, vì
+  sao, sẽ làm gì thay thế); phần việc đó chờ, phần còn lại vẫn chạy. PM phụ của nhóm có thể từ chối hoặc chuyển lên; PM
+  trưởng từ chối, hoặc trình bạn lý do, cách làm khác và đúng phần việc được áp dụng để bạn đồng ý hay từ chối; nếu PM không
+  quyết được thì hỏi bạn trước. Chỉ khi bạn đồng ý đúng yêu cầu đó, team mới được làm khác quy tắc, và chỉ cho phần việc đó
+  của run đó: quy tắc vẫn giữ nguyên, task khác và run sau không được hưởng, còn yêu cầu bạn hoãn, đóng hay chưa trả lời sẽ
+  được hỏi lại khi run chạy tiếp (`/resume`), không bao giờ bị coi là đồng ý.
 
 Mỗi thành viên có `IDENTITY.md` của chức vụ, của level và `AGENT.md` riêng. Mỗi file là một nội dung đầy đủ: file của dự
 án (`.agentduo/team/…`) nếu có, không thì file trong `team/` của user config (mọi dự án), không thì nội dung mặc định

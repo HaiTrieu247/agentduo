@@ -524,9 +524,14 @@ export class ProjectManager {
     const runsDir = this.liveSession(projectId)?.runsDirectory;
     if (!runsDir) return [];
     const path = this.path(projectId);
+    // The conversation that started a run, while it is there (archived counts: working in it brings it back).
+    const conversations = new Set(listConversations(runsDir, "all").map((c) => c.id));
     return RunStore.list(runsDir)
       .filter((st) => st.phase !== "DONE" && st.phase !== "ABORTED" && (!st.workspace || resolve(st.workspace) === path))
-      .map((st) => ({ id: st.taskId, task: st.task.split("\n")[0]!.slice(0, 120), phase: st.phase, updatedAt: st.updatedAt ?? null }))
+      .map((st) => ({
+        id: st.taskId, task: st.task.split("\n")[0]!.slice(0, 120), phase: st.phase, updatedAt: st.updatedAt ?? null,
+        conversationId: st.conversationId && conversations.has(st.conversationId) ? st.conversationId : null,
+      }))
       .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
   }
 

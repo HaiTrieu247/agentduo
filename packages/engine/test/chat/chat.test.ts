@@ -1347,15 +1347,25 @@ describe("Chat: the pipeline", () => {
     for (const line of help.split("\n").filter((l) => l.trimStart().startsWith("/"))) expect(line.trim(), line).toMatch(/^\S+(?: \S+)*\s{2,}\S/);
   });
 
-  it("offers to resume a run left waiting in an earlier session, and asks for the decision again", async () => {
+  it("offers to resume a run left waiting in an earlier session of its conversation, and asks for the decision again", async () => {
     const cfg = testConfig(fake, { limits: { max_review_rounds: 1 } });
     fake.setScenario({ ...happy(), code_reviewer: [{ output: review(false, [finding("F1")]) }] });
     const first = newChat({ cfg });
     await first.submit("/pipeline Make app.txt fixed");
     await first.idle();
     expect(latest().phase).toBe("HUMAN_REVIEW");
+    expect(latest().conversationId).toBe(first.conversationId);
+    // Another conversation is not offered it, and its /resume continues nothing of another conversation's.
+    const other = newChat({ cfg });
+    const before = ui.lines.length;
+    await other.greet();
+    expect(ui.lines.slice(before).some((l) => l.includes("/resume"))).toBe(false);
+    await other.submit("/resume");
+    expect(ui.lines.at(-1)).toBe(`Nothing to resume in this conversation. /resume <run id> continues another run (/status lists the latest; ${latest().taskId} is waiting).`);
+    expect(latest().phase).toBe("HUMAN_REVIEW");
+    // Its own conversation, opened again: offered, and /resume asks for the decision again.
     const decider = new ScriptedDecider([{ decision: "abort" }]);
-    const second = newChat({ cfg, decider });
+    const second = newChat({ cfg, decider, conversationId: first.conversationId });
     await second.greet();
     expect(ui.lines.at(-1)).toContain("/resume");
     await second.submit("/resume");

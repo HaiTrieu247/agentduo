@@ -469,6 +469,11 @@ export interface RunState {
   conversationContext?: ConversationContext;
   /** Files attached to the task, copied into the run (so a resume needs neither the originals nor the chat); absent: none. */
   attachments?: Attachment[];
+  /**
+   * The conversation that started the run: its /resume continues it, and another conversation's never does unless
+   * named. Absent: a run from `duo run`, or from before agentduo recorded it (no conversation's own).
+   */
+  conversationId?: string;
   /** The sessions the next calls continue, by slot; absent in older runs and while none is kept. Older runs have one per role. */
   sessions?: Partial<Record<SessionSlot, RoleSession>>;
   /** What the agents recorded about the repository, oldest first, at most MAX_REPO_NOTES; absent: none yet. */

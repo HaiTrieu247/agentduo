@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { configErrors, configFromLayers, defaultConfig } from "../../src/config/config.js";
-import { headPm, memberNames, memberProfile, TEAM_DEFAULTS, teamConfigErrors, teamGroups, teamMembers, type TeamConfig } from "../../src/team/config.js";
+import { headPm, memberNames, memberProfile, TEAM_DEFAULTS, teamConfigErrors, teamId, teamGroups, teamMembers, type TeamConfig } from "../../src/team/config.js";
 
 const team = (over: Partial<TeamConfig> = {}): TeamConfig => ({ ...structuredClone(TEAM_DEFAULTS), ...over });
 
@@ -15,6 +15,28 @@ describe("team config", () => {
       ["qa-1", "qa", "checker", "mid", "claude"],
     ]);
     expect(defaultConfig().team).toEqual(TEAM_DEFAULTS);
+  });
+
+  it("has an optional team id: default `default`, a name like a member's", () => {
+    expect(TEAM_DEFAULTS.id).toBe("default");
+    expect(teamId({})).toBe("default");
+    expect(teamId({ id: "web" })).toBe("web");
+    expect(teamConfigErrors(team({ id: "web-2" }))).toEqual([]);
+    const noId = structuredClone(TEAM_DEFAULTS);
+    delete noId.id;
+    expect(teamConfigErrors(noId)).toEqual([]);
+    for (const bad of ["Web", "a b", "../x", "", "x".repeat(41), 3]) {
+      expect(teamConfigErrors({ ...team(), id: bad }).some((e) => e.startsWith("team.id"))).toBe(true);
+    }
+  });
+
+  it("reads team.id from a config layer; changing members or models leaves it alone", () => {
+    const cfg = configFromLayers([{ team: { id: "web" } }]);
+    expect(cfg.team.id).toBe("web");
+    expect(configErrors(cfg)).toEqual([]);
+    const other = configFromLayers([{ team: { id: "web", members: [{ role: "pm", level: "senior", cli: "claude" }, { role: "techlead", level: "senior", cli: "claude" }, { role: "dev", level: "mid", cli: "claude", model: "x" }, { role: "qa", level: "mid", cli: "claude" }] } }]);
+    expect(teamId(other.team)).toBe("web");
+    expect(configFromLayers([]).team.id).toBe("default");
   });
 
   it("names members by role, numbering each role across entries, and keeps an explicit name", () => {
