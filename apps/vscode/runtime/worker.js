@@ -14727,7 +14727,9 @@ function helpText() {
 
 // packages/engine/src/team/config.ts
 var ROLE_KINDS = ["pm", "lead", "worker", "checker"];
+var DEFAULT_TEAM_ID = "default";
 var TEAM_DEFAULTS = {
+  id: DEFAULT_TEAM_ID,
   levels: {
     junior: { can_review: false, claude: { model: "sonnet", effort: "low" }, codex: { effort: "low" } },
     mid: { can_review: false, claude: { model: "sonnet", effort: "medium" }, codex: { effort: "medium" } },
@@ -14750,6 +14752,7 @@ var TEAM_DEFAULTS = {
   limits: { max_review_rounds: 3, max_task_attempts: 3 },
   worktree: { setup: [], link: [] }
 };
+var teamId = (team) => team.id ?? DEFAULT_TEAM_ID;
 var NAME = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 var EFFORTS = { claude: CLAUDE_EFFORTS, codex: CODEX_EFFORTS };
 var isPlainObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -14841,6 +14844,7 @@ function teamConfigErrors(raw) {
   if (!isPlainObject(raw)) return ["team must be a mapping"];
   const team = raw;
   const errors = [];
+  if (team.id !== void 0 && (typeof team.id !== "string" || !NAME.test(team.id))) errors.push(`team.id ${describeName}`);
   const levels = isPlainObject(team.levels) ? Object.keys(team.levels) : [];
   if (!isPlainObject(team.levels) || !levels.length) errors.push("team.levels must be a mapping of at least one level");
   else {
@@ -15856,19 +15860,19 @@ function reclaimLock(path, stale) {
     }
   }
 }
-function acquireLock(path, busy) {
+function acquireLock(path, busy2) {
   const deadline = Date.now() + SETTLE_MS;
   for (; ; ) {
     if (createLock(path)) return;
     const owner = lockOwner(path);
-    if (owner.kind === "live") throw new LockError(busy(owner.pid));
+    if (owner.kind === "live") throw new LockError(busy2(owner.pid));
     if (owner.kind === "stale") reclaimLock(path, owner.raw);
     if (owner.kind === "gone" || owner.kind === "stale") {
       if (createLock(path)) return;
     }
     if (Date.now() > deadline) {
-      const now = lockOwner(path);
-      throw new LockError(busy(now.kind === "live" ? now.pid : null));
+      const now2 = lockOwner(path);
+      throw new LockError(busy2(now2.kind === "live" ? now2.pid : null));
     }
     pause(15);
   }
@@ -15902,9 +15906,9 @@ function acquireWorkspaceLock(runsDir) {
 function workspaceLockHolder(runsDir) {
   return lockHolder(join6(runsDir, ".lock"));
 }
-function acquireLockFile(path, busy) {
+function acquireLockFile(path, busy2) {
   mkdirSync(dirname2(path), { recursive: true });
-  acquireLock(path, busy);
+  acquireLock(path, busy2);
   return () => releaseLock(path);
 }
 function pidAlive(pid) {
@@ -15959,8 +15963,8 @@ var RunStore = class _RunStore {
   static LATEST = "LATEST";
   dir;
   locked = false;
-  static create(runsDir, task, limits, now = /* @__PURE__ */ new Date()) {
-    const base = `${stamp(now)}-${slugify(task)}`;
+  static create(runsDir, task, limits, now2 = /* @__PURE__ */ new Date()) {
+    const base = `${stamp(now2)}-${slugify(task)}`;
     let id = base;
     for (let n = 2; existsSync5(join6(runsDir, id)); n++) id = `${base}-${n}`;
     const store = new _RunStore(runsDir, id);
@@ -16747,10 +16751,10 @@ function fileChanges(before, after, session2) {
   const out = [];
   for (const k of SETTING_KEYS) {
     const was = valueAt(before, k.path);
-    const now = valueAt(after, k.path);
-    if (isDeepStrictEqual2(was, now) || !isDeepStrictEqual2(valueAt(session2, k.path), was)) continue;
+    const now2 = valueAt(after, k.path);
+    if (isDeepStrictEqual2(was, now2) || !isDeepStrictEqual2(valueAt(session2, k.path), was)) continue;
     try {
-      out.push(settings.value(k.key, now));
+      out.push(settings.value(k.key, now2));
     } catch (e) {
       if (e instanceof ConfigError) continue;
       throw e;
@@ -17444,12 +17448,12 @@ function parseRequestEnvelope(v) {
 }
 
 // packages/host/src/runtimeSession.ts
-import { join as join24, resolve as resolve12 } from "path";
+import { join as join25, resolve as resolve12 } from "path";
 import { isDeepStrictEqual as isDeepStrictEqual3 } from "util";
 
 // packages/engine/src/chat/chat.ts
 import { homedir as homedir5 } from "os";
-import { join as join23, resolve as resolve11 } from "path";
+import { join as join24, resolve as resolve11 } from "path";
 
 // packages/engine/src/agents/runner.ts
 import { randomUUID as randomUUID3 } from "crypto";
@@ -18214,14 +18218,14 @@ var CodexParser = class {
     const failed2 = item.status === "failed";
     switch (item.type) {
       case "command_execution": {
-        const done = completed || item.status === "completed" || failed2;
+        const done2 = completed || item.status === "completed" || failed2;
         const exitCode = typeof item.exit_code === "number" ? item.exit_code : void 0;
         const command = unwrapShell(String(item.command ?? ""));
         return {
           id,
           kind: "command",
           label: `exec  ${firstLine(command)}`,
-          status: !done ? "running" : exitCode === 0 && !failed2 ? "ok" : "error",
+          status: !done2 ? "running" : exitCode === 0 && !failed2 ? "ok" : "error",
           exitCode,
           ...wholeCommand(command)
         };
@@ -18689,8 +18693,8 @@ Return ONLY a JSON object that matches the required schema exactly.
       const askSignal = AbortSignal.any([processSignal, over.signal]);
       const inflight = /* @__PURE__ */ new Set();
       const track = (work) => {
-        const done = work.catch(() => void 0).finally(() => inflight.delete(done));
-        inflight.add(done);
+        const done2 = work.catch(() => void 0).finally(() => inflight.delete(done2));
+        inflight.add(done2);
       };
       const callId = `${prefix}.a${attempt}`;
       try {
@@ -18929,9 +18933,9 @@ var WorkspacePaths = class {
   o;
   cached = null;
   list() {
-    const now = (this.o.now ?? Date.now)();
-    if (!this.cached || now - this.cached.at > (this.o.maxAgeMs ?? 1e4)) {
-      this.cached = { at: now, listing: listWorkspacePaths(this.workspace, { exclude: this.o.exclude, max: this.o.max }) };
+    const now2 = (this.o.now ?? Date.now)();
+    if (!this.cached || now2 - this.cached.at > (this.o.maxAgeMs ?? 1e4)) {
+      this.cached = { at: now2, listing: listWorkspacePaths(this.workspace, { exclude: this.o.exclude, max: this.o.max }) };
     }
     return this.cached.listing;
   }
@@ -19433,9 +19437,9 @@ var FINAL_REFRESHES = 2;
 var MAX_REASONS = 10;
 var gateSpecs = (gates, defaultTimeoutSec) => gates.map((g) => ({ name: g.name, command: g.command, required: g.required !== false, timeoutSec: g.timeout_sec ?? defaultTimeoutSec }));
 var configDigest = (specs) => createHash("sha256").update(JSON.stringify(specs.map((s) => [s.name, s.command, s.required, s.timeoutSec]))).digest("hex");
-function configChanges(before, now) {
+function configChanges(before, now2) {
   const out = [];
-  for (const g of now) {
+  for (const g of now2) {
     const b = before.find((x) => x.name === g.name);
     if (!b) {
       out.push(`gate '${g.name}' added`);
@@ -19445,8 +19449,8 @@ function configChanges(before, now) {
     if (b.required !== g.required) out.push(`gate '${g.name}' is ${g.required ? "required" : "optional"} now`);
     if (b.timeoutSec !== g.timeoutSec) out.push(`gate '${g.name}': timeout ${b.timeoutSec}s \u2192 ${g.timeoutSec}s`);
   }
-  for (const b of before) if (!now.some((g) => g.name === b.name)) out.push(`gate '${b.name}' removed`);
-  if (!out.length && configDigest(before) !== configDigest(now)) out.push("the gates' order changed");
+  for (const b of before) if (!now2.some((g) => g.name === b.name)) out.push(`gate '${b.name}' removed`);
+  if (!out.length && configDigest(before) !== configDigest(now2)) out.push("the gates' order changed");
   return out;
 }
 function gateOutcome(r, accepted) {
@@ -20404,10 +20408,10 @@ var WorkspaceLease = class {
     workspace.count++;
     this.workspace = workspace;
     if (first) this.onChange?.(true);
-    let done = false;
+    let done2 = false;
     return () => {
-      if (done) return;
-      done = true;
+      if (done2) return;
+      done2 = true;
       if (conversation2 && held && --held.count === 0) {
         this.conversations.delete(conversation2);
         held.release();
@@ -20469,10 +20473,10 @@ var Conversation = class _Conversation {
   constructor(runsDir, o = {}) {
     this.runsDir = runsDir;
     this.clock = o.clock ?? (() => /* @__PURE__ */ new Date());
-    const now = this.clock();
-    this.id = o.id ?? `${stamp(now)}-chat-${process.pid}-${++counter2}`;
+    const now2 = this.clock();
+    this.id = o.id ?? `${stamp(now2)}-chat-${process.pid}-${++counter2}`;
     this.dir = join17(conversationsDir(runsDir), this.id);
-    this.createdAt = now.toISOString();
+    this.createdAt = now2.toISOString();
     this.files = new AttachmentStore(runsDir, this.dir);
     this.locate = (a) => attachmentFile(runsDir, a);
   }
@@ -21263,9 +21267,9 @@ var ModelRegistry = class {
       this.doctor.set(key, known);
     }
     void known.then((answer) => {
-      const now = this.o.cfg();
-      if (this.closed || !now) return;
-      this.set("codex", this.signature("codex") === signature ? fromDoctor(base, answer) : this.codexNow(now));
+      const now2 = this.o.cfg();
+      if (this.closed || !now2) return;
+      this.set("codex", this.signature("codex") === signature ? fromDoctor(base, answer) : this.codexNow(now2));
     });
     return { ...base, status: "resolving" };
   }
@@ -21799,9 +21803,9 @@ function ownStep(cli) {
   const effort = cli.role_efforts?.implementer ?? null;
   return model || effort ? [{ model, effort }] : [];
 }
-function changedParts(before, now) {
+function changedParts(before, now2) {
   const value = (m, k) => k === "answers" ? m.answers ?? "" : m[k];
-  return Object.keys(MARK_PARTS).filter((k) => value(before, k) !== value(now, k));
+  return Object.keys(MARK_PARTS).filter((k) => value(before, k) !== value(now2, k));
 }
 function nextBlocker(previous, reason, round2, mark, changedFiles) {
   const key = blockerKey(reason);
@@ -21826,19 +21830,19 @@ function heldReview(b) {
   };
 }
 var STALL_CYCLES = 2;
-function cycleProgress(prev, now, o) {
-  if (!prev || prev.plan !== now.plan || !prev.blocking.length && !prev.failingGates.length) return null;
-  const nowKeys = new Set(now.blocking.map((b) => b.key));
+function cycleProgress(prev, now2, o) {
+  if (!prev || prev.plan !== now2.plan || !prev.blocking.length && !prev.failingGates.length) return null;
+  const nowKeys = new Set(now2.blocking.map((b) => b.key));
   const resolved = prev.blocking.filter((b) => o.resolved.includes(b.key)).map((b) => b.key);
   const unblocked = prev.blocking.filter((b) => !o.resolved.includes(b.key) && !nowKeys.has(b.key)).map((b) => b.key);
-  const gates = prev.failingGates.filter((g) => !now.failingGates.includes(g));
+  const gates = prev.failingGates.filter((g) => !now2.failingGates.includes(g));
   const out = [
     ...resolved.length ? [`the review resolved ${resolved.join(", ")}`] : [],
     ...unblocked.map((k) => `${k} no longer blocks`),
     ...gates.map((g) => `required gate '${g}' passes now`)
   ];
   if (o.changed === null) {
-    if (prev.tree !== now.tree) out.push("the code changed");
+    if (prev.tree !== now2.tree) out.push("the code changed");
   } else if (prev.blocking.some((b) => !b.file) && o.changed.length) {
     out.push(`files changed: ${o.changed.slice(0, 5).map(([, p]) => p).join(", ")}`);
   } else {
@@ -21888,10 +21892,10 @@ function trackCritique(ledger, issues, at) {
 }
 function planProgress(prev, blocking, resolved) {
   if (!prev || !prev.blocking.length) return null;
-  const now = new Set(blocking);
+  const now2 = new Set(blocking);
   return [
     ...prev.blocking.filter((k) => resolved.includes(k)).map((k) => `the critic resolved ${k}`),
-    ...prev.blocking.filter((k) => !resolved.includes(k) && !now.has(k)).map((k) => `${k} no longer blocks`)
+    ...prev.blocking.filter((k) => !resolved.includes(k) && !now2.has(k)).map((k) => `${k} no longer blocks`)
   ];
 }
 function planStallReview(s, items) {
@@ -22741,18 +22745,18 @@ var Workflow = class {
     const review = st.humanReview;
     if (!review || review.reason !== "clarification_required") return false;
     if (!ledgerAnswer(st.clarifications ?? [], entry.id, entry.callId, answers, nowIso())) return false;
-    const done = st.clarifications.find((e) => e.id === entry.id);
-    this.o.store.writeJson(`clarification.${done.seq}.json`, { request: { ...done, answers: void 0, status: void 0, closedAt: void 0 }, answers: done.answers, answeredAt: done.closedAt });
-    this.emit({ type: "clarification.answered", id: done.id, callId: done.callId, answers: done.answers });
-    const role = done.role === void 0 || done.role === "plan_finalizer" ? "planner" : done.role;
+    const done2 = st.clarifications.find((e) => e.id === entry.id);
+    this.o.store.writeJson(`clarification.${done2.seq}.json`, { request: { ...done2, answers: void 0, status: void 0, closedAt: void 0 }, answers: done2.answers, answeredAt: done2.closedAt });
+    this.emit({ type: "clarification.answered", id: done2.id, callId: done2.callId, answers: done2.answers });
+    const role = done2.role === void 0 || done2.role === "plan_finalizer" ? "planner" : done2.role;
     this.message({
       from: "human",
       to: this.party(role),
       kind: "decision",
-      headline: `answered ${done.source === "planner" ? "the planner's" : "Claude's"} ${done.questions.length === 1 ? "question" : `${done.questions.length} questions`}`,
-      items: done.questions.map((q) => answerSummary({ questions: [q], answers: done.answers, status: "answered" }))
+      headline: `answered ${done2.source === "planner" ? "the planner's" : "Claude's"} ${done2.questions.length === 1 ? "question" : `${done2.questions.length} questions`}`,
+      items: done2.questions.map((q) => answerSummary({ questions: [q], answers: done2.answers, status: "answered" }))
     });
-    this.record("HUMAN_REVIEW", IMPL_PHASES.includes(review.fromPhase) ? st.implRound : st.planningRound, "human", "questions answered", answerSummary(done), "ok", `clarification.${done.seq}.json`);
+    this.record("HUMAN_REVIEW", IMPL_PHASES.includes(review.fromPhase) ? st.implRound : st.planningRound, "human", "questions answered", answerSummary(done2), "ok", `clarification.${done2.seq}.json`);
     st.humanReview = null;
     st.phase = review.resumePhase;
     st.inProgress = null;
@@ -23175,11 +23179,11 @@ var Workflow = class {
     const preRef = this.ref(`impl-r${k}-pre`);
     const started = await this.git.readRef(preRef);
     const pre = started ?? await this.git.snapshot(this.snapshotExclude, preRef, `agentduo ${st.taskId}: before implementation round ${k}`);
-    const now = started ? await this.tree() : pre.tree;
+    const now2 = started ? await this.tree() : pre.tree;
     const beforeOutside = await this.outsideTree();
-    const findings = await this.findingsAt(now);
+    const findings = await this.findingsAt(now2);
     const last = st.lastImplementation?.round === k ? st.lastImplementation : null;
-    const rerun = started ? { status: last?.status ?? null, summary: last?.summary ?? null, blockingReason: last?.blockingReason ?? null, changes: await this.git.nameStatus(pre.tree, now) } : null;
+    const rerun = started ? { status: last?.status ?? null, summary: last?.summary ?? null, blockingReason: last?.blockingReason ?? null, changes: await this.git.nameStatus(pre.tree, now2) } : null;
     const failed2 = k > 1 ? (st.lastGates ?? []).filter((g) => !g.passed) : [];
     const planMd = store.readText("plan.final.md");
     const check = (rep) => rep.status === "blocked" && !(rep.blocking_reason ?? "").trim() ? ["status is 'blocked' but blocking_reason is empty"] : [];
@@ -23207,7 +23211,7 @@ var Workflow = class {
       }
     };
     const notesGiven = st.humanNotes.length;
-    const { res, turn } = await this.callAgent(turnSpec, now);
+    const { res, turn } = await this.callAgent(turnSpec, now2);
     this.addUsage(res, "implementer");
     this.noteRejections("implementer", k, res);
     const post = await this.git.snapshot(this.snapshotExclude, this.ref(`impl-r${k}`), `agentduo ${st.taskId}: implementation round ${k}`);
@@ -23225,7 +23229,7 @@ var Workflow = class {
       pre_snapshot: pre.commit,
       snapshot: post.commit,
       changes: changes.map(([status, path]) => ({ status, path })),
-      attempt_changes: (now === post.tree ? [] : await this.git.nameStatus(now, post.tree)).map(([status, path]) => ({ status, path })),
+      attempt_changes: (now2 === post.tree ? [] : await this.git.nameStatus(now2, post.tree)).map(([status, path]) => ({ status, path })),
       unanswered_findings: missing,
       earlier_attempts: earlier2 ? [...earlier2.earlier_attempts ?? [], attemptOf(earlier2)] : []
     }));
@@ -23279,7 +23283,7 @@ var Workflow = class {
     if (report.status === "blocked") {
       this.escalateProfile("implementer_blocked", `the implementer is blocked: ${report.blocking_reason ?? "no reason given"}`, "IMPLEMENT");
       const mark = await this.progressMark(post.tree, notesGiven);
-      st.blocker = nextBlocker(st.blocker, report.blocking_reason ?? "implementer reported blocked", k, mark, post.tree !== now);
+      st.blocker = nextBlocker(st.blocker, report.blocking_reason ?? "implementer reported blocked", k, mark, post.tree !== now2);
       const { message, details } = blockedReview(st.blocker);
       this.escalate("implementer_blocked", message, "IMPLEMENT", details);
       return;
@@ -23507,34 +23511,34 @@ var Workflow = class {
     const gatesOk = verdicts.length === 0;
     const critical = fixable.filter((f) => f.severity === "critical");
     const approved = review.approved || !cfg.quality_gates.require_codex_approval;
-    const done = approved && !fixable.length && !pre.length && !scope.length && gatesOk;
+    const done2 = approved && !fixable.length && !pre.length && !scope.length && gatesOk;
     st.reviewApproval = approved && !fixable.length && !fixableGates.length ? { round: k, revision: snap, tree: st.lastSnapshot.tree, plan: st.finalPlanHash, approved: review.approved } : null;
     if (review.approved && fixable.length) this.warn("the reviewer approved but reported blocking findings; continuing with a fix round");
     const keyOf = (f) => tracking.findings[f.id]?.key ?? f.id;
-    const now = { plan: st.finalPlanHash, tree: st.lastSnapshot.tree, blocking: fixable.map((f) => ({ key: keyOf(f), file: f.file })), failingGates: fixableGates.map((v) => v.gate.name) };
-    const progress = cycleProgress(samePlan, now, { resolved: tracking.resolved, changed: changedSincePrev, workspace: this.o.repo });
+    const now2 = { plan: st.finalPlanHash, tree: st.lastSnapshot.tree, blocking: fixable.map((f) => ({ key: keyOf(f), file: f.file })), failingGates: fixableGates.map((v) => v.gate.name) };
+    const progress = cycleProgress(samePlan, now2, { resolved: tracking.resolved, changed: changedSincePrev, workspace: this.o.repo });
     const statuses = Object.values(tracking.findings).map((t) => t.status);
     const cycle = {
       round: k,
       revision: snap,
-      ...now,
+      ...now2,
       progress,
       counts: { new: statuses.filter((x) => x === "new").length, open: statuses.filter((x) => x === "open").length, reopened: statuses.filter((x) => x === "reopened").length, resolved: tracking.resolved.length }
     };
     st.cycles = [...st.cycles ?? [], cycle].slice(-MAX_CYCLES);
     const stuck = [
-      ...(samePlan?.blocking ?? []).map((b) => b.key).filter((key) => now.blocking.some((b) => b.key === key)),
-      ...(samePlan?.failingGates ?? []).filter((g) => now.failingGates.includes(g)).map((g) => `gate '${g}'`)
+      ...(samePlan?.blocking ?? []).map((b) => b.key).filter((key) => now2.blocking.some((b) => b.key === key)),
+      ...(samePlan?.failingGates ?? []).filter((g) => now2.failingGates.includes(g)).map((g) => `gate '${g}'`)
     ];
     const stalled = nextStall(st.stall, { round: k, progress, keys: stuck }, samePlan?.tree === cycle.tree);
-    st.stall = done ? null : stalled.stall;
+    st.stall = done2 ? null : stalled.stall;
     const held = [pre.length ? `${pre.length} pre-existing` : "", scope.length ? `${scope.length} outside the task's scope` : ""].filter(Boolean);
     const counts = `${fixable.length + preexisting.length + scope.length} blocking${held.length ? ` (${held.join(", ")})` : ""}`;
     this.message({
       from: this.party("code_reviewer"),
       to: this.party("implementer"),
       kind: "review",
-      headline: done ? `approved${review.findings.length ? ` \xB7 ${review.findings.length} non-blocking finding(s)` : ""}` : `${review.findings.length} finding(s) \xB7 ${counts}${gatesOk ? "" : " \xB7 required gates failing"}`,
+      headline: done2 ? `approved${review.findings.length ? ` \xB7 ${review.findings.length} non-blocking finding(s)` : ""}` : `${review.findings.length} finding(s) \xB7 ${counts}${gatesOk ? "" : " \xB7 required gates failing"}`,
       items: findingItems(review.findings),
       artifact: `review.r${k}.json`
     });
@@ -23542,13 +23546,13 @@ var Workflow = class {
       "CODE_REVIEW",
       k,
       this.agentName("code_reviewer"),
-      done ? "approved" : "changes requested",
+      done2 ? "approved" : "changes requested",
       `${review.findings.length} finding(s), ${counts}${gatesOk ? "" : ", required gates failing"}`,
-      done ? "ok" : "warn",
+      done2 ? "ok" : "warn",
       `review.r${k}.json`,
       res
     );
-    if (done) {
+    if (done2) {
       await this.finalCheck("CODE_REVIEW");
       return;
     }
@@ -23780,6 +23784,419 @@ function usageReportText(r) {
 // packages/engine/src/team/state.ts
 import { existsSync as existsSync17, mkdirSync as mkdirSync7, readdirSync as readdirSync6, readFileSync as readFileSync13 } from "fs";
 import { join as join19 } from "path";
+
+// packages/engine/src/team/rule-governance.ts
+var done = (value, changed) => ({ ok: true, value, changed });
+var refuse = (reason) => ({ ok: false, reason });
+var SCOPE_UNIT_KINDS = ["planning", "integration", "apply", "acceptance"];
+var RUN_UNIT = "run";
+var UNGROUPED_PLANNING = "ungrouped";
+var GROUP_PREFIX = "group:";
+var planningUnit = (group) => ({ kind: "planning", id: group === null ? UNGROUPED_PLANNING : `${GROUP_PREFIX}${group}` });
+function unitOccurrence(state, unit) {
+  switch (unit.kind) {
+    case "planning": {
+      if (state.approvedBrief == null) return null;
+      const group = unit.id === UNGROUPED_PLANNING ? null : unit.id.startsWith(GROUP_PREFIX) && unit.id.length > GROUP_PREFIX.length ? unit.id.slice(GROUP_PREFIX.length) : void 0;
+      if (group === void 0) return null;
+      const written = (state.plans ?? []).filter((p) => p.group === group && p.briefVersion === state.approvedBrief).length;
+      return `brief${state.approvedBrief}.plan${written}`;
+    }
+    case "integration":
+      return unit.id !== RUN_UNIT ? null : state.integration?.commit ? `commit:${state.integration.commit}` : null;
+    case "apply":
+      return unit.id !== RUN_UNIT ? null : state.verifiedTree ? `tree:${state.verifiedTree}` : null;
+    case "acceptance":
+      return unit.id !== RUN_UNIT ? null : state.integration?.commit || state.verifiedTree ? `commit:${state.integration?.commit ?? "-"}/tree:${state.verifiedTree ?? "-"}` : null;
+  }
+}
+function resolveUnit(state, unit) {
+  const occurrence = unitOccurrence(state, unit);
+  return occurrence === null ? null : { kind: unit.kind, id: unit.id, occurrence };
+}
+var sameUnit = (a, b) => a.kind === b.kind && a.id === b.id && a.occurrence === b.occurrence;
+var ID = /^[\p{L}\p{N}][\p{L}\p{N}_.:-]{0,49}$/u;
+var isUnitRef = (u) => !!u && typeof u === "object" && SCOPE_UNIT_KINDS.includes(u.kind) && typeof u.id === "string" && ID.test(u.id);
+var isUnit = (u) => isUnitRef(u) && typeof u.occurrence === "string" && u.occurrence.trim() !== "";
+function resolveWork(state, work) {
+  if (work.task !== void 0) return { task: work.task };
+  const unit = isUnitRef(work.unit) ? resolveUnit(state, work.unit) : null;
+  return unit ? { unit } : null;
+}
+function callScope(state, ref) {
+  if (ref.task !== void 0) {
+    if (!state.tasks.some((t) => t.id === ref.task)) return refuse(`'${ref.task}' is not a task of this run`);
+    return done({ runId: state.id, taskIds: [ref.task], unit: null }, false);
+  }
+  if (!isUnitRef(ref.unit)) return refuse(`a unit of work is one of ${SCOPE_UNIT_KINDS.join(", ")} with an id`);
+  const unit = resolveUnit(state, ref.unit);
+  if (!unit) return refuse(`the run has no ${ref.unit.kind} '${ref.unit.id}' to ask about now`);
+  return done({ runId: state.id, taskIds: [], unit }, false);
+}
+function scopeProblems(state, scope) {
+  const problems = [];
+  if (scope.runId !== state.id) problems.push(`the scope is of run '${scope.runId}', not this run`);
+  const ids = new Set(scope.taskIds);
+  if (ids.size !== scope.taskIds.length) problems.push("a task is named twice in the scope");
+  for (const id of scope.taskIds) if (!state.tasks.some((t) => t.id === id)) problems.push(`'${id}' is not a task of this run`);
+  if (scope.taskIds.length && scope.unit) problems.push("a scope is tasks or one unit of work, not both");
+  else if (!scope.taskIds.length && !scope.unit) problems.push("a scope names tasks or one unit of work");
+  if (scope.unit && !isUnit(scope.unit)) problems.push(`a unit of work is one of ${SCOPE_UNIT_KINDS.join(", ")} with an id`);
+  return problems;
+}
+function scopeWithin(inner, outer) {
+  if (inner.runId !== outer.runId) return false;
+  if (inner.unit) return !!outer.unit && sameUnit(inner.unit, outer.unit);
+  return inner.taskIds.every((id) => outer.taskIds.includes(id));
+}
+function scopeCovers(scope, runId, ref) {
+  if (scope.runId !== runId) return false;
+  if (ref.task !== void 0) return scope.taskIds.includes(ref.task);
+  return !!scope.unit && !!ref.unit && sameUnit(scope.unit, ref.unit);
+}
+var sameScope = (a, b) => scopeWithin(a, b) && scopeWithin(b, a);
+var issueOccurrence = (callId, index) => `${callId}#${index}`;
+var exceptionStatus = (ex) => ex.decision?.status ?? (ex.assessment ? "assessed" : "requested");
+var emptyGovernance = () => ({ incidents: [], exceptions: [], nextIncident: 1, nextException: 1 });
+function governanceOf(state) {
+  const g = state.governance ??= emptyGovernance();
+  g.incidents ??= [];
+  g.exceptions ??= [];
+  g.nextIncident ??= g.incidents.length + 1;
+  g.nextException ??= g.exceptions.length + 1;
+  return g;
+}
+var now = () => (/* @__PURE__ */ new Date()).toISOString();
+var clean = (text3) => text3.trim();
+var uniq = (ids) => [...new Set(ids.map(clean).filter(Boolean))];
+function ruleProblems(ruleIds, known, required) {
+  const problems = [];
+  if (required && !ruleIds.length) problems.push("name at least one rule id");
+  if (known) {
+    for (const id of ruleIds) if (!known.has(id)) problems.push(`'${id}' is not a rule of this team (${[...known].join(", ") || "it has none"})`);
+  }
+  return problems;
+}
+var sourceKey = (s) => {
+  switch (s.kind) {
+    case "member_report":
+      return `member_report:${s.member}:${s.task ?? "-"}:${s.occurrence}`;
+    case "escalation":
+      return `escalation:${s.escalationId}`;
+    case "review":
+      return `review:${s.task}:${s.occurrence}`;
+    case "check":
+      return `check:${s.task}:${s.occurrence}`;
+    case "user_message":
+      return `user_message:${s.seq}`;
+  }
+};
+function sourceProblems(state, source) {
+  const task = (id) => state.tasks.find((t) => t.id === id);
+  if ("occurrence" in source && !String(source.occurrence ?? "").trim()) return [`a ${source.kind} names the occurrence it is about`];
+  switch (source.kind) {
+    case "member_report":
+      if (!source.member.trim()) return ["a member's report names the member"];
+      return source.task !== null && !task(source.task) ? [`'${source.task}' is not a task of this run`] : [];
+    case "escalation": {
+      const e = state.escalations?.find((x) => x.id === source.escalationId);
+      if (!e) return [`'${source.escalationId}' is not an escalation of this run`];
+      return e.answer === null ? [`escalation '${source.escalationId}' is not answered yet`] : [];
+    }
+    case "review": {
+      const t = task(source.task);
+      if (!t) return [`'${source.task}' is not a task of this run`];
+      return t.review?.verdict === "changes" ? [] : [`task '${source.task}' has no review that asked for changes`];
+    }
+    case "check": {
+      const t = task(source.task);
+      if (!t) return [`'${source.task}' is not a task of this run`];
+      return t.checks.some((c) => c.verdict === "fail") ? [] : [`task '${source.task}' has no failed check`];
+    }
+    case "user_message":
+      return state.messages?.some((m) => m.seq === source.seq && m.from === "user") ? [] : [`message ${source.seq} is no message of the user in this run`];
+  }
+}
+function recordIncident(state, input) {
+  const g = governanceOf(state);
+  const summary = clean(input.summary);
+  if (!summary) return refuse("say what happened");
+  const ruleIds = uniq(input.ruleIds ?? []);
+  const problems = [...sourceProblems(state, input.source), ...ruleProblems(ruleIds, input.known, false)];
+  if (problems.length) return refuse(problems.join("; "));
+  const key = `${input.kind}|${sourceKey(input.source)}`;
+  const same = g.incidents.find((i) => `${i.kind}|${sourceKey(i.source)}` === key);
+  if (same) return done(same, false);
+  const answered = input.source.kind === "escalation" ? state.escalations.find((e) => e.id === input.source.escalationId).answer : null;
+  const incident = {
+    id: `I${g.nextIncident++}`,
+    kind: input.kind,
+    source: structuredClone(input.source),
+    reportedBy: input.reportedBy,
+    ruleIds,
+    summary,
+    status: answered !== null ? "resolved" : "reported",
+    resolution: answered,
+    lesson: null,
+    direction: null,
+    at: now()
+  };
+  g.incidents.push(incident);
+  return done(incident, true);
+}
+var incidentOf = (state, id) => governanceOf(state).incidents.find((i) => i.id === id) ?? null;
+var noIncident = (id) => refuse(`'${id}' is not an incident of this run`);
+function resolveIncident(state, id, resolution) {
+  const i = incidentOf(state, id);
+  if (!i) return noIncident(id);
+  if (i.status !== "reported") return done(i, false);
+  const text3 = clean(resolution);
+  if (!text3) return refuse("say how it was resolved");
+  i.status = "resolved";
+  i.resolution = text3;
+  return done(i, true);
+}
+function beginLesson(state, id, text3) {
+  const i = incidentOf(state, id);
+  if (!i) return noIncident(id);
+  const rule = clean(text3);
+  if (!rule) return refuse("write the rule");
+  if (i.status === "recording" || i.status === "recorded") {
+    return i.lesson?.text === rule ? done(i, false) : refuse(`incident ${id} already has a lesson (${i.status}); a rule is never replaced`);
+  }
+  if (i.status !== "resolved") return refuse(i.status === "no_lesson" ? `incident ${id} was closed without a lesson` : `incident ${id} is not resolved yet`);
+  i.status = "recording";
+  i.lesson = { text: rule, ruleId: null, rationale: null };
+  return done(i, true);
+}
+function completeLesson(state, id, ruleId) {
+  const i = incidentOf(state, id);
+  if (!i) return noIncident(id);
+  if (!clean(ruleId)) return refuse("name the rule the store wrote");
+  if (i.status === "recorded") return i.lesson?.ruleId === ruleId ? done(i, false) : refuse(`incident ${id} is recorded as rule ${i.lesson?.ruleId}`);
+  if (i.status !== "recording") return refuse(`incident ${id} has no lesson being recorded`);
+  i.status = "recorded";
+  i.lesson.ruleId = ruleId;
+  return done(i, true);
+}
+function declineLesson(state, id, rationale) {
+  const i = incidentOf(state, id);
+  if (!i) return noIncident(id);
+  if (i.status === "no_lesson") return done(i, false);
+  if (i.status !== "resolved") return refuse(i.status === "reported" ? `incident ${id} is not resolved yet` : `incident ${id} already has a lesson (${i.status})`);
+  i.status = "no_lesson";
+  i.lesson = { text: "", ruleId: null, rationale: clean(rationale) || null };
+  return done(i, true);
+}
+var exceptionOf = (state, id) => governanceOf(state).exceptions.find((e) => e.id === id) ?? null;
+var noException = (id) => refuse(`'${id}' is not an exception request of this run`);
+var sameRules = (a, b) => a.length === b.length && [...a].sort().every((x, i) => x === [...b].sort()[i]);
+function requestException(state, input) {
+  const g = governanceOf(state);
+  const ruleIds = uniq(input.ruleIds);
+  const reason = clean(input.reason);
+  const problems = [...ruleProblems(ruleIds, input.known, true)];
+  if (!reason) problems.push("say why the rules do not fit this work");
+  const scope = callScope(state, input.work);
+  if (!scope.ok) problems.push(scope.reason);
+  const incidentId = input.incidentId ?? null;
+  if (incidentId !== null && !incidentOf(state, incidentId)) problems.push(`'${incidentId}' is not an incident of this run`);
+  if (problems.length || !scope.ok) return refuse(problems.join("; "));
+  const same = g.exceptions.find((e) => e.from === input.from && sameRules(e.ruleIds, ruleIds) && sameScope(e.requested, scope.value));
+  if (same) return exceptionStatus(same) === "rejected" ? refuse(`the exception for ${ruleIds.join(", ")} on this work was already refused`) : done(same, false);
+  const ex = {
+    id: `X${g.nextException++}`,
+    from: input.from,
+    ruleIds,
+    reason,
+    alternative: clean(input.alternative ?? "") || null,
+    requested: scope.value,
+    incidentId,
+    assessment: null,
+    direction: null,
+    decision: null,
+    at: now()
+  };
+  g.exceptions.push(ex);
+  return done(ex, true);
+}
+function assessException(state, id, input) {
+  const ex = exceptionOf(state, id);
+  if (!ex) return noException(id);
+  if (ex.decision) return refuse(`exception ${id} was already shown to the user; a new request is needed to change it`);
+  const ruleIds = uniq(input.ruleIds);
+  const problems = [...ruleProblems(ruleIds, input.known, true)];
+  let unit = null;
+  if (input.unit) {
+    const asked = ex.requested.unit;
+    if (asked && asked.kind === input.unit.kind && asked.id === input.unit.id) unit = { ...asked };
+    else problems.push(`the unit is not the one asked for (${asked ? `${asked.kind} '${asked.id}'` : "tasks " + ex.requested.taskIds.join(", ")})`);
+  }
+  const scope = { runId: state.id, taskIds: uniq(input.taskIds), unit };
+  const scoped = scopeProblems(state, scope);
+  if (unit || !input.unit) problems.push(...scoped);
+  for (const r of ruleIds) if (!ex.ruleIds.includes(r)) problems.push(`rule '${r}' was not in the request (${ex.ruleIds.join(", ")})`);
+  if ((unit || !input.unit) && !scoped.length && !scopeWithin(scope, ex.requested)) problems.push("the scope goes beyond what was asked for; a request for other work is a request of its own");
+  if (!clean(input.reason)) problems.push("give the reason the user reads");
+  if (!clean(input.alternative)) problems.push("say what the team does instead");
+  if (!clean(input.summary)) problems.push("write the proposal as the user reads it");
+  if (problems.length) return refuse(problems.join("; "));
+  ex.assessment = { by: input.by, ruleIds, reason: clean(input.reason), alternative: clean(input.alternative), scope, summary: clean(input.summary) };
+  return done(ex, true);
+}
+function requestIds(state) {
+  const g = governanceOf(state);
+  const ids = /* @__PURE__ */ new Set();
+  for (const e of g.exceptions) {
+    if (e.decision?.requestId) ids.add(e.decision.requestId);
+    for (const p of e.decision?.previousRequestIds ?? []) ids.add(p);
+    if (e.direction) ids.add(e.direction.requestId);
+  }
+  for (const i of g.incidents) if (i.direction) ids.add(i.direction.requestId);
+  if (state.waiting) ids.add(state.waiting.requestId);
+  return ids;
+}
+function presentException(state, id, requestId2) {
+  const ex = exceptionOf(state, id);
+  if (!ex) return noException(id);
+  if (!clean(requestId2)) return refuse("the request that shows it has an id");
+  if (ex.decision) {
+    if (ex.decision.status === "pending" && ex.decision.requestId === requestId2) return done(ex, false);
+    return refuse(ex.decision.status === "pending" ? `exception ${id} is already shown in request ${ex.decision.requestId}` : `exception ${id} was already decided`);
+  }
+  if (!ex.assessment) return refuse(`exception ${id} has no assessment of the PM to show`);
+  if (ex.direction && ex.direction.answer === null) return refuse(`exception ${id} waits for the user's answer to the PM's question`);
+  if (requestIds(state).has(requestId2)) return refuse(`request ${requestId2} already stands for something else`);
+  ex.decision = { status: "pending", requestId: requestId2, previousRequestIds: [], by: null, at: null, delivered: false };
+  return done(ex, true);
+}
+function declineException(state, id) {
+  const ex = exceptionOf(state, id);
+  if (!ex) return noException(id);
+  if (ex.decision) return ex.decision.status === "rejected" ? done(ex, false) : refuse(`exception ${id} was already shown to the user`);
+  ex.decision = { status: "rejected", requestId: null, previousRequestIds: [], by: "pm", at: now(), delivered: false };
+  return done(ex, true);
+}
+var APPROVE_OPTION = "approve";
+var REJECT_OPTION = "reject";
+function decisionFromAnswer(answer) {
+  if (answer.otherText && answer.otherText.trim()) return null;
+  if (answer.optionIds.length !== 1) return null;
+  return answer.optionIds[0] === APPROVE_OPTION ? "approved" : answer.optionIds[0] === REJECT_OPTION ? "rejected" : null;
+}
+function decideException(state, decision) {
+  if (decision.source !== "user") return refuse("only the user decides an exception");
+  const g = governanceOf(state);
+  const ex = g.exceptions.find((e) => e.decision?.requestId === decision.requestId);
+  if (!ex || !ex.decision) {
+    const old = g.exceptions.find((e) => e.decision?.previousRequestIds.includes(decision.requestId));
+    return refuse(old ? `request ${decision.requestId} was replaced by a later one; it decides nothing` : `request ${decision.requestId} shows no exception`);
+  }
+  const wanted = decision.approved ? "approved" : "rejected";
+  if (ex.decision.status !== "pending") return ex.decision.status === wanted ? done(ex, false) : refuse(`exception ${ex.id} was already ${ex.decision.status}`);
+  ex.decision.status = wanted;
+  ex.decision.by = "user";
+  ex.decision.at = now();
+  return done(ex, true);
+}
+function deliverDecision(state, id) {
+  const ex = exceptionOf(state, id);
+  if (!ex) return noException(id);
+  if (!ex.decision || ex.decision.status === "pending") return refuse(`exception ${id} is not decided`);
+  if (ex.decision.delivered) return done(ex, false);
+  ex.decision.delivered = true;
+  return done(ex, true);
+}
+function askDirection(state, target, requestId2, work) {
+  if (!clean(requestId2)) return refuse("the question has a request id");
+  const holder = target.exceptionId !== void 0 ? exceptionOf(state, target.exceptionId) : incidentOf(state, target.incidentId);
+  if (!holder) return refuse(`'${target.exceptionId ?? target.incidentId}' is not in this run`);
+  if ("requested" in holder && holder.decision) return refuse(`exception ${holder.id} was already shown to the user`);
+  if (holder.direction) {
+    return holder.direction.requestId === requestId2 ? done(holder.direction, false) : refuse(`${holder.id} already has the question in request ${holder.direction.requestId}`);
+  }
+  if (requestIds(state).has(requestId2)) return refuse(`request ${requestId2} already stands for something else`);
+  let scope = null;
+  if ("source" in holder) {
+    const src = holder.source;
+    const ref = work === void 0 ? "task" in src && src.task ? { task: src.task } : null : work;
+    if (ref) {
+      const made = callScope(state, ref);
+      if (!made.ok) return refuse(made.reason);
+      scope = made.value;
+    }
+  }
+  holder.direction = { requestId: requestId2, scope, answer: null };
+  return done(holder.direction, true);
+}
+function answerDirection(state, requestId2, answer) {
+  const g = governanceOf(state);
+  const d = [...g.exceptions, ...g.incidents].map((h) => h.direction).find((x) => x?.requestId === requestId2);
+  if (!d) return refuse(`request ${requestId2} is no question of the PM's`);
+  const text3 = clean(answer);
+  if (!text3) return refuse("an empty answer settles nothing");
+  if (d.answer !== null) return d.answer === text3 ? done(d, false) : refuse(`request ${requestId2} was already answered`);
+  d.answer = text3;
+  return done(d, true);
+}
+function repointRequest(state, oldId, newId) {
+  if (!clean(newId)) return refuse("the new request has an id");
+  if (oldId === newId) return done(newId, false);
+  const g = governanceOf(state);
+  if (requestIds(state).has(newId)) return refuse(`request ${newId} already stands for something else`);
+  const ex = g.exceptions.find((e) => e.decision?.requestId === oldId);
+  if (ex?.decision) {
+    if (ex.decision.status !== "pending") return refuse(`exception ${ex.id} was already ${ex.decision.status}`);
+    ex.decision.previousRequestIds.push(oldId);
+    ex.decision.requestId = newId;
+    return done(newId, true);
+  }
+  const d = [...g.exceptions, ...g.incidents].map((h) => h.direction).find((x) => x?.requestId === oldId);
+  if (!d) return refuse(`request ${oldId} is not waiting for anything`);
+  if (d.answer !== null) return refuse(`request ${oldId} was already answered`);
+  d.requestId = newId;
+  return done(newId, true);
+}
+function exceptionsFor(state, work, ruleId) {
+  const at = resolveWork(state, work);
+  if (!at) return [];
+  return governanceOf(state).exceptions.filter((e) => e.decision?.status === "approved" && e.decision.by === "user" && !!e.assessment && scopeCovers(e.assessment.scope, state.id, at) && (ruleId === void 0 || e.assessment.ruleIds.includes(ruleId)));
+}
+function holdsWork(ex) {
+  const status = exceptionStatus(ex);
+  return status === "pending" || status === "requested" || status === "assessed" || !ex.decision.delivered;
+}
+function holdingScopes(state) {
+  const g = state.governance;
+  const scopes = [];
+  for (const e of g?.exceptions ?? []) if (holdsWork(e)) scopes.push(e.requested);
+  for (const i of g?.incidents ?? []) if (i.direction && i.direction.answer === null && i.direction.scope) scopes.push(i.direction.scope);
+  return scopes;
+}
+function heldTaskIds(state) {
+  return new Set(holdingScopes(state).flatMap((s) => s.taskIds));
+}
+function unitHeld(state, unit) {
+  const now2 = resolveUnit(state, unit);
+  return !!now2 && holdingScopes(state).some((s) => !!s.unit && sameUnit(s.unit, now2));
+}
+function governanceWork(state) {
+  const g = governanceOf(state);
+  const open = (e) => !e.decision || e.decision.status === "pending";
+  return {
+    lessons: g.incidents.filter((i) => i.status === "resolved" || i.status === "recording"),
+    assess: g.exceptions.filter((e) => !e.decision && !e.assessment && (!e.direction || e.direction.answer !== null)),
+    present: g.exceptions.filter((e) => !e.decision && !!e.assessment && (!e.direction || e.direction.answer !== null)),
+    pending: g.exceptions.filter((e) => e.decision?.status === "pending"),
+    questions: [
+      ...g.exceptions.filter((e) => open(e) && e.direction?.answer === null).map((e) => ({ requestId: e.direction.requestId, exceptionId: e.id, incidentId: null })),
+      ...g.incidents.filter((i) => i.direction?.answer === null).map((i) => ({ requestId: i.direction.requestId, exceptionId: null, incidentId: i.id }))
+    ],
+    undelivered: g.exceptions.filter((e) => e.decision && e.decision.status !== "pending" && !e.decision.delivered)
+  };
+}
+
+// packages/engine/src/team/state.ts
 var TEAM_STATE_VERSION = 1;
 var groupKey = (group) => group ?? "";
 var sessionKey = (member, task) => task ? `${member.name}@${task}` : member.name;
@@ -23825,6 +24242,7 @@ function newTeamState(id, request) {
     escalations: [],
     sessions: {},
     clarifications: [],
+    governance: emptyGovernance(),
     waiting: null,
     usage: { calls: 0, unpricedCalls: 0, costUsd: 0, tokens: 0, workSec: 0, byMember: {} },
     budget: null,
@@ -23833,6 +24251,15 @@ function newTeamState(id, request) {
     warnings: [],
     seq: 1
   };
+}
+function normalizeGovernance(saved) {
+  const g = { ...emptyGovernance(), ...saved && typeof saved === "object" ? saved : {} };
+  g.incidents = Array.isArray(g.incidents) ? g.incidents : [];
+  g.exceptions = Array.isArray(g.exceptions) ? g.exceptions : [];
+  const next = (items, n) => Math.max(typeof n === "number" ? n : 1, items.length + 1);
+  g.nextIncident = next(g.incidents, g.nextIncident);
+  g.nextException = next(g.exceptions, g.nextException);
+  return g;
 }
 var nextSeq = (state) => ++state.seq;
 var latestBrief = (state) => state.briefs.at(-1) ?? null;
@@ -23851,8 +24278,8 @@ var TeamStore = class _TeamStore {
   runsDir;
   id;
   dir;
-  static create(runsDir, request, now = /* @__PURE__ */ new Date()) {
-    const base = `${stamp2(now)}-${slug(request)}`;
+  static create(runsDir, request, now2 = /* @__PURE__ */ new Date()) {
+    const base = `${stamp2(now2)}-${slug(request)}`;
     let id = base;
     for (let n = 2; existsSync17(join19(teamsDir(runsDir), id)); n++) id = `${base}-${n}`;
     const store = new _TeamStore(runsDir, id);
@@ -23890,6 +24317,7 @@ var TeamStore = class _TeamStore {
   load() {
     const state = JSON.parse(readFileSync13(this.path("state.json"), "utf8"));
     if (state.kind !== "team" || state.version !== TEAM_STATE_VERSION) throw new Error(`unsupported team state in ${this.dir}`);
+    state.governance = normalizeGovernance(state.governance);
     return state;
   }
   save(state) {
@@ -23909,10 +24337,17 @@ var teamsDir = (runsDir) => join19(runsDir, "teams");
 
 // packages/engine/src/team/team.ts
 import { rmSync as rmSync7 } from "fs";
-import { join as join22 } from "path";
+import { join as join23 } from "path";
 
 // packages/engine/src/team/board.ts
 var jobKey = (job) => `${job.kind}:${"member" in job ? job.member : "-"}:${"task" in job ? job.task ?? "-" : "-"}`;
+function heldByException(job, state, heldTasks = heldTaskIds(state)) {
+  if (job.kind === "pm" || job.kind === "area_pm") return false;
+  if ("task" in job && job.task) return heldTasks.has(job.task);
+  if (job.kind === "integration_check" || job.kind === "integration_triage" || job.kind === "gates" && job.task === null) return unitHeld(state, { kind: "integration", id: RUN_UNIT });
+  if (job.kind === "resolve_apply") return unitHeld(state, { kind: "apply", id: RUN_UNIT });
+  return false;
+}
 var ownJob = (job) => job.kind === "gates" || job.kind === "merge";
 var DONE = ["merged", "cancelled"];
 var finished = (t) => DONE.includes(t.status);
@@ -23923,20 +24358,20 @@ function ready(task, tasks) {
     return !dep || finished(dep);
   });
 }
-function chooseReviewer(task, members, busy, groups = teamGroups(members)) {
+function chooseReviewer(task, members, busy2, groups = teamGroups(members)) {
   const author = members.find((m) => m.name === task.assignee);
   const techlead = leadOf(groups, task.group ?? null).name;
   if (!author || author.canReview) return techlead;
   const able = members.filter((m) => m.kind === "worker" && m.canReview && m.name !== author.name).sort((a, b) => Number(b.group === author.group) - Number(a.group === author.group) || Number(b.role === author.role) - Number(a.role === author.role) || b.levelRank - a.levelRank);
   if (!able.length) return techlead;
-  return able.find((m) => !busy.has(m.name))?.name ?? null;
+  return able.find((m) => !busy2.has(m.name))?.name ?? null;
 }
 var blocks = (f, blocking) => f.origin === "in_scope" && blocking.includes(f.severity);
 var normalize = (text3) => text3.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 var failureKey = (f) => `${f.suspect}:${normalize(f.title)}`;
-function madeProgress(previous, now) {
+function madeProgress(previous, now2) {
   if (!previous.length) return true;
-  const current = new Set(now);
+  const current = new Set(now2);
   return previous.some((key) => !current.has(key));
 }
 var TASK_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,19}$/;
@@ -24038,8 +24473,10 @@ function boardJobs(state, ctx) {
   const groups = ctx.groups ?? teamGroups(ctx.members);
   const techleadOf = (t) => leadOf(groups, t.group ?? null).name;
   const free = (m) => !ctx.busy.has(m);
+  const held = heldTaskIds(state);
   const add = (job) => {
     if (ctx.running.has(jobKey(job))) return;
+    if (heldByException(job, state, held)) return;
     if ("member" in job && !free(job.member)) return;
     if (jobs.some((j) => "member" in j && "member" in job && j.member === job.member)) return;
     jobs.push(job);
@@ -24234,6 +24671,144 @@ ${own}`);
   return parts.join("\n\n");
 }
 
+// packages/engine/src/team/rules.ts
+import { createHash as createHash5 } from "crypto";
+import { existsSync as existsSync19, mkdirSync as mkdirSync9, readFileSync as readFileSync15, writeFileSync as writeFileSync6 } from "fs";
+import { basename as basename5, join as join21 } from "path";
+var RulesError = class extends Error {
+  name = "RulesError";
+};
+var MARKER2 = "<!-- agentduo-rule";
+var MARKER_LINE = /^<!-- agentduo-rule id=(R\d+) op=(\S+) at=(\S+) -->$/;
+var OP_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,159}$/;
+var MAX_TEXT3 = 4e3;
+var MAX_INCIDENT = 500;
+var LOCK_WAIT_MS = 1e4;
+var RULES_HEADER = "# Team rules\n\nWhat this team learned from disagreements and mistakes it has settled. The PM appends a rule after each; nothing here is deleted or rewritten. An exception to a rule needs the user's approval and does not change it.\n";
+function workspaceKey(workspace, platform = process.platform) {
+  const canon = canonicalPath(workspace, platform);
+  const name2 = basename5(canon).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || "workspace";
+  return `${name2}-${createHash5("sha256").update(canon).digest("hex").slice(0, 12)}`;
+}
+function teamRulesDir(env, workspace, teamId2) {
+  const root2 = dataRoot(env);
+  if (!root2) throw new RulesError("there is no place for the team's rules: agentduo's data folder is not set (LOCALAPPDATA or APPDATA)");
+  if (!/^[a-z0-9][a-z0-9_-]{0,39}$/.test(teamId2)) throw new RulesError(`team id '${teamId2}' is not a valid name`);
+  return join21(root2, "team-rules", workspaceKey(workspace), teamId2);
+}
+function pause2(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+var busy = (pid) => pid ? `the team's rules are being written by another agentduo (pid ${pid})` : "another agentduo is starting to write the team's rules";
+function locked(dir, waitMs, fn) {
+  mkdirSync9(dir, { recursive: true });
+  const deadline = Date.now() + waitMs;
+  for (; ; ) {
+    let release = null;
+    try {
+      release = acquireLockFile(join21(dir, ".lock"), busy);
+    } catch (e) {
+      if (!(e instanceof LockError) || Date.now() > deadline) throw new RulesError(e.message);
+      pause2(20);
+      continue;
+    }
+    try {
+      return fn();
+    } finally {
+      release();
+    }
+  }
+}
+var oneLine = (s) => s.replace(/\s+/g, " ").trim();
+function ruleInputProblem(input) {
+  const text3 = input.text.replace(/\r\n?/g, "\n").trim();
+  const incident = oneLine(input.incident);
+  if (!text3) return "a rule needs a text";
+  if (!incident) return "a rule needs the incident it came from";
+  if (text3.length > MAX_TEXT3) return `a rule's text is at most ${MAX_TEXT3} characters`;
+  if (incident.length > MAX_INCIDENT) return `a rule's incident is at most ${MAX_INCIDENT} characters`;
+  if (text3.includes(MARKER2) || incident.includes(MARKER2)) return "a rule's text cannot hold agentduo's own marker";
+  return null;
+}
+var TeamRules = class {
+  constructor(dir, o = {}) {
+    this.dir = dir;
+    this.o = o;
+    this.path = join21(dir, "RULES.md");
+  }
+  dir;
+  o;
+  path;
+  /** Creates RULES.md when the team has none; one that exists is left as it is. True when it created it. */
+  init() {
+    if (existsSync19(this.path)) return false;
+    return locked(this.dir, this.o.lockWaitMs ?? LOCK_WAIT_MS, () => {
+      if (existsSync19(this.path)) return false;
+      writeFileSync6(this.path, RULES_HEADER, { flag: "wx" });
+      return true;
+    });
+  }
+  /** The whole text of RULES.md, as stored (created first when the team has none). */
+  read() {
+    this.init();
+    return readFileSync15(this.path, "utf8");
+  }
+  /** The rules the file records, in order. Text the file holds outside a rule is not one. */
+  rules() {
+    return parseRules(this.read());
+  }
+  /**
+   * Adds a rule at the end, under the folder's lock. The same `opId` again returns the rule it added and writes nothing.
+   * Everything already in the file stays as it is: the new block is appended.
+   */
+  append(input) {
+    if (!OP_ID.test(input.opId)) throw new RulesError("a rule needs an operation id of letters, digits and . _ : @ - (at most 160)");
+    const problem = ruleInputProblem(input);
+    if (problem) throw new RulesError(problem);
+    const text3 = input.text.replace(/\r\n?/g, "\n").trim();
+    const incident = oneLine(input.incident);
+    return locked(this.dir, this.o.lockWaitMs ?? LOCK_WAIT_MS, () => {
+      const current = existsSync19(this.path) ? readFileSync15(this.path, "utf8") : RULES_HEADER;
+      const known = parseRules(current);
+      const same = known.find((r) => r.opId === input.opId);
+      if (same) return { rule: same, added: false };
+      const n = Math.max(0, ...[...current.matchAll(/^<!-- agentduo-rule id=R(\d+) /gm)].map((m) => Number(m[1]))) + 1;
+      const rule = { id: `R${n}`, opId: input.opId, text: text3, incident, at: (this.o.clock?.() ?? /* @__PURE__ */ new Date()).toISOString() };
+      const lead = current.endsWith("\n") ? "\n" : "\n\n";
+      const block = `${lead}${MARKER2} id=${rule.id} op=${rule.opId} at=${rule.at} -->
+### ${rule.id}
+
+${text3}
+
+Source: ${incident}
+`;
+      atomicWrite(this.path, current + block);
+      return { rule, added: true };
+    });
+  }
+};
+function parseRules(content) {
+  const out = [];
+  const lines = content.split(/\r?\n/);
+  let i = 0;
+  while (i < lines.length) {
+    const m = MARKER_LINE.exec(lines[i]);
+    i++;
+    if (!m) continue;
+    const body = [];
+    while (i < lines.length && !lines[i].startsWith(MARKER2)) body.push(lines[i++]);
+    let end = body.length;
+    while (end > 0 && !body[end - 1].trim()) end--;
+    let incident = "";
+    if (end > 0 && body[end - 1].startsWith("Source: ")) incident = body[--end].slice("Source: ".length);
+    let start = 0;
+    if (body[start] === `### ${m[1]}`) start++;
+    const text3 = body.slice(start, end).join("\n").trim();
+    out.push({ id: m[1], opId: m[2], text: text3, incident, at: m[3] });
+  }
+  return out;
+}
+
 // packages/engine/src/team/prompts.ts
 function pmActions(state, occasion) {
   switch (occasion.kind) {
@@ -24246,6 +24821,10 @@ function pmActions(state, occasion) {
       return ["none", "team_answer", "escalate"];
     case "acceptance":
       return ["acceptance"];
+    case "rule_lesson":
+      return ["rule_lesson", "rule_question"];
+    case "rule_exception":
+      return ["exception_proposal", "exception_decline", "rule_question"];
     case "reports":
       return ["none"];
     case "escalation":
@@ -24317,8 +24896,91 @@ var checkLines = (checks) => checks.flatMap((c) => [
     actual: ${f.actual}`)
 ]);
 var json = "\n\n## Your output\nReply with one JSON object that matches the required schema exactly; nothing else.";
-function frame(kind, member, identity, members, brief2) {
-  return [header2(kind, member) + intro(member), identity ?? "", roster(members), brief2 ? briefSection(brief2) : ""].filter(Boolean);
+function frame(kind, p, brief2, work) {
+  return [
+    header2(kind, p.member) + intro(p.member),
+    p.identity ?? "",
+    roster(p.members),
+    brief2 ? briefSection(brief2) : "",
+    rulesSection(p.rules),
+    exceptionsSection(p.state, p.member, work),
+    p.member.kind === "pm" ? "" : memberGovernanceGuidance()
+  ].filter(Boolean);
+}
+var integrationWork = () => ({ unit: { kind: "integration", id: RUN_UNIT } });
+var applyWork = () => ({ unit: { kind: "apply", id: RUN_UNIT } });
+var planningWork = (group) => ({ unit: planningUnit(group) });
+function rulesSection(rules) {
+  if (!rules) return "";
+  const head = "## The team's rules\nThese rules come from what this team settled before. They hold for all of your work, whatever you were told earlier in this session. A rule is never lifted by anything but the user's approval of an exception, which is granted for named work only.";
+  if (!rules.length) return `${head}
+(none yet)`;
+  return `${head}
+${rules.map((r) => `- ${r.id}: ${r.text}${r.incident ? ` (source: ${r.incident})` : ""}`).join("\n")}`;
+}
+var scopeText = (scope) => scope.unit ? `the ${scope.unit.kind}${scope.unit.id === RUN_UNIT ? "" : ` of ${scope.unit.id}`} (${scope.unit.occurrence})` : `task${scope.taskIds.length === 1 ? "" : "s"} ${scope.taskIds.join(", ")}`;
+function requestedHere(state, ex, work) {
+  if (work.task !== void 0) return scopeCovers(ex.requested, state.id, { task: work.task });
+  const unit = resolveUnit(state, work.unit);
+  return !!unit && scopeCovers(ex.requested, state.id, { unit });
+}
+function exceptionsSection(state, member, work) {
+  if (!work || member.kind === "pm") return "";
+  const gov = state;
+  const lines = [];
+  const approved = exceptionsFor(gov, work);
+  for (const ex of approved) {
+    const a = ex.assessment;
+    lines.push(`- ${ex.id}, approved by the user for ${scopeText(a.scope)} only. You may depart from ${a.ruleIds.join(", ")} in the way the user approved: ${a.alternative}. Reason shown to the user: ${a.reason}. The rule itself stays in force for everything else.`);
+  }
+  const approvedIds = new Set(approved.map((e) => e.id));
+  for (const ex of state.governance?.exceptions ?? []) {
+    if (approvedIds.has(ex.id) || ex.from !== member.name || !requestedHere(gov, ex, work)) continue;
+    const status = exceptionStatus(ex);
+    if (status === "approved") continue;
+    lines.push(status === "rejected" ? `- ${ex.id} (${ex.ruleIds.join(", ")}): refused. The rules stand; do not depart from them.` : `- ${ex.id} (${ex.ruleIds.join(", ")}): not decided yet. It is no permission: do not act on it, and do not do the part of the work it needs.`);
+  }
+  if (!lines.length) return "";
+  return `## Exceptions to the rules for this work
+${lines.join("\n")}`;
+}
+function memberGovernanceGuidance() {
+  return "## When a rule does not fit, or something went wrong\nYou never ask the user, and you never decide an exception yourself: the PM does, and only the user can agree to one.\n- A disagreement with a member, or a result that differs from what the user asked, that you saw: put it in `governance.issues` (kind `disagreement` or `deviation`, what happened, the ids of the rules involved).\n- A rule that does not fit this work: put it in `governance.exception` with the rule ids (as written in the list above), why the rule does not fit this work, and what you would do instead. Then stop the part of the work that needs the exception: do only what the rules allow, and leave the rest undone. A request for an exception never means you may go ahead.\n- Otherwise leave `governance` with no issue and no exception. An exception you ask for covers the work of this call only.";
+}
+var ruleLines = (ids, rules) => ids.map((id) => {
+  const r = rules?.find((x) => x.id === id);
+  return r ? `${id} (${r.text})` : id;
+}).join("; ");
+function pmGovernanceSection(state, rules) {
+  const g = state.governance;
+  if (!g || !g.incidents.length && !g.exceptions.length) return "";
+  const work = governanceWork(state);
+  const out = [];
+  if (work.lessons.length) {
+    out.push("Settled incidents to learn from (answer them all in one rule_lesson, one entry per id):\n" + work.lessons.map((i) => `- ${i.id} (${i.kind}, from ${i.reportedBy}${i.ruleIds.length ? `, rules ${i.ruleIds.join(", ")}` : ""}): ${i.summary}. Resolved: ${i.resolution ?? "(not said)"}.${i.status === "recording" && i.lesson ? ` You already wrote this rule, which is being recorded; give the same text again: ${i.lesson.text}` : ""}${i.direction && i.direction.answer === null ? " You asked the user about it; it waits for their answer (leave it out until then)." : ""}`).join("\n"));
+  }
+  const req = (e) => `- ${e.id} from ${e.from} for ${ruleLines(e.ruleIds, rules)}: ${e.reason}${e.alternative ? ` Instead: ${e.alternative}.` : ""} It asked for ${scopeText(e.requested)}.`;
+  if (work.assess.length) out.push(`Exception requests to assess (exception_proposal, or exception_decline, with its id):
+${work.assess.map(req).join("\n")}`);
+  if (work.present.length) out.push(`Your proposals not shown to the user yet (they grant nothing):
+${work.present.map((e) => `- ${e.id}: ${e.assessment.summary}`).join("\n")}`);
+  if (work.pending.length) {
+    out.push("Exception requests the user has been shown and has not decided. They grant nothing yet, and the work they hold waits:\n" + work.pending.map((e) => `- ${e.id}: ${e.assessment?.summary ?? e.reason}`).join("\n"));
+  }
+  if (work.questions.length) out.push(`Questions you asked the user about the rules, not answered yet: ${work.questions.map((q) => q.exceptionId ?? q.incidentId).join(", ")}. The work that depends on them waits.`);
+  const answered = [...g.exceptions.map((e) => ({ id: e.id, d: e.direction })), ...g.incidents.map((i) => ({ id: i.id, d: i.direction }))].filter((x) => x.d?.answer);
+  if (answered.length) {
+    out.push("The user's answers to your questions about the rules (information for your decision; they approve nothing):\n" + answered.map((x) => `- ${x.id}: ${x.d.answer}`).join("\n"));
+  }
+  const decided = g.exceptions.filter((e) => e.decision && e.decision.status !== "pending");
+  if (decided.length) {
+    out.push("Decided:\n" + decided.map((e) => `- ${e.id}: ${e.decision.status}${e.decision.status === "approved" && e.assessment ? ` for ${scopeText(e.assessment.scope)} only` : "; the rules stand"}`).join("\n"));
+  }
+  return out.length ? `## The team's rules: incidents and exceptions
+${out.join("\n\n")}` : "";
+}
+function pmGovernanceGuidance(grouped) {
+  return "## Rules, lessons and exceptions\n- After a disagreement between members or a mistake against what the user asked has been settled, you write a preventive rule (rule_lesson): short, general, so that it does not happen again. Rules are only added: never write one that removes, replaces or weakens an earlier rule. Say null when no new rule is needed.\n- A member may ask for an exception to a rule. Assess it: when the rule really does not fit, propose it to the user (exception_proposal) with the rules involved, the reason, what the team does instead and exactly which work it covers (never more than was asked); when the rule should stand, decline it (exception_decline). Nothing is done differently until the user agrees; a refused or unanswered request changes nothing, and an approved one covers only the work you named and does not remove the rule.\n- When you cannot tell what to do about a rule or an incident, ask the user (rule_question): the work that depends on it waits for the answer, which is information and never an approval.\n" + (grouped ? "- In a team with groups only the head PM asks the user; a group's PM passes the question up to the head PM.\n" : "");
 }
 var attached = (m) => m.attachments?.length ? `
 (attached: ${m.attachments.map((a) => inlineCode(a.name)).join(", ")})` : "";
@@ -24334,7 +24996,7 @@ function pmPrompt(p) {
   const s = p.state;
   const brief2 = s.briefs.at(-1) ?? null;
   const actions = pmActions(s, p.occasion);
-  const parts = frame(`pm_${p.occasion.kind}`, p.member, p.identity, p.members, null);
+  const parts = frame(`pm_${p.occasion.kind}`, p, null, null);
   const groups = groupsSection(p.groups);
   if (groups) parts.push(`${groups}
 You are the head PM: the only one who talks with the user. Each group's techlead plans its part; a group's own PM checks it first.`);
@@ -24361,6 +25023,9 @@ ${p.openEscalations.map((e) => `- ${e.id}${e.task ? ` (task ${e.task})` : ""}: $
     parts.push(`## What was asked of the techleads last time
 ${feedback.map(([group, text3]) => group ? `- ${group}: ${text3}` : text3).join("\n")}`);
   }
+  const governed = pmGovernanceSection(s, p.rules);
+  if (governed) parts.push(governed);
+  parts.push(pmGovernanceGuidance(!!groups));
   parts.push(`## What to do now
 ${pmTask(s, p.occasion)}
 
@@ -24376,6 +25041,10 @@ function pmTask(s, occasion) {
     case "area_review":
     case "area_escalation":
       return "";
+    case "rule_lesson":
+      return "Incidents above were settled (a disagreement between members, or a result that differed from what the user asked). Answer all of them in this one turn: rule_lesson with one entry in `lessons` per incident (except one that waits for the user's answer), each with its incident_id, the rule that prevents it from happening again, as one short, general sentence that members can follow, and why it prevents it. The rules above stay as they are: add to them, never remove, replace or contradict one. Give rule null when no new rule is needed (say why in rationale); when several incidents come from the same cause, write the rule once and give the others rule null with a rationale that names it. When you cannot tell which way the team should go about one of them, ask the user with rule_question and that incident's id instead (the others wait for your next turn).";
+    case "rule_exception":
+      return "A member asked for an exception to a rule (the requests above). Look at the rules it names and its reason. When the rule really does not fit that work, propose the exception (exception_proposal with the request's id): the rules involved, the reason, what the team does instead and the work it covers, which is the work the member asked for or less. The user reads your summary and decides; nothing changes until they agree, and until then the work stays held. When the rule should stand, decline (exception_decline) and say why for the member. When you cannot decide, ask the user with rule_question and the request's id (its work waits). One request per turn.";
     case "acceptance":
       return `Every task is merged and the testers' last check of the whole passed: ${s.integration ? checkLines(s.integration.checks).join("\n") : ""}
 Report to the user, criterion by criterion, whether it is met, with the evidence (the tests and checks that show it). Then the user accepts or asks for changes.`;
@@ -24406,7 +25075,7 @@ ${plan.risks.map((r) => `- ${r}`).join("\n")}` : ""
   ].filter(Boolean).join("\n");
 }
 function planPrompt(p) {
-  const parts = frame("plan", p.member, p.identity, p.members, p.brief);
+  const parts = frame("plan", p, p.brief, planningWork(p.group?.name ?? null));
   if (p.area && p.group) {
     parts.push(`${areaSection(p.area)}
 Plan only your group's part, and give its tasks only to your group: ${p.group.members.filter((m) => m.kind === "worker").map((m) => m.name).join(", ")} take tasks, ${p.group.members.filter((m) => m.kind === "checker").map((m) => m.name).join(", ")} test them. The other groups plan theirs at the same time; depend only on tasks of your own group.`);
@@ -24423,7 +25092,7 @@ ${p.additions ? "The brief changed. Plan only the new tasks the change needs (ne
 }
 function workPrompt(p) {
   const t = p.task;
-  const parts = frame("work", p.member, p.identity, p.members, p.brief);
+  const parts = frame("work", p, p.brief, { task: t.id });
   parts.push(taskSection2(t));
   const inFlight = p.others.filter((o) => o.id !== t.id && !["merged", "cancelled"].includes(o.status));
   if (inFlight.length) parts.push(`## Other tasks in progress (stay out of their areas)
@@ -24446,7 +25115,7 @@ You work in ${p.cwd}. ${t.code ? "Your earlier work on this task is already ther
 }
 function testsPrompt(p) {
   const t = p.task;
-  const parts = frame("tests", p.member, p.identity, p.members, p.brief);
+  const parts = frame("tests", p, p.brief, { task: t.id });
   parts.push(taskSection2(t));
   const fixing = t.tests[p.member.name]?.status === "fixing";
   if (fixing) {
@@ -24460,7 +25129,7 @@ You work in ${p.cwd}. ${fixing ? "Fix your tests." : `Write the tests for task $
 }
 function reviewPrompt(p) {
   const t = p.task;
-  const parts = frame("review", p.member, p.identity, p.members, p.brief);
+  const parts = frame("review", p, p.brief, { task: t.id });
   parts.push(taskSection2(t));
   if (t.codeSummary) parts.push(`## ${t.assignee}'s report
 ${t.codeSummary}${t.notes.length ? `
@@ -24477,7 +25146,7 @@ Review ${t.assignee}'s change for task ${t.id}; the code is checked out in your 
 function checkPrompt(p) {
   const t = p.task;
   const tests = t.tests[p.member.name];
-  const parts = frame("check", p.member, p.identity, p.members, p.brief);
+  const parts = frame("check", p, p.brief, { task: t.id });
   parts.push(taskSection2(t));
   if (tests?.summary) parts.push(`## Your tests
 ${tests.summary}${tests.howToRun ? `
@@ -24490,7 +25159,7 @@ In ${p.cwd} the task's code and its tests are merged. Run your tests and check t
 }
 function triagePrompt(p) {
   const t = p.task;
-  const parts = frame("triage", p.member, p.identity, p.members, p.brief);
+  const parts = frame("triage", p, p.brief, { task: t.id });
   parts.push(taskSection2(t));
   parts.push(`## What went wrong (attempt ${t.attempt} of ${p.maxAttempts})
 ${t.trouble ?? "(not said)"}${t.checks.length ? `
@@ -24503,7 +25172,7 @@ Decide what happens next: retry (the same assignee, with your guidance), reassig
 }
 function answerPrompt(p) {
   const t = p.task;
-  const parts = frame("answer", p.member, p.identity, p.members, p.brief);
+  const parts = frame("answer", p, p.brief, { task: t.id });
   parts.push(taskSection2(t));
   parts.push(`## ${t.question?.from} asks
 ${t.question?.text}`);
@@ -24512,7 +25181,7 @@ ${t.question?.text}`);
 }
 function resolvePrompt(p) {
   const t = p.task;
-  const parts = frame("resolve", p.member, p.identity, p.members, p.brief);
+  const parts = frame("resolve", p, p.brief, t ? { task: t.id } : applyWork());
   if (t) parts.push(taskSection2(t));
   const what = t ? `Merging task ${t.id} into the integration branch` : "Merging the user's own changes to their folder (made while the team worked) into the integration branch";
   parts.push(`## What to do now
@@ -24520,14 +25189,14 @@ ${what} conflicts in: ${p.files.join(", ")}. In ${p.cwd} the integration branch 
   return parts.join("\n\n");
 }
 function integrationCheckPrompt(p) {
-  const parts = frame("check", p.member, p.identity, p.members, p.brief);
+  const parts = frame("check", p, p.brief, integrationWork());
   parts.push(boardSection(p.state.tasks));
   parts.push(`## What to do now
 Every task is merged; ${p.cwd} holds the whole result. Run every test of the repository and every test the team wrote, and check the result against every acceptance criterion of the brief. Report pass only when all of it passes.` + json);
   return parts.join("\n\n");
 }
 function integrationTriagePrompt(p) {
-  const parts = frame("triage", p.member, p.identity, p.members, p.brief);
+  const parts = frame("triage", p, p.brief, integrationWork());
   parts.push(boardSection(p.state.tasks));
   parts.push(`## What must be fixed
 ${p.trouble}${p.checks.length ? `
@@ -24536,8 +25205,10 @@ ${checkLines(p.checks).join("\n")}` : ""}`);
   return parts.join("\n\n");
 }
 function areaPmPrompt(p) {
-  const parts = frame(`pm_${p.occasion.kind}`, p.member, p.identity, p.members, p.brief);
+  const parts = frame(`pm_${p.occasion.kind}`, p, p.brief, null);
   parts.push(`You are the PM of group ${p.group.name}. You never talk to the user: ${p.head.name}, the head PM, does. You answer for your group's part.`);
+  parts.push(`## Rules and exceptions
+The team's rules above hold for your group too. A request to depart from a rule, and any question to the user about one, goes up to ${p.head.name} (escalate, naming the rules, the reason, the alternative and the work), who alone shows it to the user. You never approve an exception, and you never ask the user.`);
   if (p.area) parts.push(areaSection(p.area));
   if (p.plan) parts.push(planSection2(p.plan));
   if (p.openEscalations.length) {
@@ -24554,8 +25225,8 @@ Allowed actions now: ${pmActions(p.state, p.occasion).join(", ")}. \`message\` i
 
 // packages/engine/src/team/worktrees.ts
 import { execFile as execFile3 } from "child_process";
-import { chmodSync, existsSync as existsSync19, lstatSync as lstatSync2, mkdirSync as mkdirSync9, readdirSync as readdirSync7, readFileSync as readFileSync15, rmSync as rmSync6, symlinkSync, unlinkSync as unlinkSync3, writeFileSync as writeFileSync6 } from "fs";
-import { dirname as dirname7, join as join21, posix as posix5, resolve as resolve10 } from "path";
+import { chmodSync, existsSync as existsSync20, lstatSync as lstatSync2, mkdirSync as mkdirSync10, readdirSync as readdirSync7, readFileSync as readFileSync16, rmSync as rmSync6, symlinkSync, unlinkSync as unlinkSync3, writeFileSync as writeFileSync7 } from "fs";
+import { dirname as dirname7, join as join22, posix as posix5, resolve as resolve10 } from "path";
 function teamRefs(runId) {
   const root2 = `refs/agentduo/team/${runId}`;
   return {
@@ -24580,7 +25251,7 @@ var exec = (cmd, args, cwd, shell = false) => new Promise((resolvePromise) => {
 function inside(dir, path) {
   const parts = path.split("/");
   if (!path || parts.some((p) => p === ".." || p === "" || p === ".git")) return null;
-  return join21(dir, ...parts);
+  return join22(dir, ...parts);
 }
 var TeamGit = class {
   constructor(o) {
@@ -24599,12 +25270,12 @@ var TeamGit = class {
   }
   /** A member's worktree (the whole repository's files). */
   worktree(member) {
-    return join21(this.o.root, member);
+    return join22(this.o.root, member);
   }
   /** Where a member works: its worktree's copy of the workspace. */
   async cwd(member) {
     const prefix = await this.workspacePrefix();
-    return prefix ? join21(this.worktree(member), ...prefix.split("/")) : this.worktree(member);
+    return prefix ? join22(this.worktree(member), ...prefix.split("/")) : this.worktree(member);
   }
   /** A member's worktree as a repository of its own, on its copy of the workspace. */
   async memberGit(member) {
@@ -24630,10 +25301,10 @@ var TeamGit = class {
    */
   async checkout(member, commit) {
     const wt = this.worktree(member);
-    if (!existsSync19(join21(wt, ".git"))) {
+    if (!existsSync20(join22(wt, ".git"))) {
       const add = this.adding.then(async () => {
         rmSync6(wt, { recursive: true, force: true });
-        mkdirSync9(dirname7(wt), { recursive: true });
+        mkdirSync10(dirname7(wt), { recursive: true });
         await this.o.git.run(["worktree", "prune"]);
         await this.o.git.run(["worktree", "add", "--detach", "--force", wt, commit]);
       });
@@ -24663,7 +25334,7 @@ var TeamGit = class {
     for (const path of [...this.o.link, CLAUDE_LOCAL]) {
       const source = inside(this.o.workspace, path);
       const target = inside(cwd, path);
-      if (!source || !target || !existsSync19(source)) continue;
+      if (!source || !target || !existsSync20(source)) continue;
       let present2 = false;
       try {
         present2 = lstatSync2(target).isSymbolicLink();
@@ -24671,7 +25342,7 @@ var TeamGit = class {
       }
       if (present2) continue;
       rmSync6(target, { recursive: true, force: true });
-      mkdirSync9(dirname7(target), { recursive: true });
+      mkdirSync10(dirname7(target), { recursive: true });
       symlinkSync(source, target, lstatSync2(source).isDirectory() ? "junction" : "file");
     }
   }
@@ -24726,8 +25397,8 @@ var TeamGit = class {
     const git = new Git(this.worktree(member));
     const unmerged = (await git.run(["diff", "--name-only", "--diff-filter=U", "-z"])).stdout.split("\0").filter(Boolean);
     const marked = unmerged.filter((f) => {
-      const path = join21(this.worktree(member), ...f.split("/"));
-      return existsSync19(path) && /^(<{7}|>{7})( |$)/m.test(readFileSync15(path, "utf8"));
+      const path = join22(this.worktree(member), ...f.split("/"));
+      return existsSync20(path) && /^(<{7}|>{7})( |$)/m.test(readFileSync16(path, "utf8"));
     });
     if (marked.length) return { problem: `conflict markers are still in ${marked.join(", ")}` };
     const head = await this.integrationHead();
@@ -24760,7 +25431,7 @@ var TeamGit = class {
       const path = inside(this.o.workspace, change.path);
       if (!path) continue;
       const gone = change.dstMode === "000000";
-      if (gone || change.status === "T" || existsSync19(path)) {
+      if (gone || change.status === "T" || existsSync20(path)) {
         try {
           if (lstatSync2(path).isDirectory() && !lstatSync2(path).isSymbolicLink()) rmSync6(path, { recursive: true, force: true });
           else unlinkSync3(path);
@@ -24772,11 +25443,11 @@ var TeamGit = class {
         continue;
       }
       if (change.dstMode === "160000") continue;
-      mkdirSync9(dirname7(path), { recursive: true });
+      mkdirSync10(dirname7(path), { recursive: true });
       const bytes = await this.o.git.blob(change.dstBlob);
       if (change.dstMode === "120000") symlinkSync(bytes.toString("utf8"), path);
       else {
-        writeFileSync6(path, bytes);
+        writeFileSync7(path, bytes);
         if (process.platform !== "win32") chmodSync(path, change.dstMode === "100755" ? 493 : 420);
       }
       written.push(change.path);
@@ -24795,9 +25466,9 @@ var TeamGit = class {
     const backup = await this.read(this.refs.backup);
     const applied = await this.read(this.refs.applied);
     if (!backup || !applied) return { problem: "this team run's result was never written into the workspace" };
-    const now = await this.o.git.worktreeTree(this.o.exclude);
-    if (now !== applied.tree) {
-      const changed = (await this.o.git.rawChanges(applied.tree, now)).map((c) => c.path);
+    const now2 = await this.o.git.worktreeTree(this.o.exclude);
+    if (now2 !== applied.tree) {
+      const changed = (await this.o.git.rawChanges(applied.tree, now2)).map((c) => c.path);
       return { problem: `the workspace changed since the result was written into it (${changed.slice(0, 10).join(", ")}${changed.length > 10 ? ", \u2026" : ""})` };
     }
     const restored = await this.write(applied.tree, backup.tree);
@@ -24807,7 +25478,7 @@ var TeamGit = class {
   /** Every member's worktree removed (the refs stay). */
   async remove() {
     await this.adding;
-    if (existsSync19(this.o.root)) {
+    if (existsSync20(this.o.root)) {
       for (const wt of listDirs(this.o.root)) await this.o.git.run(["worktree", "remove", "--force", wt], { check: false });
     }
     rmSync6(this.o.root, { recursive: true, force: true });
@@ -24835,6 +25506,12 @@ var FILES_ALONE = "Look at the attached file(s).";
 var CHANGE = "change";
 var Interrupted2 = class extends Error {
 };
+var Held = class extends Error {
+};
+var scopeWords = (scope, tasks) => scope.unit ? `the ${scope.unit.kind}${scope.unit.id === RUN_UNIT ? "" : ` of ${scope.unit.id}`} (${scope.unit.occurrence})` : scope.taskIds.map((id) => `task ${id}${tasks.find((t) => t.id === id) ? ` (${tasks.find((t) => t.id === id).title})` : ""}`).join(", ");
+var rulesIdentity = (cfg, workspace) => ({ teamId: teamId(cfg.team), workspaceKey: workspaceKey(workspace) });
+var lessonOp = (runId, incidentId) => `lesson:${runId}:${incidentId}`;
+var lessonSource = (runId, i) => `run ${runId}, ${i.id} (${i.kind}): ${i.summary}`.replace(/\s+/g, " ").replaceAll("<!-- agentduo-rule", "<!-- agentduo rule").slice(0, 500);
 var taskView = (t) => ({
   id: t.id,
   title: t.title,
@@ -24850,10 +25527,11 @@ var TeamRun = class _TeamRun {
   constructor(o) {
     this.o = o;
     this.env = o.env ?? process.env;
+    o.state.rulesStore ??= rulesIdentity(o.cfg, o.workspace);
     this.members = teamMembers(o.cfg.team);
     this.groups = teamGroups(this.members);
     this.head = headPm(this.members);
-    this.runner = o.runner ?? new AgentRunner(o.cfg, o.workspace, join22(o.store.dir, "logs"), o.bus, { permissions: o.permissions, runsDir: o.store.runsDir });
+    this.runner = o.runner ?? new AgentRunner(o.cfg, o.workspace, join23(o.store.dir, "logs"), o.bus, { permissions: o.permissions, runsDir: o.store.runsDir });
   }
   o;
   members;
@@ -24881,16 +25559,28 @@ var TeamRun = class _TeamRun {
   budgetReached = null;
   reportTimer = null;
   env;
+  /** The team's RULES.md, opened by the first call or step that needs it (`rulesStore`). */
+  rules = null;
+  /** The rules a prompt being built is given: read once per call, so a full prompt and a continued one carry the same (`call`, `parts`). */
+  promptRules = null;
+  /** PM turns for a lesson in this process that left no incident settled: after two, none is offered again until a later run. */
+  lessonStalled = 0;
+  /** When lessons first became due while members worked, in this process (null: none due); `lessonOwed` waits from there. */
+  lessonsOwedSince = null;
+  lessonTimer = null;
+  /** Requests about the rules shown (or offered to nobody) in this process: a reopened run asks each once. */
+  announced = /* @__PURE__ */ new Set();
   /**
    * A new team run in `runsDir` for the user's `request`: its state, the configuration and the identities it keeps.
    * `attachments` (kept elsewhere in `runsDir`, a conversation's) go with the request: the run keeps copies of its own.
    */
   static create(o) {
+    const identity = rulesIdentity(o.cfg, o.workspace);
+    new TeamRules(teamRulesDir(o.env ?? process.env, o.workspace, identity.teamId)).init();
     const { store, state } = TeamStore.create(o.runsDir, o.request);
-    if (o.conversationId) {
-      state.conversationId = o.conversationId;
-      store.save(state);
-    }
+    state.rulesStore = identity;
+    if (o.conversationId) state.conversationId = o.conversationId;
+    store.save(state);
     if (o.attachments?.length) {
       const files = new AttachmentStore(o.runsDir, store.dir);
       try {
@@ -24976,12 +25666,13 @@ var TeamRun = class _TeamRun {
     this.o.bus.emit({ type: "team.phase", runId: this.id, phase: this.state.phase });
     for (const t of this.state.tasks) this.o.bus.emit({ type: "team.task", task: taskView(t) });
     try {
+      this.prepareRules();
       for (; ; ) {
         if (this.abortRequested) {
           await this.settle();
           return this.finish("aborted");
         }
-        if (this.state.phase === "DONE") return this.finish("done");
+        if (this.state.phase === "DONE" && !this.lessonsPending()) return this.finish("done");
         if (this.stopRequested) {
           await this.settle();
           return this.finish("stopped");
@@ -24989,6 +25680,10 @@ var TeamRun = class _TeamRun {
         if (await this.advance()) continue;
         this.schedule();
         if (!this.running.size) {
+          if (this.lessonsStuck()) {
+            this.o.bus.emit({ type: "warning", text: `The team stopped: the PM has not recorded a lesson for ${this.pendingLessons().map((i) => i.id).join(", ")}. /resume asks it again.` });
+            return this.finish("waiting");
+          }
           if (this.budgetReached) {
             this.o.bus.emit({ type: "warning", text: `The team stopped: ${this.budgetReached}. /resume goes on${this.state.budget && reachedLimits(this.state.budget, this.used()).length ? " (and raises the limit)" : ""}.` });
             return this.finish("waiting");
@@ -25001,20 +25696,28 @@ var TeamRun = class _TeamRun {
       this.abort.abort();
       await this.settle();
       if (e instanceof Interrupted2) return this.finish("stopped");
-      const message = e instanceof RunGitError ? e.message : e.stack ?? String(e);
+      const message = e instanceof RunGitError || e instanceof RulesError ? e.message : e.stack ?? String(e);
       this.o.bus.emit({ type: "warning", text: `The team run failed: ${message}` });
       this.state.warnings.push(message.split("\n")[0]);
       return this.finish("error");
     } finally {
       if (this.reportTimer) clearTimeout(this.reportTimer);
+      if (this.lessonTimer) clearTimeout(this.lessonTimer);
     }
   }
+  /** Every request the run waits on (the approval, exceptions shown and not decided, the PM's questions about the rules) was put off, and none is open. */
   waitsOnDeferred() {
+    const ids = this.waitingRequests();
+    return ids.length > 0 && ids.every((id) => this.deferred.has(id));
+  }
+  waitingRequests() {
     const w = this.state.waiting;
-    return !!w && this.deferred.has(w.requestId);
+    const work = governanceWork(this.state);
+    return [...w ? [w.requestId] : [], ...work.pending.map((e) => e.decision.requestId), ...work.questions.map((q) => q.requestId)];
   }
   async settle() {
     if (this.reportTimer) clearTimeout(this.reportTimer);
+    if (this.lessonTimer) clearTimeout(this.lessonTimer);
     await Promise.allSettled([...this.running.values()]);
   }
   async finish(outcome) {
@@ -25102,7 +25805,7 @@ var TeamRun = class _TeamRun {
       git,
       workspace: this.o.workspace,
       runId: this.id,
-      root: join22(root2, "teams", this.id),
+      root: join23(root2, "teams", this.id),
       exclude: runsRel ? [runsRel] : [],
       setup: this.o.cfg.team.worktree.setup,
       link: this.o.cfg.team.worktree.link,
@@ -25116,6 +25819,12 @@ var TeamRun = class _TeamRun {
   /** One step agentduo takes by itself (a phase change, a candidate, an approval to ask); true when it took one. */
   async advance() {
     const s = this.state;
+    const settled = this.settleIncidents();
+    if (this.finishLessons() || settled) {
+      this.save();
+      return true;
+    }
+    if (this.deliverDecisions() || this.presentAssessed()) return true;
     const brief2 = latestBrief(s);
     if (brief2 && !brief2.declined && s.approvedBrief !== brief2.version && !s.waiting) return this.ask("brief");
     switch (s.phase) {
@@ -25132,7 +25841,9 @@ var TeamRun = class _TeamRun {
       }
       case "EXECUTION": {
         let changed = false;
+        const held = heldTaskIds(s);
         for (const t of s.tasks) {
+          if (held.has(t.id)) continue;
           if (t.status === "testing" && !t.candidate && testsWritten(t) && !this.runningFor(t.id)) {
             await this.makeCandidate(t);
             changed = true;
@@ -25156,7 +25867,7 @@ var TeamRun = class _TeamRun {
       }
       case "INTEGRATION": {
         const ig = s.integration;
-        if (!ig || ig.triage) return false;
+        if (!ig || ig.triage || this.heldRunUnit()) return false;
         const testers = new Set(s.tasks.flatMap((t) => t.testers));
         const by = new Set(ig.checks.map((c) => c.by));
         const complete = [...testers].every((t) => by.has(t)) && (!this.o.cfg.gates.length || by.has("gates"));
@@ -25167,6 +25878,12 @@ var TeamRun = class _TeamRun {
           this.setPhase(s.accepted ? "APPLY" : "ACCEPTANCE");
         } else {
           s.integrationRounds += 1;
+          this.note({
+            kind: "deviation",
+            source: { kind: "member_report", member: "agentduo", task: null, occurrence: `integration:r${s.integrationRounds}:${ig.commit}` },
+            reportedBy: ig.checks.find((c) => c.verdict === "fail").by,
+            summary: `The check of the whole result failed: ${ig.checks.filter((c) => c.verdict === "fail").map((c) => `${c.by}: ${c.summary}`).join("; ")}`
+          });
           if (s.integrationRounds > this.o.cfg.team.limits.max_task_attempts) {
             this.escalate(null, "integration_limit", `The whole result still fails its checks after ${s.integrationRounds - 1} round(s) of fixes: ` + ig.checks.filter((c) => c.verdict === "fail").map((c) => `${c.by}: ${c.summary}`).join("; "));
           } else {
@@ -25179,9 +25896,10 @@ var TeamRun = class _TeamRun {
         return true;
       }
       case "ACCEPTANCE":
-        if (s.acceptance && !s.accepted && !s.waiting && !s.integration?.triage) return this.ask("acceptance");
+        if (s.acceptance && !s.accepted && !s.waiting && !s.integration?.triage && !this.heldRunUnit()) return this.ask("acceptance");
         return false;
       case "APPLY":
+        if (this.lessonsPending() || this.heldRunUnit()) return false;
         if (s.applyConflict) {
           if (!s.applyConflict.resolving && !s.waiting) return this.ask("apply_conflict");
           return false;
@@ -25225,6 +25943,12 @@ var TeamRun = class _TeamRun {
     t.lastFailureKeys = keys;
     t.trouble = `the check of attempt ${t.attempt} failed: ${failing.map((c) => `${c.by}: ${c.summary}`).join("; ")}`;
     this.log(t, t.trouble);
+    this.note({
+      kind: "deviation",
+      source: { kind: "check", task: t.id, occurrence: `a${t.attempt}r${t.reviewRound}` },
+      reportedBy: failing[0].by,
+      summary: `Task ${t.id} (${t.title}): ${t.trouble}`
+    });
     if (t.stalls >= 2) {
       this.escalate(t, "review_stalled", `Task ${t.id} (${t.title}) fails the same way after two rounds of fixes: ${failures.map((f) => f.title).join("; ")}`);
     } else t.status = "triage";
@@ -25400,7 +26124,8 @@ var TeamRun = class _TeamRun {
     return true;
   }
   /** Sends a request to the decider (when there is one); an answer wakes the loop. */
-  listen(request, done) {
+  listen(request, done2) {
+    this.announced.add(request.id);
     this.o.bus.emit({ type: "clarification.requested", request });
     if (!this.o.decider) return;
     this.open.add(request.id);
@@ -25409,7 +26134,7 @@ var TeamRun = class _TeamRun {
       if (response.kind === "defer") {
         this.deferred.add(request.id);
         this.o.bus.emit({ type: "clarification.closed", id: request.id, callId: request.callId, status: "deferred" });
-      } else done(response);
+      } else done2(response);
       this.wake();
     }, () => {
       this.open.delete(request.id);
@@ -25419,6 +26144,7 @@ var TeamRun = class _TeamRun {
   }
   /** Reopens what this run asked and nobody answered yet (a run that continues an earlier one). */
   reopen() {
+    this.reopenGovernance();
     const w = this.state.waiting;
     if (!w || this.open.has(w.requestId) || this.deferred.has(w.requestId)) return;
     const entry = this.state.clarifications.find((c) => c.id === w.requestId && c.status === "pending");
@@ -25448,21 +26174,24 @@ var TeamRun = class _TeamRun {
           if (s.plans.length) s.replanning = true;
           this.setPhase("PLANNING");
           if (words2) s.leadNotes.push({ group: null, text: `The user, approving the brief: ${words2}` });
+          this.settleUser("brief");
         } else {
           b.declined = true;
-          this.userWords(`(about brief v${b.version}) ${words2 ?? "Please change the brief."}`);
+          this.userChanges(`(about brief v${b.version}) ${words2 ?? "Please change the brief."}`);
         }
         break;
       }
       case "plan": {
         const set = this.planSet() ?? [];
-        if (approve) this.startPlan(set, words2);
-        else {
+        if (approve) {
+          this.startPlan(set, words2);
+          this.settleUser("plan");
+        } else {
           for (const p of set) {
             p.declined = true;
             s.planFeedback[groupKey(p.group)] = `The user asked for changes (through the PM): ${words2 ?? "(no details)"}`;
           }
-          this.userWords(`(about the plan) ${words2 ?? "Please change the plan."}`);
+          this.userChanges(`(about the plan) ${words2 ?? "Please change the plan."}`);
         }
         break;
       }
@@ -25470,9 +26199,10 @@ var TeamRun = class _TeamRun {
         if (approve) {
           s.accepted = true;
           this.setPhase("APPLY");
+          this.settleUser("acceptance");
         } else {
           s.acceptance = null;
-          this.userWords(`(about the result) ${words2 ?? "Please change it."}`);
+          this.userChanges(`(about the result) ${words2 ?? "Please change it."}`);
         }
         break;
       case "apply_conflict":
@@ -25487,6 +26217,12 @@ var TeamRun = class _TeamRun {
     const seq = nextSeq(this.state);
     this.state.messages.push({ seq, at: nowIso2(), from: "user", text: text3 });
     this.o.bus.emit({ type: "team.message", runId: this.id, from: "user", text: text3, seq });
+    return seq;
+  }
+  /** The user asked for changes instead of approving: the result differed from what they wanted, an incident to learn from once they approve. */
+  userChanges(text3) {
+    const seq = this.userWords(text3);
+    this.note({ kind: "deviation", source: { kind: "user_message", seq }, reportedBy: "agentduo", summary: text3 });
   }
   startPlan(set, words2) {
     const s = this.state;
@@ -25546,13 +26282,16 @@ var TeamRun = class _TeamRun {
   /** The PM's next turn, if it has one now. */
   pmOccasion() {
     const s = this.state;
-    if (s.phase === "DONE" || s.phase === "ABORTED") return null;
+    if (s.phase === "ABORTED") return null;
+    if (s.phase === "DONE") return this.lessonOwed() ? { kind: "rule_lesson" } : null;
     if (s.phase === "ACCEPTANCE" && !s.acceptance && !s.integration?.triage && s.messages.length <= s.pmSeen) return { kind: "acceptance" };
     if (s.phase === "PLANNING" && s.base && this.grouped && !currentAreas(s).length) return { kind: "areas" };
     const set = s.phase === "PLANNING" ? this.planSet() : null;
     if (set && s.planReviewed !== planSignature(set)) return { kind: "plan_review" };
     if (s.messages.length > s.pmSeen && s.messages.at(-1).from === "user") return { kind: "conversation" };
-    if (s.escalations.some((e) => !e.told && e.answer === null && e.to === this.head.name)) return { kind: "escalation" };
+    if (s.escalations.some((e) => !e.told && e.answer === null && e.to === this.head.name && !e.exceptionId && !this.escalationHeld(e))) return { kind: "escalation" };
+    if (this.exceptionsToAssess().length) return { kind: "rule_exception" };
+    if (this.lessonOwed()) return { kind: "rule_lesson" };
     if ((s.phase === "EXECUTION" || s.phase === "INTEGRATION") && s.reports.length > s.reportsSeen) {
       const wait = s.lastReportAt ? (this.o.reportIntervalMs ?? REPORT_INTERVAL_MS) - (Date.now() - Date.parse(s.lastReportAt)) : 0;
       if (wait <= 0) return { kind: "reports" };
@@ -25571,6 +26310,7 @@ var TeamRun = class _TeamRun {
     const s = this.state;
     if (s.phase !== "PLANNING" || !s.base || s.waiting || this.grouped && !currentAreas(s).length) return [];
     return this.planningGroups().filter((g) => {
+      if (unitHeld(s, planningUnit(g.name))) return false;
       const plan = latestPlan(s, g.name);
       return !plan || plan.declined;
     });
@@ -25579,7 +26319,7 @@ var TeamRun = class _TeamRun {
   areaOccasion(g) {
     const s = this.state;
     if (!g.pm) return null;
-    if (s.escalations.some((e) => e.to === g.pm.name && e.answer === null)) return { kind: "area_escalation" };
+    if (s.escalations.some((e) => e.to === g.pm.name && e.answer === null && !this.escalationHeld(e))) return { kind: "area_escalation" };
     const plan = s.phase === "PLANNING" ? latestPlan(s, g.name) : null;
     if (plan && !plan.declined && plan.areaApproved == null && this.planningGroups().includes(g)) return { kind: "area_review" };
     return null;
@@ -25587,9 +26327,11 @@ var TeamRun = class _TeamRun {
   schedule() {
     this.reopen();
     if (this.budgetReached) return;
+    let lesson = false;
     if (!this.busy.has(this.head.name)) {
       const occasion = this.pmOccasion();
-      if (occasion) this.start({ kind: "pm" }, () => this.pmTurn(occasion));
+      if (occasion?.kind === "rule_lesson") lesson = true;
+      else if (occasion) this.start({ kind: "pm" }, () => this.pmTurn(occasion));
     }
     const agents = () => [...this.running.keys()].filter((k) => !/^(pm|area_pm|gates|merge):/.test(k)).length;
     for (const g of this.groups) {
@@ -25613,6 +26355,7 @@ var TeamRun = class _TeamRun {
       if ("member" in job && this.busy.has(job.member)) continue;
       this.start(job, () => this.execute(job));
     }
+    if (lesson && !this.busy.has(this.head.name) && this.lessonOwed()) this.start({ kind: "pm" }, () => this.pmTurn({ kind: "rule_lesson" }));
   }
   start(job, work) {
     const key = jobKey(job);
@@ -25627,6 +26370,10 @@ var TeamRun = class _TeamRun {
         await work();
         this.failures.delete(key);
       } catch (e) {
+        if (e instanceof Held) {
+          this.failures.delete(key);
+          return;
+        }
         if (e instanceof Interrupted2) return;
         const n = (this.failures.get(key) ?? 0) + 1;
         this.failures.set(key, n);
@@ -25707,16 +26454,30 @@ ${read.map((n) => `- ${n.text}`).join("\n")}` : "";
 
 ${text3}` : "";
     };
-    const full = build(memberIdentity(this.identities, m)) + leadNotes(0) + listed(files, false);
-    const resume = continued ? { id: continued.id, prompt: build(null) + leadNotes(continued.notes ?? s.leadNotesSeen[m.name] ?? 0) + listed(unseen, true), attachments: unseen } : void 0;
+    const rules = this.rulesStore().rules();
+    this.promptRules = rules;
+    let full;
+    let resume;
+    try {
+      full = build(memberIdentity(this.identities, m)) + leadNotes(0) + listed(files, false);
+      resume = continued ? { id: continued.id, prompt: build(null) + leadNotes(continued.notes ?? s.leadNotesSeen[m.name] ?? 0) + listed(unseen, true), attachments: unseen } : void 0;
+    } finally {
+      this.promptRules = null;
+    }
     const profile = memberProfile(m);
     if (m.backend === "claude") profile.args = [...implementerPermissionArgs(this.o.cfg.claude), ...profile.args];
+    const callId = `${String(nextSeq(s)).padStart(3, "0")}-${kind}-${m.name}${o.task ? `-${o.task}` : ""}`;
+    const work = o.work !== void 0 ? o.work : o.task ? { task: o.task } : null;
+    const check = (data) => {
+      const asked = this.exceptionVerdict(m, work, data, rules);
+      return asked.holds ? [] : [...o.check?.(data) ?? [], ...asked.problems];
+    };
     const res = await this.runner.call({
       member: { name: m.name, task: o.task, backend: m.backend, profile, cwd: o.cwd },
       prompt: full,
       schemaName,
-      logPrefix: `${String(nextSeq(s)).padStart(3, "0")}-${kind}-${m.name}${o.task ? `-${o.task}` : ""}`,
-      check: o.check,
+      logPrefix: callId,
+      check,
       signal: this.abort.signal,
       session: { keep, ...resume ? { resume } : {} },
       budget: this.callBudget(),
@@ -25744,8 +26505,561 @@ ${text3}` : "";
     if (keep && res.sessionId) {
       s.sessions[key] = { backend: m.backend, id: res.sessionId, ...files.length ? { files: files.map((a) => a.id) } : {}, ...m.kind === "lead" ? { notes: notesSeen } : {} };
     }
+    const report = res.data.governance ?? null;
+    this.noteIssues(m, o.task, callId, report, rules);
+    this.holdForException(m, work, report, rules);
     this.save();
     return res.data;
+  }
+  // ------------------------------------------------------------------ the team's rules
+  /** The team's RULES.md: the folder is the team's (`state.rulesStore`), apart from this run, its worktrees and its cleanup. */
+  rulesStore() {
+    if (this.rules) return this.rules;
+    const id = this.state.rulesStore;
+    const store = new TeamRules(teamRulesDir(this.env, this.o.workspace, id.teamId));
+    store.init();
+    this.rules = store;
+    return store;
+  }
+  /** Opens the team's rules when the run starts (RULES.md is created when the team has none) and checks it is the run's own team's. */
+  prepareRules() {
+    const id = this.state.rulesStore;
+    const key = workspaceKey(this.o.workspace);
+    if (id.workspaceKey !== key) {
+      this.o.bus.emit({ type: "warning", text: `This run was started in another folder: it now uses the rules of team '${id.teamId}' of this folder.` });
+      id.workspaceKey = key;
+      this.save();
+    }
+    this.rulesStore();
+  }
+  /** Records an incident of this run (the same occurrence twice is one); a refusal is a warning, never a stop of the run. */
+  note(input) {
+    const made = recordIncident(this.state, input);
+    if (!made.ok) {
+      this.o.bus.emit({ type: "warning", text: `An incident was not recorded: ${made.reason}` });
+      return null;
+    }
+    return made.value;
+  }
+  /** The disagreements and deviations a member reported in its result (`governance.issues`); the rules they name must be the team's. */
+  noteIssues(m, task, callId, report, rules) {
+    const known = new Set(rules.map((r) => r.id));
+    (report?.issues ?? []).forEach((issue, index) => {
+      this.note({
+        kind: issue.kind,
+        source: { kind: "member_report", member: m.name, task, occurrence: issueOccurrence(callId, index) },
+        reportedBy: m.name,
+        ruleIds: issue.rule_ids.filter((id) => known.has(id)),
+        summary: issue.summary
+      });
+    });
+  }
+  /** Why a reported incident is settled by what the run did since, or null when it is not yet (a pure reading of the state). */
+  settledBy(i) {
+    const s = this.state;
+    const task = (id) => s.tasks.find((x) => x.id === id);
+    const taskEnd = (id) => {
+      const t = task(id);
+      return t && (t.status === "merged" || t.status === "cancelled") ? `task ${id} was ${t.status}` : null;
+    };
+    const src = i.source;
+    const accepted = s.phase === "APPLY" || s.phase === "DONE" ? "the user accepted the result" : null;
+    switch (src.kind) {
+      case "review":
+        return (task(src.task)?.review?.verdict === "approve" ? `the review of ${src.task} approved it after the changes` : null) ?? taskEnd(src.task) ?? accepted;
+      case "check":
+        return taskEnd(src.task) ?? accepted;
+      case "member_report": {
+        if (src.task) return taskEnd(src.task) ?? accepted;
+        const plan = /^plan:(.*):v(\d+)$/.exec(src.occurrence);
+        if (src.occurrence.startsWith("integration:")) return s.phase === "ACCEPTANCE" || s.phase === "APPLY" || s.phase === "DONE" ? "the whole result passes its checks" : null;
+        if (plan) {
+          const later = (s.approvedPlan ?? "").split(",").some((e) => e.slice(0, e.lastIndexOf(":")) === plan[1] && Number(e.slice(e.lastIndexOf(":") + 1)) > Number(plan[2]));
+          return later ? "the techlead revised the plan and the plan was approved" : accepted;
+        }
+        return accepted;
+      }
+      case "user_message":
+        return accepted;
+      case "escalation":
+        return null;
+    }
+  }
+  /** Marks the reported incidents the run has settled; true when one changed. Idempotent. */
+  settleIncidents() {
+    let changed = false;
+    for (const i of this.state.governance.incidents) {
+      if (i.status !== "reported") continue;
+      const why = this.settledBy(i);
+      if (why && resolveIncident(this.state, i.id, why).ok) changed = true;
+    }
+    return changed;
+  }
+  /** What the user's message (by its seq) was about, as `decided` words it. */
+  userTopic(seq) {
+    const text3 = this.state.messages.find((m) => m.seq === seq)?.text ?? "";
+    return text3.startsWith("(about brief") ? "brief" : text3.startsWith("(about the plan)") ? "plan" : text3.startsWith("(about the result)") ? "acceptance" : null;
+  }
+  /** The user approved what they had asked to change: the incidents of that request are settled. */
+  settleUser(topic) {
+    for (const i of this.state.governance.incidents) {
+      if (i.status === "reported" && i.source.kind === "user_message" && this.userTopic(i.source.seq) === topic) resolveIncident(this.state, i.id, `the user approved the ${topic} after the change`);
+    }
+  }
+  /** Lessons the PM wrote that RULES.md may not hold yet (a run stopped between its two writes): finished here, without the PM. */
+  finishLessons() {
+    const recording = this.state.governance.incidents.filter((i) => i.status === "recording" && i.lesson);
+    for (const i of recording) this.appendLesson(i);
+    return recording.length > 0;
+  }
+  /**
+   * Appends an incident's lesson to RULES.md and records the rule's id in the run. The operation id is the run's and the
+   * incident's, so a second attempt (the run stopped after the file was written and before the state was) adds nothing.
+   */
+  appendLesson(i) {
+    const added = this.rulesStore().append({ opId: lessonOp(this.id, i.id), text: i.lesson.text, incident: lessonSource(this.id, i) });
+    const done2 = completeLesson(this.state, i.id, added.rule.id);
+    if (!done2.ok) throw new Error(done2.reason);
+    this.save();
+  }
+  /**
+   * The PM's structured `rule_lesson`, for every incident it answered in the turn: a rule (the only way a rule is added), or
+   * the decision that none is needed. Every rule is saved as `recording` before RULES.md is written, so a stop between the
+   * two is finished by the next run (`finishLessons`), and each is appended once (its own operation id).
+   */
+  pmLessons(lessons) {
+    const begun = [];
+    for (const a of lessons) {
+      const text3 = a.rule?.trim();
+      if (!text3) {
+        declineLesson(this.state, a.incident_id, a.rationale);
+        continue;
+      }
+      const made = beginLesson(this.state, a.incident_id, text3);
+      if (!made.ok) {
+        this.o.bus.emit({ type: "warning", text: `The PM's rule for ${a.incident_id} was not recorded: ${made.reason}` });
+        continue;
+      }
+      begun.push(made.value);
+    }
+    this.save();
+    for (const i of begun) this.appendLesson(i);
+  }
+  /** The settled incidents the PM has not decided on yet: an obligation of the run, whether or not the PM can be asked now. */
+  pendingLessons() {
+    return governanceWork(this.state).lessons.filter((i) => i.status === "resolved");
+  }
+  lessonsPending() {
+    return this.pendingLessons().length > 0;
+  }
+  /** The settled incidents the PM is to decide on now: one it asked the user about waits for the answer (the run still owes it). */
+  lessonsDue() {
+    return this.pendingLessons().filter((i) => !i.direction || i.direction.answer !== null);
+  }
+  lessonsOwedNow() {
+    return this.lessonsDue().length;
+  }
+  /**
+   * Whether the PM is asked for its lessons now: some are due, and its lesson turns in this process have not stalled (backoff,
+   * not release). While other members work (execution, integration), more incidents may settle, so the turn waits for the
+   * team to be idle, or for the report interval since the first was due, and learns from all of them at once; elsewhere (the
+   * result about to be written, or written) it is now.
+   */
+  lessonOwed() {
+    if (this.lessonStalled >= 2 || !this.lessonsOwedNow()) {
+      this.lessonsOwedSince = null;
+      return false;
+    }
+    const s = this.state;
+    if (s.phase !== "EXECUTION" && s.phase !== "INTEGRATION") return true;
+    if (![...this.running.keys()].some((k) => !k.startsWith("pm:"))) return true;
+    const now2 = Date.now();
+    this.lessonsOwedSince ??= now2;
+    const wait = (this.o.reportIntervalMs ?? REPORT_INTERVAL_MS) - (now2 - this.lessonsOwedSince);
+    if (wait <= 0) return true;
+    if (!this.lessonTimer) {
+      this.lessonTimer = setTimeout(() => {
+        this.lessonTimer = null;
+        this.wake();
+      }, wait);
+      this.lessonTimer.unref?.();
+    }
+    return false;
+  }
+  /** A lesson is pending where it holds the run (the result is being written, or has been) and the PM is no longer asked in this process. */
+  lessonsStuck() {
+    return (this.state.phase === "APPLY" || this.state.phase === "DONE") && this.lessonsPending() && this.lessonStalled >= 2;
+  }
+  // ------------------------------------------------------------------ exceptions to the rules
+  //
+  // A member asks for an exception in its result (`governance.exception`). agentduo records the request for the work of that
+  // call (rule-governance.ts), and that work waits: its jobs do not start (board.ts), a result already given is not used, and
+  // no answer, merge, acceptance or apply goes past it. The PM who answers for the work assesses the request (a group's own PM
+  // may refuse or pass it up; only the head PM proposes it to the user, or asks the user what it cannot tell). The user's
+  // answer to the very request that showed the proposal is the only thing that approves it; the member is told only after
+  // the request, the assessment and the decision are saved.
+  /**
+   * What the exception a member asks for comes to: what is wrong with it (it is retried with that), or that it can be recorded and
+   * will hold the work (`holds`: its result is not used, so the checks of a completed result are not made), or neither (none asked,
+   * or one already decided and delivered: the result is judged as any other).
+   */
+  exceptionVerdict(m, work, data, rules) {
+    const asked = data.governance?.exception ?? null;
+    if (!asked || m.kind === "pm") return { problems: [], holds: false };
+    if (!work) return { problems: ["no exception can be asked for in this call: leave governance.exception null and do only what the rules allow"], holds: false };
+    const trial = { ...this.state, governance: structuredClone(this.state.governance) };
+    const made = requestException(trial, {
+      from: m.name,
+      ruleIds: asked.rule_ids,
+      reason: asked.reason,
+      alternative: asked.alternative,
+      work,
+      known: new Set(rules.map((r) => r.id))
+    });
+    return made.ok ? { problems: [], holds: holdsWork(made.value) } : { problems: [`${made.reason}; if no exception is possible, leave governance.exception null and do only what the rules allow`], holds: false };
+  }
+  /** Records a member's request for an exception and stops its call's result there (Held); the same request again changes nothing. */
+  holdForException(m, work, report, rules) {
+    const asked = report?.exception;
+    if (!asked || m.kind === "pm" || !work) return;
+    const made = requestException(this.state, {
+      from: m.name,
+      ruleIds: asked.rule_ids,
+      reason: asked.reason,
+      alternative: asked.alternative,
+      work,
+      known: new Set(rules.map((r) => r.id))
+    });
+    if (!made.ok) throw new Error(`the exception request was not recorded: ${made.reason}`);
+    const ex = made.value;
+    if (!holdsWork(ex)) return;
+    if (made.changed) this.routeException(ex);
+    this.save();
+    throw new Held();
+  }
+  /** The PM who answers for the work of a request: the group's own PM when its work is a group's and the group has one, else the head PM. */
+  exceptionOwner(ex) {
+    const taskId = ex.requested.taskIds[0];
+    const unit = ex.requested.unit;
+    const group = taskId ? this.state.tasks.find((t) => t.id === taskId)?.group ?? null : unit?.kind === "planning" && unit.id.startsWith("group:") ? unit.id.slice("group:".length) : null;
+    return (group === null ? null : this.groups.find((g) => g.name === group)?.pm) ?? this.head;
+  }
+  /** A new request is announced in the run's reports, and sent to its group's PM first when there is one (the head PM otherwise sees it at once). */
+  routeException(ex) {
+    const s = this.state;
+    const scope = scopeWords(ex.requested, s.tasks);
+    this.report("agentduo", `${ex.from} asks for an exception to ${ex.ruleIds.join(", ")} for ${scope}. That work waits for the user's decision.`);
+    this.logException(ex, `${ex.from} asked for an exception to ${ex.ruleIds.join(", ")} (${ex.id}): ${ex.reason}; the task waits for the decision`);
+    const owner = this.exceptionOwner(ex);
+    if (owner.name === this.head.name) return;
+    const unit = ex.requested.unit;
+    s.escalations.push({
+      id: `${ex.id}-E1`,
+      task: ex.requested.taskIds.length === 1 ? ex.requested.taskIds[0] : null,
+      ...unit?.kind === "planning" ? { group: unit.id.slice("group:".length) } : {},
+      reason: "rule_exception",
+      exceptionId: ex.id,
+      to: owner.name,
+      told: false,
+      answer: null,
+      text: `${ex.from} asks for an exception to the team's rules ${ex.ruleIds.join(", ")} for ${scope} (${ex.id}).
+Reason: ${ex.reason}${ex.alternative ? `
+Instead it would: ${ex.alternative}` : ""}
+The work waits. Refuse it yourself (team_answer: say why the rules stand), or pass it up (escalate) so that ${this.head.name} can propose it to the user. You never approve it.`
+    });
+  }
+  /** A line in the history of the task a request is about (and the screen's view of it). */
+  logException(ex, text3) {
+    for (const id of ex.requested.taskIds) {
+      const t = this.state.tasks.find((x) => x.id === id);
+      if (!t) continue;
+      this.log(t, text3);
+      this.emitTask(t);
+    }
+  }
+  /** Requests that wait for the head PM's assessment: not with a group's PM, who answers or passes them up first. */
+  exceptionsToAssess() {
+    const s = this.state;
+    return governanceWork(s).assess.filter((ex) => !s.escalations.some((e) => e.exceptionId === ex.id && e.answer === null && e.to !== this.head.name));
+  }
+  /** The head PM took the request (proposed, declined or asked about it): what a group's PM was holding for it is closed. */
+  closeExceptionEscalations(id, note) {
+    for (const e of this.state.escalations) if (e.exceptionId === id && e.answer === null) e.answer = note;
+  }
+  /** A group's own PM answers a request for an exception: the rules stand. It grants nothing and cannot approve; the member is told once it is saved. */
+  refuseByGroupPm(e, answer) {
+    const ex = this.state.governance.exceptions.find((x) => x.id === e.exceptionId);
+    e.answer = answer;
+    if (!ex) return;
+    const made = declineException(this.state, ex.id);
+    if (!made.ok) {
+      this.o.bus.emit({ type: "warning", text: `${e.to}'s refusal of ${ex.id} was not recorded: ${made.reason}` });
+      return;
+    }
+    this.logException(ex, `${e.to} refused the exception ${ex.id}: ${answer}`);
+  }
+  /** The tasks and units an unanswered request or question holds, as `heldTaskIds` and `unitHeld` read them. */
+  heldRunUnit() {
+    return ["integration", "apply", "acceptance"].some((kind) => unitHeld(this.state, { kind, id: RUN_UNIT }));
+  }
+  /** Whether the work behind a question to the PM waits for a decision about an exception: no answer of the PM's releases it. */
+  escalationHeld(e) {
+    if (e.exceptionId) return false;
+    const s = this.state;
+    if (e.task) return heldTaskIds(s).has(e.task);
+    if (e.reason === "planning") return unitHeld(s, planningUnit(e.group ?? null));
+    return unitHeld(s, { kind: "integration", id: RUN_UNIT }) || unitHeld(s, { kind: "apply", id: RUN_UNIT });
+  }
+  rulesKnown() {
+    return new Set(this.rulesStore().rules().map((r) => r.id));
+  }
+  pmProposal(a) {
+    const made = assessException(this.state, a.exception_id, {
+      by: this.head.name,
+      ruleIds: a.rule_ids,
+      reason: a.reason,
+      alternative: a.alternative,
+      taskIds: a.task_ids,
+      unit: a.unit,
+      summary: a.summary,
+      known: this.rulesKnown()
+    });
+    if (!made.ok) {
+      this.o.bus.emit({ type: "warning", text: `The PM's proposal for ${a.exception_id} was not recorded: ${made.reason}` });
+      return;
+    }
+    this.closeExceptionEscalations(a.exception_id, `${this.head.name} proposed it to the user`);
+    this.logException(made.value, `${this.head.name} assessed the exception ${a.exception_id}; it goes to the user`);
+    this.save();
+  }
+  pmDecline(a) {
+    const made = declineException(this.state, a.exception_id);
+    if (!made.ok) {
+      this.o.bus.emit({ type: "warning", text: `The PM's refusal of ${a.exception_id} was not recorded: ${made.reason}` });
+      return;
+    }
+    this.closeExceptionEscalations(a.exception_id, `${this.head.name} declined it: ${a.reason}`);
+    this.logException(made.value, `${this.head.name} declined the exception ${a.exception_id}: ${a.reason}`);
+    this.save();
+  }
+  /**
+   * The work that waits for the user's answer about an incident: its source's task, or for what had none the unit it was about (the
+   * escalation's group planning, the integration, the apply; a plan's group). Null when nothing is running there now: nothing waits.
+   */
+  incidentWork(id) {
+    const s = this.state;
+    const i = s.governance.incidents.find((x) => x.id === id);
+    if (!i) return null;
+    const src = i.source;
+    let ref = null;
+    if (src.kind === "escalation") {
+      const e = s.escalations.find((x) => x.id === src.escalationId);
+      if (e) ref = e.task ? { task: e.task } : e.reason === "planning" ? planningWork(e.group ?? null) : e.reason === "merge_conflict" ? applyWork() : integrationWork();
+    } else if ("task" in src && src.task) ref = { task: src.task };
+    else if (src.kind === "member_report") {
+      const plan = /^plan:(.*):v\d+$/.exec(src.occurrence);
+      if (src.occurrence.startsWith("integration:")) ref = integrationWork();
+      else if (plan) ref = planningWork(plan[1] === "" ? null : plan[1]);
+    }
+    return ref && callScope(s, ref).ok ? ref : null;
+  }
+  /** The PM cannot decide and asks the user (through the broker): the work that depends on it waits, and the answer is information, never an approval. */
+  pmRuleQuestion(a) {
+    const parsed = parseQuestions(a.questions.map((q) => ({ header: q.header, question: q.question, multiSelect: q.multi_select, options: q.options })));
+    if ("error" in parsed) return;
+    const request = this.request("direction", parsed.questions);
+    ledgerOpen(this.state.clarifications, request);
+    const target = a.exception_id !== null ? { exceptionId: a.exception_id } : { incidentId: a.incident_id };
+    const asked = askDirection(this.state, target, request.id, a.exception_id === null ? this.incidentWork(a.incident_id) : void 0);
+    if (!asked.ok) {
+      ledgerClose(this.state.clarifications, request.id, "cancelled", nowIso2(), request.callId);
+      this.o.bus.emit({ type: "warning", text: `The PM's question about the rules was not asked: ${asked.reason}` });
+      return;
+    }
+    if (a.exception_id !== null) this.closeExceptionEscalations(a.exception_id, `${this.head.name} asked the user`);
+    this.save();
+    this.listen(request, (response) => this.directionAnswered(request, response));
+  }
+  /**
+   * A request about the rules the user closed without answering is put off like one they deferred: it stays pending, as it was
+   * (the same request, the same words), and the run asks it again when it is reopened. Nothing is decided by it.
+   */
+  putOff(request) {
+    this.deferred.add(request.id);
+    this.o.bus.emit({ type: "clarification.closed", id: request.id, callId: request.callId, status: "deferred" });
+    this.save();
+  }
+  directionAnswered(request, response) {
+    const s = this.state;
+    if (response.kind !== "answered") return this.putOff(request);
+    if (!ledgerAnswer(s.clarifications, request.id, request.callId, response.answers, nowIso2())) {
+      this.deferred.add(request.id);
+      return;
+    }
+    this.o.bus.emit({ type: "clarification.answered", id: request.id, callId: request.callId, answers: response.answers });
+    const made = answerDirection(s, request.id, answersText(request.questions, response.answers));
+    if (!made.ok) this.o.bus.emit({ type: "warning", text: `The user's answer was not recorded: ${made.reason}` });
+    this.save();
+  }
+  proposalProblems(a) {
+    const waiting = this.exceptionsToAssess();
+    if (!waiting.some((x) => x.id === a.exception_id)) return [`'${a.exception_id}' is not an exception request waiting for you (${waiting.map((x) => x.id).join(", ") || "none"})`];
+    const trial = { ...this.state, governance: structuredClone(this.state.governance) };
+    const made = assessException(trial, a.exception_id, {
+      by: this.head.name,
+      ruleIds: a.rule_ids,
+      reason: a.reason,
+      alternative: a.alternative,
+      taskIds: a.task_ids,
+      unit: a.unit,
+      summary: a.summary,
+      known: this.rulesKnown()
+    });
+    return made.ok ? [] : [made.reason];
+  }
+  declineProblems(a) {
+    const waiting = this.exceptionsToAssess();
+    if (!waiting.some((x) => x.id === a.exception_id)) return [`'${a.exception_id}' is not an exception request waiting for you (${waiting.map((x) => x.id).join(", ") || "none"})`];
+    return a.reason.trim() ? [] : ["say why the rules stand, for the member who asked"];
+  }
+  questionProblems(a) {
+    if (a.exception_id === null === (a.incident_id === null)) return ["ask about one thing: an exception request (exception_id) or an incident (incident_id), the other null"];
+    const parsed = parseQuestions(a.questions.map((q) => ({ header: q.header, question: q.question, multiSelect: q.multi_select, options: q.options })));
+    if ("error" in parsed) return [`your questions cannot be shown: ${parsed.error}`];
+    if (a.exception_id !== null && !this.exceptionsToAssess().some((x) => x.id === a.exception_id)) return [`'${a.exception_id}' is not an exception request waiting for you`];
+    if (a.incident_id !== null && !governanceWork(this.state).lessons.some((i) => i.id === a.incident_id && i.status === "resolved")) return [`'${a.incident_id}' is not a settled incident waiting for you`];
+    const trial = { ...this.state, governance: structuredClone(this.state.governance) };
+    const made = askDirection(trial, a.exception_id !== null ? { exceptionId: a.exception_id } : { incidentId: a.incident_id }, "trial", a.exception_id === null ? this.incidentWork(a.incident_id) : void 0);
+    return made.ok ? [] : [made.reason];
+  }
+  /** What the user reads when an assessed request is shown: the rules, the reason, the alternative and the work it covers, to approve or refuse. */
+  exceptionQuestion(ex) {
+    const a = ex.assessment;
+    const rules = this.rulesStore().rules();
+    const named = a.ruleIds.map((id) => {
+      const r = rules.find((x) => x.id === id);
+      return r ? `${id} (${r.text})` : id;
+    }).join("; ");
+    return {
+      id: "decision",
+      header: "Exception",
+      multiSelect: false,
+      question: `${ex.from} asks to depart from ${named} for ${scopeWords(a.scope, this.state.tasks)} only.
+Reason: ${a.reason}
+Instead: ${a.alternative}
+${a.summary}
+Approve this exception for that work only? The rules stay in force everywhere else, and refusing keeps the work under the rules as written.`,
+      options: [
+        { id: APPROVE_OPTION, label: "Approve for this work only", description: "The team departs from the rules as proposed, for that work and nothing else" },
+        { id: REJECT_OPTION, label: "Refuse", description: "The rules stand; the work goes on as the rules say" }
+      ]
+    };
+  }
+  /** Shows the proposals the PM assessed and the user has not seen yet. Saved before the user is asked; true when it showed one. */
+  presentAssessed() {
+    const ex = governanceWork(this.state).present[0];
+    if (!ex) return false;
+    const request = this.request("exception", [this.exceptionQuestion(ex)]);
+    ledgerOpen(this.state.clarifications, request);
+    const shown2 = presentException(this.state, ex.id, request.id);
+    if (!shown2.ok) {
+      ledgerClose(this.state.clarifications, request.id, "cancelled", nowIso2(), request.callId);
+      throw new Error(`the exception ${ex.id} could not be shown to the user: ${shown2.reason}`);
+    }
+    this.save();
+    this.listen(request, (response) => this.exceptionAnswered(request, response));
+    return true;
+  }
+  /** The user's response to a request that showed an exception. Only the approve or the refuse option decides; anything else is words for the PM. */
+  exceptionAnswered(request, response) {
+    const s = this.state;
+    if (response.kind !== "answered") return this.putOff(request);
+    if (!ledgerAnswer(s.clarifications, request.id, request.callId, response.answers, nowIso2())) {
+      this.deferred.add(request.id);
+      return;
+    }
+    this.o.bus.emit({ type: "clarification.answered", id: request.id, callId: request.callId, answers: response.answers });
+    const answer = response.answers[0];
+    const verdict = decisionFromAnswer(answer);
+    const ex = s.governance.exceptions.find((x) => x.decision?.requestId === request.id);
+    if (verdict === null) {
+      if (!ex) return;
+      this.userWords(`(about exception ${ex.id}) ${answer.otherText?.trim() || "No decision yet."}`);
+      this.askExceptionAgain(ex);
+      return;
+    }
+    const decided = decideException(s, { requestId: request.id, source: "user", approved: verdict === "approved" });
+    if (!decided.ok) {
+      this.o.bus.emit({ type: "warning", text: `The user's answer decides nothing: ${decided.reason}` });
+      this.save();
+      return;
+    }
+    this.logException(decided.value, `the user ${verdict === "approved" ? "approved" : "refused"} the exception ${decided.value.id}`);
+    this.save();
+  }
+  /** A shown request nobody decided (closed unanswered, or answered in words) is shown again, under a new id; the old id decides nothing. */
+  askExceptionAgain(ex) {
+    const old = ex.decision.requestId;
+    const request = this.request("exception", [this.exceptionQuestion(ex)]);
+    ledgerOpen(this.state.clarifications, request);
+    const moved = repointRequest(this.state, old, request.id);
+    if (!moved.ok) {
+      ledgerClose(this.state.clarifications, request.id, "cancelled", nowIso2(), request.callId);
+      this.o.bus.emit({ type: "warning", text: `The exception ${ex.id} could not be asked again: ${moved.reason}` });
+      return;
+    }
+    ledgerClose(this.state.clarifications, old, "cancelled", nowIso2());
+    this.save();
+    this.listen(request, (response) => this.exceptionAnswered(request, response));
+  }
+  /** Asks again the requests about the rules that nobody answered (a reopened run): the same request when it is still pending, a new one otherwise. */
+  reopenGovernance() {
+    const s = this.state;
+    const work = governanceWork(s);
+    const free = (id) => !this.open.has(id) && !this.deferred.has(id) && !this.announced.has(id);
+    for (const ex of work.pending) {
+      const id = ex.decision.requestId;
+      if (!free(id)) continue;
+      const entry = s.clarifications.find((c) => c.id === id);
+      if (entry?.status === "pending") {
+        const { seq: _seq, status: _status, ...request } = entry;
+        this.listen(request, (response) => this.exceptionAnswered(request, response));
+      } else if (this.o.decider) this.askExceptionAgain(ex);
+    }
+    for (const q of work.questions) {
+      if (!free(q.requestId)) continue;
+      const entry = s.clarifications.find((c) => c.id === q.requestId);
+      if (!entry) continue;
+      if (entry.status === "pending") {
+        const { seq: _seq, status: _status, ...request2 } = entry;
+        this.listen(request2, (response) => this.directionAnswered(request2, response));
+        continue;
+      }
+      if (!this.o.decider) continue;
+      const request = this.request("direction", entry.questions);
+      ledgerOpen(s.clarifications, request);
+      if (!repointRequest(s, q.requestId, request.id).ok) {
+        ledgerClose(s.clarifications, request.id, "cancelled", nowIso2(), request.callId);
+        continue;
+      }
+      this.save();
+      this.listen(request, (response) => this.directionAnswered(request, response));
+    }
+  }
+  /** Releases decided requests to the work they held: the member's next prompt carries the decision. Saved before the work wakes. */
+  deliverDecisions() {
+    let changed = false;
+    for (const ex of governanceWork(this.state).undelivered) {
+      const done2 = deliverDecision(this.state, ex.id);
+      if (!done2.ok || !done2.changed) continue;
+      changed = true;
+      const approved = ex.decision.status === "approved";
+      const text3 = approved ? `The user approved the exception ${ex.id} (${ex.assessment.ruleIds.join(", ")}) for ${scopeWords(ex.assessment.scope, this.state.tasks)} only; the rules stand everywhere else.` : `${ex.decision.by === "pm" ? "The PM declined" : "The user refused"} the exception ${ex.id}; the work goes on under the rules as written.`;
+      this.report("agentduo", text3);
+      this.logException(ex, text3);
+    }
+    if (changed) this.save();
+    return changed;
   }
   /** The files the user attached to the request and to messages since, oldest first: every member is given them. */
   files() {
@@ -25753,7 +27067,8 @@ ${text3}` : "";
     return all.filter((a, i) => all.findIndex((b) => b.id === a.id) === i);
   }
   parts(m) {
-    return { member: m, members: this.members, state: this.state };
+    if (!this.promptRules) throw new Error("a prompt is built inside a call, which reads the team's rules first");
+    return { member: m, members: this.members, state: this.state, rules: this.promptRules };
   }
   brief() {
     return approvedBrief(this.state) ?? latestBrief(this.state);
@@ -25766,10 +27081,13 @@ ${text3}` : "";
     const messagesNow = s.messages.length;
     const reports = s.reports.slice(s.reportsSeen);
     const reportsNow = s.reports.length;
-    const open = s.escalations.filter((e) => e.answer === null && e.to === pm.name);
+    const open = s.escalations.filter((e) => e.answer === null && e.to === pm.name && !e.exceptionId && !this.escalationHeld(e));
     const set = this.planSet() ?? [];
     const shown2 = occasion.kind === "plan_review" ? set : this.approvedSet();
     const actions = pmActions(s, occasion);
+    const owedBefore = this.lessonsOwedNow();
+    const due = occasion.kind === "rule_lesson" ? this.lessonsDue().map((i) => i.id) : [];
+    if (occasion.kind === "rule_lesson") this.lessonsOwedSince = null;
     let cwd = this.o.workspace;
     if (s.base) {
       const tg = await this.teamGit();
@@ -25785,7 +27103,7 @@ ${text3}` : "";
       groups: this.groups,
       plans: shown2,
       areas: currentAreas(s)
-    }), { task: null, cwd, check: (d) => this.pmProblems(d, actions, open) });
+    }), { task: null, cwd, check: (d) => this.pmProblems(d, actions, open, due) });
     s.pmSeen = Math.max(s.pmSeen, messagesNow);
     s.reportsSeen = Math.max(s.reportsSeen, reportsNow);
     if (reports.length) s.lastReportAt = nowIso2();
@@ -25823,6 +27141,7 @@ ${text3}` : "";
             p.pmApproved = false;
             s.planFeedback[groupKey(p.group)] = `The PM sent it back:
 ${mine.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
+            this.planSentBack(pm, p, mine.map((i) => i.issue));
           }
         }
         break;
@@ -25849,6 +27168,18 @@ ${mine.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
       case "team_answer":
         this.answerEscalation(a.question_id, a.answer);
         break;
+      case "rule_lesson":
+        this.pmLessons(a.lessons);
+        break;
+      case "exception_proposal":
+        this.pmProposal(a);
+        break;
+      case "exception_decline":
+        this.pmDecline(a);
+        break;
+      case "rule_question":
+        this.pmRuleQuestion(a);
+        break;
       case "acceptance":
         s.acceptance = { criteria: a.criteria, summary: a.summary };
         this.document("acceptance", "Acceptance report", [a.summary, ...a.criteria.map((c) => `- ${c.id}: ${c.status} \u2014 ${c.evidence}`)].join("\n"));
@@ -25856,9 +27187,13 @@ ${mine.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
       default:
         break;
     }
+    if (occasion.kind === "rule_lesson") {
+      this.lessonStalled = this.lessonsOwedNow() < owedBefore ? 0 : this.lessonStalled + 1;
+    }
     this.save();
   }
-  pmProblems(d, actions, open) {
+  /** What is wrong with the PM's answer; `due`: the incidents its lesson turn must answer (those it was shown that wait for nothing). */
+  pmProblems(d, actions, open, due = []) {
     const a = d.action;
     if (!actions.includes(a.kind)) return [`the action '${a.kind}' is not allowed now; allowed: ${actions.join(", ")}`];
     if (a.kind === "questions") {
@@ -25889,6 +27224,10 @@ ${mine.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     if (a.kind === "team_answer" && !open.some((e) => e.id === a.question_id)) {
       return [`'${a.question_id}' is not an open question of the team (${open.map((e) => e.id).join(", ") || "none"})`];
     }
+    if (a.kind === "rule_lesson") return this.lessonProblems(a.lessons, due);
+    if (a.kind === "exception_proposal") return this.proposalProblems(a);
+    if (a.kind === "exception_decline") return this.declineProblems(a);
+    if (a.kind === "rule_question") return this.questionProblems(a);
     if (a.kind === "plan_review" && a.approve && !a.summary?.trim()) return ["an approved plan needs your summary of it for the user"];
     if (a.kind === "plan_review" && !a.approve && !a.issues.length) return ["say which issues send the plan back"];
     if (a.kind === "acceptance") {
@@ -25896,6 +27235,57 @@ ${mine.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
       if (missing.length) return [`report every acceptance criterion of the brief; missing: ${missing.join(", ")}`];
     }
     return [];
+  }
+  /**
+   * What is wrong with the PM's lessons, each said for its incident: an entry that is no incident waiting for one, a rule
+   * RULES.md would refuse, another text for one being recorded, an incident answered twice, the same rule twice (it is
+   * written once: the other entry says null and names it), or an incident of `due` left out (one turn answers them all).
+   */
+  lessonProblems(lessons, due) {
+    const owed = governanceWork(this.state).lessons;
+    const problems = [];
+    const answered = /* @__PURE__ */ new Set();
+    const rules = /* @__PURE__ */ new Map();
+    for (const a of lessons) {
+      if (answered.has(a.incident_id)) {
+        problems.push(`${a.incident_id} is answered twice: give one entry per incident`);
+        continue;
+      }
+      answered.add(a.incident_id);
+      const i = owed.find((x) => x.id === a.incident_id);
+      if (!i) {
+        problems.push(`'${a.incident_id}' is not an incident waiting for a lesson (${owed.map((x) => x.id).join(", ") || "none"})`);
+        continue;
+      }
+      const text3 = a.rule?.trim();
+      if (!text3) {
+        if (!a.rationale.trim()) problems.push(`${i.id}: say in rationale why no new rule is needed`);
+        continue;
+      }
+      if (i.status === "recording" && i.lesson?.text !== text3) {
+        problems.push(`the rule for ${i.id} is being recorded; give exactly this text: ${i.lesson?.text}`);
+        continue;
+      }
+      const problem = ruleInputProblem({ text: text3, incident: lessonSource(this.id, i) });
+      if (problem) problems.push(`${i.id}: ${problem}`);
+      const same = rules.get(text3);
+      if (same) problems.push(`${i.id} repeats the rule of ${same}: write it once, and give ${i.id} rule null with a rationale that names it`);
+      else rules.set(text3, i.id);
+    }
+    const missing = due.filter((id) => !answered.has(id) && owed.some((x) => x.id === id && x.status === "resolved"));
+    if (missing.length) {
+      problems.push(`answer every settled incident in this one turn: ${missing.join(", ")} ${missing.length === 1 ? "has" : "have"} no entry (rule null and why, when no new rule is needed)`);
+    } else if (!lessons.length) problems.push("give a lesson for each settled incident listed");
+    return problems;
+  }
+  /** A PM objected to a plan: a disagreement with its techlead, settled once a later plan of the group is approved. */
+  planSentBack(pm, plan, issues) {
+    this.note({
+      kind: "disagreement",
+      source: { kind: "member_report", member: pm.name, task: null, occurrence: `plan:${groupKey(plan.group)}:v${plan.version}` },
+      reportedBy: pm.name,
+      summary: `${pm.name} sent ${plan.group ? `group ${plan.group}'s ` : "the "}plan v${plan.version} back: ${issues.join("; ")}`
+    });
   }
   newBrief(b) {
     const s = this.state;
@@ -25927,7 +27317,12 @@ ${mine.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     const s = this.state;
     const e = s.escalations.find((x) => x.id === id);
     if (!e || e.answer !== null) return;
+    if (e.exceptionId) return this.refuseByGroupPm(e, answer);
+    if (this.escalationHeld(e)) return;
     e.answer = answer;
+    if (e.reason === "planning" || e.reason === "review_stalled" || e.reason === "task_limit" || e.reason === "integration_limit") {
+      this.note({ kind: e.reason === "planning" ? "disagreement" : "deviation", source: { kind: "escalation", escalationId: e.id }, reportedBy: "agentduo", summary: e.text });
+    }
     for (const key of [...this.failures.keys()]) if (!e.task || key.endsWith(`:${e.task}`)) this.failures.delete(key);
     if (e.task) {
       const t = this.task(e.task);
@@ -25975,7 +27370,7 @@ ${from.name} (the group's PM): ${question}`;
   async areaTurn(g, occasion) {
     const s = this.state;
     const pm = g.pm;
-    const open = s.escalations.filter((e) => e.answer === null && e.to === pm.name);
+    const open = s.escalations.filter((e) => e.answer === null && e.to === pm.name && !this.escalationHeld(e));
     const plan = latestPlan(s, g.name);
     const area = currentAreas(s).find((a2) => a2.group === g.name) ?? null;
     const actions = pmActions(s, occasion);
@@ -26014,6 +27409,7 @@ ${from.name} (the group's PM): ${question}`;
         plan.declined = true;
         s.planFeedback[groupKey(g.name)] = `${pm.name} (your group's PM) sent it back:
 ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
+        this.planSentBack(pm, plan, a.issues.map((i) => i.issue));
       }
       this.report(pm.name, a.approve ? `${g.name}'s plan v${plan.version} is right for its part` : `${g.name}'s plan v${plan.version} goes back to ${g.lead.name}`);
     } else if (a.kind === "team_answer") this.answerEscalation(a.question_id, a.answer);
@@ -26056,6 +27452,7 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     }), {
       task: null,
       cwd,
+      work: planningWork(g.name),
       check: (d) => planProblems(d.tasks, [...g.members, techlead], brief2, additions ? s.tasks : [], required)
     });
     s.planningRounds += 1;
@@ -26165,9 +27562,9 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     const files = await tg.startResolve(techlead.name, t.candidate);
     const cwd = await tg.cwd(techlead.name);
     await this.call(techlead, "resolve", "team_work", (identity) => resolvePrompt({ ...this.parts(techlead), identity, task: t, brief: this.brief(), cwd, files }), { task: t.id, cwd });
-    const done = await tg.finishResolve(techlead.name, t.candidate, head, `agentduo team ${this.id}: merge ${t.id} (resolved)`);
-    if ("problem" in done) {
-      this.escalate(t, "merge_conflict", `Task ${t.id} cannot be merged: ${done.problem}`);
+    const done2 = await tg.finishResolve(techlead.name, t.candidate, head, `agentduo team ${this.id}: merge ${t.id} (resolved)`);
+    if ("problem" in done2) {
+      this.escalate(t, "merge_conflict", `Task ${t.id} cannot be merged: ${done2.problem}`);
     } else {
       t.status = "merged";
       this.log(t, `merged after the techlead resolved conflicts in ${files.join(", ")}`);
@@ -26202,16 +27599,17 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     }), {
       task: null,
       cwd,
+      work: integrationWork(),
       check: (d) => {
         if (d.action === "escalate") return d.question?.trim() ? [] : ["escalate needs the question for the PM"];
         if (d.action !== "add_tasks") return ["add the tasks that fix it (add_tasks), or escalate"];
         return planProblems(d.tasks, [...g.members, techlead], brief2, s.tasks, null);
       }
     });
-    const now = s.integration;
-    if (!now?.triage || !now.triageGroups.includes(key)) return;
+    const now2 = s.integration;
+    if (!now2?.triage || !now2.triageGroups.includes(key)) return;
     this.report(techlead.name, out.report);
-    now.triageGroups = now.triageGroups.filter((k) => k !== key);
+    now2.triageGroups = now2.triageGroups.filter((k) => k !== key);
     if (out.action === "escalate") this.escalate(null, "question", out.question, g.name);
     else {
       for (const t of out.tasks) {
@@ -26220,7 +27618,7 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
         this.emitTask(task);
       }
     }
-    if (!now.triageGroups.length && s.tasks.some((t) => !finished(t))) {
+    if (!now2.triageGroups.length && s.tasks.some((t) => !finished(t))) {
       s.integration = null;
       s.accepted = false;
       s.acceptance = null;
@@ -26236,14 +27634,14 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     const head = await tg.integrationHead();
     const files = await tg.startResolve(techlead.name, conflict.ours);
     const cwd = await tg.cwd(techlead.name);
-    await this.call(techlead, "resolve", "team_work", (identity) => resolvePrompt({ ...this.parts(techlead), identity, task: null, brief: this.brief(), cwd, files }), { task: null, cwd });
-    const done = await tg.finishResolve(techlead.name, conflict.ours, head, `agentduo team ${this.id}: the workspace's changes merged`);
-    if ("problem" in done) {
+    await this.call(techlead, "resolve", "team_work", (identity) => resolvePrompt({ ...this.parts(techlead), identity, task: null, brief: this.brief(), cwd, files }), { task: null, cwd, work: applyWork() });
+    const done2 = await tg.finishResolve(techlead.name, conflict.ours, head, `agentduo team ${this.id}: the workspace's changes merged`);
+    if ("problem" in done2) {
       s.applyConflict.resolving = false;
-      this.escalate(null, "merge_conflict", `The result cannot be merged with your folder's changes: ${done.problem}`);
+      this.escalate(null, "merge_conflict", `The result cannot be merged with your folder's changes: ${done2.problem}`);
     } else {
       s.applyConflict = null;
-      s.integration = { commit: done.head, checks: [], triage: false, trouble: null, triageGroups: [] };
+      s.integration = { commit: done2.head, checks: [], triage: false, trouble: null, triageGroups: [] };
       this.setPhase("INTEGRATION");
     }
     this.save();
@@ -26340,6 +27738,12 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
       t.review = { reviewer: m.name, verdict: "changes", summary: out.summary, findings: out.findings };
       t.reviewRound += 1;
       this.log(t, `${m.name} asks for changes: ${blockers.map((f) => f.title).join("; ")}`);
+      this.note({
+        kind: "disagreement",
+        source: { kind: "review", task: t.id, occurrence: `a${t.attempt}r${t.reviewRound}` },
+        reportedBy: m.name,
+        summary: `${m.name} asked for changes to ${t.id} (${t.title}) by ${t.assignee}: ${blockers.map((f) => f.title).join("; ")}`
+      });
       if (t.reviewRound >= this.o.cfg.team.limits.max_review_rounds) {
         t.status = "triage";
         t.trouble = `the review still asks for changes after ${t.reviewRound} round(s): ${blockers.map((f) => f.title).join("; ")}`;
@@ -26385,6 +27789,7 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     const out = await this.call(m, "integration-check", "team_check", (identity) => integrationCheckPrompt({ ...this.parts(m), identity, brief: this.brief(), cwd }), {
       task: null,
       cwd,
+      work: integrationWork(),
       check: (d) => d.verdict === "fail" && !d.failures.length ? ["a failing check lists its failures"] : []
     });
     if (s.integration?.commit !== commit) return;
@@ -26403,7 +27808,7 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     const results = await runGates({
       gates: this.o.cfg.gates,
       repo: cwd,
-      logDir: join22(this.o.store.dir, "logs"),
+      logDir: join23(this.o.store.dir, "logs"),
       label: `${String(nextSeq(s)).padStart(3, "0")}-${id ?? "integration"}`,
       defaultTimeoutSec: this.o.cfg.limits.gate_timeout_sec,
       maxOutputChars: this.o.cfg.limits.max_gate_output_chars,
@@ -26442,7 +27847,7 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
   }
   async mergeTask(id) {
     const t = this.task(id);
-    if (t.status !== "merging" || !t.candidate) return;
+    if (t.status !== "merging" || !t.candidate || heldTaskIds(this.state).has(t.id)) return;
     const tg = await this.teamGit();
     const extras = t.checks.map((c) => c.commit).filter((c) => !!c);
     const whole = await tg.merge([t.candidate, ...extras], `agentduo team ${this.id}: ${t.id} with the tests added while checking`);
@@ -26485,7 +27890,8 @@ function teamStatusText(state) {
   const u = state.usage;
   const cost = u.costUsd ? `$${u.costUsd.toFixed(2)}` : "";
   const waiting = state.waiting ? ` (waiting for your ${state.waiting.kind === "apply_conflict" ? "decision on conflicts" : `approval of the ${state.waiting.kind}`})` : "";
-  const lines = [`Team ${state.id} \u2014 ${state.phase}${waiting} \xB7 ${u.calls} call(s)${cost ? ` \xB7 ${cost}` : ""}${u.tokens ? ` \xB7 ${Math.round(u.tokens / 1e3)}k tok` : ""}`];
+  const exceptions = (state.governance?.exceptions ?? []).filter((e) => e.decision?.status === "pending").length;
+  const lines = [`Team ${state.id} \u2014 ${state.phase}${waiting}${exceptions ? ` (${exceptions} exception request(s) wait for your decision)` : ""} \xB7 ${u.calls} call(s)${cost ? ` \xB7 ${cost}` : ""}${u.tokens ? ` \xB7 ${Math.round(u.tokens / 1e3)}k tok` : ""}`];
   for (const t of state.tasks) lines.push(`  ${t.id} ${t.title} \u2014 ${t.assignee}, ${TASK_WORDS[t.status]}${t.attempt > 1 ? ` (attempt ${t.attempt})` : ""}`);
   if (!state.tasks.length) lines.push(state.phase === "INTAKE" ? "  The PM is working out what you need." : "  No task yet.");
   return lines.join("\n");
@@ -26512,7 +27918,7 @@ async function undoTeam(o) {
     git,
     workspace: o.workspace,
     runId: state.id,
-    root: join22(dataRoot(env) ?? o.workspace, "teams", state.id),
+    root: join23(dataRoot(env) ?? o.workspace, "teams", state.id),
     exclude: runsRel ? [runsRel] : [],
     setup: [],
     link: []
@@ -26717,7 +28123,7 @@ var Chat = class {
       case "team":
         return this.teamCommand(input, o);
       case "attach":
-        return this.attachTyped(input.home ? join23(homedir5(), input.path) : resolve11(this.o.workspace, input.path));
+        return this.attachTyped(input.home ? join24(homedir5(), input.path) : resolve11(this.o.workspace, input.path));
       case "detach":
         return this.detach(input.target);
       case "setting":
@@ -27611,8 +29017,8 @@ var Chat = class {
    */
   resume(arg, o = {}) {
     if (this.active) return this.busy();
-    const teamId = this.teamToResume(arg.trim());
-    if (teamId) return this.resumeTeam(teamId, arg.trim() === teamId ? "" : arg.trim());
+    const teamId2 = this.teamToResume(arg.trim());
+    if (teamId2) return this.resumeTeam(teamId2, arg.trim() === teamId2 ? "" : arg.trim());
     if (this.elsewhere()) return;
     const release = this.takeWorkspace();
     if (!release) return;
@@ -27709,8 +29115,8 @@ var Chat = class {
     change.apply(this.cfg);
     this.changes = withChange(this.changes, change);
     const running = this.active?.kind === "pipeline" ? this.active : null;
-    const now = change.live === "next-call";
-    if (running && now) {
+    const now2 = change.live === "next-call";
+    if (running && now2) {
       change.apply(running.cfg);
       running.store.writeJson("config.json", running.cfg);
     }
@@ -27719,7 +29125,7 @@ var Chat = class {
     this.o.ui.setSettings?.(settingsView(this.cfg));
     this.models.refresh();
     if (!saved) return;
-    const when = running ? now ? " Applies from the next agent call of the current run." : " Applies to the next run; the current run keeps its own." : this.active?.kind === "discussion" && !now ? " Applies to the next discussion." : this.active ? " Applies from the next question." : "";
+    const when = running ? now2 ? " Applies from the next agent call of the current run." : " Applies to the next run; the current run keeps its own." : this.active?.kind === "discussion" && !now2 ? " Applies to the next discussion." : this.active ? " Applies from the next question." : "";
     this.o.ui.info(`${text3()}${when}${saved.text}`);
     this.o.changed?.(change, saved.wrote);
   }
@@ -27997,20 +29403,20 @@ var PermissionBroker = class {
   askPermission({ request }, signal) {
     if (this.closed || signal?.aborted || this.waiting.has(request.id)) return Promise.resolve({ decision: "deny" });
     return new Promise((resolve14) => {
-      const done = (answer) => {
+      const done2 = (answer) => {
         this.waiting.delete(request.id);
         signal?.removeEventListener("abort", onAbort);
         resolve14(answer);
       };
-      const onAbort = () => done({ decision: "deny" });
+      const onAbort = () => done2({ decision: "deny" });
       signal?.addEventListener("abort", onAbort, { once: true });
-      this.waiting.set(request.id, done);
+      this.waiting.set(request.id, done2);
     });
   }
   answer(id, answer) {
-    const done = this.waiting.get(id);
-    if (!done) return false;
-    done(answer);
+    const done2 = this.waiting.get(id);
+    if (!done2) return false;
+    done2(answer);
     return true;
   }
   pending() {
@@ -28190,7 +29596,7 @@ var RuntimeSession = class {
       throw e;
     }
     const holder = workspaceLockHolder(env.runsDir);
-    const locked = holder && holder !== process.pid ? { kind: "locked", message: workspaceBusy(holder) } : null;
+    const locked2 = holder && holder !== process.pid ? { kind: "locked", message: workspaceBusy(holder) } : null;
     return {
       ...result,
       workspace: env.workspace,
@@ -28202,7 +29608,7 @@ var RuntimeSession = class {
       models: this.modelsFor(env).current(),
       settings: safeSettings(env.cfg),
       warnings: env.warnings,
-      problem: runnableProblem(env, env.cfg, env.sources.join(", "), this.o.env, { repo: false }) ?? locked,
+      problem: runnableProblem(env, env.cfg, env.sources.join(", "), this.o.env, { repo: false }) ?? locked2,
       hint: resumeHint(env.runsDir, env.workspace) ?? snapshotNote(env.snapshots)
     };
   }
@@ -28531,11 +29937,11 @@ var RuntimeSession = class {
     const open = new Set(tab.clarifications.pending().map((r) => r.id));
     const recorded = new Promise((resolve14) => {
       if (!open.size) return resolve14();
-      const timer = setTimeout(done, 500);
+      const timer = setTimeout(done2, 500);
       const off = tab.bus.on((e) => {
-        if (e.type === "clarification.closed" && open.delete(e.id) && !open.size) done();
+        if (e.type === "clarification.closed" && open.delete(e.id) && !open.size) done2();
       });
-      function done() {
+      function done2() {
         clearTimeout(timer);
         off();
         resolve14();
@@ -28552,11 +29958,11 @@ var RuntimeSession = class {
     const open = new Set(tab.permissions.pending());
     const written = new Promise((resolve14) => {
       if (!open.size) return resolve14();
-      const timer = setTimeout(done, 500);
+      const timer = setTimeout(done2, 500);
       const off = tab.bus.on((e) => {
-        if (e.type === "permission.answered" && open.delete(e.id) && !open.size) done();
+        if (e.type === "permission.answered" && open.delete(e.id) && !open.size) done2();
       });
-      function done() {
+      function done2() {
         clearTimeout(timer);
         off();
         resolve14();
@@ -28763,7 +30169,7 @@ ${findingsMarkdown(r.findings)}
    */
   async findFiles(query) {
     if (this.closing) throw new SessionError("shutting_down", "the worker is shutting down");
-    const runsDir = this.env?.runsDir ?? join24(this.workspace, ".agentduo", "runs");
+    const runsDir = this.env?.runsDir ?? join25(this.workspace, ".agentduo", "runs");
     if (this.paths?.runsDir !== runsDir) this.paths = { runsDir, paths: new WorkspacePaths(this.workspace, { exclude: workspaceExcludes(this.workspace, [runsDir]) }) };
     return this.paths.paths.find(query);
   }
