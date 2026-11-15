@@ -618,24 +618,39 @@ function reclaimLock(path: string, stale: string): void {
 }
 
 /**
+ * Windows keeps the name of a file another process deleted until the handle that deleted it (with older semantics, every
+ * handle on it) is closed: opening, reading or deleting it meanwhile fails with EPERM, or EBUSY while a scanner holds it.
+ * A lock being given back or taken over is in that state for a moment.
+ */
+function deletePending(e: unknown): boolean {
+  const code = (e as NodeJS.ErrnoException).code;
+  return process.platform === "win32" && (code === "EPERM" || code === "EBUSY");
+}
+
+/** One try at `path`: true once it is ours, false to try again; throws LockError naming a live holder. */
+function tryLock(path: string, busy: (pid: number | null) => string): boolean {
+  if (createLock(path)) return true;
+  const owner = lockOwner(path);
+  if (owner.kind === "live") throw new LockError(busy(owner.pid));
+  if (owner.kind === "stale") reclaimLock(path, owner.raw);
+  return owner.kind !== "writing" && createLock(path);
+}
+
+/**
  * Creates `path` exclusively, holding our pid. A lock whose process is gone is taken over (never simply ignored); one
- * being created or taken over by another process is waited for briefly. Throws LockError naming the live holder (null:
- * another process is taking it right now).
+ * being created, given back or taken over by another process is waited for briefly. Throws LockError naming the live
+ * holder (null: another process is taking it right now), or, once that wait is over, the error a lock whose name stays
+ * unusable gave.
  */
 function acquireLock(path: string, busy: (pid: number | null) => string): void {
   const deadline = Date.now() + SETTLE_MS;
   for (;;) {
-    if (createLock(path)) return;
-    const owner = lockOwner(path);
-    if (owner.kind === "live") throw new LockError(busy(owner.pid));
-    if (owner.kind === "stale") reclaimLock(path, owner.raw);
-    if (owner.kind === "gone" || owner.kind === "stale") {
-      if (createLock(path)) return;
+    try {
+      if (tryLock(path, busy)) return;
+    } catch (e) {
+      if (!deletePending(e) || Date.now() > deadline) throw e;
     }
-    if (Date.now() > deadline) {
-      const now = lockOwner(path);
-      throw new LockError(busy(now.kind === "live" ? now.pid : null));
-    }
+    if (Date.now() > deadline) throw new LockError(busy(lockHolder(path)));
     pause(15);
   }
 }

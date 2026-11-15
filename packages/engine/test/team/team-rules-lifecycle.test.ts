@@ -171,7 +171,7 @@ describe("a team's rules across its runs (AC1–AC8)", () => {
     }
     expect(rulesOf().rules().map((r) => r.id)).toEqual(["R1"]);
     expect(readFileSync(rulesOf().path, "utf8")).toBe(learnt);
-  });
+  }, 120_000); // five team runs, each with its own agent processes and git worktrees: 8 s on a Mac, 20–31 s on Windows CI
 
   it("asks a refused exception no more in the run, and the next run's member may ask again (a new request, undecided)", async () => {
     rulesOf().append({ opId: "seed:1", text: LEARNT, incident: "an earlier run" });
