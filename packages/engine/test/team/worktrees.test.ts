@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Git } from "../../src/git/git.js";
 import { prepareRunGit } from "../../src/git/run-git.js";
 import { TeamGit } from "../../src/team/worktrees.js";
@@ -12,7 +12,10 @@ let t: { path: string; cleanup(): void };
 beforeEach(() => {
   t = tempDir();
 });
-afterEach(() => t.cleanup());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  t.cleanup();
+});
 
 const read = (path: string) => readFileSync(path, "utf8");
 
@@ -161,6 +164,34 @@ describe("a team's worktrees", () => {
     expect(await tg.undo("undo")).toEqual({ problem: expect.stringContaining("README.md") });
     writeFileSync(join(repo, "README.md"), "yours\n");
     expect(await tg.planApply(final, "apply again")).toMatchObject({ kind: "conflicts", files: ["README.md"] });
+  });
+
+  it("find your edits already in the result once a resolution merged them, however much later the next plan is made", async () => {
+    const repo = makeRepo(t.path);
+    const tg = team(repo);
+    await tg.createBase("base");
+    const snap = await work(tg, "dev-1", "T1", { "README.md": "team\n" });
+    await tg.mergeIntoIntegration(snap.commit, "merge T1");
+    writeFileSync(join(repo, "README.md"), "yours\n");
+    // A resolution and the check after it take longer than a second: each plan is made at another time.
+    const at = (date: string) => {
+      vi.stubEnv("GIT_AUTHOR_DATE", date);
+      vi.stubEnv("GIT_COMMITTER_DATE", date);
+    };
+    at("2026-11-15T10:00:00Z");
+    const conflict = await tg.planApply(await tg.integrationHead(), "apply");
+    expect(conflict).toMatchObject({ kind: "conflicts", files: ["README.md"] });
+    if (conflict.kind !== "conflicts") return;
+    const head = await tg.integrationHead();
+    expect(await tg.startResolve("techlead", conflict.ours)).toEqual(["README.md"]);
+    writeFileSync(join(await tg.cwd("techlead"), "README.md"), "team and yours\n");
+    expect("head" in await tg.finishResolve("techlead", conflict.ours, head, "resolved")).toBe(true);
+    at("2026-11-15T10:05:00Z");
+    // The workspace is as the resolution took it: the plan is the resolved result, not the same conflict again.
+    const again = await tg.planApply(await tg.integrationHead(), "apply");
+    expect(again.kind).toBe("merged");
+    expect(again.tree).toBe(git(repo, "rev-parse", `${await tg.integrationHead()}^{tree}`));
+    if (again.kind === "merged") expect(again.ours).toBe(conflict.ours);
   });
 
   it("see a change of the same size made in the second of the checkout, however late the snapshot", async () => {

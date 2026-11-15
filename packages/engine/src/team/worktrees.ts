@@ -250,7 +250,11 @@ export class TeamGit {
     const tree = (await this.o.git.run(["rev-parse", `${commit}^{tree}`])).stdout.trim();
     if (current.tree === base.tree) return { kind: "direct", current, tree };
     // The workspace as a child of the base, so the merge's base is the run's base whatever the workspace's own history.
-    const ours = await this.o.git.commitTree(current.tree, [base.commit], `${message} (the workspace)`);
+    // Its message and date are the run's base's, never now: the same workspace is the same commit in every plan, so once a
+    // resolution (or a merge) took it into the integration branch, the next plan finds it there. A new commit would make
+    // the base the merge's base again, and a resolved conflict come back as the same conflict.
+    const date = (await this.o.git.run(["show", "-s", "--format=%cd", "--date=raw", base.commit])).stdout.trim();
+    const ours = await this.o.git.commitTree(current.tree, [base.commit], `agentduo team ${this.o.runId}: the workspace`, date);
     const merged = await this.o.git.mergeTree(ours, commit);
     if (merged.conflicts.length) return { kind: "conflicts", current, tree: merged.tree, ours, files: merged.conflicts };
     return { kind: "merged", current, tree: merged.tree, ours };

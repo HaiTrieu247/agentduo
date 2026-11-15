@@ -516,10 +516,10 @@ describe("conflict resolution cannot bypass a pending exception (AC5, AC7, AC8)"
     expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("user changes\n");
     expect(fake.calls("team_resolve")).toHaveLength(1);
     expect(await reopen(decisions((r) => choose(r, "approve")).decider).run()).toBe("done");
-    // The held resolution ran again once approved, told what was approved. (Later resolutions can follow when the apply sees the workspace
-    // change again: that recheck is the apply's own and also happens without any exception, so the count is not fixed.)
+    // The held resolution ran again once approved, told what was approved, and only once: the apply after its check finds your
+    // edits in the result it merged (however long that took), not the same conflict again.
     const resolves = fake.calls("team_resolve");
-    expect(resolves.length).toBeGreaterThanOrEqual(2);
+    expect(resolves).toHaveLength(2);
     expect(resolves[0]!.prompt).not.toContain("approved by the user");
     expect(resolves[1]!.prompt).toContain("approved by the user for the apply (tree:");
     expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("team and user changes\n");

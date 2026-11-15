@@ -337,9 +337,13 @@ export class Git {
     return (await this.run(["diff", "--no-color", "--stat", "--relative", a, b, "--", "."])).stdout;
   }
 
-  /** A commit of `tree` with these parents, made by agentduo (never by the user's identity). */
-  async commitTree(tree: string, parents: string[], message: string): Promise<string> {
-    return (await this.run(["commit-tree", tree, ...parents.flatMap((p) => ["-p", p]), "-m", message], { env: IDENTITY })).stdout.trim();
+  /**
+   * A commit of `tree` with these parents, made by agentduo (never by the user's identity). `date` (any date git reads)
+   * dates it instead of now: the same tree, parents, message and date then make the same commit.
+   */
+  async commitTree(tree: string, parents: string[], message: string, date?: string): Promise<string> {
+    const env = date ? { ...IDENTITY, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } : IDENTITY;
+    return (await this.run(["commit-tree", tree, ...parents.flatMap((p) => ["-p", p]), "-m", message], { env })).stdout.trim();
   }
 
   /**
