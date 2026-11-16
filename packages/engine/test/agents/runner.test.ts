@@ -403,6 +403,17 @@ describe("AgentRunner sessions", () => {
     expect(events.filter((e) => e.type === "warning")).toEqual([]);
   });
 
+  it("counts only a continued Codex thread's new turn, though Codex reports the thread's running total", async () => {
+    fake.setScenario({ chat: [{ answer: "first" }, { answer: "second" }, { answer: "third" }] });
+    const r = runner();
+    const first = await turn(r, "codex", "001-codex", { session: { keep: true } });
+    const resume = { id: first.sessionId!, prompt: "[agentduo-conversation]\nNEW ONLY" };
+    const second = await turn(r, "codex", "002-codex", { session: { keep: true, resume } });
+    const third = await turn(r, "codex", "003-codex", { session: { keep: true, resume } });
+    expect([first.tokens, second.tokens, third.tokens]).toEqual([1234, 1234, 1234]);
+    expect([second.resumed, third.resumed]).toEqual([true, true]);
+  });
+
   it("asks a conversation turn whose session is lost again in a new one, with the whole prompt and its files, and says so", async () => {
     fake.setScenario({ sessions: { lost: true }, chat: [{ answer: "fresh" }] });
     const r = runner();

@@ -13,7 +13,7 @@ import { ClaudeBackend } from "./claude.js";
 import { CodexBackend } from "./codex.js";
 import { runProcess, type ChildIO, type RunResult } from "./process.js";
 import { validateOutput, type SchemaName } from "./schema.js";
-import { AgentFailure, BinaryNotFound, type AgentBackend, type AgentMeta, type ClarificationReply, type NativeImage, type ParsedEvent } from "./types.js";
+import { AgentFailure, BinaryNotFound, type AgentBackend, type AgentMeta, type ClarificationReply, type NativeImage, type ParsedEvent, type SessionArgs } from "./types.js";
 
 /**
  * The files attached to what the call answers. Its prompt already lists them with their paths (prompts.ts does); the
@@ -513,18 +513,17 @@ export class AgentRunner {
       const { images } = located;
       // Stream input carries the images (Claude); a backend without it takes them as arguments (Codex).
       const stream = host || (images.length > 0 && !!backend.hostInput);
+      const session: SessionArgs | undefined = o.session ? { keep: o.session.keep, ...(resuming ? { resume: resuming.id } : {}) } : undefined;
       let binary: string;
       let args: string[];
       try {
         binary = backend.binary();
         args = o.mode === "text"
-          ? backend.buildArgs({ mode: "text", lastMessageFile, askPermissions: host, images,
-            ...(o.session ? { session: { keep: o.session.keep, ...(resuming ? { resume: resuming.id } : {}) } } : {}),
-          })
+          ? backend.buildArgs({ mode: "text", lastMessageFile, askPermissions: host, images, ...(session ? { session } : {}) })
           : backend.buildArgs({
             schemaName: o.schemaName, lastMessageFile, askPermissions: host, images, skipGitRepoCheck: o.skipGitRepoCheck,
             ...(member ? { profile: member.profile, cwd: member.cwd } : { role: o.agentRole! }),
-            ...(o.session ? { session: { keep: o.session.keep, ...(resuming ? { resume: resuming.id } : {}) } } : {}),
+            ...(session ? { session } : {}),
             ...(budget?.costCap(cost) != null ? { costCap: budget.costCap(cost)! } : {}),
           });
       } catch (e) {
@@ -542,7 +541,7 @@ export class AgentRunner {
       }
       writeFileSync(`${stem}.cmd.json`, JSON.stringify([binary, ...args], null, 1));
       const eventsLog = createWriteStream(`${stem}.events.jsonl`);
-      const parser = backend.createParser();
+      const parser = backend.createParser(session);
       const baseCost = cost;
       const baseTokens = tokens;
       let io: ChildIO | undefined;

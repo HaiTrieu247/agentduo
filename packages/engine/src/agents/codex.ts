@@ -1,11 +1,13 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { roleEffort, roleModel, type AgentRole, type ConfigData } from "../config/config.js";
 import type { Activity } from "../events.js";
+import { dataRoot } from "../paths.js";
 import { resolveBinary } from "./resolve.js";
 import { schemaPath } from "./schema.js";
 import {
   AgentFailure, BinaryNotFound, extractJson, firstLine, wholeCommand,
-  type AgentBackend, type AgentMeta, type BuildArgs, type FinalOutput, type ParsedEvent, type StreamParser,
+  type AgentBackend, type AgentMeta, type BuildArgs, type FinalOutput, type ParsedEvent, type SessionArgs, type StreamParser,
 } from "./types.js";
 
 /** "/bin/zsh -lc 'cat a.txt'" → "cat a.txt" */
@@ -23,6 +25,52 @@ type Item = Record<string, unknown> & { id?: unknown; type?: unknown };
 /** Codex's flag for a session that is not written to disk (and so cannot be resumed). */
 export const CODEX_EPHEMERAL = "--ephemeral";
 
+/**
+ * The usage Codex last reported for each thread agentduo keeps, one file per thread under the data root
+ * (`codex-threads/<thread id>`). `codex exec resume` reports in turn.completed the thread's running total, every
+ * earlier turn included (codex-cli 0.167), so a continued call's own tokens are that total less the one its thread's
+ * previous call reported. A thread with no total here (one from before agentduo kept them, or with no data root) counts
+ * whole, as before. Reads and writes never throw: a total that cannot be kept only makes the thread's next call count whole.
+ */
+export class CodexThreadTotals {
+  /** Under the data root of `env`; with none, nothing is kept. */
+  static inDataRoot(env: NodeJS.ProcessEnv = process.env): CodexThreadTotals {
+    const root = dataRoot(env);
+    return new CodexThreadTotals(root ? join(root, "codex-threads") : null);
+  }
+
+  constructor(private readonly dir: string | null) {}
+
+  get(threadId: string): number | undefined {
+    const file = this.file(threadId);
+    if (!file) return undefined;
+    try {
+      const total = Number(readFileSync(file, "utf8").trim());
+      return Number.isFinite(total) && total >= 0 ? total : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  set(threadId: string, total: number): void {
+    const file = this.file(threadId);
+    if (!file) return;
+    try {
+      mkdirSync(this.dir!, { recursive: true });
+      const tmp = `${file}.${process.pid}.tmp`;
+      writeFileSync(tmp, `${total}\n`);
+      renameSync(tmp, file);
+    } catch {
+      // See the class: the thread's next call counts whole.
+    }
+  }
+
+  /** A thread id is Codex's (a UUID): anything else names no file. */
+  private file(threadId: string): string | null {
+    return this.dir && /^[A-Za-z0-9_-]{1,128}$/.test(threadId) ? join(this.dir, threadId) : null;
+  }
+}
+
 export class CodexParser implements StreamParser {
   tokens = 0;
   lastAgentMessage: string | null = null;
@@ -31,6 +79,12 @@ export class CodexParser implements StreamParser {
   failed = false;
   /** The thread (session) the call ran in, which `codex exec resume` continues. */
   threadId: string | null = null;
+  /** The thread's total as Codex last reported it, which this call's tokens leave out (see CodexThreadTotals). */
+  private reported: number;
+
+  constructor(private readonly totals: CodexThreadTotals | null = null, private readonly session?: SessionArgs) {
+    this.reported = session?.resume ? totals?.get(session.resume) ?? 0 : 0;
+  }
 
   usage(): { tokens?: number } {
     return { tokens: this.tokens || undefined };
@@ -50,7 +104,13 @@ export class CodexParser implements StreamParser {
     }
     if (event.type === "turn.completed" && event.usage && typeof event.usage === "object") {
       const usage = event.usage as { input_tokens?: number; output_tokens?: number };
-      this.tokens += (Number(usage.input_tokens) || 0) + (Number(usage.output_tokens) || 0);
+      const total = (Number(usage.input_tokens) || 0) + (Number(usage.output_tokens) || 0);
+      // The thread's running total: this call adds what grew since the total its previous call reported (one that
+      // shrank is not that thread's, and counts whole).
+      this.tokens += total >= this.reported ? total - this.reported : total;
+      this.reported = total;
+      const thread = this.threadId ?? this.session?.resume;
+      if (this.session?.keep && thread) this.totals?.set(thread, total);
       return [{ type: "usage", tokens: this.tokens }];
     }
     if (event.type === "turn.failed" || event.type === "error") {
@@ -156,8 +216,8 @@ export class CodexBackend implements AgentBackend {
     ];
   }
 
-  createParser(): CodexParser {
-    return new CodexParser();
+  createParser(session?: SessionArgs): CodexParser {
+    return new CodexParser(CodexThreadTotals.inDataRoot(), session);
   }
 
   finalize(parser: StreamParser, _stdout: string, lastMessageFile: string, mode: "structured" | "text" = "structured"): FinalOutput {

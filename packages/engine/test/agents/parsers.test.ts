@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ClaudeParser } from "../../src/agents/claude.js";
-import { CodexParser, unwrapShell } from "../../src/agents/codex.js";
+import { CodexParser, CodexThreadTotals, unwrapShell } from "../../src/agents/codex.js";
 import { extractJson, MAX_COMMAND_CHARS, type ParsedEvent, type StreamParser } from "../../src/agents/types.js";
 import { tempDir } from "../helpers/tmp.js";
 
@@ -228,5 +228,62 @@ describe("extractJson", () => {
     expect(extractJson('```json\n{"a": 1}\n```')).toEqual({ a: 1 });
     expect(extractJson('Here: {"a": {"b": 2}} done')).toEqual({ a: { b: 2 } });
     expect(() => extractJson("no json here")).toThrow("not valid JSON");
+  });
+});
+
+describe("Codex thread totals", () => {
+  // Codex's turn.completed of a continued thread is the thread's running total, every earlier turn included.
+  const thread = (id: string, input: number, output: number) => [
+    JSON.stringify({ type: "thread.started", thread_id: id }),
+    JSON.stringify({ type: "turn.completed", usage: { input_tokens: input, output_tokens: output } }),
+  ];
+
+  it("counts a continued thread's call as the difference from the total its last call reported", () => {
+    const dir = tempDir();
+    try {
+      const totals = new CodexThreadTotals(dir.path);
+      const fresh = new CodexParser(totals, { keep: true });
+      feedAll(fresh, thread("t-1", 1000, 234));
+      expect(fresh.tokens).toBe(1234);
+      const continued = new CodexParser(totals, { keep: true, resume: "t-1" });
+      const events = feedAll(continued, thread("t-1", 2500, 500));
+      expect(continued.tokens).toBe(1766);
+      expect(events.filter((e) => e.type === "usage")).toEqual([{ type: "usage", tokens: 1766 }]);
+      const again = new CodexParser(new CodexThreadTotals(dir.path), { keep: true, resume: "t-1" });
+      feedAll(again, thread("t-1", 3000, 600));
+      expect(again.tokens).toBe(600);
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  it("counts the whole total of a thread it has no total for, and keeps none for a session nobody continues", () => {
+    const dir = tempDir();
+    try {
+      const totals = new CodexThreadTotals(dir.path);
+      const unknown = new CodexParser(totals, { keep: true, resume: "t-old" });
+      feedAll(unknown, thread("t-old", 5000, 100));
+      expect(unknown.tokens).toBe(5100);
+      const ephemeral = new CodexParser(totals, { keep: false });
+      feedAll(ephemeral, thread("t-2", 1000, 234));
+      expect(totals.get("t-2")).toBeUndefined();
+      expect(totals.get("t-old")).toBe(5100);
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  it("refuses a thread id that is not a plain name, and works without a data root", () => {
+    const dir = tempDir();
+    try {
+      const totals = new CodexThreadTotals(dir.path);
+      totals.set("../escape", 10);
+      expect(totals.get("../escape")).toBeUndefined();
+      const none = new CodexParser(new CodexThreadTotals(null), { keep: true, resume: "t-1" });
+      expect(() => feedAll(none, thread("t-1", 1000, 234))).not.toThrow();
+      expect(none.tokens).toBe(1234);
+    } finally {
+      dir.cleanup();
+    }
   });
 });

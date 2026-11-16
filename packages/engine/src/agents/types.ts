@@ -112,7 +112,8 @@ export interface AgentBackend {
    * its role_args count too. False when the user turns session persistence off (Codex's --ephemeral, Claude's --no-session-persistence), which agentduo respects.
    */
   keepsSessions(role?: AgentRole, extraArgs?: string[]): boolean;
-  createParser(): StreamParser;
+  /** A parser for one attempt; `session` is the attempt's own (what buildArgs got), which a resumed call's usage depends on. */
+  createParser(session?: SessionArgs): StreamParser;
   /** Extract the final JSON (or, in text mode, the answer); throws AgentFailure (carrying whatever meta is known) when unusable. */
   finalize(parser: StreamParser, stdout: string, lastMessageFile: string, mode?: CallMode): FinalOutput;
   /**

@@ -116,8 +116,12 @@ async function main() {
   }
   const session = resumed ?? randomUUID();
   const persisted = !args.includes(backend === "codex" ? "--ephemeral" : "--no-session-persistence") && !scenario.sessions?.lost;
+  // Codex's turn.completed reports a continued thread's usage as the thread's running total, every earlier turn
+  // included (codex-cli 0.167): each turn here is 1000 in and 234 out, so the fake keeps each thread's total.
+  const earlier = backend === "codex" ? sessions[session]?.usage : undefined;
+  const threadUsage = { input_tokens: (earlier?.input_tokens ?? 0) + 1000, output_tokens: (earlier?.output_tokens ?? 0) + 234 };
   if (persisted) {
-    sessions[session] = { backend, role };
+    sessions[session] = { backend, role, ...(backend === "codex" ? { usage: threadUsage } : {}) };
     writeFileSync(`${sessionsFile}.${process.pid}.tmp`, JSON.stringify(sessions));
     renameSync(`${sessionsFile}.${process.pid}.tmp`, sessionsFile);
   }
@@ -222,7 +226,7 @@ async function main() {
     });
     await sleep();
     emit({ type: "item.completed", item: { id: "item_final", type: "agent_message", text } });
-    emit({ type: "turn.completed", usage: { input_tokens: 1000, output_tokens: 234 } });
+    emit({ type: "turn.completed", usage: threadUsage });
     if (!resp.noLastMessage) writeFileSync(args[args.indexOf("--output-last-message") + 1], text);
   } else {
     const model = args.includes("--model") ? args[args.lastIndexOf("--model") + 1] : resp.model ?? "claude-fake-default";
