@@ -408,8 +408,10 @@ describe("vscode worker", () => {
       fake.setScenario(happy());
       await h.client.request({ type: "submit", conversation: C, text: "Make app.txt fixed", route: "pipeline" });
       await h.waitFor(isEvent("gate.started"));
-      await waitUntil(() => existsSync(join(repo, "gate.pid")), 5000, "the gate to start");
-      const pid = Number(readFileSync(join(repo, "gate.pid"), "utf8"));
+      // The file exists, empty, before the gate writes its pid in it (Number("") is 0, which pidAlive takes for the test's own group).
+      const gatePid = () => (existsSync(join(repo, "gate.pid")) ? Number(readFileSync(join(repo, "gate.pid"), "utf8")) : 0);
+      await waitUntil(() => gatePid() > 0, 5000, "the gate to start");
+      const pid = gatePid();
       expect(await within(h)).toBeLessThan(4000);
       await waitUntil(() => !pidAlive(pid), 3000, "the gate to die");
       // The first gate to run is the baseline, before the first plan.

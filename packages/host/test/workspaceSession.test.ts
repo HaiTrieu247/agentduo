@@ -343,7 +343,13 @@ describe("WorkspaceSession", () => {
         `setInterval(() => undefined, 1000);`,
         hello ? `process.send({ kind: "hello", protocol: ${PROTOCOL_VERSION}, pid: process.pid, node: process.versions.node, version: "0.0.0" });` : ``,
       ].join("\n"));
-      return { script, pid: () => (existsSync(pidFile) ? Number(readFileSync(pidFile, "utf8")) : null) };
+      // The file exists, empty, before the worker writes its pid in it: an empty one is no pid (Number("") is 0, and
+      // pidAlive(0) asks about the test's own process group).
+      const pid = () => {
+        const n = existsSync(pidFile) ? Number(readFileSync(pidFile, "utf8")) : 0;
+        return Number.isInteger(n) && n > 0 ? n : null;
+      };
+      return { script, pid };
     }
 
     it("is stopped at once by dispose while initialize goes unanswered", async () => {
