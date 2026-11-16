@@ -15722,9 +15722,13 @@ var Git = class {
   async diffStat(a, b) {
     return (await this.run(["diff", "--no-color", "--stat", "--relative", a, b, "--", "."])).stdout;
   }
-  /** A commit of `tree` with these parents, made by agentduo (never by the user's identity). */
-  async commitTree(tree, parents, message) {
-    return (await this.run(["commit-tree", tree, ...parents.flatMap((p) => ["-p", p]), "-m", message], { env: IDENTITY })).stdout.trim();
+  /**
+   * A commit of `tree` with these parents, made by agentduo (never by the user's identity). `date` (any date git reads)
+   * dates it instead of now: the same tree, parents, message and date then make the same commit.
+   */
+  async commitTree(tree, parents, message, date) {
+    const env = date ? { ...IDENTITY, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } : IDENTITY;
+    return (await this.run(["commit-tree", tree, ...parents.flatMap((p) => ["-p", p]), "-m", message], { env })).stdout.trim();
   }
   /**
    * Commits `a` and `b` merged, without a working tree (`git merge-tree --write-tree`, git 2.38 or later): the merged
@@ -15860,20 +15864,26 @@ function reclaimLock(path, stale) {
     }
   }
 }
+function deletePending(e) {
+  const code = e.code;
+  return process.platform === "win32" && (code === "EPERM" || code === "EBUSY");
+}
+function tryLock(path, busy2) {
+  if (createLock(path)) return true;
+  const owner = lockOwner(path);
+  if (owner.kind === "live") throw new LockError(busy2(owner.pid));
+  if (owner.kind === "stale") reclaimLock(path, owner.raw);
+  return owner.kind !== "writing" && createLock(path);
+}
 function acquireLock(path, busy2) {
   const deadline = Date.now() + SETTLE_MS;
   for (; ; ) {
-    if (createLock(path)) return;
-    const owner = lockOwner(path);
-    if (owner.kind === "live") throw new LockError(busy2(owner.pid));
-    if (owner.kind === "stale") reclaimLock(path, owner.raw);
-    if (owner.kind === "gone" || owner.kind === "stale") {
-      if (createLock(path)) return;
+    try {
+      if (tryLock(path, busy2)) return;
+    } catch (e) {
+      if (!deletePending(e) || Date.now() > deadline) throw e;
     }
-    if (Date.now() > deadline) {
-      const now2 = lockOwner(path);
-      throw new LockError(busy2(now2.kind === "live" ? now2.pid : null));
-    }
+    if (Date.now() > deadline) throw new LockError(busy2(lockHolder(path)));
     pause(15);
   }
 }
@@ -17448,17 +17458,17 @@ function parseRequestEnvelope(v) {
 }
 
 // packages/host/src/runtimeSession.ts
-import { join as join25, resolve as resolve12 } from "path";
+import { join as join26, resolve as resolve12 } from "path";
 import { isDeepStrictEqual as isDeepStrictEqual3 } from "util";
 
 // packages/engine/src/chat/chat.ts
 import { homedir as homedir5 } from "os";
-import { join as join24, resolve as resolve11 } from "path";
+import { join as join25, resolve as resolve11 } from "path";
 
 // packages/engine/src/agents/runner.ts
 import { randomUUID as randomUUID3 } from "crypto";
-import { appendFileSync as appendFileSync2, createWriteStream, existsSync as existsSync13, mkdirSync as mkdirSync4, rmSync as rmSync3, writeFileSync as writeFileSync3 } from "fs";
-import { join as join13 } from "path";
+import { appendFileSync as appendFileSync2, createWriteStream, existsSync as existsSync13, mkdirSync as mkdirSync5, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "fs";
+import { join as join14 } from "path";
 
 // packages/engine/src/inputs/attachments.ts
 import { randomBytes } from "crypto";
@@ -18165,7 +18175,8 @@ var ClaudeBackend = class {
 };
 
 // packages/engine/src/agents/codex.ts
-import { existsSync as existsSync12, readFileSync as readFileSync10 } from "fs";
+import { existsSync as existsSync12, mkdirSync as mkdirSync4, readFileSync as readFileSync10, renameSync as renameSync3, writeFileSync as writeFileSync3 } from "fs";
+import { join as join13 } from "path";
 function unwrapShell(command) {
   const quoted = /^\S*?(?:ba|z)?sh -lc '([\s\S]*)'$/.exec(command);
   if (quoted) return quoted[1].replace(/'\\''/g, "'");
@@ -18175,7 +18186,51 @@ function unwrapShell(command) {
   return bare ? bare[1] : command;
 }
 var CODEX_EPHEMERAL = "--ephemeral";
+var CodexThreadTotals = class _CodexThreadTotals {
+  constructor(dir) {
+    this.dir = dir;
+  }
+  dir;
+  /** Under the data root of `env`; with none, nothing is kept. */
+  static inDataRoot(env = process.env) {
+    const root2 = dataRoot(env);
+    return new _CodexThreadTotals(root2 ? join13(root2, "codex-threads") : null);
+  }
+  get(threadId) {
+    const file = this.file(threadId);
+    if (!file) return void 0;
+    try {
+      const total = Number(readFileSync10(file, "utf8").trim());
+      return Number.isFinite(total) && total >= 0 ? total : void 0;
+    } catch {
+      return void 0;
+    }
+  }
+  set(threadId, total) {
+    const file = this.file(threadId);
+    if (!file) return;
+    try {
+      mkdirSync4(this.dir, { recursive: true });
+      const tmp = `${file}.${process.pid}.tmp`;
+      writeFileSync3(tmp, `${total}
+`);
+      renameSync3(tmp, file);
+    } catch {
+    }
+  }
+  /** A thread id is Codex's (a UUID): anything else names no file. */
+  file(threadId) {
+    return this.dir && /^[A-Za-z0-9_-]{1,128}$/.test(threadId) ? join13(this.dir, threadId) : null;
+  }
+};
 var CodexParser = class {
+  constructor(totals = null, session2) {
+    this.totals = totals;
+    this.session = session2;
+    this.reported = session2?.resume ? totals?.get(session2.resume) ?? 0 : 0;
+  }
+  totals;
+  session;
   tokens = 0;
   lastAgentMessage = null;
   error = null;
@@ -18183,6 +18238,8 @@ var CodexParser = class {
   failed = false;
   /** The thread (session) the call ran in, which `codex exec resume` continues. */
   threadId = null;
+  /** The thread's total as Codex last reported it, which this call's tokens leave out (see CodexThreadTotals). */
+  reported;
   usage() {
     return { tokens: this.tokens || void 0 };
   }
@@ -18200,7 +18257,11 @@ var CodexParser = class {
     }
     if (event.type === "turn.completed" && event.usage && typeof event.usage === "object") {
       const usage2 = event.usage;
-      this.tokens += (Number(usage2.input_tokens) || 0) + (Number(usage2.output_tokens) || 0);
+      const total = (Number(usage2.input_tokens) || 0) + (Number(usage2.output_tokens) || 0);
+      this.tokens += total >= this.reported ? total - this.reported : total;
+      this.reported = total;
+      const thread = this.threadId ?? this.session?.resume;
+      if (this.session?.keep && thread) this.totals?.set(thread, total);
       return [{ type: "usage", tokens: this.tokens }];
     }
     if (event.type === "turn.failed" || event.type === "error") {
@@ -18310,8 +18371,8 @@ var CodexBackend = class {
       // read the prompt from stdin
     ];
   }
-  createParser() {
-    return new CodexParser();
+  createParser(session2) {
+    return new CodexParser(CodexThreadTotals.inDataRoot(), session2);
   }
   finalize(parser, _stdout, lastMessageFile, mode = "structured") {
     const p = parser;
@@ -18567,9 +18628,9 @@ var AgentRunner = class {
     const attemptsAllowed = (text3 ? 1 : this.cfg.limits.max_retries + 1) + (resume ? 1 : 0);
     const timeoutMs = this.cfg.limits.agent_timeout_sec * 1e3;
     const idleTimeoutMs = this.cfg.limits.agent_idle_timeout_sec * 1e3;
-    mkdirSync4(this.logDir, { recursive: true });
+    mkdirSync5(this.logDir, { recursive: true });
     let prefix = o.logPrefix;
-    for (let n = 2; existsSync13(join13(this.logDir, `${prefix}.a1.prompt.md`)); n++) prefix = `${o.logPrefix}-${n}`;
+    for (let n = 2; existsSync13(join14(this.logDir, `${prefix}.a1.prompt.md`)); n++) prefix = `${o.logPrefix}-${n}`;
     const started = Date.now();
     let cost = 0;
     let costSeen = false;
@@ -18627,7 +18688,7 @@ ${clarificationSection(answered, "## What the user already answered during an ea
         if (member) this.bus.emit({ type: "team.retry", member: member.name, agent, attempt, max: attemptsAllowed, reason: lastError ?? "" });
         else this.bus.emit({ type: "agent.retry", role: o.role, agent, attempt, max: attemptsAllowed, reason: lastError ?? "" });
       }
-      const stem2 = join13(this.logDir, `${prefix}.a${attempt}`);
+      const stem2 = join14(this.logDir, `${prefix}.a${attempt}`);
       const base = o.prompt + earlierAnswers();
       const prompt = resuming ? resuming.prompt : rejected ? base + rejectionNote(rejected.errors, rejected.answer, fellBack) : lastError && !fellBack ? `${base}
 
@@ -18642,24 +18703,19 @@ Return ONLY a JSON object that matches the required schema exactly.
       if (typeof located === "string") return finish(false, attempt, null, located);
       const { images } = located;
       const stream = host || images.length > 0 && !!backend.hostInput;
+      const session2 = o.session ? { keep: o.session.keep, ...resuming ? { resume: resuming.id } : {} } : void 0;
       let binary;
       let args;
       try {
         binary = backend.binary();
-        args = o.mode === "text" ? backend.buildArgs({
-          mode: "text",
-          lastMessageFile,
-          askPermissions: host,
-          images,
-          ...o.session ? { session: { keep: o.session.keep, ...resuming ? { resume: resuming.id } : {} } } : {}
-        }) : backend.buildArgs({
+        args = o.mode === "text" ? backend.buildArgs({ mode: "text", lastMessageFile, askPermissions: host, images, ...session2 ? { session: session2 } : {} }) : backend.buildArgs({
           schemaName: o.schemaName,
           lastMessageFile,
           askPermissions: host,
           images,
           skipGitRepoCheck: o.skipGitRepoCheck,
           ...member ? { profile: member.profile, cwd: member.cwd } : { role: o.agentRole },
-          ...o.session ? { session: { keep: o.session.keep, ...resuming ? { resume: resuming.id } : {} } } : {},
+          ...session2 ? { session: session2 } : {},
           ...budget?.costCap(cost) != null ? { costCap: budget.costCap(cost) } : {}
         });
       } catch (e) {
@@ -18667,10 +18723,10 @@ Return ONLY a JSON object that matches the required schema exactly.
         throw e;
       }
       rmSync3(lastMessageFile, { force: true });
-      writeFileSync3(`${stem2}.prompt.md`, prompt);
+      writeFileSync4(`${stem2}.prompt.md`, prompt);
       if (attachments.length) {
         const sent = new Set(images.map((i) => i.file));
-        writeFileSync3(`${stem2}.attachments.json`, JSON.stringify(attachments.map((a) => ({
+        writeFileSync4(`${stem2}.attachments.json`, JSON.stringify(attachments.map((a) => ({
           id: a.id,
           name: a.name,
           mediaType: a.mediaType,
@@ -18679,9 +18735,9 @@ Return ONLY a JSON object that matches the required schema exactly.
           image: sent.has(located.files.get(a.id))
         })), null, 1));
       }
-      writeFileSync3(`${stem2}.cmd.json`, JSON.stringify([binary, ...args], null, 1));
+      writeFileSync4(`${stem2}.cmd.json`, JSON.stringify([binary, ...args], null, 1));
       const eventsLog = createWriteStream(`${stem2}.events.jsonl`);
-      const parser = backend.createParser();
+      const parser = backend.createParser(session2);
       const baseCost = cost;
       const baseTokens = tokens;
       let io;
@@ -18756,7 +18812,7 @@ Return ONLY a JSON object that matches the required schema exactly.
         waits.close();
       }
       await new Promise((r) => eventsLog.end(r));
-      writeFileSync3(`${stem2}.stderr.txt`, run.stderr);
+      writeFileSync4(`${stem2}.stderr.txt`, run.stderr);
       if (run.aborted || run.timedOut || run.idle) {
         const seen = parser.usage().tokens;
         if (seen) {
@@ -18815,7 +18871,7 @@ Return ONLY a JSON object that matches the required schema exactly.
         continue;
       }
       if (o.mode === "text") {
-        writeFileSync3(`${stem2}.answer.md`, String(data));
+        writeFileSync4(`${stem2}.answer.md`, String(data));
         return finish(true, attempt, data, null);
       }
       let errors = validateOutput(o.schemaName, data);
@@ -18832,7 +18888,7 @@ Return ONLY a JSON object that matches the required schema exactly.
         rejected = { errors: shown2, answer: data };
         continue;
       }
-      writeFileSync3(`${stem2}.output.json`, JSON.stringify(data, null, 2));
+      writeFileSync4(`${stem2}.output.json`, JSON.stringify(data, null, 2));
       return finish(true, attempt, data, null);
     }
     return finish(false, attemptsAllowed, null, lastError);
@@ -18841,8 +18897,8 @@ Return ONLY a JSON object that matches the required schema exactly.
 
 // packages/engine/src/chat/conversation.ts
 import { randomBytes as randomBytes2 } from "crypto";
-import { existsSync as existsSync15, mkdirSync as mkdirSync6, readdirSync as readdirSync5, readFileSync as readFileSync11, renameSync as renameSync3, rmSync as rmSync4, statSync as statSync6 } from "fs";
-import { join as join17 } from "path";
+import { existsSync as existsSync15, mkdirSync as mkdirSync7, readdirSync as readdirSync5, readFileSync as readFileSync11, renameSync as renameSync4, rmSync as rmSync4, statSync as statSync6 } from "fs";
+import { join as join18 } from "path";
 
 // packages/engine/src/inputs/mentions.ts
 import { readdirSync as readdirSync4, statSync as statSync5 } from "fs";
@@ -18970,7 +19026,7 @@ function taggedPaths(text3, workspace) {
 
 // packages/engine/src/workflow/context.ts
 import { existsSync as existsSync14 } from "fs";
-import { isAbsolute as isAbsolute8, join as join14, posix as posix4 } from "path";
+import { isAbsolute as isAbsolute8, join as join15, posix as posix4 } from "path";
 var MAX_REPO_NOTES = 60;
 var MAX_NOTES_PER_TURN = 12;
 var MAX_NOTE_CHARS = 300;
@@ -18995,7 +19051,7 @@ ${text3}`;
 }
 function notePath(raw, workspace) {
   const path = workspacePath(raw, workspace);
-  return path && existsSync14(join14(workspace, path)) ? path : null;
+  return path && existsSync14(join15(workspace, path)) ? path : null;
 }
 function workspacePath(raw, workspace) {
   let path = raw.trim().replace(/\\/g, "/");
@@ -19124,18 +19180,18 @@ function rememberSession(state, role, r, turn, at) {
 }
 
 // packages/engine/src/quality/gates.ts
-import { mkdirSync as mkdirSync5, writeFileSync as writeFileSync4 } from "fs";
-import { join as join15 } from "path";
+import { mkdirSync as mkdirSync6, writeFileSync as writeFileSync5 } from "fs";
+import { join as join16 } from "path";
 var GatesInterrupted = class extends Error {
   name = "GatesInterrupted";
 };
 var tail = (text3, limit) => text3.length <= limit ? text3 : `...[truncated]...
 ${text3.slice(-limit)}`;
 async function runGates(o) {
-  mkdirSync5(o.logDir, { recursive: true });
+  mkdirSync6(o.logDir, { recursive: true });
   const results = [];
   for (const gate of o.gates) {
-    const log = join15(o.logDir, `${o.label}-gate-${gate.name}.log`);
+    const log = join16(o.logDir, `${o.label}-gate-${gate.name}.log`);
     o.bus.emit({ type: "gate.started", name: gate.name, command: gate.command });
     const started = Date.now();
     const run = await runProcess(gate.command, [], {
@@ -19149,7 +19205,7 @@ async function runGates(o) {
     const separator = run.stdout && run.stderr && !run.stdout.endsWith("\n") ? "\n" : "";
     const output = run.stdout + separator + run.stderr;
     const exitCode = run.timedOut ? null : run.code;
-    writeFileSync4(log, `$ ${gate.command}
+    writeFileSync5(log, `$ ${gate.command}
 ${output}
 [exit code: ${exitCode}]
 `);
@@ -20354,8 +20410,8 @@ function codeReviewer(ctx, round2, planMd, base, snapshot, gateResults, diffStat
 }
 
 // packages/engine/src/workflow/lease.ts
-import { join as join16 } from "path";
-var conversationLockPath = (runsDir, id) => join16(runsDir, "conversations", id, ".lock");
+import { join as join17 } from "path";
+var conversationLockPath = (runsDir, id) => join17(runsDir, "conversations", id, ".lock");
 var conversationBusy = (pid) => pid ? `this conversation is in use by another agentduo (pid ${pid}); wait for it to finish there, or continue it there` : "another agentduo is starting work in this conversation; try again in a moment";
 function conversationHolder(runsDir, id) {
   return lockHolder(conversationLockPath(runsDir, id));
@@ -20433,8 +20489,8 @@ var ConversationError = class extends Error {
 var RECORD = "conversation.json";
 var ARCHIVED = "archived";
 var UNFINISHED_QUESTION = "(the message of a turn that did not finish; it was not kept)";
-var conversationsDir = (runsDir) => join17(runsDir, "conversations");
-var conversationFile = (runsDir, id) => join17(conversationsDir(runsDir), id, RECORD);
+var conversationsDir = (runsDir) => join18(runsDir, "conversations");
+var conversationFile = (runsDir, id) => join18(conversationsDir(runsDir), id, RECORD);
 function readConversation(runsDir, id) {
   return readRecord(conversationFile(runsDir, id));
 }
@@ -20446,7 +20502,7 @@ function readRecord(file) {
     return null;
   }
 }
-var archiveMark = (runsDir, id) => join17(conversationsDir(runsDir), id, ARCHIVED);
+var archiveMark = (runsDir, id) => join18(conversationsDir(runsDir), id, ARCHIVED);
 function archiveTime(runsDir, id) {
   const file = archiveMark(runsDir, id);
   try {
@@ -20475,7 +20531,7 @@ var Conversation = class _Conversation {
     this.clock = o.clock ?? (() => /* @__PURE__ */ new Date());
     const now2 = this.clock();
     this.id = o.id ?? `${stamp(now2)}-chat-${process.pid}-${++counter2}`;
-    this.dir = join17(conversationsDir(runsDir), this.id);
+    this.dir = join18(conversationsDir(runsDir), this.id);
     this.createdAt = now2.toISOString();
     this.files = new AttachmentStore(runsDir, this.dir);
     this.locate = (a) => attachmentFile(runsDir, a);
@@ -20517,11 +20573,11 @@ var Conversation = class _Conversation {
   persisted = false;
   /** It was saved, and its record is gone: another window deleted it (deleteConversation). Nothing writes it back. */
   get deleted() {
-    return this.persisted && !existsSync15(join17(this.dir, RECORD));
+    return this.persisted && !existsSync15(join18(this.dir, RECORD));
   }
   fileStamp() {
     try {
-      const st = statSync6(join17(this.dir, RECORD));
+      const st = statSync6(join18(this.dir, RECORD));
       return `${st.mtimeMs}:${st.size}`;
     } catch {
       return null;
@@ -20530,7 +20586,7 @@ var Conversation = class _Conversation {
   /** The saved record; what it was is noted first, so a save that lands while it is read is seen as a change next time. */
   read() {
     this.seen = this.fileStamp();
-    const r = readRecord(join17(this.dir, RECORD));
+    const r = readRecord(join18(this.dir, RECORD));
     if (r) this.persisted = true;
     return r;
   }
@@ -20620,8 +20676,8 @@ var Conversation = class _Conversation {
       writer: process.pid
     };
     ensureRunsDir(this.runsDir);
-    mkdirSync6(this.dir, { recursive: true });
-    atomicWrite(join17(this.dir, RECORD), `${JSON.stringify(record, null, 2)}
+    mkdirSync7(this.dir, { recursive: true });
+    atomicWrite(join18(this.dir, RECORD), `${JSON.stringify(record, null, 2)}
 `);
     this.seen = this.fileStamp();
     this.persisted = true;
@@ -20660,7 +20716,7 @@ var Conversation = class _Conversation {
     return { exchanges: this.exchanges.slice(Math.max(session2.exchanges, context.omitted)).map(withoutId), omitted: Math.max(0, context.omitted - session2.exchanges) };
   }
   get logDir() {
-    return join17(this.dir, "logs");
+    return join18(this.dir, "logs");
   }
   // ------------------------------------------------------------------ questions the agents asked the user
   /** The questions asked in this conversation, with their answers, oldest first. */
@@ -20808,7 +20864,7 @@ var Conversation = class _Conversation {
     };
     this.turns.push(turn);
     ensureRunsDir(this.runsDir);
-    mkdirSync6(this.logDir, { recursive: true });
+    mkdirSync7(this.logDir, { recursive: true });
     this.save();
     const tagged = (text3) => taggedPaths(text3, workspace);
     const prompt = conversation({ workspace, backend, context, earlier: earlier2, question, attachments, locate: this.locate, tagged, canAsk });
@@ -20885,7 +20941,7 @@ var Conversation = class _Conversation {
     };
     this.turns.push(turn);
     ensureRunsDir(this.runsDir);
-    mkdirSync6(this.logDir, { recursive: true });
+    mkdirSync7(this.logDir, { recursive: true });
     this.save();
     const tagged = (text3) => taggedPaths(text3, workspace);
     const pairs = this.discussionPairs(id);
@@ -20990,7 +21046,7 @@ function parseVerdict(answer) {
 import { createHash as createHash2 } from "crypto";
 import { existsSync as existsSync16, readFileSync as readFileSync12 } from "fs";
 import { homedir as homedir4 } from "os";
-import { dirname as dirname5, join as join18, resolve as resolve8 } from "path";
+import { dirname as dirname5, join as join19, resolve as resolve8 } from "path";
 var DISCOVERY_TIMEOUT_MS = 1e4;
 var blank = (backend) => ({
   backend,
@@ -21026,10 +21082,10 @@ function codexDoctorArgs(args) {
   return out;
 }
 function codexConfigFiles(workspace, env) {
-  const home = env.CODEX_HOME || join18(env.HOME || homedir4(), ".codex");
-  const files = [join18(home, "config.toml"), "/etc/codex/config.toml", "/etc/codex/managed_config.toml"];
+  const home = env.CODEX_HOME || join19(env.HOME || homedir4(), ".codex");
+  const files = [join19(home, "config.toml"), "/etc/codex/config.toml", "/etc/codex/managed_config.toml"];
   for (let dir = resolve8(workspace); ; dir = dirname5(dir)) {
-    files.push(join18(dir, ".codex", "config.toml"));
+    files.push(join19(dir, ".codex", "config.toml"));
     if (dirname5(dir) === dir) return files;
   }
 }
@@ -21112,7 +21168,7 @@ function claudeSettingsSources(o) {
   const enabled = listed === void 0 ? SOURCES : listed.split(",").map((s) => s.trim()).filter(Boolean);
   const unknown = enabled.find((s) => !SOURCES.includes(s));
   if (unknown) return { reason: `--setting-sources names '${unknown}', which agentduo cannot read` };
-  const configDir = o.env.CLAUDE_CONFIG_DIR || join18(o.env.HOME || homedir4(), ".claude");
+  const configDir = o.env.CLAUDE_CONFIG_DIR || join19(o.env.HOME || homedir4(), ".claude");
   const candidates = [
     ...(o.managed ?? managedSettingsPaths()).map((p) => ({ where: p, read: () => readJsonFile(p) })),
     // A later --settings wins over an earlier one.
@@ -21123,9 +21179,9 @@ function claudeSettingsSources(o) {
         return { error: e.message };
       }
     } } : { where: resolve8(o.workspace, v), read: () => readJsonFile(resolve8(o.workspace, v)) }),
-    ...(enabled.includes("local") ? [join18(o.workspace, ".claude", "settings.local.json")] : []).map((p) => ({ where: p, read: () => readJsonFile(p) })),
-    ...(enabled.includes("project") ? [join18(o.workspace, ".claude", "settings.json")] : []).map((p) => ({ where: p, read: () => readJsonFile(p) })),
-    ...(enabled.includes("user") ? [join18(configDir, "settings.json")] : []).map((p) => ({ where: p, read: () => readJsonFile(p) }))
+    ...(enabled.includes("local") ? [join19(o.workspace, ".claude", "settings.local.json")] : []).map((p) => ({ where: p, read: () => readJsonFile(p) })),
+    ...(enabled.includes("project") ? [join19(o.workspace, ".claude", "settings.json")] : []).map((p) => ({ where: p, read: () => readJsonFile(p) })),
+    ...(enabled.includes("user") ? [join19(configDir, "settings.json")] : []).map((p) => ({ where: p, read: () => readJsonFile(p) }))
   ];
   return { candidates };
 }
@@ -23782,8 +23838,8 @@ function usageReportText(r) {
 }
 
 // packages/engine/src/team/state.ts
-import { existsSync as existsSync17, mkdirSync as mkdirSync7, readdirSync as readdirSync6, readFileSync as readFileSync13 } from "fs";
-import { join as join19 } from "path";
+import { existsSync as existsSync17, mkdirSync as mkdirSync8, readdirSync as readdirSync6, readFileSync as readFileSync13 } from "fs";
+import { join as join20 } from "path";
 
 // packages/engine/src/team/rule-governance.ts
 var done = (value, changed) => ({ ok: true, value, changed });
@@ -24273,7 +24329,7 @@ var TeamStore = class _TeamStore {
   constructor(runsDir, id) {
     this.runsDir = runsDir;
     this.id = id;
-    this.dir = join19(teamsDir(runsDir), id);
+    this.dir = join20(teamsDir(runsDir), id);
   }
   runsDir;
   id;
@@ -24281,9 +24337,9 @@ var TeamStore = class _TeamStore {
   static create(runsDir, request, now2 = /* @__PURE__ */ new Date()) {
     const base = `${stamp2(now2)}-${slug(request)}`;
     let id = base;
-    for (let n = 2; existsSync17(join19(teamsDir(runsDir), id)); n++) id = `${base}-${n}`;
+    for (let n = 2; existsSync17(join20(teamsDir(runsDir), id)); n++) id = `${base}-${n}`;
     const store = new _TeamStore(runsDir, id);
-    mkdirSync7(join19(store.dir, "logs"), { recursive: true });
+    mkdirSync8(join20(store.dir, "logs"), { recursive: true });
     const state = newTeamState(id, request);
     store.save(state);
     return { store, state };
@@ -24312,7 +24368,7 @@ var TeamStore = class _TeamStore {
     });
   }
   path(name2) {
-    return join19(this.dir, name2);
+    return join20(this.dir, name2);
   }
   load() {
     const state = JSON.parse(readFileSync13(this.path("state.json"), "utf8"));
@@ -24333,11 +24389,11 @@ var TeamStore = class _TeamStore {
     return JSON.parse(readFileSync13(this.path(name2), "utf8"));
   }
 };
-var teamsDir = (runsDir) => join19(runsDir, "teams");
+var teamsDir = (runsDir) => join20(runsDir, "teams");
 
 // packages/engine/src/team/team.ts
 import { rmSync as rmSync7 } from "fs";
-import { join as join23 } from "path";
+import { join as join24 } from "path";
 
 // packages/engine/src/team/board.ts
 var jobKey = (job) => `${job.kind}:${"member" in job ? job.member : "-"}:${"task" in job ? job.task ?? "-" : "-"}`;
@@ -24527,8 +24583,8 @@ function boardJobs(state, ctx) {
 
 // packages/engine/src/team/identity.ts
 var import_yaml4 = __toESM(require_dist(), 1);
-import { existsSync as existsSync18, mkdirSync as mkdirSync8, readFileSync as readFileSync14, rmSync as rmSync5, writeFileSync as writeFileSync5 } from "fs";
-import { dirname as dirname6, join as join20 } from "path";
+import { existsSync as existsSync18, mkdirSync as mkdirSync9, readFileSync as readFileSync14, rmSync as rmSync5, writeFileSync as writeFileSync6 } from "fs";
+import { dirname as dirname6, join as join21 } from "path";
 
 // packages/engine/src/team/defaults.ts
 var PM = `You are the team's product manager, and the only member the user talks to.
@@ -24603,11 +24659,11 @@ var LEVEL_IDENTITIES = {
 
 // packages/engine/src/team/identity.ts
 function identityDirs(workspace, env = process.env) {
-  return { global: join20(dirname6(userConfigPath(env)), "team"), project: workspace ? join20(workspace, ".agentduo", "team") : null };
+  return { global: join21(dirname6(userConfigPath(env)), "team"), project: workspace ? join21(workspace, ".agentduo", "team") : null };
 }
 var FOLDERS = { role: "roles", level: "levels", agent: "agents" };
 var FILES = { role: "IDENTITY.md", level: "IDENTITY.md", agent: "AGENT.md" };
-var identityPath = (dir, kind, name2) => join20(dir, FOLDERS[kind], name2, FILES[kind]);
+var identityPath = (dir, kind, name2) => join21(dir, FOLDERS[kind], name2, FILES[kind]);
 function parseFile(path, warnings) {
   const raw = readFileSync14(path, "utf8").replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/<!--[\s\S]*?-->/g, "").trimStart();
   const m = /^---\n([\s\S]*?)\n---\n?/.exec(raw);
@@ -24673,8 +24729,8 @@ ${own}`);
 
 // packages/engine/src/team/rules.ts
 import { createHash as createHash5 } from "crypto";
-import { existsSync as existsSync19, mkdirSync as mkdirSync9, readFileSync as readFileSync15, writeFileSync as writeFileSync6 } from "fs";
-import { basename as basename5, join as join21 } from "path";
+import { existsSync as existsSync19, mkdirSync as mkdirSync10, readFileSync as readFileSync15, writeFileSync as writeFileSync7 } from "fs";
+import { basename as basename5, join as join22 } from "path";
 var RulesError = class extends Error {
   name = "RulesError";
 };
@@ -24694,19 +24750,19 @@ function teamRulesDir(env, workspace, teamId2) {
   const root2 = dataRoot(env);
   if (!root2) throw new RulesError("there is no place for the team's rules: agentduo's data folder is not set (LOCALAPPDATA or APPDATA)");
   if (!/^[a-z0-9][a-z0-9_-]{0,39}$/.test(teamId2)) throw new RulesError(`team id '${teamId2}' is not a valid name`);
-  return join21(root2, "team-rules", workspaceKey(workspace), teamId2);
+  return join22(root2, "team-rules", workspaceKey(workspace), teamId2);
 }
 function pause2(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 var busy = (pid) => pid ? `the team's rules are being written by another agentduo (pid ${pid})` : "another agentduo is starting to write the team's rules";
 function locked(dir, waitMs, fn) {
-  mkdirSync9(dir, { recursive: true });
+  mkdirSync10(dir, { recursive: true });
   const deadline = Date.now() + waitMs;
   for (; ; ) {
     let release = null;
     try {
-      release = acquireLockFile(join21(dir, ".lock"), busy);
+      release = acquireLockFile(join22(dir, ".lock"), busy);
     } catch (e) {
       if (!(e instanceof LockError) || Date.now() > deadline) throw new RulesError(e.message);
       pause2(20);
@@ -24734,7 +24790,7 @@ var TeamRules = class {
   constructor(dir, o = {}) {
     this.dir = dir;
     this.o = o;
-    this.path = join21(dir, "RULES.md");
+    this.path = join22(dir, "RULES.md");
   }
   dir;
   o;
@@ -24744,7 +24800,7 @@ var TeamRules = class {
     if (existsSync19(this.path)) return false;
     return locked(this.dir, this.o.lockWaitMs ?? LOCK_WAIT_MS, () => {
       if (existsSync19(this.path)) return false;
-      writeFileSync6(this.path, RULES_HEADER, { flag: "wx" });
+      writeFileSync7(this.path, RULES_HEADER, { flag: "wx" });
       return true;
     });
   }
@@ -25225,8 +25281,8 @@ Allowed actions now: ${pmActions(p.state, p.occasion).join(", ")}. \`message\` i
 
 // packages/engine/src/team/worktrees.ts
 import { execFile as execFile3 } from "child_process";
-import { chmodSync, existsSync as existsSync20, lstatSync as lstatSync2, mkdirSync as mkdirSync10, readdirSync as readdirSync7, readFileSync as readFileSync16, rmSync as rmSync6, symlinkSync, unlinkSync as unlinkSync3, writeFileSync as writeFileSync7 } from "fs";
-import { dirname as dirname7, join as join22, posix as posix5, resolve as resolve10 } from "path";
+import { chmodSync, existsSync as existsSync20, lstatSync as lstatSync2, mkdirSync as mkdirSync11, readdirSync as readdirSync7, readFileSync as readFileSync16, rmSync as rmSync6, symlinkSync, unlinkSync as unlinkSync3, writeFileSync as writeFileSync8 } from "fs";
+import { dirname as dirname7, join as join23, posix as posix5, resolve as resolve10 } from "path";
 function teamRefs(runId) {
   const root2 = `refs/agentduo/team/${runId}`;
   return {
@@ -25251,7 +25307,7 @@ var exec = (cmd, args, cwd, shell = false) => new Promise((resolvePromise) => {
 function inside(dir, path) {
   const parts = path.split("/");
   if (!path || parts.some((p) => p === ".." || p === "" || p === ".git")) return null;
-  return join22(dir, ...parts);
+  return join23(dir, ...parts);
 }
 var TeamGit = class {
   constructor(o) {
@@ -25270,12 +25326,12 @@ var TeamGit = class {
   }
   /** A member's worktree (the whole repository's files). */
   worktree(member) {
-    return join22(this.o.root, member);
+    return join23(this.o.root, member);
   }
   /** Where a member works: its worktree's copy of the workspace. */
   async cwd(member) {
     const prefix = await this.workspacePrefix();
-    return prefix ? join22(this.worktree(member), ...prefix.split("/")) : this.worktree(member);
+    return prefix ? join23(this.worktree(member), ...prefix.split("/")) : this.worktree(member);
   }
   /** A member's worktree as a repository of its own, on its copy of the workspace. */
   async memberGit(member) {
@@ -25301,10 +25357,10 @@ var TeamGit = class {
    */
   async checkout(member, commit) {
     const wt = this.worktree(member);
-    if (!existsSync20(join22(wt, ".git"))) {
+    if (!existsSync20(join23(wt, ".git"))) {
       const add = this.adding.then(async () => {
         rmSync6(wt, { recursive: true, force: true });
-        mkdirSync10(dirname7(wt), { recursive: true });
+        mkdirSync11(dirname7(wt), { recursive: true });
         await this.o.git.run(["worktree", "prune"]);
         await this.o.git.run(["worktree", "add", "--detach", "--force", wt, commit]);
       });
@@ -25342,7 +25398,7 @@ var TeamGit = class {
       }
       if (present2) continue;
       rmSync6(target, { recursive: true, force: true });
-      mkdirSync10(dirname7(target), { recursive: true });
+      mkdirSync11(dirname7(target), { recursive: true });
       symlinkSync(source, target, lstatSync2(source).isDirectory() ? "junction" : "file");
     }
   }
@@ -25397,7 +25453,7 @@ var TeamGit = class {
     const git = new Git(this.worktree(member));
     const unmerged = (await git.run(["diff", "--name-only", "--diff-filter=U", "-z"])).stdout.split("\0").filter(Boolean);
     const marked = unmerged.filter((f) => {
-      const path = join22(this.worktree(member), ...f.split("/"));
+      const path = join23(this.worktree(member), ...f.split("/"));
       return existsSync20(path) && /^(<{7}|>{7})( |$)/m.test(readFileSync16(path, "utf8"));
     });
     if (marked.length) return { problem: `conflict markers are still in ${marked.join(", ")}` };
@@ -25416,7 +25472,8 @@ var TeamGit = class {
     const current = await this.o.git.snapshot(this.o.exclude, this.refs.backup, `${message} (the workspace before)`);
     const tree = (await this.o.git.run(["rev-parse", `${commit}^{tree}`])).stdout.trim();
     if (current.tree === base.tree) return { kind: "direct", current, tree };
-    const ours = await this.o.git.commitTree(current.tree, [base.commit], `${message} (the workspace)`);
+    const date = (await this.o.git.run(["show", "-s", "--format=%cd", "--date=raw", base.commit])).stdout.trim();
+    const ours = await this.o.git.commitTree(current.tree, [base.commit], `agentduo team ${this.o.runId}: the workspace`, date);
     const merged = await this.o.git.mergeTree(ours, commit);
     if (merged.conflicts.length) return { kind: "conflicts", current, tree: merged.tree, ours, files: merged.conflicts };
     return { kind: "merged", current, tree: merged.tree, ours };
@@ -25443,11 +25500,11 @@ var TeamGit = class {
         continue;
       }
       if (change.dstMode === "160000") continue;
-      mkdirSync10(dirname7(path), { recursive: true });
+      mkdirSync11(dirname7(path), { recursive: true });
       const bytes = await this.o.git.blob(change.dstBlob);
       if (change.dstMode === "120000") symlinkSync(bytes.toString("utf8"), path);
       else {
-        writeFileSync7(path, bytes);
+        writeFileSync8(path, bytes);
         if (process.platform !== "win32") chmodSync(path, change.dstMode === "100755" ? 493 : 420);
       }
       written.push(change.path);
@@ -25531,7 +25588,7 @@ var TeamRun = class _TeamRun {
     this.members = teamMembers(o.cfg.team);
     this.groups = teamGroups(this.members);
     this.head = headPm(this.members);
-    this.runner = o.runner ?? new AgentRunner(o.cfg, o.workspace, join23(o.store.dir, "logs"), o.bus, { permissions: o.permissions, runsDir: o.store.runsDir });
+    this.runner = o.runner ?? new AgentRunner(o.cfg, o.workspace, join24(o.store.dir, "logs"), o.bus, { permissions: o.permissions, runsDir: o.store.runsDir });
   }
   o;
   members;
@@ -25805,7 +25862,7 @@ var TeamRun = class _TeamRun {
       git,
       workspace: this.o.workspace,
       runId: this.id,
-      root: join23(root2, "teams", this.id),
+      root: join24(root2, "teams", this.id),
       exclude: runsRel ? [runsRel] : [],
       setup: this.o.cfg.team.worktree.setup,
       link: this.o.cfg.team.worktree.link,
@@ -27808,7 +27865,7 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     const results = await runGates({
       gates: this.o.cfg.gates,
       repo: cwd,
-      logDir: join23(this.o.store.dir, "logs"),
+      logDir: join24(this.o.store.dir, "logs"),
       label: `${String(nextSeq(s)).padStart(3, "0")}-${id ?? "integration"}`,
       defaultTimeoutSec: this.o.cfg.limits.gate_timeout_sec,
       maxOutputChars: this.o.cfg.limits.max_gate_output_chars,
@@ -27918,7 +27975,7 @@ async function undoTeam(o) {
     git,
     workspace: o.workspace,
     runId: state.id,
-    root: join23(dataRoot(env) ?? o.workspace, "teams", state.id),
+    root: join24(dataRoot(env) ?? o.workspace, "teams", state.id),
     exclude: runsRel ? [runsRel] : [],
     setup: [],
     link: []
@@ -28123,7 +28180,7 @@ var Chat = class {
       case "team":
         return this.teamCommand(input, o);
       case "attach":
-        return this.attachTyped(input.home ? join24(homedir5(), input.path) : resolve11(this.o.workspace, input.path));
+        return this.attachTyped(input.home ? join25(homedir5(), input.path) : resolve11(this.o.workspace, input.path));
       case "detach":
         return this.detach(input.target);
       case "setting":
@@ -30169,7 +30226,7 @@ ${findingsMarkdown(r.findings)}
    */
   async findFiles(query) {
     if (this.closing) throw new SessionError("shutting_down", "the worker is shutting down");
-    const runsDir = this.env?.runsDir ?? join25(this.workspace, ".agentduo", "runs");
+    const runsDir = this.env?.runsDir ?? join26(this.workspace, ".agentduo", "runs");
     if (this.paths?.runsDir !== runsDir) this.paths = { runsDir, paths: new WorkspacePaths(this.workspace, { exclude: workspaceExcludes(this.workspace, [runsDir]) }) };
     return this.paths.paths.find(query);
   }
