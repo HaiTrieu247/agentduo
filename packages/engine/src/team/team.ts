@@ -35,11 +35,11 @@ import {
 } from "./rule-governance.js";
 import { ruleInputProblem, TeamRules, teamRulesDir, workspaceKey, RulesError, type RuleEntry } from "./rules.js";
 import {
-  answerPrompt, applyWork, areaPmPrompt, checkPrompt, filesSection, integrationCheckPrompt, integrationTriagePrompt, integrationWork, planningWork, planPrompt, pmActions, pmPrompt, resolvePrompt,
-  reviewPrompt, testsPrompt, triagePrompt, workPrompt, type PmOccasion,
+  answerPrompt, applyWork, areaPmPrompt, authored, checkPrompt, filesSection, integrationCheckPrompt, integrationTriagePrompt, integrationWork, planningWork, planPrompt, pmActions, pmPrompt,
+  resolvePrompt, reviewPrompt, testsPrompt, triagePrompt, workPrompt, type PmOccasion, type ReviewChange, type SessionPrompt, type SessionView,
 } from "./prompts.js";
 import {
-  approvedBrief, currentAreas, groupKey, latestBrief, latestPlan, nextSeq, nowIso, planSignature, sessionKey, TeamStore, type Area, type Brief, type CheckFailure,
+  approvedBrief, currentAreas, groupKey, latestBrief, latestPlan, nextSeq, nowIso, planSignature, sessionKey, TeamStore, type Area, type SessionPurpose, type Brief, type CheckFailure,
   type Escalation, type PlanTask, type ReviewFinding, type TaskCheck, type TaskState, type TeamPlan, type TeamState,
 } from "./state.js";
 import { TeamGit } from "./worktrees.js";
@@ -1070,15 +1070,19 @@ export class TeamRun {
 
   // ------------------------------------------------------------------ member calls
 
-  /** One call of a member, in its session: the result's data, or an error (thrown). */
-  private async call<T>(m: Member, kind: string, schemaName: SchemaName,
-    build: (identity: string | null) => string, o: { task: string | null; cwd: string; check?: (data: T) => string[]; work?: WorkRef | null }): Promise<T> {
+  /**
+   * One call of a member, in its session: the result's data, or an error (thrown). `build` makes the prompt for a fresh
+   * session (every part, the identity) and for one that goes on (`since`: what its earlier turns were given; it gets only
+   * what changed). The fresh one says what the session holds once the turn succeeded (`view`), kept in `MemberSession.seen`.
+   */
+  private async call<T>(m: Member, kind: string, schemaName: SchemaName, build: (session: SessionPrompt) => string,
+    o: { task: string | null; cwd: string; check?: (data: T) => string[]; work?: WorkRef | null; purpose?: SessionPurpose }): Promise<T> {
     const s = this.state;
     const backend = this.runner.backends[m.backend];
     const keep = backend.keepsSessions(undefined, m.args);
     // A member's session holds one task (its work, its fixes, its tests and checks, a review of it) or, for a turn of no
     // task, the member's own thread (the PM's conversation, the techlead's plan): never another task's history.
-    const key = sessionKey(m, o.task);
+    const key = sessionKey(m, o.task, o.purpose ?? null);
     const session = s.sessions[key];
     const continued = keep && session && session.backend === m.backend ? session : null;
     // A techlead reads the PM's notes for its group (and those for every techlead): all of them in a fresh session,
@@ -1103,10 +1107,15 @@ export class TeamRun {
     this.promptRules = rules;
     let full: string;
     let resume: { id: string; prompt: string; attachments: Attachment[] } | undefined;
+    // What the whole prompt gives, part by part: what a session holds after this turn, whichever prompt it got.
+    const view: SessionView = {};
     try {
-      full = build(memberIdentity(this.identities!, m)) + leadNotes(0) + listed(files, false);
+      full = build({ identity: memberIdentity(this.identities!, m), view }) + leadNotes(0) + listed(files, false);
       resume = continued
-        ? { id: continued.id, prompt: build(null) + leadNotes(continued.notes ?? s.leadNotesSeen[m.name] ?? 0) + listed(unseen, true), attachments: unseen }
+        ? {
+          id: continued.id, attachments: unseen,
+          prompt: build({ identity: null, since: continued.seen ?? null }) + leadNotes(continued.notes ?? s.leadNotesSeen[m.name] ?? 0) + listed(unseen, true),
+        }
         : undefined;
     } finally {
       this.promptRules = null;
@@ -1149,7 +1158,12 @@ export class TeamRun {
       throw new Error(res.error ?? "the call failed");
     }
     if (keep && res.sessionId) {
-      s.sessions[key] = { backend: m.backend, id: res.sessionId, ...(files.length ? { files: files.map((a) => a.id) } : {}), ...(m.kind === "lead" ? { notes: notesSeen } : {}) };
+      // A session that went on still holds what its earlier turns were given that this prompt has no part for; a fresh one
+      // (a new session, or the one a lost resume fell back to) holds this prompt's parts only.
+      const seen = res.resumed && continued ? { ...(continued.seen ?? {}), ...view } : view;
+      s.sessions[key] = {
+        backend: m.backend, id: res.sessionId, ...(files.length ? { files: files.map((a) => a.id) } : {}), ...(m.kind === "lead" ? { notes: notesSeen } : {}), seen,
+      };
     }
     const report = (res.data as { governance?: GovernanceReport | null }).governance ?? null;
     this.noteIssues(m, o.task, callId, report, rules);
@@ -1157,6 +1171,15 @@ export class TeamRun {
     this.holdForException(m, work, report, rules);
     this.save();
     return res.data as T;
+  }
+
+  /**
+   * What a member's turn wrote that its later prompts would show (the PM's brief and the groups' parts, a techlead's plan):
+   * its session has it, as its own answer, and is not sent it back. A session agentduo keeps no record of is left alone.
+   */
+  private knows(m: Member, task: string | null, wrote: SessionView): void {
+    const session = this.state.sessions[sessionKey(m, task)];
+    if (session?.seen) Object.assign(session.seen, wrote);
   }
 
   // ------------------------------------------------------------------ the team's rules
@@ -1758,8 +1781,8 @@ export class TeamRun {
       const tg = await this.teamGit();
       cwd = await tg.checkout(pm.name, await tg.integrationHead());
     }
-    const out = await this.call<PmOutput>(pm, "pm", "team_pm", (identity) => pmPrompt({
-      ...this.parts(pm), identity, occasion, seenMessages: identity ? 0 : seenMessages, reports, openEscalations: open, groups: this.groups, plans: shown,
+    const out = await this.call<PmOutput>(pm, "pm", "team_pm", (session) => pmPrompt({
+      ...this.parts(pm), ...session, occasion, seenMessages: session.identity ? 0 : seenMessages, reports, openEscalations: open, groups: this.groups, plans: shown,
       areas: currentAreas(s),
     }), { task: null, cwd, check: (d) => this.pmProblems(d, actions, open, due) });
     s.pmSeen = Math.max(s.pmSeen, messagesNow);
@@ -1775,8 +1798,10 @@ export class TeamRun {
     const a = out.action;
     switch (a.kind) {
       case "questions": this.pmQuestions(a.questions); break;
-      case "brief": this.newBrief(a.brief); break;
-      case "change_request": this.newBrief(a.brief); break;
+      case "brief": case "change_request":
+        this.newBrief(a.brief);
+        this.knows(pm, null, authored.brief(latestBrief(s)!));
+        break;
       case "plan_review": {
         if (!set.length) break;
         const signature = planSignature(set);
@@ -1802,6 +1827,7 @@ export class TeamRun {
         const version = s.approvedBrief!;
         s.areas = s.areas.filter((x) => x.briefVersion !== version);
         for (const x of a.areas) s.areas.push({ briefVersion: version, group: x.group, area: x.area, criteria: [...x.criteria] });
+        this.knows(pm, null, authored.areas(currentAreas(s)));
         this.document("plan", "The groups' parts", a.areas.map((x) => `- ${x.group}: ${x.area} (${x.criteria.join(", ")})`).join("\n"));
         break;
       }
@@ -2026,8 +2052,8 @@ export class TeamRun {
       const tg = await this.teamGit();
       cwd = await tg.checkout(pm.name, await tg.integrationHead());
     }
-    const out = await this.call<PmOutput>(pm, "pm", "team_pm", (identity) => areaPmPrompt({
-      ...this.parts(pm), identity, occasion, brief: this.brief(), group: g, area, plan: occasion.kind === "area_review" ? plan : null, openEscalations: open, head: this.head,
+    const out = await this.call<PmOutput>(pm, "pm", "team_pm", (session) => areaPmPrompt({
+      ...this.parts(pm), ...session, occasion, brief: this.brief(), group: g, area, plan: occasion.kind === "area_review" ? plan : null, openEscalations: open, head: this.head,
     }), {
       task: null, cwd, check: (d) => {
         const a = d.action;
@@ -2077,18 +2103,20 @@ export class TeamRun {
     const area = currentAreas(s).find((a) => a.group === g.name) ?? null;
     const previous = latestPlan(s, g.name) ?? s.plans.filter((p) => p.group === g.name).at(-1) ?? null;
     const required = this.requiredCriteria(g);
-    const out = await this.call<PlanOutput>(techlead, "plan", "team_plan", (identity) => planPrompt({
-      ...this.parts(techlead), identity, brief, feedback: s.planFeedback[key] ?? null, previous, existing: additions ? existing : [], additions,
+    const out = await this.call<PlanOutput>(techlead, "plan", "team_plan", (session) => planPrompt({
+      ...this.parts(techlead), ...session, brief, feedback: s.planFeedback[key] ?? null, previous, existing: additions ? existing : [], additions,
       area: this.grouped ? area : null, group: this.grouped ? g : null,
     }), {
       task: null, cwd, work: planningWork(g.name), check: (d) => planProblems(d.tasks, [...g.members, techlead], brief, additions ? s.tasks : [], required),
     });
     s.planningRounds += 1;
     const version = s.plans.filter((p) => p.group === g.name).reduce((n, p) => Math.max(n, p.version), 0) + 1;
-    s.plans.push({
+    const plan: TeamPlan = {
       version, group: g.name, briefVersion: s.approvedBrief!, ...(g.pm ? { areaApproved: null } : {}), summary: out.summary, tasks: out.tasks, risks: out.risks,
       pmApproved: null, additions,
-    });
+    };
+    s.plans.push(plan);
+    this.knows(techlead, null, authored.plan(plan));
     delete s.planFeedback[key];
     this.report(techlead.name, out.report);
     this.save();
@@ -2104,8 +2132,8 @@ export class TeamRun {
     // A task stays in its group: its techlead hands it to one of the group's workers.
     const workers = g.members.filter((m) => m.kind === "worker");
     const max = this.o.cfg.team.limits.max_task_attempts;
-    const out = await this.call<TriageOutput>(techlead, "triage", "team_triage", (identity) => triagePrompt({
-      ...this.parts(techlead), identity, task: t, brief: this.brief(), maxAttempts: max, workers,
+    const out = await this.call<TriageOutput>(techlead, "triage", "team_triage", (session) => triagePrompt({
+      ...this.parts(techlead), ...session, task: t, brief: this.brief(), maxAttempts: max, workers,
     }), {
       task: t.id, cwd, check: (d) => {
         if (d.action === "add_tasks") return ["add_tasks is for the whole result, not a task: retry, reassign, fix_tests or escalate"];
@@ -2154,7 +2182,7 @@ export class TeamRun {
     const techlead = this.group(t.group).lead;
     const tg = await this.teamGit();
     const cwd = await tg.checkout(techlead.name, t.code ?? t.base!);
-    const out = await this.call<AnswerOutput>(techlead, "answer", "team_answer", (identity) => answerPrompt({ ...this.parts(techlead), identity, task: t, brief: this.brief() }), {
+    const out = await this.call<AnswerOutput>(techlead, "answer", "team_answer", (session) => answerPrompt({ ...this.parts(techlead), ...session, task: t, brief: this.brief() }), {
       task: t.id, cwd, check: (d) => (!d.answer?.trim() && !d.escalate?.trim() ? ["give an answer, or escalate with the question for the PM"] : []),
     });
     if (t.status !== "blocked" || !t.question) return;
@@ -2178,7 +2206,7 @@ export class TeamRun {
     const head = await tg.integrationHead();
     const files = await tg.startResolve(techlead.name, t.candidate!);
     const cwd = await tg.cwd(techlead.name);
-    await this.call<WorkOutput>(techlead, "resolve", "team_work", (identity) => resolvePrompt({ ...this.parts(techlead), identity, task: t, brief: this.brief(), cwd, files }), { task: t.id, cwd });
+    await this.call<WorkOutput>(techlead, "resolve", "team_work", (session) => resolvePrompt({ ...this.parts(techlead), ...session, task: t, brief: this.brief(), cwd, files }), { task: t.id, cwd });
     const done = await tg.finishResolve(techlead.name, t.candidate!, head, `agentduo team ${this.id}: merge ${t.id} (resolved)`);
     if ("problem" in done) {
       this.escalate(t, "merge_conflict", `Task ${t.id} cannot be merged: ${done.problem}`);
@@ -2208,8 +2236,8 @@ export class TeamRun {
     const checks = ig.checks.filter((c) => c.verdict === "fail").map((c) => ({
       ...c, failures: !this.grouped ? c.failures : c.failures.filter((f) => f.criteria.some((x) => own?.includes(x)) || (first && !f.criteria.length)),
     })).filter((c) => !this.grouped || c.failures.length || c.by === "gates");
-    const out = await this.call<TriageOutput>(techlead, "integration-triage", "team_triage", (identity) => integrationTriagePrompt({
-      ...this.parts(techlead), identity, brief, trouble: ig.trouble ?? "", checks,
+    const out = await this.call<TriageOutput>(techlead, "integration-triage", "team_triage", (session) => integrationTriagePrompt({
+      ...this.parts(techlead), ...session, brief, trouble: ig.trouble ?? "", checks,
     }), {
       task: null, cwd, work: integrationWork(), check: (d) => {
         if (d.action === "escalate") return d.question?.trim() ? [] : ["escalate needs the question for the PM"];
@@ -2247,7 +2275,7 @@ export class TeamRun {
     const head = await tg.integrationHead();
     const files = await tg.startResolve(techlead.name, conflict.ours);
     const cwd = await tg.cwd(techlead.name);
-    await this.call<WorkOutput>(techlead, "resolve", "team_work", (identity) => resolvePrompt({ ...this.parts(techlead), identity, task: null, brief: this.brief(), cwd, files }), { task: null, cwd, work: applyWork() });
+    await this.call<WorkOutput>(techlead, "resolve", "team_work", (session) => resolvePrompt({ ...this.parts(techlead), ...session, task: null, brief: this.brief(), cwd, files }), { task: null, cwd, work: applyWork() });
     const done = await tg.finishResolve(techlead.name, conflict.ours, head, `agentduo team ${this.id}: the workspace's changes merged`);
     if ("problem" in done) {
       s.applyConflict!.resolving = false;
@@ -2275,8 +2303,8 @@ export class TeamRun {
     }
     if (t.status !== "coding" || t.assignee !== m.name) return;
     const cwd = await tg.checkout(m.name, t.code ?? t.base!);
-    const out = await this.call<WorkOutput>(m, "work", "team_work", (identity) => workPrompt({
-      ...this.parts(m), identity, task: t, brief: this.brief(), others: this.state.tasks, cwd,
+    const out = await this.call<WorkOutput>(m, "work", "team_work", (session) => workPrompt({
+      ...this.parts(m), ...session, task: t, brief: this.brief(), others: this.state.tasks, cwd,
     }), { task: t.id, cwd, check: (d) => (d.status === "blocked" && !d.question?.trim() ? ["a blocked result needs your question for the techlead"] : []) });
     if (t.status !== "coding" || t.assignee !== m.name) return;
     const snap = await tg.snapshot(m.name, tg.refs.task(t.id, m.name), `agentduo team ${this.id}: ${t.id} by ${m.name}`);
@@ -2305,8 +2333,8 @@ export class TeamRun {
     const tg = await this.teamGit();
     const cwd = await tg.checkout(m.name, tests.commit ?? t.base ?? await tg.integrationHead());
     const failures = t.checks.length ? t.checks : [];
-    const out = await this.call<TestsOutput>(m, "tests", "team_tests", (identity) => testsPrompt({
-      ...this.parts(m), identity, task: t, brief: this.brief(), cwd, failures,
+    const out = await this.call<TestsOutput>(m, "tests", "team_tests", (session) => testsPrompt({
+      ...this.parts(m), ...session, task: t, brief: this.brief(), cwd, failures,
     }), { task: t.id, cwd });
     const snap = await tg.snapshot(m.name, tg.refs.task(t.id, m.name), `agentduo team ${this.id}: ${t.id} tests by ${m.name}`);
     tests.commit = snap.commit;
@@ -2324,13 +2352,19 @@ export class TeamRun {
     t.reviewer = m.name;
     const tg = await this.teamGit();
     const cwd = await tg.checkout(m.name, t.code);
-    const diff = (await this.git!.diff(t.base!, t.code)).slice(0, this.o.cfg.limits.max_diff_chars);
+    const max = this.o.cfg.limits.max_diff_chars;
+    const diff = (await this.git!.diff(t.base!, t.code)).slice(0, max);
+    // A worker reviews in a session of its own for the task, never in the one where it may have built it before (a
+    // reassigned task): its own reasoning would be in the review, and the whole implementation in its context. The
+    // techlead never builds a task; its review stays with its triage and answers of it.
+    const purpose: SessionPurpose | undefined = m.kind === "lead" ? undefined : "review";
+    const change = await this.reviewChange(m, t, purpose);
     const blocking = this.o.cfg.quality_gates.blocking_severities;
     const criteria = new Set(this.brief().criteria.map((c) => c.id));
-    const out = await this.call<ReviewOutput>(m, "review", "team_review", (identity) => reviewPrompt({
-      ...this.parts(m), identity, task: t, brief: this.brief(), diff, blocking,
+    const out = await this.call<ReviewOutput>(m, "review", "team_review", (session) => reviewPrompt({
+      ...this.parts(m), ...session, task: t, brief: this.brief(), diff, blocking, change,
     }), {
-      task: t.id, cwd, check: (d) => d.findings.flatMap((f) => f.criteria.filter((c) => !criteria.has(c)).map((c) => `finding '${f.id}' cites '${c}', which is not an acceptance criterion (${[...criteria].join(", ")})`)),
+      task: t.id, cwd, purpose, check: (d) => d.findings.flatMap((f) => f.criteria.filter((c) => !criteria.has(c)).map((c) => `finding '${f.id}' cites '${c}', which is not an acceptance criterion (${[...criteria].join(", ")})`)),
     });
     if (t.status !== "review") return;
     const blockers = out.findings.filter((f) => blocks(f, blocking));
@@ -2357,6 +2391,23 @@ export class TeamRun {
     this.save();
   }
 
+  /**
+   * The change a review is about, for a reviewer's session that goes on: the diff since the commit it reviewed last (its
+   * view's `change`), with the whole change's stat. No earlier review in the session, or a commit git cannot diff any more:
+   * no `previous`, and the session is given the whole diff.
+   */
+  private async reviewChange(m: Member, t: TaskState, purpose: SessionPurpose | undefined): Promise<ReviewChange> {
+    const max = this.o.cfg.limits.max_diff_chars;
+    const reviewed = this.state.sessions[sessionKey(m, t.id, purpose ?? null)]?.seen?.change;
+    const stat = await this.git!.diffStat(t.base!, t.code!).catch(() => "");
+    let previous: ReviewChange["previous"] = null;
+    if (reviewed && reviewed !== t.code) {
+      const since = await this.git!.diff(reviewed, t.code!).catch(() => null);
+      if (since !== null) previous = { from: reviewed, diff: since.slice(0, max) };
+    }
+    return { head: t.code!, base: t.base!, stat, previous };
+  }
+
   private async checkTurn(name: string, id: string): Promise<void> {
     const t = this.task(id);
     const m = this.member(name);
@@ -2364,7 +2415,7 @@ export class TeamRun {
     const candidate = t.candidate;
     const tg = await this.teamGit();
     const cwd = await tg.checkout(m.name, candidate);
-    const out = await this.call<CheckOutput>(m, "check", "team_check", (identity) => checkPrompt({ ...this.parts(m), identity, task: t, brief: this.brief(), cwd }), {
+    const out = await this.call<CheckOutput>(m, "check", "team_check", (session) => checkPrompt({ ...this.parts(m), ...session, task: t, brief: this.brief(), cwd }), {
       task: t.id, cwd, check: (d) => (d.verdict === "fail" && !d.failures.length ? ["a failing check lists its failures"] : []),
     });
     if (t.candidate !== candidate) return;
@@ -2384,7 +2435,7 @@ export class TeamRun {
     const commit = ig.commit;
     const tg = await this.teamGit();
     const cwd = await tg.checkout(m.name, commit);
-    const out = await this.call<CheckOutput>(m, "integration-check", "team_check", (identity) => integrationCheckPrompt({ ...this.parts(m), identity, brief: this.brief(), cwd }), {
+    const out = await this.call<CheckOutput>(m, "integration-check", "team_check", (session) => integrationCheckPrompt({ ...this.parts(m), ...session, brief: this.brief(), cwd }), {
       task: null, cwd, work: integrationWork(), check: (d) => (d.verdict === "fail" && !d.failures.length ? ["a failing check lists its failures"] : []),
     });
     if (s.integration?.commit !== commit) return;

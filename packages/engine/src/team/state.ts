@@ -179,8 +179,8 @@ export interface Report {
 
 /**
  * A member's CLI session, kept under `sessionKey`: one per task the member works on (its work and fixes, its tests and
- * checks, its review of it), and one for its turns of no task (the PM's conversation, the techlead's plan). A new task
- * starts a fresh session, so no call carries another task's history.
+ * checks; a worker's review of it is a session of its own), and one for its turns of no task (the PM's conversation, the
+ * techlead's plan). A new task starts a fresh session, so no call carries another task's history.
  */
 export interface MemberSession {
   backend: TeamBackend;
@@ -189,10 +189,22 @@ export interface MemberSession {
   files?: string[];
   /** A techlead's: how many of the PM's notes (`leadNotes`) this session has read. */
   notes?: number;
+  /**
+   * What the session holds, part by part of its prompts (`SessionView`, team/prompts.ts): a continued call is given only
+   * the parts that differ. A review's `change` is the commit it reviewed. Absent (an older run): every part but the identity.
+   */
+  seen?: Record<string, string>;
 }
 
-/** Where a member's session for `task` is kept: `<member>@<task>`, or the member's name for a turn of no task. */
-export const sessionKey = (member: { name: string }, task: string | null): string => (task ? `${member.name}@${task}` : member.name);
+/** A turn that runs in a session of its own for its task: a worker's review, apart from the session in which it may have built it. */
+export type SessionPurpose = "review";
+
+/**
+ * Where a member's session for `task` is kept: `<member>@<task>` (`<member>@<task>:review` for a worker's review of it),
+ * or the member's name for a turn of no task.
+ */
+export const sessionKey = (member: { name: string }, task: string | null, purpose: SessionPurpose | null = null): string =>
+  (task ? `${member.name}@${task}${purpose ? `:${purpose}` : ""}` : member.name);
 
 /** What the run waits for from the user, through the PM: one of the three approvals, or how to apply a conflicting result. */
 export interface Approval {

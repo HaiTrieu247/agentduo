@@ -180,16 +180,54 @@ agentduo's (`packages/engine/src/team/defaults.ts`, in the code so every bundle 
 text and you add to it or rewrite it (amended after the first trial: files used to be appended to the default); front
 matter and HTML comments are left out. A role with no
 file of its own uses its kind's default and a warning says so; a level without one has none. The run keeps what it
-started with in `identities.json`. A continued session gets the turn's section without the identities.
+started with in `identities.json`. A continued session gets the turn's section without the identities, and only what
+changed in it (below).
 
 **Sessions** (amended 2026-11-13, after the first real run used a Claude Pro plan's 5 hours by task 2): a member's CLI
-session holds one task, kept under `sessionKey` (`<member>@<task>`): its work and fixes, its tests and checks, its
-review of it, the techlead's triage, answer or resolution of it. A turn of no task (the PM's conversation, the
-techlead's plan, the check and triage of the whole result) goes on in the member's own session (`<member>`). A new
-task starts a fresh session with the whole prompt, so no call carries another task's history: in that run each new job
-of a member had started with all its earlier ones (dev-1's review of another task at 290k tokens of context, a fresh
-call at 44k), about a third of the run's Claude tokens. A techlead's notes from the PM are counted per session
+session holds one task, kept under `sessionKey` (`<member>@<task>`): its work and fixes, its tests and checks, the
+techlead's review, triage, answer or resolution of it. A turn of no task (the PM's conversation, the techlead's plan,
+the check and triage of the whole result) goes on in the member's own session (`<member>`). A new task starts a fresh
+session with the whole prompt, so no call carries another task's history: in that run each new job of a member had
+started with all its earlier ones (dev-1's review of another task at 290k tokens of context, a fresh call at 44k),
+about a third of the run's Claude tokens. A techlead's notes from the PM are counted per session
 (`MemberSession.notes`): a fresh one gets all of its group's.
+
+**A worker's review is a session of its own** (amended 2026-11-16): `<member>@<task>:review`. A worker can review a
+task it built in an earlier attempt (a reassigned task). In its work session that review started with the whole
+implementation in its context (dev-1's review of T5 at 313k tokens, of T1 at 269k; a fresh review of the same size
+near 50k), and with its own reasoning about the code it now judges. Its review session holds its reviews of that
+task only, so its next round goes on there. The techlead's review stays in `techlead@<task>`: the techlead never
+builds a task, and its triage and answers of the task use what its review found.
+
+**Continued prompts carry only what changed** (amended 2026-11-16, as the pipeline's do:
+`2026-11-03-agentduo-context-sharing-design.md`). Measured in the runs of 13 and 14 November, a continued prompt repeated
+what its session already held: 91–93% of the PM's (the team, the whole brief, the plan, the board and the whole
+conversation, every turn), 72% of a review's (the whole change again each round, about 35k tokens), 72–88% of work,
+triage and answer prompts. The PM's single session grew 4.5–4.7k tokens a call, so about 95 calls would fill Codex's
+window. Now:
+
+- A prompt is a list of parts (`render`, `team/prompts.ts`). Some parts come in every prompt: the role line, the team's
+  rules, the exceptions for this work and the guidance about them, the work to act on (the review's findings, the
+  techlead's guidance, the question and its answer, what failed, the new reports, the questions for the PM, the PM's
+  incidents and requests) and what to do now with the output contract. These are short, and they keep the decisions
+  exact after a CLI compacts the session. The others are kept parts: the introduction, the team, the brief, the task,
+  the plan, the groups' parts, the board, a task's history, why a worker's earlier attempt failed, the assignee's
+  report, the change under review.
+- Each session's record keeps a digest of every kept part it was given (`MemberSession.seen`; a list's items one by
+  one). A continued call gets a kept part again only when its digest changed, a list only its new or changed items. So
+  the PM gets the tasks that changed on the board, with where the board stands ("5 tasks: 3 merged, 2 review"). A
+  triage gets the task's history since its last turn. The PM's conversation goes by its own count (`pmSeen`): a
+  continued turn gets the messages after it, or none.
+- What a turn wrote itself is in its session, so its later prompts leave it out (`TeamRun.knows`, with `authored`):
+  the PM's brief and the groups' parts, a techlead's plan.
+- A continued review gets the diff from the commit it reviewed last (its record's `change`) to the one under review,
+  with the stat of the whole change and how to see all of it in its worktree. It is told to judge the whole change all
+  the same, and to check that its earlier findings were dealt with. When that commit cannot be diffed any more, it
+  gets the whole diff, as a fresh review does.
+- A continued prompt says so in place of the introduction: what its earlier turns gave still holds, and only what is
+  new or changed follows. A continued call that fails falls back to a fresh session with the whole prompt (the runner).
+  That session's record holds that prompt's parts only. A session that went on keeps what it held before as well. A
+  session recorded before this change has no digests and gets every part but the identity, as before.
 
 ## The team's rules (added 2026-11-14)
 

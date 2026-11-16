@@ -136,8 +136,14 @@ describe("a team run", () => {
     expect([...tests.keys()].sort()).toEqual(["T1", "T2"]);
     for (const c of tests.values()) expect(c.resumed, `tests of ${task(c)}`).toBeUndefined();
     expect(tests.get("T1")!.session).not.toBe(tests.get("T2")!.session);
-    // Its check of a task goes on in the session that wrote that task's tests.
-    for (const [id, check] of by("team_check", "qa-1")) expect(check.resumed, `check of ${id}`).toBe(tests.get(id)!.session);
+    // Its check of a task goes on in the session that wrote that task's tests (which holds the task: the continued prompt
+    // names it only in what to do now).
+    const checks = fake.calls("team_check").filter((c) => c.member === "qa-1" && !c.prompt.includes("Every task is merged"));
+    for (const [id, c] of tests) {
+      const check = checks.find((x) => x.resumed === c.session);
+      expect(check, `check of ${id}`).toBeDefined();
+      expect(check!.prompt).toContain(`the code of task ${id} and its tests are merged`);
+    }
     // dev-1 reviews dev-2's T2 in a session of its own, not in the one that built T1.
     const review = by("team_review", "dev-1").get("T2")!;
     expect(review.resumed).toBeUndefined();
@@ -148,7 +154,92 @@ describe("a team run", () => {
     // A turn that belongs to no task goes on as before: the PM keeps one session.
     expect(fake.calls().filter((c) => c.member === "pm").slice(1).every((c) => c.resumed)).toBe(true);
     const state = TeamStore.open(join(repo, ".agentduo", "runs"), "latest").load();
-    expect(Object.keys(state.sessions).sort()).toEqual(expect.arrayContaining(["pm", "qa-1@T1", "qa-1@T2", "dev-1@T1", "dev-1@T2", "dev-2@T2"]));
+    // A worker's review of a task is kept apart from any work of its own on it.
+    expect(Object.keys(state.sessions).sort()).toEqual(expect.arrayContaining(["pm", "qa-1@T1", "qa-1@T2", "dev-1@T1", "dev-1@T2:review", "dev-2@T2"]));
+  });
+
+  it("gives a session that goes on only what changed: the PM no brief, plan or conversation it already has", async () => {
+    fake.setScenario(happy());
+    expect(await teamRun({ decider: decider() }).run()).toBe("done");
+    const pm = fake.calls().filter((c) => c.member === "pm");
+    const [first, second, third] = pm;
+    // The first turn is a fresh session: the whole prompt, with the user's request.
+    expect(first!.resumed).toBeUndefined();
+    expect(first!.prompt).toContain("## The conversation with the user\nUser: Add subtraction, and document it");
+    // Its second turn (the plan's review) goes on: the plan is new; the brief it wrote and the conversation it read are not sent again.
+    expect(second!.role).toBe("team_pm_plan_review");
+    expect(second!.resumed).toBe(first!.session);
+    expect(second!.prompt).toContain("This message continues your session");
+    expect(second!.prompt).toContain("## Plan v1");
+    expect(second!.prompt).not.toContain("## The brief");
+    expect(second!.prompt).not.toContain("Subtraction works");
+    expect(second!.prompt).not.toContain("Add subtraction, and document it");
+    expect(second!.prompt).not.toContain("Here is what I understood.");
+    expect(second!.prompt).not.toContain("## The team\n");
+    expect(second!.prompt).not.toMatch(/^You are pm, the/m);
+    // Nothing was said since (an approval is no message): no part of the conversation at all.
+    expect(second!.prompt).not.toContain("conversation with the user");
+    expect(second!.prompt).toContain("## Reports from the team since your last turn\n- techlead: Plan: 2 task(s).");
+    // Its next turn has the plan already, and gets the board as what changed on it.
+    expect(third!.resumed).toBe(first!.session);
+    expect(third!.prompt).not.toContain("## Plan v1");
+    expect(third!.prompt).not.toContain("## The conversation with the user");
+    expect(third!.prompt).toMatch(/## The board: what changed since your last turn \(2 tasks: /);
+    // What to do now and the output contract come every time.
+    for (const c of pm) expect(c.prompt).toContain("## What to do now");
+    for (const c of pm) expect(c.prompt).toContain("## Your output");
+    // A session that falls back to a fresh one (here: none) would get the whole prompt; every call recorded what it holds.
+    const state = TeamStore.open(join(repo, ".agentduo", "runs"), "latest").load();
+    expect(Object.keys(state.sessions.pm!.seen ?? {})).toEqual(expect.arrayContaining(["team", "brief", "plan:", "board#T1"]));
+  });
+
+  it("gives a review that goes on only the change since the commit it reviewed, with the whole change's files", async () => {
+    fake.setScenario(happy({
+      team_plan: [{ output: teamPlan([task("T1", { criteria: ["AC1", "AC2"] })]) }],
+      team_review: [{ output: teamReview("changes") }, { output: teamReview("approve") }],
+      "team_work:dev-1": [{ output: teamWork(), write: { "app.txt": "first change\n" } }, { output: teamWork(), write: { "second.txt": "second change\n" } }],
+      team_pm_rule_lesson: [{ output: teamPm.ruleLesson("I1", null, "The review was answered.") }],
+    }));
+    expect(await teamRun({ decider: decider() }).run()).toBe("done");
+    const [first, second] = fake.calls("team_review");
+    expect(first!.member).toBe("techlead");
+    expect(first!.prompt).toContain("## The change\n");
+    expect(first!.prompt).toContain("+first change");
+    expect(first!.prompt).toContain("## Task T1");
+    // The second review continues the first one's session: the new diff only, the files of the whole change, no task again.
+    expect(second!.resumed).toBe(first!.session);
+    expect(second!.prompt).toMatch(/## The change since the commit you last reviewed \(`[0-9a-f]{12}` → `[0-9a-f]{12}`\)/);
+    expect(second!.prompt).toContain("+second change");
+    expect(second!.prompt).not.toContain("+first change");
+    expect(second!.prompt).toMatch(/app\.txt\s+\|/);
+    expect(second!.prompt).toMatch(/second\.txt\s+\|/);
+    expect(second!.prompt).toContain("Judge the whole change all the same");
+    expect(second!.prompt).toContain("check that each was dealt with");
+    expect(second!.prompt).not.toContain("## Task T1");
+    expect(second!.prompt).not.toContain("## The brief");
+    // The dev's second round has the review's findings (the work), not the task and the brief again.
+    const fix = fake.calls("team_work")[1]!;
+    expect(fix.resumed).toBe(fake.calls("team_work")[0]!.session);
+    expect(fix.prompt).toContain("## techlead's review asks for changes");
+    expect(fix.prompt).not.toContain("## Task T1");
+    expect(fix.prompt).not.toContain("## The brief");
+  });
+
+  it("gives the fresh session a lost one falls back to the whole prompt", async () => {
+    fake.setScenario({ ...happy(), sessions: { lost: true } });
+    expect(await teamRun({ decider: decider() }).run()).toBe("done");
+    // Every continued call failed; each fell back to a fresh session with the identity, the brief and the conversation.
+    const pm = fake.calls().filter((c) => c.member === "pm" || (c.lost && c.prompt.includes("[agentduo-member: pm]")));
+    const continued = pm.filter((c) => c.lost);
+    const fresh = pm.filter((c) => !c.lost);
+    expect(continued.length).toBeGreaterThan(0);
+    for (const c of continued) expect(c.prompt).toContain("This message continues your session");
+    for (const c of fresh.slice(1)) {
+      expect(c.resumed).toBeUndefined();
+      expect(c.prompt).not.toContain("This message continues your session");
+      expect(c.prompt).toContain("## The conversation with the user\nUser: Add subtraction, and document it");
+      expect(c.prompt).toMatch(/## (The brief|Your latest brief)/);
+    }
   });
 
   it("asks the PM to revise the brief and the techlead the plan when you ask for changes", async () => {
