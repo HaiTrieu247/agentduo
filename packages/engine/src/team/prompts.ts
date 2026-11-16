@@ -1,6 +1,8 @@
 // The protocol part of every team turn (packages/engine/src/team): who the member is in the team, what the team knows,
 // what to do now, and the output contract. The member's identity (packages/engine/src/team/identity.ts) comes after
-// the first lines of a fresh session; a continued session already has it.
+// the first lines of a fresh session; a continued session already has it, and is given only the parts of the prompt
+// that changed since its last turn (`render`, `MemberSession.seen`).
+import { createHash } from "node:crypto";
 import type { Attachment } from "../inputs/attachment-types.js";
 import { attachmentLines, inlineCode, type Locate } from "../workflow/prompts.js";
 import type { Member, TeamGroup } from "./config.js";
@@ -9,7 +11,91 @@ import {
   type UnitRef, type WorkRef,
 } from "./rule-governance.js";
 import type { RuleEntry } from "./rules.js";
-import type { Area, Brief, Escalation, Report, TaskCheck, TaskState, TeamMessage, TeamPlan, TeamState } from "./state.js";
+import { groupKey, type Area, type Brief, type Escalation, type Report, type TaskCheck, type TaskState, type TeamMessage, type TeamPlan, type TeamState } from "./state.js";
+
+// ─── Parts of a prompt, and what a session that goes on is given ───────────────────────────────────────────────────
+
+/**
+ * What a member's session was given, part by part (`MemberSession.seen`): a part's key → its digest, a list's items as
+ * `<key>#<id>`. A session that goes on is sent a part again only when its digest changed, a list only its new or changed items.
+ */
+export type SessionView = Record<string, string>;
+
+/** How a prompt is built for a member's session: a fresh one (its identity, every part) or one that goes on (`since`). */
+export interface SessionPrompt {
+  /** The member's identity, for a fresh session; null when the session continues. */
+  identity: string | null;
+  /**
+   * A session that goes on: what its earlier turns were given. Absent or null (a session recorded before agentduo kept
+   * this): every part but the identity, as a fresh prompt has them.
+   */
+  since?: SessionView | null;
+  /** Filled with the digest of every part of the whole prompt: what the session holds once the turn succeeded. */
+  view?: SessionView;
+}
+
+/**
+ * A part of a prompt:
+ *  - a text: in every prompt (the role line, the team's rules and decisions, the work to act on, what to do now);
+ *  - a kept part: given once to a session, then again only when it changed (`digest`, by default the text's). A session that
+ *    had an earlier version (`previous`, its digest) is given `delta(previous)` when that says what changed, else the whole text;
+ *  - a list: each item given once, then again when it changed (the board's tasks, a task's history).
+ */
+type Part =
+  | string
+  | { key: string; text: string; digest?: string; delta?: (previous: string) => string | null }
+  | { key: string; items: Array<{ id: string; text: string }>; heading: string; changed: string; empty?: string };
+
+/** A short digest of a part's text: equal digests, the same text (a session given it once need not be given it again). */
+export const digest = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 16);
+
+/** Whether this prompt is for a session that goes on and knows what it was given. */
+const goesOn = (p: SessionPrompt): p is SessionPrompt & { since: SessionView } => p.identity === null && !!p.since;
+
+const CONTINUED = "This message continues your session. Your earlier turns in it hold what you were given and read (the team, the brief, " +
+  "the plan or your task…) and your own answers. The parts of this prompt that did not change since your last turn are left out: what they " +
+  "said still holds. Below is only what is new or changed, then what to do now. Read a file again before you rely on what you remember of it.";
+
+/** The prompt's text: every part for a fresh session, and for one that goes on only what it was not given (filling `p.view` either way). */
+function render(parts: Part[], p: SessionPrompt): string {
+  const since = goesOn(p) ? p.since : null;
+  const out: string[] = [];
+  for (const part of parts) {
+    if (typeof part === "string") {
+      if (part) out.push(part);
+    } else if ("items" in part) {
+      const fresh = part.items.filter((item) => {
+        const key = `${part.key}#${item.id}`;
+        const d = digest(item.text);
+        if (p.view) p.view[key] = d;
+        return !since || since[key] !== d;
+      });
+      if (fresh.length) out.push([since ? part.changed : part.heading, ...fresh.map((i) => i.text)].join("\n"));
+      else if (!since && !part.items.length && part.empty) out.push(`${part.heading}\n${part.empty}`);
+    } else {
+      const d = part.digest ?? digest(part.text);
+      if (p.view) p.view[part.key] = d;
+      const previous = since?.[part.key];
+      if (previous === d && !part.delta) continue;
+      const text = previous !== undefined && part.delta ? part.delta(previous) ?? part.text : part.text;
+      if (text) out.push(text);
+    }
+  }
+  return out.join("\n\n");
+}
+
+/** Where a group's plan is kept in a session's view (the PM's and the group PM's plan, the techlead's previous one). */
+const planKey = (group: string | null) => `plan:${groupKey(group)}`;
+
+/**
+ * The parts a member wrote itself, as its session's view keeps them: what a turn's own answer added (the PM's brief and
+ * the groups' parts, a techlead's plan) is in the session that wrote it, and is not sent back to it.
+ */
+export const authored = {
+  brief: (b: Brief): SessionView => ({ brief: digest(briefSection(b)) }),
+  areas: (areas: Area[]): SessionView => ({ areas: digest(areasText(areas)) }),
+  plan: (plan: TeamPlan): SessionView => ({ [planKey(plan.group)]: digest(planSection(plan)) }),
+};
 
 export type PmOccasion =
   | { kind: "conversation" }
@@ -96,9 +182,22 @@ export function taskSection(t: TaskState, heading = `## Task ${t.id}: ${t.title}
   ].join("\n");
 }
 
+const boardLine = (t: TaskState) => `- ${t.id} [${t.status}] ${t.title} (assignee ${t.assignee}, attempt ${t.attempt})`;
+
 export function boardSection(tasks: TaskState[]): string {
   if (!tasks.length) return "## The board\n(no task yet)";
-  return ["## The board", ...tasks.map((t) => `- ${t.id} [${t.status}] ${t.title} (assignee ${t.assignee}, attempt ${t.attempt})`)].join("\n");
+  return ["## The board", ...tasks.map(boardLine)].join("\n");
+}
+
+/** The board as a list: a session that goes on is given the tasks that changed since its last turn, and where the board stands. */
+function boardPart(tasks: TaskState[]): Part {
+  const counts = new Map<string, number>();
+  for (const t of tasks) counts.set(t.status, (counts.get(t.status) ?? 0) + 1);
+  const stands = [...counts].map(([status, n]) => `${n} ${status}`).join(", ");
+  return {
+    key: "board", heading: "## The board", empty: "(no task yet)", items: tasks.map((t) => ({ id: t.id, text: boardLine(t) })),
+    changed: `## The board: what changed since your last turn (${tasks.length} task${tasks.length === 1 ? "" : "s"}: ${stands})`,
+  };
 }
 
 const checkLines = (checks: TaskCheck[]) => checks.flatMap((c) => [
@@ -112,20 +211,20 @@ const json = "\n\n## Your output\nReply with one JSON object that matches the re
 /**
  * The parts of a prompt every member gets: the role line, its identity (fresh sessions), the team, the brief, and (for fresh
  * and continued sessions alike, since they are written into the prompt, never into the identity) the team's rules, what the
- * user approved for this very work, the requests that wait, and how to bring a rule problem to the PM.
+ * user approved for this very work, the requests that wait, and how to bring a rule problem to the PM. A session that goes on
+ * is told so in place of the introduction, and is given the team and the brief again only when they changed.
  */
-function frame(kind: string, p: PromptParts, brief: Brief | null, work: WorkRef | null): string[] {
+function frame(kind: string, p: PromptParts, brief: Brief | null, work: WorkRef | null): Part[] {
   return [
-    header(kind, p.member) + intro(p.member), p.identity ?? "", roster(p.members), brief ? briefSection(brief) : "",
+    header(kind, p.member) + (goesOn(p) ? CONTINUED : intro(p.member)), p.identity ?? "", { key: "team", text: roster(p.members) },
+    brief ? { key: "brief", text: briefSection(brief) } : "",
     rulesSection(p.rules), exceptionsSection(p.state, p.member, work), p.member.kind === "pm" ? "" : memberGovernanceGuidance(),
-  ].filter(Boolean);
+  ];
 }
 
-export interface PromptParts {
+export interface PromptParts extends SessionPrompt {
   member: Member;
   members: Member[];
-  /** The member's identity, for a fresh session; null when the session continues. */
-  identity: string | null;
   state: TeamState;
   /** The team's rules as RULES.md holds them now (`TeamRules.rules()`), read for this call; absent: not given (the section is left out). */
   rules?: readonly RuleEntry[] | null;
@@ -274,16 +373,20 @@ export function pmPrompt(p: PromptParts & {
   // The occasion is part of the role tag: logs (and test scenarios) tell a plan review from a report.
   const parts = frame(`pm_${p.occasion.kind}`, p, null, null);
   const groups = groupsSection(p.groups);
-  if (groups) parts.push(`${groups}\nYou are the head PM: the only one who talks with the user. Each group's techlead plans its part; a group's own PM checks it first.`);
-  parts.push(`## Where the work is\nPhase: ${s.phase}.${s.approvedBrief ? ` The user approved brief v${s.approvedBrief}.` : ""}` +
-    `${s.approvedPlan ? " The user approved the plan." : ""}`);
-  if (brief) parts.push(briefSection(brief, s.approvedBrief === brief.version ? "The brief" : "Your latest brief (not approved yet)"));
-  if (p.areas.length) parts.push(`## The groups' parts\n${p.areas.map((a) => `- ${a.group}: ${a.area} (${a.criteria.join(", ")})`).join("\n")}`);
-  if (s.phase !== "INTAKE") for (const plan of p.plans) parts.push(planSection(plan));
-  if (s.tasks.length) parts.push(boardSection(s.tasks));
+  if (groups) parts.push({ key: "groups", text: `${groups}\nYou are the head PM: the only one who talks with the user. Each group's techlead plans its part; a group's own PM checks it first.` });
+  parts.push({ key: "where", text: `## Where the work is\nPhase: ${s.phase}.${s.approvedBrief ? ` The user approved brief v${s.approvedBrief}.` : ""}` +
+    `${s.approvedPlan ? " The user approved the plan." : ""}` });
+  // The brief is the same part whatever its label: its approval is said under "Where the work is".
+  if (brief) parts.push({ key: "brief", text: briefSection(brief, s.approvedBrief === brief.version ? "The brief" : "Your latest brief (not approved yet)"), digest: digest(briefSection(brief)) });
+  if (p.areas.length) parts.push({ key: "areas", text: areasText(p.areas) });
+  if (s.phase !== "INTAKE") for (const plan of p.plans) parts.push({ key: planKey(plan.group), text: planSection(plan) });
+  if (s.tasks.length) parts.push(boardPart(s.tasks));
+  // The conversation goes by the PM's own count of what it read (`seenMessages`, which counts its own messages too): a
+  // session that goes on is given the messages after it, and none when there are none.
   const fresh = p.state.messages.slice(p.seenMessages);
-  if (p.seenMessages > 0 && fresh.length) parts.push(`## New in the conversation with the user\n${transcript(fresh)}`);
-  else if (s.messages.length) parts.push(`## The conversation with the user\n${transcript(s.messages)}`);
+  if (p.identity === null && p.seenMessages > 0) {
+    if (fresh.length) parts.push(`## New in the conversation with the user\n${transcript(fresh)}`);
+  } else if (s.messages.length) parts.push(`## The conversation with the user\n${transcript(s.messages)}`);
   if (p.reports.length) parts.push(`## Reports from the team since your last turn\n${p.reports.map((r) => `- ${r.from}: ${r.text}`).join("\n")}`);
   if (p.openEscalations.length) {
     parts.push(`## Questions the team needs answered (answer one with team_answer and its id)\n${p.openEscalations.map((e) =>
@@ -299,8 +402,10 @@ export function pmPrompt(p: PromptParts & {
   parts.push(`## What to do now\n${pmTask(s, p.occasion)}\n\nAllowed actions now: ${actions.join(", ")}. ` +
     "`message` is what the user reads (in the user's language), or null. Use `questions` to ask the user up to 4 questions with 2 to 6 options each; " +
     "they can always answer in their own words too." + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
+
+const areasText = (areas: Area[]) => `## The groups' parts\n${areas.map((a) => `- ${a.group}: ${a.area} (${a.criteria.join(", ")})`).join("\n")}`;
 
 function pmTask(s: TeamState, occasion: PmOccasion): string {
   switch (occasion.kind) {
@@ -363,13 +468,14 @@ export function planPrompt(p: PromptParts & {
 }): string {
   const parts = frame("plan", p, p.brief, planningWork(p.group?.name ?? null));
   if (p.area && p.group) {
-    parts.push(`${areaSection(p.area)}\nPlan only your group's part, and give its tasks only to your group: ` +
+    parts.push({ key: "area", text: `${areaSection(p.area)}\nPlan only your group's part, and give its tasks only to your group: ` +
       `${p.group.members.filter((m) => m.kind === "worker").map((m) => m.name).join(", ")} take tasks, ` +
       `${p.group.members.filter((m) => m.kind === "checker").map((m) => m.name).join(", ")} test them. The other groups plan theirs at the same time; ` +
-      "depend only on tasks of your own group.");
+      "depend only on tasks of your own group." });
   }
-  if (p.existing.length) parts.push(`## Tasks the run already has\n${p.existing.map((t) => `- ${t.id} [${t.status}] ${t.title} (${t.assignee})`).join("\n")}`);
-  if (p.previous) parts.push(`## Your previous plan\n${planSection(p.previous)}`);
+  if (p.existing.length) parts.push({ key: "existing", text: `## Tasks the run already has\n${p.existing.map((t) => `- ${t.id} [${t.status}] ${t.title} (${t.assignee})`).join("\n")}` });
+  // The techlead's own plan, which the session that wrote it holds (`authored.plan`).
+  if (p.previous) parts.push({ key: planKey(p.previous.group), text: `## Your previous plan\n${planSection(p.previous)}`, digest: digest(planSection(p.previous)) });
   if (p.feedback) parts.push(`## What must change\n${p.feedback}`);
   parts.push(`## What to do now\n${p.additions
     ? "The brief changed. Plan only the new tasks the change needs (new ids; they may depend on existing tasks)."
@@ -377,31 +483,36 @@ export function planPrompt(p: PromptParts & {
     "so members can work in parallel. Name each task's assignee (a member who takes tasks), its testers, the files or folders it touches, its dependencies, " +
     `the acceptance criteria it serves and what its testers must cover. Assign by level. ${p.area ? "Every acceptance criterion of your group's part" : "Every acceptance criterion"} ` +
     "must be served by some task. `report` is one line for the PM." + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
+
+/** The task a prompt is about: a session that goes on has it (its session holds this one task), unless it changed. */
+const taskPart = (t: TaskState): Part => ({ key: "task", text: taskSection(t) });
 
 export function workPrompt(p: PromptParts & { task: TaskState; brief: Brief; others: TaskState[]; cwd: string }): string {
   const t = p.task;
   const parts = frame("work", p, p.brief, { task: t.id });
-  parts.push(taskSection(t));
+  parts.push(taskPart(t));
   const inFlight = p.others.filter((o) => o.id !== t.id && !["merged", "cancelled"].includes(o.status));
-  if (inFlight.length) parts.push(`## Other tasks in progress (stay out of their areas)\n${inFlight.map((o) => `- ${o.id} ${o.title} (${o.assignee}): ${o.area.join(", ")}`).join("\n")}`);
+  if (inFlight.length) parts.push({ key: "others", text: `## Other tasks in progress (stay out of their areas)\n${inFlight.map((o) => `- ${o.id} ${o.title} (${o.assignee}): ${o.area.join(", ")}`).join("\n")}` });
+  // The work to act on (an answer, a review, the techlead's guidance) comes every time it is there; why the attempt before
+  // failed only until the session has it.
   if (t.question?.answer) parts.push(`## The answer to your question\nYou asked: ${t.question.text}\nAnswer: ${t.question.answer}`);
   if (t.review?.verdict === "changes") {
     parts.push(`## ${t.review.reviewer}'s review asks for changes\n${t.review.summary}\n${t.review.findings.map((f) =>
       `- ${f.id} [${f.severity}${f.origin === "out_of_scope" ? ", a suggestion outside the scope" : ""}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} ` : ""}${f.title}: ${f.detail}`).join("\n")}`);
   }
   if (t.guidance) parts.push(`## The techlead's guidance for this attempt (${t.attempt})\n${t.guidance}`);
-  if (t.trouble && t.attempt > 1) parts.push(`## Why the previous attempt failed\n${t.trouble}`);
+  if (t.trouble && t.attempt > 1) parts.push({ key: "trouble", text: `## Why the previous attempt failed\n${t.trouble}` });
   parts.push(`## What to do now\nYou work in ${p.cwd}. ${t.code ? "Your earlier work on this task is already there; continue from it." : "Implement the task."} ` +
     "When it is done, report done with a summary; if you cannot go on without an answer, report blocked with one precise question for the techlead." + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 
 export function testsPrompt(p: PromptParts & { task: TaskState; brief: Brief; cwd: string; failures: TaskCheck[] }): string {
   const t = p.task;
   const parts = frame("tests", p, p.brief, { task: t.id });
-  parts.push(taskSection(t));
+  parts.push(taskPart(t));
   const fixing = t.tests[p.member.name]?.status === "fixing";
   if (fixing) {
     parts.push(`## The techlead says your tests are wrong\n${t.guidance ?? ""}\n${checkLines(p.failures).join("\n")}`);
@@ -409,82 +520,121 @@ export function testsPrompt(p: PromptParts & { task: TaskState; brief: Brief; cw
   parts.push(`## What to do now\nYou work in ${p.cwd}. ${fixing ? "Fix your tests." : `Write the tests for task ${t.id} now, while ${t.assignee} writes the code.`} ` +
     "Test the acceptance criteria and the test focus, not an implementation: the code is not there yet, so your tests may fail for now. " +
     "Put them where the repository keeps its tests and follow its conventions. Never change the product code. Say how to run them." + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 
-export function reviewPrompt(p: PromptParts & { task: TaskState; brief: Brief; diff: string; blocking: readonly string[] }): string {
+const fenceFor = (text: string) => "`".repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map((m) => m[0].length + 1)));
+const fenced = (lang: string, text: string) => `${fenceFor(text)}${lang}\n${text}\n${fenceFor(text)}`;
+const short = (commit: string) => commit.slice(0, 12);
+
+/**
+ * The change a review is about. `head`: the commit under review, by which a session knows which change it reviewed (its
+ * view keeps it). `previous`: the diff from the commit the session reviewed last to `head`, which a session that goes on
+ * is given instead of the whole diff, with `stat` (the whole change, file by file); null: it cannot be diffed (or there
+ * was no earlier review), and the session gets the whole diff.
+ */
+export interface ReviewChange {
+  head: string;
+  base: string;
+  stat: string;
+  previous: { from: string; diff: string } | null;
+}
+
+export function reviewPrompt(p: PromptParts & { task: TaskState; brief: Brief; diff: string; blocking: readonly string[]; change?: ReviewChange | null }): string {
   const t = p.task;
   const parts = frame("review", p, p.brief, { task: t.id });
-  parts.push(taskSection(t));
-  if (t.codeSummary) parts.push(`## ${t.assignee}'s report\n${t.codeSummary}${t.notes.length ? `\n${t.notes.map((n) => `- ${n}`).join("\n")}` : ""}`);
-  const fence = "`".repeat(Math.max(3, ...[...p.diff.matchAll(/`+/g)].map((m) => m[0].length + 1)));
-  parts.push(`## The change\n${fence}diff\n${p.diff || "(no change)"}\n${fence}`);
+  parts.push(taskPart(t));
+  if (t.codeSummary) parts.push({ key: "report", text: `## ${t.assignee}'s report\n${t.codeSummary}${t.notes.length ? `\n${t.notes.map((n) => `- ${n}`).join("\n")}` : ""}` });
+  const whole = `## The change\n${fenced("diff", p.diff || "(no change)")}`;
+  const c = p.change ?? null;
+  // The commit this session reviewed in its last turn, when it goes on and agentduo can tell it what changed since.
+  const reviewed = goesOn(p) && c ? p.since.change : undefined;
+  const again = reviewed !== undefined && (reviewed === c!.head || c!.previous?.from === reviewed);
+  parts.push({
+    key: "change", text: whole, digest: c?.head ?? digest(whole),
+    delta: (from) => {
+      if (!again) return null;
+      if (from === c!.head) return `## The change\nThe same commit (\`${short(c!.head)}\`) is the one you reviewed last, earlier in this session: nothing changed since.`;
+      return `## The change since the commit you last reviewed (\`${short(from)}\` → \`${short(c!.head)}\`)\n` +
+        `You reviewed the change up to \`${short(from)}\` earlier in this session; below is what changed after it. Judge the whole change all the same: ` +
+        `every file it touches is listed here, and \`git diff ${short(c!.base)} HEAD -- .\` in your worktree shows all of it.\n` +
+        `${fenced("", c!.stat.trimEnd() || "(no change)")}\n\n${fenced("diff", c!.previous!.diff || "(no change)")}`;
+    },
+  });
   parts.push(`## What to do now\nReview ${t.assignee}'s change for task ${t.id}; the code is checked out in your worktree. ` +
+    (again ? "Your findings from your last review are in this session: check that each was dealt with, and that nothing else broke. " : "") +
     `Ask for changes (verdict changes) only for a finding inside the task's scope of severity ${p.blocking.join(" or ")}; anything else is a suggestion. ` +
     "A finding outside the task or the brief has origin out_of_scope and is never work for this task. Cite the acceptance criteria a finding concerns." + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 
 export function checkPrompt(p: PromptParts & { task: TaskState; brief: Brief; cwd: string }): string {
   const t = p.task;
   const tests = t.tests[p.member.name];
   const parts = frame("check", p, p.brief, { task: t.id });
-  parts.push(taskSection(t));
-  if (tests?.summary) parts.push(`## Your tests\n${tests.summary}${tests.howToRun ? `\nRun them with: ${tests.howToRun}` : ""}`);
-  if (t.codeSummary) parts.push(`## ${t.assignee}'s report\n${t.codeSummary}`);
-  parts.push(`## What to do now\nIn ${p.cwd} the task's code and its tests are merged. Run your tests and check the task against its acceptance criteria and its test focus. ` +
+  parts.push(taskPart(t));
+  if (tests?.summary) parts.push({ key: "tests", text: `## Your tests\n${tests.summary}${tests.howToRun ? `\nRun them with: ${tests.howToRun}` : ""}` });
+  if (t.codeSummary) parts.push({ key: "report", text: `## ${t.assignee}'s report\n${t.codeSummary}` });
+  parts.push(`## What to do now\nIn ${p.cwd} the code of task ${t.id} and its tests are merged. Run your tests and check the task against its acceptance criteria and its test focus. ` +
     "Now that you see the code you may add tests for cases it reveals (list them in added_tests). Report pass only when every case passes; " +
     "for each failure say how to reproduce it, what was expected, what happened, and whether you suspect the code, the test or the plan." + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 
 export function triagePrompt(p: PromptParts & { task: TaskState; brief: Brief; maxAttempts: number; workers: Member[] }): string {
   const t = p.task;
   const parts = frame("triage", p, p.brief, { task: t.id });
-  parts.push(taskSection(t));
+  parts.push(taskPart(t));
   parts.push(`## What went wrong (attempt ${t.attempt} of ${p.maxAttempts})\n${t.trouble ?? "(not said)"}${t.checks.length ? `\n${checkLines(t.checks).join("\n")}` : ""}`);
-  if (t.history.length) parts.push(`## The task's history\n${t.history.slice(-12).map((h) => `- ${h.text}`).join("\n")}`);
+  // The latest dozen entries; a session that goes on, those it was not given (an entry is known by its place in the history).
+  const from = Math.max(0, t.history.length - 12);
+  if (t.history.length) {
+    parts.push({
+      key: "history", heading: "## The task's history", changed: "## The task's history since your last turn",
+      items: t.history.slice(from).map((h, i) => ({ id: String(from + i), text: `- ${h.text}` })),
+    });
+  }
   parts.push(`## What to do now\nDecide what happens next: retry (the same assignee, with your guidance), reassign (to another member who takes tasks: ` +
     `${p.workers.map((w) => `${w.name} (${w.level})`).join(", ")}), fix_tests (the tests are wrong: the testers fix them), or escalate (a question only the PM or the user can answer). ` +
     "After a second failure of the same kind, change the approach rather than retry the same way. `report` is one line for the PM." + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 
 export function answerPrompt(p: PromptParts & { task: TaskState; brief: Brief }): string {
   const t = p.task;
   const parts = frame("answer", p, p.brief, { task: t.id });
-  parts.push(taskSection(t));
+  parts.push(taskPart(t));
   parts.push(`## ${t.question?.from} asks\n${t.question?.text}`);
   parts.push("## What to do now\nAnswer from the brief, the plan and the repository. When only the PM or the user can decide it (the product, the scope), " +
     "give escalate with the question for the PM and no answer." + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 
 export function resolvePrompt(p: PromptParts & { task: TaskState | null; brief: Brief; cwd: string; files: string[] }): string {
   const t = p.task;
   const parts = frame("resolve", p, p.brief, t ? { task: t.id } : applyWork());
-  if (t) parts.push(taskSection(t));
+  if (t) parts.push(taskPart(t));
   const what = t ? `Merging task ${t.id} into the integration branch` : "Merging the user's own changes to their folder (made while the team worked) into the integration branch";
   parts.push(`## What to do now\n${what} conflicts in: ${p.files.join(", ")}. In ${p.cwd} the integration branch is checked out ` +
     "with the other side merged in and conflict markers in those files. Resolve them so that both sides keep working, remove every marker, and report done." + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 
 export function integrationCheckPrompt(p: PromptParts & { brief: Brief; cwd: string }): string {
   const parts = frame("check", p, p.brief, integrationWork());
-  parts.push(boardSection(p.state.tasks));
+  parts.push(boardPart(p.state.tasks));
   parts.push(`## What to do now\nEvery task is merged; ${p.cwd} holds the whole result. Run every test of the repository and every test the team wrote, ` +
     "and check the result against every acceptance criterion of the brief. Report pass only when all of it passes." + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 
 export function integrationTriagePrompt(p: PromptParts & { brief: Brief; trouble: string; checks: TaskCheck[] }): string {
   const parts = frame("triage", p, p.brief, integrationWork());
-  parts.push(boardSection(p.state.tasks));
+  parts.push(boardPart(p.state.tasks));
   parts.push(`## What must be fixed\n${p.trouble}${p.checks.length ? `\n${checkLines(p.checks).join("\n")}` : ""}`);
   parts.push("## What to do now\nAdd the tasks that fix it (action add_tasks, new ids, with assignees and testers), or escalate with a question only the PM " +
     "or the user can answer. `report` is one line for the PM." + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 
 /** A group's own PM: it checks its group's plan against its part of the brief, or answers its techlead's question. */
@@ -492,11 +642,11 @@ export function areaPmPrompt(p: PromptParts & {
   occasion: PmOccasion; brief: Brief; group: TeamGroup; area: Area | null; plan: TeamPlan | null; openEscalations: Escalation[]; head: Member;
 }): string {
   const parts = frame(`pm_${p.occasion.kind}`, p, p.brief, null);
-  parts.push(`You are the PM of group ${p.group.name}. You never talk to the user: ${p.head.name}, the head PM, does. You answer for your group's part.`);
+  parts.push({ key: "group", text: `You are the PM of group ${p.group.name}. You never talk to the user: ${p.head.name}, the head PM, does. You answer for your group's part.` });
   parts.push("## Rules and exceptions\nThe team's rules above hold for your group too. A request to depart from a rule, and any question to the user about one, goes up to " +
     `${p.head.name} (escalate, naming the rules, the reason, the alternative and the work), who alone shows it to the user. You never approve an exception, and you never ask the user.`);
-  if (p.area) parts.push(areaSection(p.area));
-  if (p.plan) parts.push(planSection(p.plan));
+  if (p.area) parts.push({ key: "area", text: areaSection(p.area) });
+  if (p.plan) parts.push({ key: planKey(p.plan.group), text: planSection(p.plan) });
   if (p.openEscalations.length) {
     parts.push(`## Questions from your group's techlead (answer one with team_answer and its id)\n${p.openEscalations.map((e) =>
       `- ${e.id}${e.task ? ` (task ${e.task})` : ""}: ${e.text}`).join("\n")}`);
@@ -506,5 +656,5 @@ export function areaPmPrompt(p: PromptParts & {
       "no assumption against the brief. approve: true passes it to the head PM; approve: false sends it back with the exact `issues` (group: your group's name)."
     : "Answer a question yourself (team_answer) when the brief and your part settle it; otherwise pass it to the head PM (escalate, with what the head PM must decide).";
   parts.push(`## What to do now\n${task}\n\nAllowed actions now: ${pmActions(p.state, p.occasion).join(", ")}. \`message\` is never shown to the user: leave it null.` + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
