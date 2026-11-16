@@ -24255,7 +24255,7 @@ function governanceWork(state) {
 // packages/engine/src/team/state.ts
 var TEAM_STATE_VERSION = 1;
 var groupKey = (group) => group ?? "";
-var sessionKey = (member, task) => task ? `${member.name}@${task}` : member.name;
+var sessionKey = (member, task, purpose = null) => task ? `${member.name}@${task}${purpose ? `:${purpose}` : ""}` : member.name;
 var nowIso2 = () => (/* @__PURE__ */ new Date()).toISOString();
 function newTeamState(id, request) {
   const at = nowIso2();
@@ -24866,6 +24866,43 @@ function parseRules(content) {
 }
 
 // packages/engine/src/team/prompts.ts
+import { createHash as createHash6 } from "crypto";
+var digest3 = (text3) => createHash6("sha256").update(text3).digest("hex").slice(0, 16);
+var goesOn = (p) => p.identity === null && !!p.since;
+var CONTINUED = "This message continues your session. Your earlier turns in it hold what you were given and read (the team, the brief, the plan or your task\u2026) and your own answers. The parts of this prompt that did not change since your last turn are left out: what they said still holds. Below is only what is new or changed, then what to do now. Read a file again before you rely on what you remember of it.";
+function render(parts, p) {
+  const since = goesOn(p) ? p.since : null;
+  const out = [];
+  for (const part of parts) {
+    if (typeof part === "string") {
+      if (part) out.push(part);
+    } else if ("items" in part) {
+      const fresh = part.items.filter((item) => {
+        const key = `${part.key}#${item.id}`;
+        const d = digest3(item.text);
+        if (p.view) p.view[key] = d;
+        return !since || since[key] !== d;
+      });
+      if (fresh.length) out.push([since ? part.changed : part.heading, ...fresh.map((i) => i.text)].join("\n"));
+      else if (!since && !part.items.length && part.empty) out.push(`${part.heading}
+${part.empty}`);
+    } else {
+      const d = part.digest ?? digest3(part.text);
+      if (p.view) p.view[part.key] = d;
+      const previous = since?.[part.key];
+      if (previous === d && !part.delta) continue;
+      const text3 = previous !== void 0 && part.delta ? part.delta(previous) ?? part.text : part.text;
+      if (text3) out.push(text3);
+    }
+  }
+  return out.join("\n\n");
+}
+var planKey = (group) => `plan:${groupKey(group)}`;
+var authored = {
+  brief: (b) => ({ brief: digest3(briefSection(b)) }),
+  areas: (areas) => ({ areas: digest3(areasText(areas)) }),
+  plan: (plan) => ({ [planKey(plan.group)]: digest3(planSection2(plan)) })
+};
 function pmActions(state, occasion) {
   switch (occasion.kind) {
     case "plan_review":
@@ -24940,9 +24977,18 @@ function taskSection2(t, heading = `## Task ${t.id}: ${t.title}`) {
     `Test focus: ${t.test_focus}`
   ].join("\n");
 }
-function boardSection(tasks) {
-  if (!tasks.length) return "## The board\n(no task yet)";
-  return ["## The board", ...tasks.map((t) => `- ${t.id} [${t.status}] ${t.title} (assignee ${t.assignee}, attempt ${t.attempt})`)].join("\n");
+var boardLine = (t) => `- ${t.id} [${t.status}] ${t.title} (assignee ${t.assignee}, attempt ${t.attempt})`;
+function boardPart(tasks) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const t of tasks) counts.set(t.status, (counts.get(t.status) ?? 0) + 1);
+  const stands = [...counts].map(([status, n]) => `${n} ${status}`).join(", ");
+  return {
+    key: "board",
+    heading: "## The board",
+    empty: "(no task yet)",
+    items: tasks.map((t) => ({ id: t.id, text: boardLine(t) })),
+    changed: `## The board: what changed since your last turn (${tasks.length} task${tasks.length === 1 ? "" : "s"}: ${stands})`
+  };
 }
 var checkLines = (checks) => checks.flatMap((c) => [
   `- ${c.by}: ${c.verdict}. ${c.summary}`,
@@ -24954,14 +25000,14 @@ var checkLines = (checks) => checks.flatMap((c) => [
 var json = "\n\n## Your output\nReply with one JSON object that matches the required schema exactly; nothing else.";
 function frame(kind, p, brief2, work) {
   return [
-    header2(kind, p.member) + intro(p.member),
+    header2(kind, p.member) + (goesOn(p) ? CONTINUED : intro(p.member)),
     p.identity ?? "",
-    roster(p.members),
-    brief2 ? briefSection(brief2) : "",
+    { key: "team", text: roster(p.members) },
+    brief2 ? { key: "brief", text: briefSection(brief2) } : "",
     rulesSection(p.rules),
     exceptionsSection(p.state, p.member, work),
     p.member.kind === "pm" ? "" : memberGovernanceGuidance()
-  ].filter(Boolean);
+  ];
 }
 var integrationWork = () => ({ unit: { kind: "integration", id: RUN_UNIT } });
 var applyWork = () => ({ unit: { kind: "apply", id: RUN_UNIT } });
@@ -25054,19 +25100,19 @@ function pmPrompt(p) {
   const actions = pmActions(s, p.occasion);
   const parts = frame(`pm_${p.occasion.kind}`, p, null, null);
   const groups = groupsSection(p.groups);
-  if (groups) parts.push(`${groups}
-You are the head PM: the only one who talks with the user. Each group's techlead plans its part; a group's own PM checks it first.`);
-  parts.push(`## Where the work is
-Phase: ${s.phase}.${s.approvedBrief ? ` The user approved brief v${s.approvedBrief}.` : ""}${s.approvedPlan ? " The user approved the plan." : ""}`);
-  if (brief2) parts.push(briefSection(brief2, s.approvedBrief === brief2.version ? "The brief" : "Your latest brief (not approved yet)"));
-  if (p.areas.length) parts.push(`## The groups' parts
-${p.areas.map((a) => `- ${a.group}: ${a.area} (${a.criteria.join(", ")})`).join("\n")}`);
-  if (s.phase !== "INTAKE") for (const plan of p.plans) parts.push(planSection2(plan));
-  if (s.tasks.length) parts.push(boardSection(s.tasks));
+  if (groups) parts.push({ key: "groups", text: `${groups}
+You are the head PM: the only one who talks with the user. Each group's techlead plans its part; a group's own PM checks it first.` });
+  parts.push({ key: "where", text: `## Where the work is
+Phase: ${s.phase}.${s.approvedBrief ? ` The user approved brief v${s.approvedBrief}.` : ""}${s.approvedPlan ? " The user approved the plan." : ""}` });
+  if (brief2) parts.push({ key: "brief", text: briefSection(brief2, s.approvedBrief === brief2.version ? "The brief" : "Your latest brief (not approved yet)"), digest: digest3(briefSection(brief2)) });
+  if (p.areas.length) parts.push({ key: "areas", text: areasText(p.areas) });
+  if (s.phase !== "INTAKE") for (const plan of p.plans) parts.push({ key: planKey(plan.group), text: planSection2(plan) });
+  if (s.tasks.length) parts.push(boardPart(s.tasks));
   const fresh = p.state.messages.slice(p.seenMessages);
-  if (p.seenMessages > 0 && fresh.length) parts.push(`## New in the conversation with the user
+  if (p.identity === null && p.seenMessages > 0) {
+    if (fresh.length) parts.push(`## New in the conversation with the user
 ${transcript(fresh)}`);
-  else if (s.messages.length) parts.push(`## The conversation with the user
+  } else if (s.messages.length) parts.push(`## The conversation with the user
 ${transcript(s.messages)}`);
   if (p.reports.length) parts.push(`## Reports from the team since your last turn
 ${p.reports.map((r) => `- ${r.from}: ${r.text}`).join("\n")}`);
@@ -25086,8 +25132,10 @@ ${feedback.map(([group, text3]) => group ? `- ${group}: ${text3}` : text3).join(
 ${pmTask(s, p.occasion)}
 
 Allowed actions now: ${actions.join(", ")}. \`message\` is what the user reads (in the user's language), or null. Use \`questions\` to ask the user up to 4 questions with 2 to 6 options each; they can always answer in their own words too.` + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
+var areasText = (areas) => `## The groups' parts
+${areas.map((a) => `- ${a.group}: ${a.area} (${a.criteria.join(", ")})`).join("\n")}`;
 function pmTask(s, occasion) {
   switch (occasion.kind) {
     case "plan_review":
@@ -25133,26 +25181,27 @@ ${plan.risks.map((r) => `- ${r}`).join("\n")}` : ""
 function planPrompt(p) {
   const parts = frame("plan", p, p.brief, planningWork(p.group?.name ?? null));
   if (p.area && p.group) {
-    parts.push(`${areaSection(p.area)}
-Plan only your group's part, and give its tasks only to your group: ${p.group.members.filter((m) => m.kind === "worker").map((m) => m.name).join(", ")} take tasks, ${p.group.members.filter((m) => m.kind === "checker").map((m) => m.name).join(", ")} test them. The other groups plan theirs at the same time; depend only on tasks of your own group.`);
+    parts.push({ key: "area", text: `${areaSection(p.area)}
+Plan only your group's part, and give its tasks only to your group: ${p.group.members.filter((m) => m.kind === "worker").map((m) => m.name).join(", ")} take tasks, ${p.group.members.filter((m) => m.kind === "checker").map((m) => m.name).join(", ")} test them. The other groups plan theirs at the same time; depend only on tasks of your own group.` });
   }
-  if (p.existing.length) parts.push(`## Tasks the run already has
-${p.existing.map((t) => `- ${t.id} [${t.status}] ${t.title} (${t.assignee})`).join("\n")}`);
-  if (p.previous) parts.push(`## Your previous plan
-${planSection2(p.previous)}`);
+  if (p.existing.length) parts.push({ key: "existing", text: `## Tasks the run already has
+${p.existing.map((t) => `- ${t.id} [${t.status}] ${t.title} (${t.assignee})`).join("\n")}` });
+  if (p.previous) parts.push({ key: planKey(p.previous.group), text: `## Your previous plan
+${planSection2(p.previous)}`, digest: digest3(planSection2(p.previous)) });
   if (p.feedback) parts.push(`## What must change
 ${p.feedback}`);
   parts.push(`## What to do now
 ${p.additions ? "The brief changed. Plan only the new tasks the change needs (new ids; they may depend on existing tasks)." : "Read the repository, then plan the work."} Split it into tasks that can each be done and tested on their own and that rarely touch the same files, so members can work in parallel. Name each task's assignee (a member who takes tasks), its testers, the files or folders it touches, its dependencies, the acceptance criteria it serves and what its testers must cover. Assign by level. ${p.area ? "Every acceptance criterion of your group's part" : "Every acceptance criterion"} must be served by some task. \`report\` is one line for the PM.` + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
+var taskPart = (t) => ({ key: "task", text: taskSection2(t) });
 function workPrompt(p) {
   const t = p.task;
   const parts = frame("work", p, p.brief, { task: t.id });
-  parts.push(taskSection2(t));
+  parts.push(taskPart(t));
   const inFlight = p.others.filter((o) => o.id !== t.id && !["merged", "cancelled"].includes(o.status));
-  if (inFlight.length) parts.push(`## Other tasks in progress (stay out of their areas)
-${inFlight.map((o) => `- ${o.id} ${o.title} (${o.assignee}): ${o.area.join(", ")}`).join("\n")}`);
+  if (inFlight.length) parts.push({ key: "others", text: `## Other tasks in progress (stay out of their areas)
+${inFlight.map((o) => `- ${o.id} ${o.title} (${o.assignee}): ${o.area.join(", ")}`).join("\n")}` });
   if (t.question?.answer) parts.push(`## The answer to your question
 You asked: ${t.question.text}
 Answer: ${t.question.answer}`);
@@ -25163,16 +25212,16 @@ ${t.review.findings.map((f) => `- ${f.id} [${f.severity}${f.origin === "out_of_s
   }
   if (t.guidance) parts.push(`## The techlead's guidance for this attempt (${t.attempt})
 ${t.guidance}`);
-  if (t.trouble && t.attempt > 1) parts.push(`## Why the previous attempt failed
-${t.trouble}`);
+  if (t.trouble && t.attempt > 1) parts.push({ key: "trouble", text: `## Why the previous attempt failed
+${t.trouble}` });
   parts.push(`## What to do now
 You work in ${p.cwd}. ${t.code ? "Your earlier work on this task is already there; continue from it." : "Implement the task."} When it is done, report done with a summary; if you cannot go on without an answer, report blocked with one precise question for the techlead.` + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 function testsPrompt(p) {
   const t = p.task;
   const parts = frame("tests", p, p.brief, { task: t.id });
-  parts.push(taskSection2(t));
+  parts.push(taskPart(t));
   const fixing = t.tests[p.member.name]?.status === "fixing";
   if (fixing) {
     parts.push(`## The techlead says your tests are wrong
@@ -25181,92 +25230,119 @@ ${checkLines(p.failures).join("\n")}`);
   }
   parts.push(`## What to do now
 You work in ${p.cwd}. ${fixing ? "Fix your tests." : `Write the tests for task ${t.id} now, while ${t.assignee} writes the code.`} Test the acceptance criteria and the test focus, not an implementation: the code is not there yet, so your tests may fail for now. Put them where the repository keeps its tests and follow its conventions. Never change the product code. Say how to run them.` + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
+var fenceFor2 = (text3) => "`".repeat(Math.max(3, ...[...text3.matchAll(/`+/g)].map((m) => m[0].length + 1)));
+var fenced = (lang, text3) => `${fenceFor2(text3)}${lang}
+${text3}
+${fenceFor2(text3)}`;
+var short3 = (commit) => commit.slice(0, 12);
 function reviewPrompt(p) {
   const t = p.task;
   const parts = frame("review", p, p.brief, { task: t.id });
-  parts.push(taskSection2(t));
-  if (t.codeSummary) parts.push(`## ${t.assignee}'s report
+  parts.push(taskPart(t));
+  if (t.codeSummary) parts.push({ key: "report", text: `## ${t.assignee}'s report
 ${t.codeSummary}${t.notes.length ? `
-${t.notes.map((n) => `- ${n}`).join("\n")}` : ""}`);
-  const fence = "`".repeat(Math.max(3, ...[...p.diff.matchAll(/`+/g)].map((m) => m[0].length + 1)));
-  parts.push(`## The change
-${fence}diff
-${p.diff || "(no change)"}
-${fence}`);
+${t.notes.map((n) => `- ${n}`).join("\n")}` : ""}` });
+  const whole = `## The change
+${fenced("diff", p.diff || "(no change)")}`;
+  const c = p.change ?? null;
+  const reviewed = goesOn(p) && c ? p.since.change : void 0;
+  const again = reviewed !== void 0 && (reviewed === c.head || c.previous?.from === reviewed);
+  parts.push({
+    key: "change",
+    text: whole,
+    digest: c?.head ?? digest3(whole),
+    delta: (from) => {
+      if (!again) return null;
+      if (from === c.head) return `## The change
+The same commit (\`${short3(c.head)}\`) is the one you reviewed last, earlier in this session: nothing changed since.`;
+      return `## The change since the commit you last reviewed (\`${short3(from)}\` \u2192 \`${short3(c.head)}\`)
+You reviewed the change up to \`${short3(from)}\` earlier in this session; below is what changed after it. Judge the whole change all the same: every file it touches is listed here, and \`git diff ${short3(c.base)} HEAD -- .\` in your worktree shows all of it.
+${fenced("", c.stat.trimEnd() || "(no change)")}
+
+${fenced("diff", c.previous.diff || "(no change)")}`;
+    }
+  });
   parts.push(`## What to do now
-Review ${t.assignee}'s change for task ${t.id}; the code is checked out in your worktree. Ask for changes (verdict changes) only for a finding inside the task's scope of severity ${p.blocking.join(" or ")}; anything else is a suggestion. A finding outside the task or the brief has origin out_of_scope and is never work for this task. Cite the acceptance criteria a finding concerns.` + json);
-  return parts.join("\n\n");
+Review ${t.assignee}'s change for task ${t.id}; the code is checked out in your worktree. ` + (again ? "Your findings from your last review are in this session: check that each was dealt with, and that nothing else broke. " : "") + `Ask for changes (verdict changes) only for a finding inside the task's scope of severity ${p.blocking.join(" or ")}; anything else is a suggestion. A finding outside the task or the brief has origin out_of_scope and is never work for this task. Cite the acceptance criteria a finding concerns.` + json);
+  return render(parts, p);
 }
 function checkPrompt(p) {
   const t = p.task;
   const tests = t.tests[p.member.name];
   const parts = frame("check", p, p.brief, { task: t.id });
-  parts.push(taskSection2(t));
-  if (tests?.summary) parts.push(`## Your tests
+  parts.push(taskPart(t));
+  if (tests?.summary) parts.push({ key: "tests", text: `## Your tests
 ${tests.summary}${tests.howToRun ? `
-Run them with: ${tests.howToRun}` : ""}`);
-  if (t.codeSummary) parts.push(`## ${t.assignee}'s report
-${t.codeSummary}`);
+Run them with: ${tests.howToRun}` : ""}` });
+  if (t.codeSummary) parts.push({ key: "report", text: `## ${t.assignee}'s report
+${t.codeSummary}` });
   parts.push(`## What to do now
-In ${p.cwd} the task's code and its tests are merged. Run your tests and check the task against its acceptance criteria and its test focus. Now that you see the code you may add tests for cases it reveals (list them in added_tests). Report pass only when every case passes; for each failure say how to reproduce it, what was expected, what happened, and whether you suspect the code, the test or the plan.` + json);
-  return parts.join("\n\n");
+In ${p.cwd} the code of task ${t.id} and its tests are merged. Run your tests and check the task against its acceptance criteria and its test focus. Now that you see the code you may add tests for cases it reveals (list them in added_tests). Report pass only when every case passes; for each failure say how to reproduce it, what was expected, what happened, and whether you suspect the code, the test or the plan.` + json);
+  return render(parts, p);
 }
 function triagePrompt(p) {
   const t = p.task;
   const parts = frame("triage", p, p.brief, { task: t.id });
-  parts.push(taskSection2(t));
+  parts.push(taskPart(t));
   parts.push(`## What went wrong (attempt ${t.attempt} of ${p.maxAttempts})
 ${t.trouble ?? "(not said)"}${t.checks.length ? `
 ${checkLines(t.checks).join("\n")}` : ""}`);
-  if (t.history.length) parts.push(`## The task's history
-${t.history.slice(-12).map((h) => `- ${h.text}`).join("\n")}`);
+  const from = Math.max(0, t.history.length - 12);
+  if (t.history.length) {
+    parts.push({
+      key: "history",
+      heading: "## The task's history",
+      changed: "## The task's history since your last turn",
+      items: t.history.slice(from).map((h, i) => ({ id: String(from + i), text: `- ${h.text}` }))
+    });
+  }
   parts.push(`## What to do now
 Decide what happens next: retry (the same assignee, with your guidance), reassign (to another member who takes tasks: ${p.workers.map((w) => `${w.name} (${w.level})`).join(", ")}), fix_tests (the tests are wrong: the testers fix them), or escalate (a question only the PM or the user can answer). After a second failure of the same kind, change the approach rather than retry the same way. \`report\` is one line for the PM.` + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 function answerPrompt(p) {
   const t = p.task;
   const parts = frame("answer", p, p.brief, { task: t.id });
-  parts.push(taskSection2(t));
+  parts.push(taskPart(t));
   parts.push(`## ${t.question?.from} asks
 ${t.question?.text}`);
   parts.push("## What to do now\nAnswer from the brief, the plan and the repository. When only the PM or the user can decide it (the product, the scope), give escalate with the question for the PM and no answer." + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 function resolvePrompt(p) {
   const t = p.task;
   const parts = frame("resolve", p, p.brief, t ? { task: t.id } : applyWork());
-  if (t) parts.push(taskSection2(t));
+  if (t) parts.push(taskPart(t));
   const what = t ? `Merging task ${t.id} into the integration branch` : "Merging the user's own changes to their folder (made while the team worked) into the integration branch";
   parts.push(`## What to do now
 ${what} conflicts in: ${p.files.join(", ")}. In ${p.cwd} the integration branch is checked out with the other side merged in and conflict markers in those files. Resolve them so that both sides keep working, remove every marker, and report done.` + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 function integrationCheckPrompt(p) {
   const parts = frame("check", p, p.brief, integrationWork());
-  parts.push(boardSection(p.state.tasks));
+  parts.push(boardPart(p.state.tasks));
   parts.push(`## What to do now
 Every task is merged; ${p.cwd} holds the whole result. Run every test of the repository and every test the team wrote, and check the result against every acceptance criterion of the brief. Report pass only when all of it passes.` + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 function integrationTriagePrompt(p) {
   const parts = frame("triage", p, p.brief, integrationWork());
-  parts.push(boardSection(p.state.tasks));
+  parts.push(boardPart(p.state.tasks));
   parts.push(`## What must be fixed
 ${p.trouble}${p.checks.length ? `
 ${checkLines(p.checks).join("\n")}` : ""}`);
   parts.push("## What to do now\nAdd the tasks that fix it (action add_tasks, new ids, with assignees and testers), or escalate with a question only the PM or the user can answer. `report` is one line for the PM." + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 function areaPmPrompt(p) {
   const parts = frame(`pm_${p.occasion.kind}`, p, p.brief, null);
-  parts.push(`You are the PM of group ${p.group.name}. You never talk to the user: ${p.head.name}, the head PM, does. You answer for your group's part.`);
+  parts.push({ key: "group", text: `You are the PM of group ${p.group.name}. You never talk to the user: ${p.head.name}, the head PM, does. You answer for your group's part.` });
   parts.push(`## Rules and exceptions
 The team's rules above hold for your group too. A request to depart from a rule, and any question to the user about one, goes up to ${p.head.name} (escalate, naming the rules, the reason, the alternative and the work), who alone shows it to the user. You never approve an exception, and you never ask the user.`);
-  if (p.area) parts.push(areaSection(p.area));
-  if (p.plan) parts.push(planSection2(p.plan));
+  if (p.area) parts.push({ key: "area", text: areaSection(p.area) });
+  if (p.plan) parts.push({ key: planKey(p.plan.group), text: planSection2(p.plan) });
   if (p.openEscalations.length) {
     parts.push(`## Questions from your group's techlead (answer one with team_answer and its id)
 ${p.openEscalations.map((e) => `- ${e.id}${e.task ? ` (task ${e.task})` : ""}: ${e.text}`).join("\n")}`);
@@ -25276,7 +25352,7 @@ ${p.openEscalations.map((e) => `- ${e.id}${e.task ? ` (task ${e.task})` : ""}: $
 ${task}
 
 Allowed actions now: ${pmActions(p.state, p.occasion).join(", ")}. \`message\` is never shown to the user: leave it null.` + json);
-  return parts.join("\n\n");
+  return render(parts, p);
 }
 
 // packages/engine/src/team/worktrees.ts
@@ -26485,12 +26561,16 @@ var TeamRun = class _TeamRun {
     }
   }
   // ------------------------------------------------------------------ member calls
-  /** One call of a member, in its session: the result's data, or an error (thrown). */
+  /**
+   * One call of a member, in its session: the result's data, or an error (thrown). `build` makes the prompt for a fresh
+   * session (every part, the identity) and for one that goes on (`since`: what its earlier turns were given; it gets only
+   * what changed). The fresh one says what the session holds once the turn succeeded (`view`), kept in `MemberSession.seen`.
+   */
   async call(m, kind, schemaName, build, o) {
     const s = this.state;
     const backend = this.runner.backends[m.backend];
     const keep = backend.keepsSessions(void 0, m.args);
-    const key = sessionKey(m, o.task);
+    const key = sessionKey(m, o.task, o.purpose ?? null);
     const session2 = s.sessions[key];
     const continued = keep && session2 && session2.backend === m.backend ? session2 : null;
     const leadNotes = (from) => {
@@ -26515,9 +26595,14 @@ ${text3}` : "";
     this.promptRules = rules;
     let full;
     let resume;
+    const view2 = {};
     try {
-      full = build(memberIdentity(this.identities, m)) + leadNotes(0) + listed(files, false);
-      resume = continued ? { id: continued.id, prompt: build(null) + leadNotes(continued.notes ?? s.leadNotesSeen[m.name] ?? 0) + listed(unseen, true), attachments: unseen } : void 0;
+      full = build({ identity: memberIdentity(this.identities, m), view: view2 }) + leadNotes(0) + listed(files, false);
+      resume = continued ? {
+        id: continued.id,
+        attachments: unseen,
+        prompt: build({ identity: null, since: continued.seen ?? null }) + leadNotes(continued.notes ?? s.leadNotesSeen[m.name] ?? 0) + listed(unseen, true)
+      } : void 0;
     } finally {
       this.promptRules = null;
     }
@@ -26560,13 +26645,28 @@ ${text3}` : "";
       throw new Error(res.error ?? "the call failed");
     }
     if (keep && res.sessionId) {
-      s.sessions[key] = { backend: m.backend, id: res.sessionId, ...files.length ? { files: files.map((a) => a.id) } : {}, ...m.kind === "lead" ? { notes: notesSeen } : {} };
+      const seen = res.resumed && continued ? { ...continued.seen ?? {}, ...view2 } : view2;
+      s.sessions[key] = {
+        backend: m.backend,
+        id: res.sessionId,
+        ...files.length ? { files: files.map((a) => a.id) } : {},
+        ...m.kind === "lead" ? { notes: notesSeen } : {},
+        seen
+      };
     }
     const report = res.data.governance ?? null;
     this.noteIssues(m, o.task, callId, report, rules);
     this.holdForException(m, work, report, rules);
     this.save();
     return res.data;
+  }
+  /**
+   * What a member's turn wrote that its later prompts would show (the PM's brief and the groups' parts, a techlead's plan):
+   * its session has it, as its own answer, and is not sent it back. A session agentduo keeps no record of is left alone.
+   */
+  knows(m, task, wrote) {
+    const session2 = this.state.sessions[sessionKey(m, task)];
+    if (session2?.seen) Object.assign(session2.seen, wrote);
   }
   // ------------------------------------------------------------------ the team's rules
   /** The team's RULES.md: the folder is the team's (`state.rulesStore`), apart from this run, its worktrees and its cleanup. */
@@ -27150,11 +27250,11 @@ Approve this exception for that work only? The rules stay in force everywhere el
       const tg = await this.teamGit();
       cwd = await tg.checkout(pm.name, await tg.integrationHead());
     }
-    const out = await this.call(pm, "pm", "team_pm", (identity) => pmPrompt({
+    const out = await this.call(pm, "pm", "team_pm", (session2) => pmPrompt({
       ...this.parts(pm),
-      identity,
+      ...session2,
       occasion,
-      seenMessages: identity ? 0 : seenMessages,
+      seenMessages: session2.identity ? 0 : seenMessages,
       reports,
       openEscalations: open,
       groups: this.groups,
@@ -27177,10 +27277,9 @@ Approve this exception for that work only? The rules stay in force everywhere el
         this.pmQuestions(a.questions);
         break;
       case "brief":
-        this.newBrief(a.brief);
-        break;
       case "change_request":
         this.newBrief(a.brief);
+        this.knows(pm, null, authored.brief(latestBrief(s)));
         break;
       case "plan_review": {
         if (!set.length) break;
@@ -27207,6 +27306,7 @@ ${mine.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
         const version = s.approvedBrief;
         s.areas = s.areas.filter((x) => x.briefVersion !== version);
         for (const x of a.areas) s.areas.push({ briefVersion: version, group: x.group, area: x.area, criteria: [...x.criteria] });
+        this.knows(pm, null, authored.areas(currentAreas(s)));
         this.document("plan", "The groups' parts", a.areas.map((x) => `- ${x.group}: ${x.area} (${x.criteria.join(", ")})`).join("\n"));
         break;
       }
@@ -27436,9 +27536,9 @@ ${from.name} (the group's PM): ${question}`;
       const tg = await this.teamGit();
       cwd = await tg.checkout(pm.name, await tg.integrationHead());
     }
-    const out = await this.call(pm, "pm", "team_pm", (identity) => areaPmPrompt({
+    const out = await this.call(pm, "pm", "team_pm", (session2) => areaPmPrompt({
       ...this.parts(pm),
-      identity,
+      ...session2,
       occasion,
       brief: this.brief(),
       group: g,
@@ -27496,9 +27596,9 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     const area = currentAreas(s).find((a) => a.group === g.name) ?? null;
     const previous = latestPlan(s, g.name) ?? s.plans.filter((p) => p.group === g.name).at(-1) ?? null;
     const required = this.requiredCriteria(g);
-    const out = await this.call(techlead, "plan", "team_plan", (identity) => planPrompt({
+    const out = await this.call(techlead, "plan", "team_plan", (session2) => planPrompt({
       ...this.parts(techlead),
-      identity,
+      ...session2,
       brief: brief2,
       feedback: s.planFeedback[key] ?? null,
       previous,
@@ -27514,7 +27614,7 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     });
     s.planningRounds += 1;
     const version = s.plans.filter((p) => p.group === g.name).reduce((n, p) => Math.max(n, p.version), 0) + 1;
-    s.plans.push({
+    const plan = {
       version,
       group: g.name,
       briefVersion: s.approvedBrief,
@@ -27524,7 +27624,9 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
       risks: out.risks,
       pmApproved: null,
       additions
-    });
+    };
+    s.plans.push(plan);
+    this.knows(techlead, null, authored.plan(plan));
     delete s.planFeedback[key];
     this.report(techlead.name, out.report);
     this.save();
@@ -27538,9 +27640,9 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     const cwd = await tg.checkout(techlead.name, t.code ?? await tg.integrationHead());
     const workers = g.members.filter((m) => m.kind === "worker");
     const max = this.o.cfg.team.limits.max_task_attempts;
-    const out = await this.call(techlead, "triage", "team_triage", (identity) => triagePrompt({
+    const out = await this.call(techlead, "triage", "team_triage", (session2) => triagePrompt({
       ...this.parts(techlead),
-      identity,
+      ...session2,
       task: t,
       brief: this.brief(),
       maxAttempts: max,
@@ -27593,7 +27695,7 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     const techlead = this.group(t.group).lead;
     const tg = await this.teamGit();
     const cwd = await tg.checkout(techlead.name, t.code ?? t.base);
-    const out = await this.call(techlead, "answer", "team_answer", (identity) => answerPrompt({ ...this.parts(techlead), identity, task: t, brief: this.brief() }), {
+    const out = await this.call(techlead, "answer", "team_answer", (session2) => answerPrompt({ ...this.parts(techlead), ...session2, task: t, brief: this.brief() }), {
       task: t.id,
       cwd,
       check: (d) => !d.answer?.trim() && !d.escalate?.trim() ? ["give an answer, or escalate with the question for the PM"] : []
@@ -27618,7 +27720,7 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     const head = await tg.integrationHead();
     const files = await tg.startResolve(techlead.name, t.candidate);
     const cwd = await tg.cwd(techlead.name);
-    await this.call(techlead, "resolve", "team_work", (identity) => resolvePrompt({ ...this.parts(techlead), identity, task: t, brief: this.brief(), cwd, files }), { task: t.id, cwd });
+    await this.call(techlead, "resolve", "team_work", (session2) => resolvePrompt({ ...this.parts(techlead), ...session2, task: t, brief: this.brief(), cwd, files }), { task: t.id, cwd });
     const done2 = await tg.finishResolve(techlead.name, t.candidate, head, `agentduo team ${this.id}: merge ${t.id} (resolved)`);
     if ("problem" in done2) {
       this.escalate(t, "merge_conflict", `Task ${t.id} cannot be merged: ${done2.problem}`);
@@ -27647,9 +27749,9 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
       ...c,
       failures: !this.grouped ? c.failures : c.failures.filter((f) => f.criteria.some((x) => own?.includes(x)) || first && !f.criteria.length)
     })).filter((c) => !this.grouped || c.failures.length || c.by === "gates");
-    const out = await this.call(techlead, "integration-triage", "team_triage", (identity) => integrationTriagePrompt({
+    const out = await this.call(techlead, "integration-triage", "team_triage", (session2) => integrationTriagePrompt({
       ...this.parts(techlead),
-      identity,
+      ...session2,
       brief: brief2,
       trouble: ig.trouble ?? "",
       checks
@@ -27691,7 +27793,7 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     const head = await tg.integrationHead();
     const files = await tg.startResolve(techlead.name, conflict.ours);
     const cwd = await tg.cwd(techlead.name);
-    await this.call(techlead, "resolve", "team_work", (identity) => resolvePrompt({ ...this.parts(techlead), identity, task: null, brief: this.brief(), cwd, files }), { task: null, cwd, work: applyWork() });
+    await this.call(techlead, "resolve", "team_work", (session2) => resolvePrompt({ ...this.parts(techlead), ...session2, task: null, brief: this.brief(), cwd, files }), { task: null, cwd, work: applyWork() });
     const done2 = await tg.finishResolve(techlead.name, conflict.ours, head, `agentduo team ${this.id}: the workspace's changes merged`);
     if ("problem" in done2) {
       s.applyConflict.resolving = false;
@@ -27717,9 +27819,9 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     }
     if (t.status !== "coding" || t.assignee !== m.name) return;
     const cwd = await tg.checkout(m.name, t.code ?? t.base);
-    const out = await this.call(m, "work", "team_work", (identity) => workPrompt({
+    const out = await this.call(m, "work", "team_work", (session2) => workPrompt({
       ...this.parts(m),
-      identity,
+      ...session2,
       task: t,
       brief: this.brief(),
       others: this.state.tasks,
@@ -27751,9 +27853,9 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     const tg = await this.teamGit();
     const cwd = await tg.checkout(m.name, tests.commit ?? t.base ?? await tg.integrationHead());
     const failures = t.checks.length ? t.checks : [];
-    const out = await this.call(m, "tests", "team_tests", (identity) => testsPrompt({
+    const out = await this.call(m, "tests", "team_tests", (session2) => testsPrompt({
       ...this.parts(m),
-      identity,
+      ...session2,
       task: t,
       brief: this.brief(),
       cwd,
@@ -27774,19 +27876,24 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     t.reviewer = m.name;
     const tg = await this.teamGit();
     const cwd = await tg.checkout(m.name, t.code);
-    const diff = (await this.git.diff(t.base, t.code)).slice(0, this.o.cfg.limits.max_diff_chars);
+    const max = this.o.cfg.limits.max_diff_chars;
+    const diff = (await this.git.diff(t.base, t.code)).slice(0, max);
+    const purpose = m.kind === "lead" ? void 0 : "review";
+    const change = await this.reviewChange(m, t, purpose);
     const blocking = this.o.cfg.quality_gates.blocking_severities;
     const criteria2 = new Set(this.brief().criteria.map((c) => c.id));
-    const out = await this.call(m, "review", "team_review", (identity) => reviewPrompt({
+    const out = await this.call(m, "review", "team_review", (session2) => reviewPrompt({
       ...this.parts(m),
-      identity,
+      ...session2,
       task: t,
       brief: this.brief(),
       diff,
-      blocking
+      blocking,
+      change
     }), {
       task: t.id,
       cwd,
+      purpose,
       check: (d) => d.findings.flatMap((f) => f.criteria.filter((c) => !criteria2.has(c)).map((c) => `finding '${f.id}' cites '${c}', which is not an acceptance criterion (${[...criteria2].join(", ")})`))
     });
     if (t.status !== "review") return;
@@ -27815,6 +27922,22 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     this.emitTask(t);
     this.save();
   }
+  /**
+   * The change a review is about, for a reviewer's session that goes on: the diff since the commit it reviewed last (its
+   * view's `change`), with the whole change's stat. No earlier review in the session, or a commit git cannot diff any more:
+   * no `previous`, and the session is given the whole diff.
+   */
+  async reviewChange(m, t, purpose) {
+    const max = this.o.cfg.limits.max_diff_chars;
+    const reviewed = this.state.sessions[sessionKey(m, t.id, purpose ?? null)]?.seen?.change;
+    const stat2 = await this.git.diffStat(t.base, t.code).catch(() => "");
+    let previous = null;
+    if (reviewed && reviewed !== t.code) {
+      const since = await this.git.diff(reviewed, t.code).catch(() => null);
+      if (since !== null) previous = { from: reviewed, diff: since.slice(0, max) };
+    }
+    return { head: t.code, base: t.base, stat: stat2, previous };
+  }
   async checkTurn(name2, id) {
     const t = this.task(id);
     const m = this.member(name2);
@@ -27822,7 +27945,7 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     const candidate = t.candidate;
     const tg = await this.teamGit();
     const cwd = await tg.checkout(m.name, candidate);
-    const out = await this.call(m, "check", "team_check", (identity) => checkPrompt({ ...this.parts(m), identity, task: t, brief: this.brief(), cwd }), {
+    const out = await this.call(m, "check", "team_check", (session2) => checkPrompt({ ...this.parts(m), ...session2, task: t, brief: this.brief(), cwd }), {
       task: t.id,
       cwd,
       check: (d) => d.verdict === "fail" && !d.failures.length ? ["a failing check lists its failures"] : []
@@ -27843,7 +27966,7 @@ ${a.issues.map((i) => `- ${i.id}: ${i.issue}`).join("\n")}`;
     const commit = ig.commit;
     const tg = await this.teamGit();
     const cwd = await tg.checkout(m.name, commit);
-    const out = await this.call(m, "integration-check", "team_check", (identity) => integrationCheckPrompt({ ...this.parts(m), identity, brief: this.brief(), cwd }), {
+    const out = await this.call(m, "integration-check", "team_check", (session2) => integrationCheckPrompt({ ...this.parts(m), ...session2, brief: this.brief(), cwd }), {
       task: null,
       cwd,
       work: integrationWork(),
