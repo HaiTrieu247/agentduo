@@ -11,6 +11,10 @@ import type { AccountUsage } from "@agentduo/host/protocol";
 import type { Check } from "@agentduo/engine/system/doctor";
 import type { TeamIdentityFile, TeamInfo } from "@agentduo/engine/team/model";
 import type { TeamEdit } from "@agentduo/engine/config/configuration";
+import {
+  DOCUMENT_CLOSE_OUTCOMES, DOCUMENT_ID, DOCUMENT_LINK_ID, DOCUMENT_REQUEST_ID, DOCUMENT_REVISION, MAX_DOCUMENT_CHARS, isWritableText,
+  type DocumentCloseOutcome, type DocumentCloseReason, type DocumentInfo, type DocumentLinkGrant, type DocumentOpened, type DocumentSaved,
+} from "./documents.js";
 
 export { ProtocolError };
 
@@ -253,6 +257,24 @@ export type DesktopRequest =
   | { method: "diagnostics.collect"; projectId: string | null }
   | { method: "diagnostics.export"; projectId: string | null }
   | { method: "link.open"; link: LinkName }
+  // "Mở": documents opened from a link in the chat (shared/documents.ts, design docs/superpowers/specs/2026-11-18-desktop-open-markdown-design.md).
+  // The renderer names a link by the id main granted for that view and a document by the id main gave its session, and
+  // never sends a path to read or write.
+  /** Opens the file a link of the chat's text points to. `view`: the attachment the page was shown by, as chat.message's. */
+  | { method: "document.open"; projectId: string; conversationId: string; view: number; linkId: string }
+  /** Reads the session's file again (after a conflict, or the user's choice); the answer is the whole document as `document.open`'s. */
+  | { method: "document.reload"; documentId: string }
+  /**
+   * Writes `text` to the session's file, only when its content still is the `revision` the renderer holds (the one the
+   * session read or last wrote), unless `overwrite`: the user chose to replace what is there now.
+   */
+  | { method: "document.save"; documentId: string; revision: string; text: string; overwrite: boolean }
+  /** Tells main whether the page holds unsaved edits of the document (so quitting asks only when there are some). */
+  | { method: "document.dirty"; documentId: string; dirty: boolean }
+  /** The session ends (idempotent); edits not saved are the renderer's to have settled first. */
+  | { method: "document.close"; documentId: string }
+  /** The answer to a `documentCloseRequest` event. */
+  | { method: "document.closeResponse"; requestId: string; outcome: DocumentCloseOutcome }
   /** Looks for a new version of the app now. */
   | { method: "update.check" }
   /** Quits (as Quit does: runs stopped, locks freed) and restarts into the downloaded version. */
@@ -301,6 +323,12 @@ export interface DesktopResults {
   "diagnostics.collect": Diagnostics;
   "diagnostics.export": { file: string } | null;
   "link.open": { opened: true };
+  "document.open": DocumentOpened;
+  "document.reload": DocumentOpened;
+  "document.save": DocumentSaved;
+  "document.dirty": { recorded: true };
+  "document.close": { closed: true };
+  "document.closeResponse": { accepted: boolean };
   "update.check": UpdateState;
   "update.install": { restarting: true };
 }
@@ -317,7 +345,16 @@ export type DesktopEvent =
   | { type: "theme"; dark: boolean }
   /** The application menu: what the renderer does for it. */
   | { type: "menu"; command: MenuCommand }
-  | { type: "update"; state: UpdateState };
+  | { type: "update"; state: UpdateState }
+  /**
+   * Links of a conversation's chat that have an id (`DocumentLinkTable`): `links` are new (or, after a snapshot, all of
+   * them) and `revoked` are ids that stopped being valid. Ids of an earlier `view` are revoked by the view changing.
+   */
+  | { type: "documentLinks"; projectId: string; conversationId: string; view: number; links: DocumentLinkGrant[]; revoked: string[] }
+  /** Main is about to quit or close the window: the page settles these documents (save, discard or keep editing) and answers with `document.closeResponse`. */
+  | { type: "documentCloseRequest"; requestId: string; reason: DocumentCloseReason; documentIds: string[] }
+  /** Main ended a session (a request it settled, or its file went with the project's data): the page drops the document. */
+  | { type: "documentClosed"; documentId: string };
 
 export const MENU_COMMANDS = ["newConversation", "openProject", "settings", "toggleInspector", "stop", "diagnostics", "checkUpdates", "about"] as const;
 export type MenuCommand = (typeof MENU_COMMANDS)[number];
@@ -353,6 +390,11 @@ function conversationId(v: unknown): string {
 }
 
 const maybeConversation = (v: unknown): string | null => (v === null || v === undefined ? null : conversationId(v));
+
+function documentId(v: unknown): string {
+  if (typeof v !== "string" || !DOCUMENT_ID.test(v)) throw new ProtocolError("documentId is not a document id");
+  return v;
+}
 
 function int(v: unknown, what: string, max = Number.MAX_SAFE_INTEGER): number {
   if (!Number.isSafeInteger(v) || (v as number) < 0 || (v as number) > max) throw new ProtocolError(`${what} must be a non-negative integer`);
@@ -423,7 +465,7 @@ const METHODS: readonly DesktopMethod[] = [
   "conversation.select", "conversation.archive", "conversation.archived", "conversation.restore", "conversation.delete", "chat.message", "chat.draft", "run.inspect", "artifact.read", "changes.list", "changes.file", "settings.read", "settings.update",
   "settings.clear", "settings.openFile", "team.read", "team.openIdentity", "team.save", "team.reset", "team.identity.read", "team.identity.write", "team.identity.reset",
   "team.identity.defaults", "folder.open", "cli.status", "cli.pick", "doctor.run", "account.usage", "diagnostics.collect", "diagnostics.export",
-  "link.open", "update.check", "update.install",
+  "link.open", "document.open", "document.reload", "document.save", "document.dirty", "document.close", "document.closeResponse", "update.check", "update.install",
 ];
 
 /** A message the chat may send main: the VS Code webview's, without what has no meaning here. */
@@ -598,6 +640,29 @@ export function parseDesktopRequest(v: unknown): DesktopRequest {
       return { method, projectId: projectId(o.projectId) };
     case "link.open":
       return { method, link: oneOf(o.link, Object.keys(LINKS) as LinkName[], "link") };
+    case "document.open": {
+      if (typeof o.linkId !== "string" || !DOCUMENT_LINK_ID.test(o.linkId)) throw new ProtocolError("linkId is not a link id");
+      return { method, projectId: projectId(o.projectId), conversationId: conversationId(o.conversationId), view: int(o.view, "view"), linkId: o.linkId };
+    }
+    case "document.reload":
+    case "document.close":
+      return { method, documentId: documentId(o.documentId) };
+    case "document.save": {
+      // The revision is required: a save never means "whatever is there now" unless `overwrite` says the user chose it.
+      if (typeof o.revision !== "string" || !DOCUMENT_REVISION.test(o.revision)) throw new ProtocolError("revision is not a document revision");
+      if (typeof o.text !== "string" || o.text.length > MAX_DOCUMENT_CHARS) throw new ProtocolError("text must be a string within the size limit");
+      if (!isWritableText(o.text)) throw new ProtocolError("text cannot be written as it is (NUL or a broken character)");
+      if (o.overwrite !== undefined && typeof o.overwrite !== "boolean") throw new ProtocolError("overwrite must be true or false");
+      return { method, documentId: documentId(o.documentId), revision: o.revision, text: o.text, overwrite: o.overwrite === true };
+    }
+    case "document.dirty": {
+      if (typeof o.dirty !== "boolean") throw new ProtocolError("dirty must be true or false");
+      return { method, documentId: documentId(o.documentId), dirty: o.dirty };
+    }
+    case "document.closeResponse": {
+      if (typeof o.requestId !== "string" || !DOCUMENT_REQUEST_ID.test(o.requestId)) throw new ProtocolError("requestId is not a close request id");
+      return { method, requestId: o.requestId, outcome: oneOf(o.outcome, DOCUMENT_CLOSE_OUTCOMES, "outcome") };
+    }
   }
 }
 
@@ -623,4 +688,5 @@ export function trustedSender(s: SenderInfo): boolean {
   }
 }
 
+export type { DocumentCloseOutcome, DocumentCloseReason, DocumentInfo, DocumentLinkGrant, DocumentOpened, DocumentSaved };
 export type { ArtifactName, ConfigScope, ConfigurationView, HostMessage, WebviewMessage };
