@@ -198,6 +198,62 @@ const WORD = /[\p{L}\p{N}]/u;
  */
 type Misses = Map<string, number>;
 
+/**
+ * The target of a link whose `(` is just before `start`, and where the link ends (after its `)`): `<…>` may hold spaces
+ * (`<my notes.md>`), a bare target may hold balanced parentheses (`a(1).md`), and a title after it (`"…"`, `'…'`) is
+ * dropped. A backslash stays a backslash (Windows paths). Nothing is decoded: the target is kept as written. A target
+ * the strict reading cannot close (unbalanced parentheses) ends at the first `)`, as it always did. Null: not a link (empty, a line break, no `)`).
+ */
+function linkDestination(src: string, start: number, to: number): { href: string; end: number } | null {
+  const read = readDestination(src, start, to);
+  if (read || /^[ \t]*</.test(src.slice(start, start + 8))) return read;
+  // As it always was: up to the first `)`, and the first word of what is between.
+  const paren = src.indexOf(")", start);
+  if (paren < 0 || paren >= to || src.slice(start, paren).includes("\n")) return null;
+  const word = src.slice(start, paren).trim().split(/\s+/)[0] ?? "";
+  return word ? { href: word, end: paren + 1 } : null;
+}
+
+function readDestination(src: string, start: number, to: number): { href: string; end: number } | null {
+  let i = start;
+  while (i < to && (src[i] === " " || src[i] === "\t")) i++;
+  let href = "";
+  if (src[i] === "<") {
+    const gt = src.indexOf(">", i + 1);
+    if (gt < 0 || gt >= to) return null;
+    href = src.slice(i + 1, gt);
+    if (/[\n<]/.test(href)) return null;
+    i = gt + 1;
+  } else {
+    const first = i;
+    let depth = 0;
+    while (i < to && !/\s/.test(src[i]!)) {
+      if (src[i] === "(") depth++;
+      else if (src[i] === ")") {
+        if (depth === 0) break;
+        depth--;
+      }
+      i++;
+    }
+    if (depth > 0) return null;
+    href = src.slice(first, i);
+  }
+  if (!href.trim()) return null;
+  while (i < to && /[ \t]/.test(src[i]!)) i++;
+  if (src[i] === '"' || src[i] === "'") {
+    const q = src.indexOf(src[i]!, i + 1);
+    if (q >= 0 && q < to && !src.slice(i, q).includes("\n")) {
+      i = q + 1;
+      while (i < to && /[ \t]/.test(src[i]!)) i++;
+    }
+  }
+  if (src[i] === ")" && i < to) return { href: href.trim(), end: i + 1 };
+  // Anything else before the `)` (a title in another form) is dropped, as before.
+  const paren = src.indexOf(")", i);
+  if (paren < 0 || paren >= to || src.slice(start, paren).includes("\n")) return null;
+  return { href: href.trim(), end: paren + 1 };
+}
+
 export function parseInline(src: string): Inline[] {
   return inline(src, 0, src.length, new Map(), 0);
 }
@@ -279,12 +335,11 @@ function inline(src: string, from: number, to: number, misses: Misses, depth: nu
       const close = missed(misses, "]", to) ? -1 : src.indexOf("]", i + 1);
       if (close < 0 || close >= to) misses.set("]", to);
       else if (src[close + 1] === "(") {
-        const paren = src.indexOf(")", close + 2);
-        const href = paren >= 0 && paren < to ? src.slice(close + 2, paren).trim().split(/\s+/)[0] ?? "" : "";
-        if (href && !src.slice(close + 2, paren).includes("\n")) {
+        const dest = linkDestination(src, close + 2, to);
+        if (dest) {
           flush();
-          out.push({ type: "link", href, children: inline(src, i + 1, close, misses, depth + 1) });
-          i = paren + 1;
+          out.push({ type: "link", href: dest.href, children: inline(src, i + 1, close, misses, depth + 1) });
+          i = dest.end;
           continue;
         }
       }

@@ -105,6 +105,29 @@ describe("markdown inline", () => {
     expect(parseInline("[not a link] (x)")).toEqual([text("[not a link] (x)")]);
   });
 
+  it("reads a target in <…> with spaces, balanced parentheses, a title, and a Windows path, as written", () => {
+    const href = (src: string) => (parseInline(src).find((n) => n.type === "link") as { href: string } | undefined)?.href;
+    expect(href("[a](<docs/my notes.md>)")).toBe("docs/my notes.md");
+    expect(href("[a](<docs/my%20notes.md>)")).toBe("docs/my%20notes.md");
+    expect(href("[a](<C:\\My Docs\\a.md>)")).toBe("C:\\My Docs\\a.md");
+    expect(href("[a](<file:///tmp/my notes.md#L3>)")).toBe("file:///tmp/my notes.md#L3");
+    expect(href("[a](docs/a(1).md)")).toBe("docs/a(1).md");
+    expect(href("[a](docs/a(1)(2).md:4)")).toBe("docs/a(1)(2).md:4");
+    expect(href("[a](C:\\x\\a.md)")).toBe("C:\\x\\a.md");
+    expect(href('[a](docs/a.md "the title")')).toBe("docs/a.md");
+    expect(href("[a](<docs/my notes.md> 'title')")).toBe("docs/my notes.md");
+    expect(href("[a]( docs/a.md )")).toBe("docs/a.md");
+    // The link ends at its own `)`, and what follows is text.
+    expect(parseInline("[a](x(1).md) (note)")).toEqual([{ type: "link", href: "x(1).md", children: [text("a")] }, text(" (note)")]);
+    expect(parseInline("[a](<my notes.md>) and [b](c.md)").filter((n) => n.type === "link")).toHaveLength(2);
+    // An unbalanced target ends at the first `)`, as before; an empty or broken one is no link.
+    expect(href("[a](x(y)")).toBe("x(y");
+    expect(parseInline("[a](<>)")).toEqual([text("[a](<>)")]);
+    expect(parseInline("[a](<x\ny>)")).toEqual([text("[a](<x"), { type: "break" }, text("y>)")]);
+    expect(parseInline("[a](<x y.md)")).toEqual([text("[a](<x y.md)")]);
+    expect(parseInline("[a](x.md")).toEqual([text("[a](x.md")]);
+  });
+
   it("honours backslash escapes and longer backtick runs", () => {
     expect(parseInline("\\*not em\\* ``a ` b``")).toEqual([text("*not em* "), { type: "code", text: "a ` b" }]);
   });
