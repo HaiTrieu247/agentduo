@@ -227,6 +227,30 @@ describe("links in the chat's text", () => {
     expect(markdownLinks(text)).toEqual(["/a/h.md", "/a/b.md", "/a/1.md", "/a/2.md", "/a/q.md", "/a/th.md", "/a/td.md"]);
   });
 
+  it("keeps the whole target of a link in <…> or with parentheses, in the order they are written, mixed with other kinds", () => {
+    const text = [
+      "1 [angle](<docs/my notes.md>) 2 [plain](docs/plan.md) 3 [parens](docs/a(1).md#L4) 4 [web](https://example.com/x(1)) 5 [win](<C:\\My Docs\\a.md:7>)",
+      "6 [url](file:///tmp/my%20notes.md) 7 [code](src/a.ts) 8 [titled](docs/t.md \"title\") 9 [enc](<docs/my%20notes.md>) tail (note).",
+    ].join("\n");
+    expect(markdownLinks(text)).toEqual([
+      "docs/my notes.md", "docs/plan.md", "docs/a(1).md#L4", "https://example.com/x(1)", "C:\\My Docs\\a.md:7", "file:///tmp/my%20notes.md", "src/a.ts", "docs/t.md", "docs/my%20notes.md",
+    ]);
+    const sites = documentLinkSites([pm("pm-1", text)]);
+    // Only files "Mở" opens get an id, each with its own ordinal among every link of the text.
+    expect(sites.map((s) => [s.ordinal, s.href])).toEqual([
+      [0, "docs/my notes.md"], [1, "docs/plan.md"], [2, "docs/a(1).md#L4"], [4, "C:\\My Docs\\a.md:7"], [5, "file:///tmp/my%20notes.md"], [7, "docs/t.md"], [8, "docs/my%20notes.md"],
+    ]);
+    const where = (href: string) => {
+      const t = target(href);
+      return [t.path, t.position?.line ?? null];
+    };
+    expect(where("docs/my notes.md")).toEqual(["/work/app/docs/my notes.md", null]);
+    expect(where("docs/my%20notes.md")).toEqual(["/work/app/docs/my notes.md", null]);
+    expect(where("docs/a(1).md#L4")).toEqual(["/work/app/docs/a(1).md", 4]);
+    expect(where("file:///tmp/my%20notes.md")).toEqual(["/tmp/my notes.md", null]);
+    expect(target("C:\\My Docs\\a.md:7", null)).toMatchObject({ path: "C:\\My Docs\\a.md", position: { line: 7, column: null } });
+  });
+
   it("takes links only from the Markdown the chat draws, and only to files it can open", () => {
     const items: TimelineItem[] = [
       { id: "user-1", kind: "user", text: "open [x](/a/user.md)" },
