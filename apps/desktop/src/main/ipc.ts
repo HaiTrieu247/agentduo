@@ -40,6 +40,8 @@ export interface DispatcherOptions {
   run?: Runner;
   /** The app's own updates (main/updates.ts). */
   updates?: { check(): Promise<UpdateState>; install(): void };
+  /** The close protocol of "Mở" (quit, closing the window): takes the page's answer to a `documentCloseRequest`; false for one it does not know. */
+  documentCloseResponse?(requestId: string, outcome: "settled" | "cancelled"): boolean;
   /** Preferences changed: the window's theme, the menu and the update timer follow. */
   prefsChanged?(): void;
 }
@@ -278,6 +280,20 @@ export class Dispatcher {
       case "link.open":
         await this.o.shell.openExternal(LINKS[r.link]);
         return { opened: true };
+      case "document.open":
+        return projects.openDocument(r.projectId, r.conversationId, r.view, r.linkId);
+      case "document.reload":
+        return projects.documents.reload(r.documentId);
+      case "document.save":
+        return projects.documents.save(r.documentId, r.revision, r.text, r.overwrite);
+      case "document.dirty":
+        projects.documents.setDirty(r.documentId, r.dirty);
+        return { recorded: true };
+      case "document.close":
+        projects.documents.close(r.documentId);
+        return { closed: true };
+      case "document.closeResponse":
+        return { accepted: this.o.documentCloseResponse?.(r.requestId, r.outcome) ?? false };
       case "update.check":
         return this.o.updates ? this.o.updates.check() : this.o.snapshot().update;
       case "update.install":
