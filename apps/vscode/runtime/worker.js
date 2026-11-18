@@ -14760,6 +14760,7 @@ var isPosInt = (v) => Number.isInteger(v) && v >= 1;
 var isStringList = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
 var isModel = (v) => typeof v === "string" && !!v.trim() && v.length <= 200 && !/[\s\u0000-\u001f]/.test(v);
 var describeName = "must be lowercase letters, digits, '-' or '_' (at most 40), starting with a letter or digit";
+var isRoleDescription = (v) => typeof v === "string" && !!v.trim() && v.length <= 300 && !/[\r\n]/.test(v);
 function entryNames(entries, kindOf) {
   const numbered = /* @__PURE__ */ new Map();
   return entries.map((e) => {
@@ -14785,7 +14786,7 @@ function teamMembers(team) {
   const names = entryNames(team.members, (role) => team.roles[role]?.kind);
   const out = [];
   team.members.forEach((entry, i) => {
-    const kind = team.roles[entry.role].kind;
+    const { kind, description } = team.roles[entry.role];
     const level = team.levels[entry.level] ?? {};
     const cli = level[entry.cli] ?? {};
     for (const name2 of names[i]) {
@@ -14800,7 +14801,8 @@ function teamMembers(team) {
         backend: entry.cli,
         model: entry.model ?? cli.model ?? null,
         effort: entry.effort ?? cli.effort ?? null,
-        args: [...entry.args ?? []]
+        args: [...entry.args ?? []],
+        ...description ? { description } : {}
       });
     }
   });
@@ -14864,7 +14866,10 @@ function teamConfigErrors(raw) {
         continue;
       }
       if (!ROLE_KINDS.includes(role.kind)) errors.push(`team.roles.${name2}.kind must be one of ${ROLE_KINDS.join(", ")}`);
-      const extra = Object.keys(role).filter((k) => k !== "kind");
+      if ("description" in role && !isRoleDescription(role.description)) {
+        errors.push(`team.roles.${name2}.description must be one line of text (at most 300 characters)`);
+      }
+      const extra = Object.keys(role).filter((k) => k !== "kind" && k !== "description");
       if (extra.length) errors.push(`team.roles.${name2}: unknown keys ${extra.sort().join(", ")}`);
     }
   }
@@ -14993,6 +14998,7 @@ var DEFAULTS = {
   team: TEAM_DEFAULTS
 };
 var RENAMED = { "codex.extra_args": "codex.args", "claude.extra_args": "claude.args" };
+var DROPPABLE = /* @__PURE__ */ new Set(["team.roles"]);
 var OPEN_MAPPINGS = /* @__PURE__ */ new Set([
   "codex.role_args",
   "claude.role_args",
@@ -15018,9 +15024,13 @@ function defaultConfig() {
   return structuredClone(DEFAULTS);
 }
 var isPlainObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-function mergeOpen(base, over) {
+function mergeOpen(base, over, droppable = false) {
   const out = { ...base };
   for (const [key, value] of Object.entries(over)) {
+    if (droppable && value === null) {
+      delete out[key];
+      continue;
+    }
     const current = base[key];
     out[key] = isPlainObject2(current) && isPlainObject2(value) ? mergeOpen(current, value) : value;
   }
@@ -15037,7 +15047,7 @@ function mergeInto(base, override, where, warnings) {
     const current = base[key];
     if ((isPlainObject2(current) || Array.isArray(current)) && (value === null || value === void 0)) continue;
     if (OPEN_MAPPINGS.has(path)) {
-      out[key] = isPlainObject2(current) && isPlainObject2(value) ? mergeOpen(current, value) : value;
+      out[key] = isPlainObject2(current) && isPlainObject2(value) ? mergeOpen(current, value, DROPPABLE.has(path)) : value;
       continue;
     }
     if (isPlainObject2(current)) {
@@ -18380,8 +18390,8 @@ var CodexBackend = class {
     const fromFile = lastMessageFile && existsSync12(lastMessageFile) ? readFileSync10(lastMessageFile, "utf8") : "";
     const text3 = fromFile.trim() ? fromFile : p.lastAgentMessage ?? "";
     const meta = { tokens: p.tokens || void 0, sessionId: p.threadId ?? void 0, permissionDenials: [] };
-    if (mode === "text" && p.failed) throw new AgentFailure(`codex failed: ${p.error}`, meta);
-    if (!text3.trim()) throw new AgentFailure(p.error ? `codex failed: ${p.error}` : "codex produced no final message", meta);
+    if (mode === "text" && p.failed) throw new AgentFailure(`codex failed: ${p.error}`, meta, true);
+    if (!text3.trim()) throw new AgentFailure(p.error ? `codex failed: ${p.error}` : "codex produced no final message", meta, !!p.error);
     if (mode === "text") return { data: text3, meta };
     try {
       return { data: extractJson(text3), meta };
@@ -24959,7 +24969,13 @@ ${area.area}
 Acceptance criteria your group answers for: ${area.criteria.join(", ") || "(none)"}`;
 }
 function roster(members) {
-  return ["## The team", ...members.map((m) => `- ${m.name}: ${m.role} (${m.kind === "worker" ? "takes tasks" : m.kind === "checker" ? "tests tasks" : m.kind}), level ${m.level}${m.canReview && m.kind === "worker" ? ", reviews others" : ""}, on ${m.backend === "codex" ? "Codex" : "Claude"}`)].join("\n");
+  const described = /* @__PURE__ */ new Map();
+  for (const m of members) if (m.description && !described.has(m.role)) described.set(m.role, m.description);
+  return [
+    "## The team",
+    ...members.map((m) => `- ${m.name}: ${m.role} (${m.kind === "worker" ? "takes tasks" : m.kind === "checker" ? "tests tasks" : m.kind}), level ${m.level}${m.canReview && m.kind === "worker" ? ", reviews others" : ""}, on ${m.backend === "codex" ? "Codex" : "Claude"}`),
+    ...described.size ? ["What the roles do:", ...[...described].map(([role, text3]) => `- ${role}: ${text3}`)] : []
+  ].join("\n");
 }
 function briefSection(brief2, label = "The brief") {
   const list = (title, xs) => xs.length ? `${title}:
@@ -25222,6 +25238,7 @@ ${plan.risks.map((r) => `- ${r}`).join("\n")}` : ""
 }
 function planPrompt(p) {
   const parts = frame("plan", p, p.brief, planningWork(p.group?.name ?? null));
+  const byRole = (p.group?.members ?? p.members).some((m) => m.kind === "worker" && m.description);
   if (p.area && p.group) {
     parts.push({ key: "area", text: `${areaSection(p.area)}
 Plan only your group's part, and give its tasks only to your group: ${p.group.members.filter((m) => m.kind === "worker").map((m) => m.name).join(", ")} take tasks, ${p.group.members.filter((m) => m.kind === "checker").map((m) => m.name).join(", ")} test them. The other groups plan theirs at the same time; depend only on tasks of your own group.` });
@@ -25233,7 +25250,7 @@ ${planSection2(p.previous)}`, digest: digest3(planSection2(p.previous)) });
   if (p.feedback) parts.push(`## What must change
 ${p.feedback}`);
   parts.push(`## What to do now
-${p.additions ? "The brief changed. Plan only the new tasks the change needs (new ids; they may depend on existing tasks)." : "Read the repository, then plan the work."} Split it into tasks that can each be done and tested on their own and that rarely touch the same files, so members can work in parallel. Name each task's assignee (a member who takes tasks), its testers, the files or folders it touches, its dependencies, the acceptance criteria it serves and what its testers must cover. Assign by level. ${p.area ? "Every acceptance criterion of your group's part" : "Every acceptance criterion"} must be served by some task. \`report\` is one line for the PM.` + json);
+${p.additions ? "The brief changed. Plan only the new tasks the change needs (new ids; they may depend on existing tasks)." : "Read the repository, then plan the work."} Split it into tasks that can each be done and tested on their own and that rarely touch the same files, so members can work in parallel. Name each task's assignee (a member who takes tasks), its testers, the files or folders it touches, its dependencies, the acceptance criteria it serves and what its testers must cover. Assign by level${byRole ? ", and by role: give a role the work its description says it does" : ""}. ${p.area ? "Every acceptance criterion of your group's part" : "Every acceptance criterion"} must be served by some task. \`report\` is one line for the PM.` + json);
   return render(parts, p);
 }
 var taskPart = (t) => ({ key: "task", text: taskSection2(t) });
