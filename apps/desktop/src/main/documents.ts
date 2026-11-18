@@ -115,6 +115,20 @@ async function writeAll(fh: { write(b: Buffer, off: number, len: number, pos: nu
   }
 }
 
+/** The whole content of an open handle from its start, or null when it is longer than `max` bytes. */
+async function readHandle(fh: { read(b: Buffer, off: number, len: number, pos: number): Promise<{ bytesRead: number }> }, max: number): Promise<Buffer | null> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const buf = Buffer.alloc(Math.min(65536, max + 1 - total));
+    const { bytesRead } = await fh.read(buf, 0, buf.length, total);
+    if (bytesRead === 0) return Buffer.concat(chunks);
+    chunks.push(buf.subarray(0, bytesRead));
+    total += bytesRead;
+    if (total > max) return null;
+  }
+}
+
 export class DocumentService {
   readonly links = new DocumentLinkTable();
   private readonly sessions = new Map<string, Session>();
@@ -241,7 +255,7 @@ export class DocumentService {
       const check = (): Promise<{ mode: number; current: Buffer | null }> => this.verify(s, revision, overwrite);
       const first = await check();
       try {
-        await this.write(s.real, Buffer.from(bytes), first, check);
+        await this.write(s, Buffer.from(bytes), first, check, revision, overwrite);
       } catch (e) {
         if (e instanceof Failure) throw e;
         throw new Failure(documentError("save-failed", s.name, detailOf(e)));
@@ -274,14 +288,15 @@ export class DocumentService {
   }
 
   /** The folder allowed a temporary file: write it whole, flush it, give it the old mode, check again, then rename it over the file. */
-  private async write(real: string, bytes: Buffer, found: { mode: number; current: Buffer | null }, check: () => Promise<{ current: Buffer | null }>): Promise<void> {
+  private async write(s: Session, bytes: Buffer, found: { mode: number; current: Buffer | null }, check: () => Promise<unknown>, revision: string, overwrite: boolean): Promise<void> {
+    const real = s.real;
     const tmp = join(dirname(real), `.${basename(real)}.${randomBytes(6).toString("hex")}.agentduo-tmp`);
     let fh: Awaited<ReturnType<FileOps["open"]>>;
     try {
       fh = await this.ops.open(tmp, "wx", found.mode & 0o777);
     } catch (e) {
       // A folder that cannot be written to: the file itself is written in place (the one case with no temporary file).
-      if (["EACCES", "EPERM", "EROFS"].includes(code(e))) return this.writeInPlace(real, bytes, check);
+      if (["EACCES", "EPERM", "EROFS"].includes(code(e))) return this.writeInPlace(s, bytes, revision, overwrite);
       throw e;
     }
     try {
@@ -301,12 +316,27 @@ export class DocumentService {
     }
   }
 
-  /** In place: the new bytes first (all of them), then the length, so a failure never leaves a truncated file; a half write is put back. */
-  private async writeInPlace(real: string, bytes: Buffer, check: () => Promise<{ current: Buffer | null }>): Promise<void> {
-    const fh = await this.ops.open(real, "r+");
+  /**
+   * In place: the new bytes first (all of them), then the length, so a failure never leaves a truncated file; a half
+   * write is put back. What is checked is the handle that will be written: it is a regular file, it is the file now at
+   * the session's path (same device and inode), and its own content (read through it) is the revision, unless `overwrite`.
+   */
+  private async writeInPlace(s: Session, bytes: Buffer, revision: string, overwrite: boolean): Promise<void> {
+    const fh = await this.ops.open(s.real, "r+");
     try {
-      // Checked with the file open, right before the first byte goes in; what that read is what is put back on a failure.
-      const { current: original } = await check();
+      let original: Buffer | null;
+      try {
+        const own = await fh.stat();
+        if (!own.isFile()) throw new Failure(documentError("not-a-file", s.name));
+        await this.ensureSamePlace(s);
+        const there = await this.ops.stat(s.real);
+        if (!there.isFile() || there.dev !== own.dev || there.ino !== own.ino) throw new Failure(documentError("changed-on-disk", s.name));
+        original = await readHandle(fh, s.format.maxBytes);
+      } catch (e) {
+        if (e instanceof Failure) throw e;
+        throw fileFailure(e, s.name);
+      }
+      if (!overwrite && (revision !== s.revision || original === null || digest(original) !== s.revision)) throw new Failure(documentError("changed-on-disk", s.name));
       try {
         await writeAll(fh, bytes, 0);
         await fh.truncate(bytes.length);

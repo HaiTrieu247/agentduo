@@ -584,4 +584,28 @@ describe("a write that takes fewer bytes, and a file that changes while it is be
     expect(readFileSync(f, "utf8")).toBe("outside\n");
     expect(s.ids()).toEqual([d.documentId]);
   });
+
+  it("in place: a file moved away and replaced after the handle was opened is not written through the old handle", async () => {
+    if (!posix) return;
+    const fsp = await real();
+    for (const overwrite of [false, true]) {
+      const f = file(`r${overwrite}.md`, "ORIGINAL");
+      const old = join(root, `old${overwrite}.md`);
+      const open = noTmp((async (p: string, flags: string, mode?: number) => {
+        const fh = await fsp.open(p, flags, mode);
+        if (flags === "r+") {
+          (await import("node:fs")).renameSync(f, old);
+          writeFileSync(f, overwrite ? "DIFFERENT" : "ORIGINAL");
+        }
+        return fh;
+      }) as FileOps["open"]);
+      const s = service({ open });
+      const d = doc(await openLink(s, f));
+      const r = await s.save(d.documentId, d.revision, "MY-EDITS", overwrite);
+      expect(r.ok ? "ok" : r.error.code).toBe("changed-on-disk");
+      expect(readFileSync(old, "utf8")).toBe("ORIGINAL");
+      expect(readFileSync(f, "utf8")).toBe(overwrite ? "DIFFERENT" : "ORIGINAL");
+      expect(s.ids()).toEqual([d.documentId]);
+    }
+  });
 });
