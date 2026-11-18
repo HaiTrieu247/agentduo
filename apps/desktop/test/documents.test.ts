@@ -169,13 +169,13 @@ describe("opening: which file", () => {
     }
   });
 
-  it("does not open a Windows path on another OS, nor a POSIX one on Windows", async () => {
-    const s = service();
-    const r = await openLink(s, "C:\\Users\\me\\a.md", null);
+  it("does not open a path of the other OS's shape (a Windows path on POSIX, a POSIX path on Windows)", async () => {
+    // The opposite platform to the real one, with a path in that platform's own shape.
+    const other = service(undefined, { platform: posix ? "win32" : "linux" });
+    const r = await openLink(other, posix ? "C:\\Users\\me\\a.md" : "/home/me/a.md", posix ? null : "/home/me");
     expect(r.ok ? "ok" : r.error.code).toBe("not-found");
-    const w = service(undefined, { platform: "win32" });
-    const r2 = await openLink(w, file("a.md", "x\n"));
-    expect(r2.ok ? "ok" : r2.error.code).toBe("not-found");
+    // And with the real platform, a path of its own shape opens.
+    expect((await openLink(service(), file("a.md", "x\n"))).ok).toBe(true);
   });
 
   it("unreadable and read errors are reported, not thrown", async () => {
@@ -343,7 +343,7 @@ describe("saving", () => {
     const s = service({
       open: (async (p: string, flags: string, mode?: number) => {
         const fh = await real.open(p, flags, mode);
-        if (flags === "wx") fh.writeFile = (() => Promise.reject(Object.assign(new Error("ENOSPC: no space"), { code: "ENOSPC" }))) as typeof fh.writeFile;
+        if (flags === "wx") fh.write = (() => Promise.reject(Object.assign(new Error("ENOSPC: no space"), { code: "ENOSPC" }))) as typeof fh.write;
         return fh;
       }) as FileOps["open"],
     });
@@ -473,5 +473,115 @@ describe("the dispatcher's document requests", () => {
     expect((await ask({ method: "document.closeResponse", requestId: "q2", outcome: "settled" })).result).toEqual({ accepted: false });
     expect((await ask({ method: "document.close", documentId: id })).result).toEqual({ closed: true });
     expect((await ask({ method: "document.reload", documentId: id })).result.ok).toBe(false);
+  });
+});
+
+describe("a write that takes fewer bytes, and a file that changes while it is being replaced", () => {
+  const real = () => import("node:fs").then((m) => m.promises);
+  /** An open() whose handles take at most `n` bytes per write. */
+  const shortWrites = async (n: number, only: string): Promise<FileOps["open"]> => {
+    const fsp = await real();
+    return (async (p: string, flags: string, mode?: number) => {
+      const fh = await fsp.open(p, flags, mode);
+      if (flags === only) {
+        const w = fh.write.bind(fh) as (...a: unknown[]) => Promise<{ bytesWritten: number }>;
+        fh.write = ((b: Buffer, off: number, len: number, pos: number) => w(b, off, Math.min(len, n), pos)) as typeof fh.write;
+      }
+      return fh;
+    }) as FileOps["open"];
+  };
+  const noTmp = (inner: FileOps["open"]): FileOps["open"] => ((p: string, flags: string, mode?: number) =>
+    flags === "wx" ? Promise.reject(Object.assign(new Error("EACCES"), { code: "EACCES" })) : inner(p, flags, mode)) as FileOps["open"];
+
+  it("in place: writes every byte even when each write takes two, then reports success", async () => {
+    const f = file("a.md", "ORIGINAL-CONTENT");
+    const s = service({ open: noTmp(await shortWrites(2, "r+")) });
+    const d = doc(await openLink(s, f));
+    const r = await s.save(d.documentId, d.revision, "NEW-TEXT", false);
+    expect(r.ok).toBe(true);
+    expect(readFileSync(f, "utf8")).toBe("NEW-TEXT");
+  });
+
+  it("in place: a write that makes no progress is a failure, and the old bytes are put back whole", async () => {
+    const f = file("a.md", "ORIGINAL-CONTENT");
+    const fsp = await real();
+    let calls = 0;
+    const open = noTmp((async (p: string, flags: string, mode?: number) => {
+      const fh = await fsp.open(p, flags, mode);
+      if (flags === "r+") {
+        const w = fh.write.bind(fh) as (...a: unknown[]) => Promise<{ bytesWritten: number }>;
+        // Two bytes land, then nothing: the restore (also in 2-byte writes) then goes through.
+        fh.write = ((b: Buffer, off: number, len: number, pos: number) => (++calls === 2 ? Promise.resolve({ bytesWritten: 0 }) : w(b, off, Math.min(len, 2), pos))) as typeof fh.write;
+      }
+      return fh;
+    }) as FileOps["open"]);
+    const s = service({ open });
+    const d = doc(await openLink(s, f));
+    const r = await s.save(d.documentId, d.revision, "NEW-TEXT-LONGER", false);
+    expect(r.ok ? "ok" : r.error.code).toBe("save-failed");
+    expect(readFileSync(f, "utf8")).toBe("ORIGINAL-CONTENT");
+    expect(s.ids()).toEqual([d.documentId]);
+  });
+
+  it("replacing: an outside change while the temporary file is flushed is not overwritten", async () => {
+    const f = file("a.md", "one\n");
+    const fsp = await real();
+    const open = (async (p: string, flags: string, mode?: number) => {
+      const fh = await fsp.open(p, flags, mode);
+      if (flags === "wx") {
+        const sync = fh.sync.bind(fh);
+        fh.sync = (async () => {
+          writeFileSync(f, "outside\n");
+          return sync();
+        }) as typeof fh.sync;
+      }
+      return fh;
+    }) as FileOps["open"];
+    const s = service({ open });
+    const d = doc(await openLink(s, f));
+    const r = await s.save(d.documentId, d.revision, "mine\n", false);
+    expect(r.ok ? "ok" : r.error.code).toBe("changed-on-disk");
+    expect(readFileSync(f, "utf8")).toBe("outside\n");
+    expect(tmpLeft()).toEqual([]);
+    expect(s.ids()).toEqual([d.documentId]);
+  });
+
+  it("replacing: a file removed while the temporary file is flushed is not created again", async () => {
+    const f = file("a.md", "one\n");
+    const fsp = await real();
+    const open = (async (p: string, flags: string, mode?: number) => {
+      const fh = await fsp.open(p, flags, mode);
+      if (flags === "wx") {
+        const sync = fh.sync.bind(fh);
+        fh.sync = (async () => {
+          (await import("node:fs")).rmSync(f);
+          return sync();
+        }) as typeof fh.sync;
+      }
+      return fh;
+    }) as FileOps["open"];
+    const s = service({ open });
+    const d = doc(await openLink(s, f));
+    // Even with the user's choice to overwrite: a file that is gone is not made again.
+    const r = await s.save(d.documentId, d.revision, "mine\n", true);
+    expect(r.ok ? "ok" : r.error.code).toBe("not-found");
+    expect(existsSync(f)).toBe(false);
+    expect(tmpLeft()).toEqual([]);
+  });
+
+  it("in place: an outside change after the file was opened for writing is not overwritten", async () => {
+    const f = file("a.md", "one\n");
+    const fsp = await real();
+    const open = noTmp((async (p: string, flags: string, mode?: number) => {
+      const fh = await fsp.open(p, flags, mode);
+      if (flags === "r+") writeFileSync(f, "outside\n");
+      return fh;
+    }) as FileOps["open"]);
+    const s = service({ open });
+    const d = doc(await openLink(s, f));
+    const r = await s.save(d.documentId, d.revision, "mine\n", false);
+    expect(r.ok ? "ok" : r.error.code).toBe("changed-on-disk");
+    expect(readFileSync(f, "utf8")).toBe("outside\n");
+    expect(s.ids()).toEqual([d.documentId]);
   });
 });

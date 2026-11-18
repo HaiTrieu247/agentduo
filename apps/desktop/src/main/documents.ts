@@ -5,7 +5,7 @@
 // file is opened by `open` (a link id) and written only by `save` (a document id), into the file that was opened.
 // No Electron import and no shell: files are read and written through `FileOps` (node's fs), tested with real files.
 import { createHash, randomBytes } from "node:crypto";
-import { constants, promises as fsp, type Stats } from "node:fs";
+import { constants, promises as fsp } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { TimelineItem } from "@agentduo/host/viewState";
 import {
@@ -102,6 +102,16 @@ export function fileFailure(e: unknown, subject: string): Failure {
       return new Failure(documentError("unreadable", subject, "permission denied"));
     default:
       return new Failure(documentError("unreadable", subject, detailOf(e)));
+  }
+}
+
+/** Every byte of `bytes` at `position` on: a write may take fewer than asked, and one that takes none is a failure. */
+async function writeAll(fh: { write(b: Buffer, off: number, len: number, pos: number): Promise<{ bytesWritten: number }> }, bytes: Buffer, position: number): Promise<void> {
+  let done = 0;
+  while (done < bytes.length) {
+    const { bytesWritten } = await fh.write(bytes, done, bytes.length - done, position + done);
+    if (!(bytesWritten > 0)) throw new Error("the write made no progress");
+    done += bytesWritten;
   }
 }
 
@@ -227,26 +237,13 @@ export class DocumentService {
       const bytes = codec.encode(text);
       if (!bytes) throw new Failure(documentError("save-failed", s.name, "the text cannot be written as it is (NUL or a broken character)"));
       if (bytes.length > s.format.maxBytes) throw new Failure(documentError("save-failed", s.name, `the text is larger than ${s.format.maxBytes} bytes`));
-      const gone = (e: unknown): Failure => (code(e) === "ENOENT" || code(e) === "ENOTDIR" ? new Failure(documentError("not-found", s.name)) : fileFailure(e, s.name));
-      // Still the same file: the folders on the way did not change where it is, and it was not replaced by a link or a folder.
-      await this.ensureSamePlace(s);
-      let before: Stats;
-      let current: Buffer | null;
+      // Checked now and again right before the file is replaced: what lies between (a temporary file, a flush) takes time.
+      const check = (): Promise<{ mode: number; current: Buffer | null }> => this.verify(s, revision, overwrite);
+      const first = await check();
       try {
-        before = await this.ops.stat(s.real);
-        if (!before.isFile()) throw new Failure(documentError("not-a-file", s.name));
-        current = await this.readCurrent(s);
+        await this.write(s.real, Buffer.from(bytes), first, check);
       } catch (e) {
         if (e instanceof Failure) throw e;
-        throw gone(e);
-      }
-      if (!overwrite) {
-        // The page's revision is the session's last; a different one, or content that is no longer it, is not saved over.
-        if (revision !== s.revision || current === null || digest(current) !== s.revision) throw new Failure(documentError("changed-on-disk", s.name));
-      }
-      try {
-        await this.write(s.real, Buffer.from(bytes), before.mode, current);
-      } catch (e) {
         throw new Failure(documentError("save-failed", s.name, detailOf(e)));
       }
       s.text = text;
@@ -255,25 +252,48 @@ export class DocumentService {
     });
   }
 
-  /** The folder allowed a temporary file: write it whole, flush it, give it the old mode, then rename it over the file. */
-  private async write(real: string, bytes: Buffer, mode: number, original: Buffer | null): Promise<void> {
+  /**
+   * The file is where the session opened it, still a regular file, and (unless `overwrite`) its content still is the
+   * session's revision and the page's. Throws the error the user reads; returns the mode and the bytes it found.
+   */
+  private async verify(s: Session, revision: string, overwrite: boolean): Promise<{ mode: number; current: Buffer | null }> {
+    await this.ensureSamePlace(s);
+    let mode: number;
+    let current: Buffer | null;
+    try {
+      const st = await this.ops.stat(s.real);
+      if (!st.isFile()) throw new Failure(documentError("not-a-file", s.name));
+      mode = st.mode;
+      current = await this.readCurrent(s);
+    } catch (e) {
+      if (e instanceof Failure) throw e;
+      throw fileFailure(e, s.name);
+    }
+    if (!overwrite && (revision !== s.revision || current === null || digest(current) !== s.revision)) throw new Failure(documentError("changed-on-disk", s.name));
+    return { mode, current };
+  }
+
+  /** The folder allowed a temporary file: write it whole, flush it, give it the old mode, check again, then rename it over the file. */
+  private async write(real: string, bytes: Buffer, found: { mode: number; current: Buffer | null }, check: () => Promise<{ current: Buffer | null }>): Promise<void> {
     const tmp = join(dirname(real), `.${basename(real)}.${randomBytes(6).toString("hex")}.agentduo-tmp`);
     let fh: Awaited<ReturnType<FileOps["open"]>>;
     try {
-      fh = await this.ops.open(tmp, "wx", mode & 0o777);
+      fh = await this.ops.open(tmp, "wx", found.mode & 0o777);
     } catch (e) {
       // A folder that cannot be written to: the file itself is written in place (the one case with no temporary file).
-      if (["EACCES", "EPERM", "EROFS"].includes(code(e))) return this.writeInPlace(real, bytes, original);
+      if (["EACCES", "EPERM", "EROFS"].includes(code(e))) return this.writeInPlace(real, bytes, check);
       throw e;
     }
     try {
       try {
-        await fh.writeFile(bytes);
+        await writeAll(fh, bytes, 0);
         await fh.sync();
       } finally {
         await fh.close();
       }
-      await this.ops.chmod(tmp, mode & 0o7777).catch(() => undefined);
+      await this.ops.chmod(tmp, found.mode & 0o7777).catch(() => undefined);
+      // The file may have changed or gone while the temporary file was written: nothing is replaced then.
+      await check();
       await this.ops.rename(tmp, real);
     } catch (e) {
       await this.ops.rm(tmp, { force: true }).catch(() => undefined);
@@ -281,18 +301,20 @@ export class DocumentService {
     }
   }
 
-  /** In place: the new bytes first, then the length, so a failure never leaves a truncated file; a half write is put back. */
-  private async writeInPlace(real: string, bytes: Buffer, original: Buffer | null): Promise<void> {
+  /** In place: the new bytes first (all of them), then the length, so a failure never leaves a truncated file; a half write is put back. */
+  private async writeInPlace(real: string, bytes: Buffer, check: () => Promise<{ current: Buffer | null }>): Promise<void> {
     const fh = await this.ops.open(real, "r+");
     try {
+      // Checked with the file open, right before the first byte goes in; what that read is what is put back on a failure.
+      const { current: original } = await check();
       try {
-        await fh.write(bytes, 0, bytes.length, 0);
+        await writeAll(fh, bytes, 0);
         await fh.truncate(bytes.length);
         await fh.sync();
       } catch (e) {
         if (original) {
           try {
-            await fh.write(original, 0, original.length, 0);
+            await writeAll(fh, original, 0);
             await fh.truncate(original.length);
           } catch {
             // the original could not be put back: the error below says the save failed
