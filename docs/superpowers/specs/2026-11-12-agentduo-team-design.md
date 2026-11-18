@@ -206,13 +206,13 @@ conversation, every turn), 72% of a review's (the whole change again each round,
 triage and answer prompts. The PM's single session grew 4.5–4.7k tokens a call, so about 95 calls would fill Codex's
 window. Now:
 
-- A prompt is a list of parts (`render`, `team/prompts.ts`). Some parts come in every prompt: the role line, the team's
-  rules, the exceptions for this work and the guidance about them, the work to act on (the review's findings, the
-  techlead's guidance, the question and its answer, what failed, the new reports, the questions for the PM, the PM's
-  incidents and requests) and what to do now with the output contract. These are short, and they keep the decisions
-  exact after a CLI compacts the session. The others are kept parts: the introduction, the team, the brief, the task,
-  the plan, the groups' parts, the board, a task's history, why a worker's earlier attempt failed, the assignee's
-  report, the change under review.
+- A prompt is a list of parts (`render`, `team/prompts.ts`). Some parts come in every prompt: the role line, the
+  exceptions for this work, the work to act on (the review's findings, the techlead's guidance, the question and its
+  answer, what failed, the new reports, the questions for the PM, the PM's incidents and requests) and what to do now
+  with the output contract. These are short, and they keep the decisions exact after a CLI compacts the session. The
+  others are kept parts: the introduction, the team, the brief, the task, the plan, the groups' parts, the board, a
+  task's history, why a worker's earlier attempt failed, the assignee's report, the change under review, the guidance
+  about the rules (a member's, the PM's, a group PM's). The team's rules are a list (amended 2026-11-18, below).
 - Each session's record keeps a digest of every kept part it was given (`MemberSession.seen`; a list's items one by
   one). A continued call gets a kept part again only when its digest changed, a list only its new or changed items. So
   the PM gets the tasks that changed on the board, with where the board stands ("5 tasks: 3 merged, 2 review"). A
@@ -229,6 +229,24 @@ window. Now:
   That session's record holds that prompt's parts only. A session that went on keeps what it held before as well. A
   session recorded before this change has no digests and gets every part but the identity, as before.
 
+**The rules are given once per session** (amended 2026-11-18). In the run of 16 November (`20261116-161143Z`, 246
+calls) the rules, sent whole in every prompt, were 80% of a continued PM prompt (about 10 KB a turn) and 44% of all
+the bytes of its prompts: RULES.md grew from 1.7 to 13.7 KB during the run (23 lessons), 65% of each rule's line was
+its source, and the PM's one session held 73 copies of them, about 175k of the 364k tokens it reached (Codex's window:
+475k). Now:
+
+- The rules are a list (`rulesPart`): a fresh session gets every rule (`- R<n>: <text>`); a session that goes on gets
+  the ids in force (`In force: R1–R26.`), that the rules its earlier turns were given still hold as written there, and
+  only the rules it was not given (or whose text changed). A session whose earlier turns had no rules gets them all.
+  A rule's source is left out of prompts: RULES.md keeps it, and a rule is to hold without it.
+- A session the CLI compacted holds a summary of its earlier turns, so what they were given may be gone. Claude Code
+  reports it (`system` / `compact_boundary` in its stream, `AgentResult.compacted`); the session's record says so
+  (`MemberSession.compacted`), and its next call goes on in it with the whole prompt: the introduction, the identity,
+  every part and rule, the user's files and the PM's notes. `codex exec --json` reports no compaction (codex-cli
+  0.167.2: its items are agent_message, reasoning, command_execution, file_change, mcp_tool_call, web_search,
+  todo_list), so a Codex session that compacts keeps only its own summary of the rules given before, with the ids in
+  force named every turn. Sessions now grow far slower, which makes that rarer, but not impossible in a long run.
+
 ## The team's rules (added 2026-11-14)
 
 A team learns from what it settled, and keeps it beyond its runs; the user grants every departure from it.
@@ -241,7 +259,8 @@ A team learns from what it settled, and keeps it beyond its runs; the user grant
   marker (`<!-- agentduo-rule id=R<n> op=<opId> at=… -->`), its text and its `Source:`; the same operation id adds it once
   (`lesson:<run>:<incident>`), and whatever the file held, the user's own lines too, stays byte for byte.
 - **Every call.** `TeamRun.call` reads the rules once per call (`promptRules`); every prompt's frame carries them
-  (`rulesSection`), the full prompt, the continued one and the fresh session a lost resume falls back to alike, with the
+  (`rulesPart`: the full prompt and the fresh session a lost resume falls back to every rule, the continued one the ids
+  in force and the rules its session was not given, as "Continued prompts carry only what changed" says), with the
   decisions about exceptions for that very work (`exceptionsSection`) and how a member raises a problem
   (`memberGovernanceGuidance`). Every member schema has `governance: { issues, exception }`.
 - **Incidents and lessons** (`team/rule-governance.ts`, pure). The flow records incidents itself: a review that asked

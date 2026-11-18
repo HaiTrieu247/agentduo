@@ -341,6 +341,15 @@ describe("AgentRunner sessions", () => {
     expect(readFileSync(join(t.path, "logs", "002-plan-r2.a1.prompt.md"), "utf8")).toContain("NEW ONLY");
   });
 
+  it("says when the CLI compacted the context of the session the answer came from", async () => {
+    fake.setScenario({ plan_reviewer: [{ output: critique(true), compact: true }, { output: critique(true) }] });
+    const r = runner();
+    const compacted = await call(r, "plan_reviewer", "001-critique", { session: { keep: true } });
+    expect(compacted).toMatchObject({ ok: true, compacted: true });
+    const plain = await call(r, "plan_reviewer", "002-critique", { session: { keep: true, resume: { id: compacted.sessionId!, prompt: `${prompt("plan_reviewer")}\nNEW ONLY` } } });
+    expect(plain).toMatchObject({ ok: true, resumed: true, compacted: false });
+  });
+
   it("starts a fresh session with the whole prompt when the CLI lost the one to continue, without costing a retry", async () => {
     fake.setScenario({ sessions: { lost: true }, planner: [{ output: plan() }], plan_reviewer: [{ output: critique(true) }] });
     const r = runner({ limits: { max_retries: 0 } });

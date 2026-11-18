@@ -36,15 +36,16 @@ export interface SessionPrompt {
 
 /**
  * A part of a prompt:
- *  - a text: in every prompt (the role line, the team's rules and decisions, the work to act on, what to do now);
+ *  - a text: in every prompt (the role line, the exceptions for this work, the work to act on, what to do now);
  *  - a kept part: given once to a session, then again only when it changed (`digest`, by default the text's). A session that
  *    had an earlier version (`previous`, its digest) is given `delta(previous)` when that says what changed, else the whole text;
- *  - a list: each item given once, then again when it changed (the board's tasks, a task's history).
+ *  - a list: each item given once, then again when it changed (the board's tasks, a task's history, the team's rules). A
+ *    session that goes on is given `changed` above its new items, or `unchanged` (when set) when none is new.
  */
 type Part =
   | string
   | { key: string; text: string; digest?: string; delta?: (previous: string) => string | null }
-  | { key: string; items: Array<{ id: string; text: string }>; heading: string; changed: string; empty?: string };
+  | { key: string; items: Array<{ id: string; text: string }>; heading: string; changed: string; unchanged?: string; empty?: string };
 
 /** A short digest of a part's text: equal digests, the same text (a session given it once need not be given it again). */
 export const digest = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 16);
@@ -71,6 +72,7 @@ function render(parts: Part[], p: SessionPrompt): string {
         return !since || since[key] !== d;
       });
       if (fresh.length) out.push([since ? part.changed : part.heading, ...fresh.map((i) => i.text)].join("\n"));
+      else if (since && part.unchanged) out.push(part.unchanged);
       else if (!since && !part.items.length && part.empty) out.push(`${part.heading}\n${part.empty}`);
     } else {
       const d = part.digest ?? digest(part.text);
@@ -209,16 +211,18 @@ const checkLines = (checks: TaskCheck[]) => checks.flatMap((c) => [
 const json = "\n\n## Your output\nReply with one JSON object that matches the required schema exactly; nothing else.";
 
 /**
- * The parts of a prompt every member gets: the role line, its identity (fresh sessions), the team, the brief, and (for fresh
- * and continued sessions alike, since they are written into the prompt, never into the identity) the team's rules, what the
- * user approved for this very work, the requests that wait, and how to bring a rule problem to the PM. A session that goes on
- * is told so in place of the introduction, and is given the team and the brief again only when they changed.
+ * The parts of a prompt every member gets: the role line, its identity (fresh sessions), the team, the brief, and (written
+ * into the prompt, never into the identity) the team's rules, what the user approved for this very work, the requests that
+ * wait, and how to bring a rule problem to the PM. A session that goes on is told so in place of the introduction, and is
+ * given the team, the brief and that guidance again only when they changed, and of the rules the ids in force and the
+ * rules it was not given (its earlier turns hold the others).
  */
 function frame(kind: string, p: PromptParts, brief: Brief | null, work: WorkRef | null): Part[] {
   return [
     header(kind, p.member) + (goesOn(p) ? CONTINUED : intro(p.member)), p.identity ?? "", { key: "team", text: roster(p.members) },
     brief ? { key: "brief", text: briefSection(brief) } : "",
-    rulesSection(p.rules), exceptionsSection(p.state, p.member, work), p.member.kind === "pm" ? "" : memberGovernanceGuidance(),
+    rulesPart(p.rules), exceptionsSection(p.state, p.member, work),
+    p.member.kind === "pm" ? "" : { key: "governance", text: memberGovernanceGuidance() },
   ];
 }
 
@@ -238,13 +242,40 @@ export const integrationWork = (): WorkRef => ({ unit: { kind: "integration", id
 export const applyWork = (): WorkRef => ({ unit: { kind: "apply", id: RUN_UNIT } });
 export const planningWork = (group: string | null): WorkRef => ({ unit: planningUnit(group) });
 
-/** The rules in force, every one with its id: members cite these ids. Empty: the team has none yet. */
-export function rulesSection(rules: readonly RuleEntry[] | null | undefined): string {
+const LIFTED = "A rule is never lifted by anything but the user's approval of an exception, which is granted for named work only.";
+
+/** `R1–R3, R5`: the rules' ids, a run of consecutive numbers said as a range. */
+export function ruleIdList(rules: readonly RuleEntry[]): string {
+  const out: string[] = [];
+  let run: { first: string; last: string; n: number } | null = null;
+  const flush = () => { if (run) out.push(run.first === run.last ? run.first : `${run.first}–${run.last}`); run = null; };
+  for (const r of rules) {
+    const n = /^R(\d+)$/.exec(r.id)?.[1];
+    if (n === undefined) { flush(); out.push(r.id); continue; }
+    if (run && Number(n) === run.n + 1) { run.last = r.id; run.n = Number(n); continue; }
+    flush();
+    run = { first: r.id, last: r.id, n: Number(n) };
+  }
+  flush();
+  return out.join(", ");
+}
+
+/**
+ * The rules in force, every one with its id (members cite these ids), as a list: a fresh session is given them all, one that
+ * goes on the ids in force and only the rules it was not given (its earlier turns hold the others, as written). A rule's
+ * source stays in RULES.md: the rule is to hold without it. Empty: the team has none yet; absent: not given.
+ */
+export function rulesPart(rules: readonly RuleEntry[] | null | undefined): Part {
   if (!rules) return "";
-  const head = "## The team's rules\nThese rules come from what this team settled before. They hold for all of your work, whatever you were told " +
-    "earlier in this session. A rule is never lifted by anything but the user's approval of an exception, which is granted for named work only.";
-  if (!rules.length) return `${head}\n(none yet)`;
-  return `${head}\n${rules.map((r) => `- ${r.id}: ${r.text}${r.incident ? ` (source: ${r.incident})` : ""}`).join("\n")}`;
+  const heading = "## The team's rules\nThese rules come from what this team settled before. They hold for all of your work, whatever you were told " +
+    `earlier in this session. ${LIFTED}`;
+  if (!rules.length) return `${heading}\n(none yet)`;
+  const held = `## The team's rules\nIn force: ${ruleIdList(rules)}. The rules you were given earlier in this session still hold, as written there, ` +
+    `for all of your work. ${LIFTED}`;
+  return {
+    key: "rule", heading, items: rules.map((r) => ({ id: r.id, text: `- ${r.id}: ${r.text}` })),
+    changed: `${held}\nNew or changed since your last turn:`, unchanged: `${held} None is new since your last turn.`,
+  };
 }
 
 const scopeText = (scope: ExceptionScope): string =>
@@ -398,7 +429,7 @@ export function pmPrompt(p: PromptParts & {
   }
   const governed = pmGovernanceSection(s, p.rules);
   if (governed) parts.push(governed);
-  parts.push(pmGovernanceGuidance(!!groups));
+  parts.push({ key: "pm-governance", text: pmGovernanceGuidance(!!groups) });
   parts.push(`## What to do now\n${pmTask(s, p.occasion)}\n\nAllowed actions now: ${actions.join(", ")}. ` +
     "`message` is what the user reads (in the user's language), or null. Use `questions` to ask the user up to 4 questions with 2 to 6 options each; " +
     "they can always answer in their own words too." + json);
@@ -643,8 +674,8 @@ export function areaPmPrompt(p: PromptParts & {
 }): string {
   const parts = frame(`pm_${p.occasion.kind}`, p, p.brief, null);
   parts.push({ key: "group", text: `You are the PM of group ${p.group.name}. You never talk to the user: ${p.head.name}, the head PM, does. You answer for your group's part.` });
-  parts.push("## Rules and exceptions\nThe team's rules above hold for your group too. A request to depart from a rule, and any question to the user about one, goes up to " +
-    `${p.head.name} (escalate, naming the rules, the reason, the alternative and the work), who alone shows it to the user. You never approve an exception, and you never ask the user.`);
+  parts.push({ key: "group-governance", text: "## Rules and exceptions\nThe team's rules hold for your group too. A request to depart from a rule, and any question to the user about one, goes up to " +
+    `${p.head.name} (escalate, naming the rules, the reason, the alternative and the work), who alone shows it to the user. You never approve an exception, and you never ask the user.` });
   if (p.area) parts.push({ key: "area", text: areaSection(p.area) });
   if (p.plan) parts.push({ key: planKey(p.plan.group), text: planSection(p.plan) });
   if (p.openEscalations.length) {

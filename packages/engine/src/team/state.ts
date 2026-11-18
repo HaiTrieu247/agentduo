@@ -194,6 +194,11 @@ export interface MemberSession {
    * the parts that differ. A review's `change` is the commit it reviewed. Absent (an older run): every part but the identity.
    */
   seen?: Record<string, string>;
+  /**
+   * The CLI compacted the session's context in its last turn (`AgentResult.compacted`): its earlier turns are a summary,
+   * so its next call goes on in it with the whole prompt (introduction, identity, every part, the files and the PM's notes).
+   */
+  compacted?: boolean;
 }
 
 /** A turn that runs in a session of its own for its task: a worker's review, apart from the session in which it may have built it. */

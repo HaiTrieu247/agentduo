@@ -35,6 +35,11 @@ export type ParsedEvent =
   | { type: "question"; questions: ClarificationQuestion[] | null; error?: string; raw: Record<string, unknown> }
   /** The CLI said which model this call runs on. */
   | { type: "model"; model: string }
+  /**
+   * The CLI compacted the session's context (Claude Code's `compact_boundary`): its earlier turns are a summary now, so
+   * what they were given may be gone. `codex exec --json` reports no such event.
+   */
+  | { type: "compacted" }
   /** The final result arrived; in host mode the runner closes stdin so the CLI exits. */
   | { type: "end" };
 

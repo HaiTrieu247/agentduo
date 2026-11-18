@@ -63,6 +63,7 @@ export class ClaudeParser implements StreamParser {
       this.model = event.model;
       return [{ type: "model", model: event.model }];
     }
+    if (event.type === "system" && event.subtype === "compact_boundary") return [{ type: "compacted" }];
     const out: ParsedEvent[] = event.type === "assistant" ? this.trackUsage(event.message) : [];
     const content = event.message?.content;
     if (!Array.isArray(content)) return out;

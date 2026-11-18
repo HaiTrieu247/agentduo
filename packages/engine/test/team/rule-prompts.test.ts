@@ -4,7 +4,7 @@ import { newTask } from "../../src/team/board.js";
 import { TEAM_DEFAULTS, teamGroups, teamMembers, type Member, type TeamConfig } from "../../src/team/config.js";
 import {
   areaPmPrompt, checkPrompt, integrationCheckPrompt, integrationTriagePrompt, answerPrompt, planPrompt, pmActions, pmPrompt, resolvePrompt, reviewPrompt, testsPrompt,
-  triagePrompt, workPrompt, type PmOccasion, type PromptParts,
+  triagePrompt, workPrompt, type PmOccasion, type PromptParts, type SessionView,
 } from "../../src/team/prompts.js";
 import {
   answerDirection, askDirection, assessException, decideException, declineException, presentException, recordIncident, requestException, resolveIncident,
@@ -136,9 +136,10 @@ describe("the rules in a prompt", () => {
     expect(allPrompts(state(), flat, null, null).work).not.toContain("## The team's rules");
   });
 
-  it("a rule is shown as written, with its source, and says no rule is lifted but by an approved exception", () => {
+  it("a rule is shown as written, without its source (RULES.md keeps it), and says no rule is lifted but by an approved exception", () => {
     const text = allPrompts(state(), flat, null).work;
-    expect(text).toContain("(source: an incident)");
+    expect(text).toContain("- R1: State the units in every task description.\n");
+    expect(text).not.toContain("an incident");
     expect(text).toMatch(/never lifted by anything but the user's approval of an exception/);
   });
 });
@@ -359,5 +360,14 @@ describe("a group's PM", () => {
     expect(text).not.toContain("governance.exception");
     expect(text).not.toMatch(/exception_proposal|rule_question/);
     expect(text).toContain("Allowed actions now: none, team_answer, escalate");
+  });
+
+  it("is given that guidance once in a session: a turn that goes on is not given it again", () => {
+    const s = state();
+    const group = teamGroups(grouped).find((g) => g.name === "web")!;
+    const prompt = (p: PromptParts) => areaPmPrompt({ ...p, occasion: { kind: "area_escalation" }, brief, group, area: null, plan: null, openEscalations: [], head: named(grouped, "pm") });
+    const view: SessionView = {};
+    expect(prompt({ ...parts(s, group.pm!, grouped, "IDENTITY"), view })).toContain("## Rules and exceptions");
+    expect(prompt({ ...parts(s, group.pm!, grouped, null), since: view })).not.toContain("## Rules and exceptions");
   });
 });

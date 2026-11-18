@@ -12,6 +12,7 @@ import { testConfig, userConfigEnv, userDataEnv } from "../helpers/config.js";
 import { FakeClis } from "../helpers/fake-clis.js";
 import { git, makeRepo } from "../helpers/repo.js";
 import { recordRuleReads } from "../helpers/rule-reads.js";
+import { rulesInForce, sessionHeld } from "../helpers/session-held.js";
 import { brief, reportIssue, task, teamAnswer, teamCheck, teamPlan, teamPm, teamReview, teamTests, teamTriage, teamWork } from "../helpers/team-builders.js";
 import { tempDir } from "../helpers/tmp.js";
 
@@ -148,12 +149,19 @@ describe("TeamRun's persistent team rules (T4)", () => {
       if (r.questions[0]!.header === "Brief") store.append({ opId: "new-pm-rule", text: LATEST, incident: "The PM settled an earlier mistake." });
     });
     expect(await create(d).run()).toBe("done");
-    const calls = fake.calls().filter((c) => !c.lost);
-    expect(new Set(calls.map((c) => c.member))).toEqual(new Set(["pm", "techlead", "dev-1", "qa-1"]));
-    expect(calls.some((c) => c.resumed)).toBe(true);
-    expect(calls.some((c) => !c.resumed)).toBe(true);
-    for (const call of calls) expect(call.prompt, `${call.role}: ${call.member}`).toContain(ORIGINAL);
-    for (const call of calls.slice(1)) expect(call.prompt, `${call.role}: ${call.member}`).toContain(LATEST);
+    const all = fake.calls();
+    const held = sessionHeld(all);
+    const calls = all.map((call, i) => ({ call, held: held[i]! })).filter(({ call }) => !call.lost);
+    expect(new Set(calls.map(({ call }) => call.member))).toEqual(new Set(["pm", "techlead", "dev-1", "qa-1"]));
+    expect(calls.some(({ call }) => call.resumed)).toBe(true);
+    expect(calls.some(({ call }) => !call.resumed)).toBe(true);
+    // Every call has the rules in its session: a fresh one in its prompt, one that goes on from the turn it was given them.
+    for (const { call, held } of calls) expect(held, `${call.role}: ${call.member}`).toContain(ORIGINAL);
+    for (const { call, held } of calls.slice(1)) {
+      expect(held, `${call.role}: ${call.member}`).toContain(LATEST);
+      if (call.resumed) expect(rulesInForce(call.prompt), `${call.role}: ${call.member}`).toEqual(["R1", "R2"]);
+      else expect(call.prompt, `${call.role}: ${call.member}`).toContain(LATEST);
+    }
   });
 
   it("AC2: a lost continued session falls back to a full prompt with the newly appended rule", async () => {
@@ -167,7 +175,7 @@ describe("TeamRun's persistent team rules (T4)", () => {
     const lost = calls.filter((c) => c.lost);
     expect(lost.length).toBeGreaterThan(0);
     for (const call of lost) {
-      expect(call.prompt).toContain(LATEST);
+      expect(rulesInForce(call.prompt)).toEqual(["R1", "R2"]);
       const fallback = calls.slice(calls.indexOf(call) + 1).find((c) => c.role === call.role && !c.lost);
       expect(fallback).toBeDefined();
       expect(fallback!.resumed).toBeUndefined();
@@ -184,13 +192,19 @@ describe("TeamRun's persistent team rules (T4)", () => {
     store.append({ opId: "while-closed", text: LATEST, incident: "PM recorded a lesson while this run was closed." });
     const before = fake.calls().length;
     expect(await reopen(first.id).run()).toBe("done");
-    const calls = fake.calls().slice(before).filter((c) => !c.lost);
+    const all = fake.calls();
+    const held = sessionHeld(all);
+    const calls = all.map((call, i) => ({ call, held: held[i]! })).slice(before).filter(({ call }) => !call.lost);
     expect(calls.length).toBeGreaterThan(0);
-    expect(calls.some((c) => c.resumed)).toBe(true);
-    for (const call of calls) {
-      expect(call.prompt, call.role).toContain(ORIGINAL);
-      expect(call.prompt, call.role).toContain(LATEST);
+    expect(calls.some(({ call }) => call.resumed)).toBe(true);
+    for (const { call, held } of calls) {
+      expect(held, call.role).toContain(ORIGINAL);
+      expect(held, call.role).toContain(LATEST);
     }
+    // The first call of a session that goes on after the reopening is given the rule it was not given yet.
+    const firstContinued = calls.find(({ call }) => call.resumed)!.call;
+    expect(firstContinued.prompt).toContain(`- R2: ${LATEST}`);
+    expect(firstContinued.prompt).not.toContain(ORIGINAL);
   });
 
   it("AC1: a resumed run keeps its rules-store identity even when the supplied team configuration changes", async () => {
@@ -202,10 +216,13 @@ describe("TeamRun's persistent team rules (T4)", () => {
     const before = fake.calls().length;
     const resumed = TeamRun.resume({ runsDir, id: first.id, cfg: cfg("beta"), workspace: repo, bus: new EventBus(), env, decider: approvals(), reportIntervalMs: 0 });
     expect(await resumed.run()).toBe("done");
-    for (const call of fake.calls().slice(before).filter((c) => !c.lost)) {
-      expect(call.prompt).toContain("ALPHA:");
-      expect(call.prompt).not.toContain("BETA:");
-    }
+    const all = fake.calls();
+    const held = sessionHeld(all);
+    all.forEach((call, i) => {
+      if (i < before || call.lost) return;
+      expect(held[i]).toContain("ALPHA:");
+      expect(held[i]).not.toContain("BETA:");
+    });
   });
 
   it("AC3: a rejected plan that is corrected leads to a PM lesson before acceptance", async () => {
@@ -255,12 +272,19 @@ describe("TeamRun's persistent team rules (T4)", () => {
     expect(store.rules().find((r) => r.id === incident!.lesson!.ruleId)?.text).toBe(LESSON);
     expect(store.read().startsWith(before)).toBe(true);
     // The PM's next call must receive the rule it just added, in the same session.
-    expect(fake.calls("team_pm_acceptance").at(-1)!.prompt).toContain(LESSON);
+    const all = fake.calls();
+    const held = sessionHeld(all);
+    const acceptance = all.findLastIndex((c) => c.role === "team_pm_acceptance");
+    expect(held[acceptance]).toContain(LESSON);
+    expect(rulesInForce(all[acceptance]!.prompt)).toEqual(["R1", "R2"]);
     // So must every call that started once RULES.md held it. A call already on its way then (a lesson turn runs beside the
     // jobs started with it, the PM's turns outside max_parallel) has the rules it read.
     const later = reads.filter((r) => r.rules.includes(LESSON));
     expect(later.length).toBeGreaterThan(0);
-    for (const r of later) for (const prompt of r.prompts) expect(prompt, r.schema ?? undefined).toContain(LESSON);
+    for (const r of later) {
+      expect(r.prompts[0], r.schema ?? undefined).toContain(LESSON);
+      for (const prompt of r.prompts.slice(1)) expect(rulesInForce(prompt), r.schema ?? undefined).toEqual(["R1", "R2"]);
+    }
   });
 
   it("AC3: retains the member's structured incident, its source and its eventual resolution", async () => {

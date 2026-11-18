@@ -24,6 +24,7 @@
 // `codex login status` says it is logged in (scenario.usage.codex.loggedOut: it is not), as the desktop's first-run check asks.
 // `codex app-server` answers initialize, account/read (scenario.usage.codex.account) and account/rateLimits/read
 // (.rateLimits, or the error .rateLimitsError) until stdin closes; .hang never answers, .exit and .stderr fail it.
+// A response's `compact` (Claude only) reports a compaction of the session's context (a compact_boundary event).
 // A response's `pid` names a file (relative to the working directory) the agent writes its process id to, the process
 // a stop must end: on Windows the agent runs under the cmd.exe of its .cmd shim, so only the tree kill reaches it.
 // Sessions work as the real CLIs keep them: a call gets a new session id (Codex's thread_id, Claude's session_id) and
@@ -231,6 +232,8 @@ async function main() {
   } else {
     const model = args.includes("--model") ? args[args.lastIndexOf("--model") + 1] : resp.model ?? "claude-fake-default";
     emit({ type: "system", subtype: "init", session_id: session, model });
+    // `compact`: Claude Code compacted the session's context during the turn, as it reports it (codex exec reports nothing).
+    if (resp.compact) emit({ type: "system", subtype: "compact_boundary", session_id: session, compact_metadata: { trigger: "auto", pre_tokens: 200000 } });
     const usage = { input_tokens: 10, output_tokens: 5 };
     activities.forEach((a, i) => {
       emit({ type: "assistant", uuid: `u${i}`, message: { id: "m", usage, content: [{ type: "tool_use", id: `t${i}`, name: a.tool, input: a.input ?? {} }] } });

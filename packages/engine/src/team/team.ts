@@ -1085,6 +1085,8 @@ export class TeamRun {
     const key = sessionKey(m, o.task, o.purpose ?? null);
     const session = s.sessions[key];
     const continued = keep && session && session.backend === m.backend ? session : null;
+    // A session the CLI compacted holds a summary of its earlier turns: it goes on, given the whole prompt again.
+    const whole = !!continued?.compacted;
     // A techlead reads the PM's notes for its group (and those for every techlead): all of them in a fresh session,
     // the ones its session has not read yet in one that goes on (an older run counted them per member).
     const leadNotes = (from: number) => {
@@ -1094,7 +1096,7 @@ export class TeamRun {
     const notesSeen = s.leadNotes.length;
     // The user's files: every one for a fresh session, the ones it was not given for a session that goes on.
     const files = this.files();
-    const given = new Set(continued?.files ?? []);
+    const given = new Set(continued && !whole ? continued.files ?? [] : []);
     const unseen = files.filter((a) => !given.has(a.id));
     const locate = (a: Attachment) => attachmentFile(this.o.store.runsDir, a);
     const listed = (list: Attachment[], next: boolean) => {
@@ -1114,7 +1116,7 @@ export class TeamRun {
       resume = continued
         ? {
           id: continued.id, attachments: unseen,
-          prompt: build({ identity: null, since: continued.seen ?? null }) + leadNotes(continued.notes ?? s.leadNotesSeen[m.name] ?? 0) + listed(unseen, true),
+          prompt: whole ? full : build({ identity: null, since: continued.seen ?? null }) + leadNotes(continued.notes ?? s.leadNotesSeen[m.name] ?? 0) + listed(unseen, true),
         }
         : undefined;
     } finally {
@@ -1159,10 +1161,12 @@ export class TeamRun {
     }
     if (keep && res.sessionId) {
       // A session that went on still holds what its earlier turns were given that this prompt has no part for; a fresh one
-      // (a new session, or the one a lost resume fell back to) holds this prompt's parts only.
-      const seen = res.resumed && continued ? { ...(continued.seen ?? {}), ...view } : view;
+      // (a new session, or the one a lost resume fell back to) and one given the whole prompt hold this prompt's parts only.
+      // One the CLI compacted in this turn holds a summary of them: its next call gives it the whole prompt.
+      const seen = res.resumed && continued && !whole ? { ...(continued.seen ?? {}), ...view } : view;
       s.sessions[key] = {
         backend: m.backend, id: res.sessionId, ...(files.length ? { files: files.map((a) => a.id) } : {}), ...(m.kind === "lead" ? { notes: notesSeen } : {}), seen,
+        ...(res.compacted ? { compacted: true } : {}),
       };
     }
     const report = (res.data as { governance?: GovernanceReport | null }).governance ?? null;

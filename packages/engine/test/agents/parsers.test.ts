@@ -164,6 +164,13 @@ describe("ClaudeParser", () => {
     expect(fine.questions[0]).toMatchObject({ header: "", multiSelect: true, options: [{ description: "" }, { description: "bee" }] });
   });
 
+  it("reports that Claude Code compacted the session's context (its compact_boundary), once per boundary", () => {
+    const p = new ClaudeParser("/repo");
+    const boundary = JSON.stringify({ type: "system", subtype: "compact_boundary", session_id: "s1", compact_metadata: { trigger: "auto", pre_tokens: 221989 } });
+    expect(p.feed(boundary)).toEqual([{ type: "compacted" }]);
+    expect(p.feed(JSON.stringify({ type: "system", subtype: "status", status: "compacting" }))).toEqual([]);
+  });
+
   it("shows repo-relative paths through symlinks and ignores the trailing newline when counting lines", () => {
     const t = tempDir();
     try {

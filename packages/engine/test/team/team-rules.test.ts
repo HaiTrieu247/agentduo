@@ -14,6 +14,7 @@ import { testConfig, userDataEnv } from "../helpers/config.js";
 import { FakeClis } from "../helpers/fake-clis.js";
 import { git, makeRepo } from "../helpers/repo.js";
 import { recordRuleReads } from "../helpers/rule-reads.js";
+import { rulesInForce, sessionHeld } from "../helpers/session-held.js";
 import { brief, reportIssue, task, teamCheck, teamPlan, teamPm, teamReview, teamTests, teamTriage, teamWork } from "../helpers/team-builders.js";
 import { tempDir } from "../helpers/tmp.js";
 
@@ -109,9 +110,9 @@ describe("the team's RULES.md in a run (AC1)", () => {
     fake.setScenario(happy());
     expect(await teamRun().run()).toBe("done");
     expect(rulesOf().rules().map((r) => r.text)).toEqual([SEED.text]);
-    // The second run's prompts carry it.
-    const calls = fake.calls().filter((c) => c.member);
-    expect(calls.slice(-5).every((c) => c.prompt.includes(SEED.text))).toBe(true);
+    // The second run's calls have it (a continued one in its session, from the turn it was given).
+    const held = sessionHeld(fake.calls());
+    expect(held.slice(-5).every((text) => text.includes(SEED.text))).toBe(true);
   });
 
   it("keeps two teams' rules apart", async () => {
@@ -145,13 +146,37 @@ describe("every call gets the current rules (AC2)", () => {
     rulesOf().append(SEED);
     fake.setScenario(happy());
     expect(await teamRun().run()).toBe("done");
-    const calls = fake.calls().filter((c) => c.member);
+    const all = fake.calls();
+    const held = sessionHeld(all);
+    const calls = all.map((c, i) => ({ c, held: held[i]! })).filter(({ c }) => c.member);
     expect(calls.length).toBeGreaterThan(6);
-    expect(calls.some((c) => c.resumed)).toBe(true);
-    for (const c of calls) {
-      expect(c.prompt, `${c.role} of ${c.member}${c.resumed ? " (continued)" : ""}`).toContain("## The team's rules");
-      expect(c.prompt).toContain(`- R1: ${SEED.text}`);
+    expect(calls.some(({ c }) => c.resumed)).toBe(true);
+    for (const { c, held } of calls) {
+      const name = `${c.role} of ${c.member}${c.resumed ? " (continued)" : ""}`;
+      expect(c.prompt, name).toContain("## The team's rules");
+      // A fresh session is given the rule; one that goes on holds it from an earlier turn and is told it is in force.
+      expect(held, name).toContain(`- R1: ${SEED.text}`);
+      if (c.resumed) expect(rulesInForce(c.prompt), name).toEqual(["R1"]);
+      else expect(c.prompt, name).toContain(`- R1: ${SEED.text}`);
     }
+  });
+
+  it("gives a session the CLI compacted the whole prompt again in its next turn: the introduction, the identity and every rule", async () => {
+    rulesOf().append(SEED);
+    fake.setScenario(happy({
+      team_review: [{ output: teamReview("changes") }, { output: teamReview("approve") }],
+      "team_work:dev-1": [{ output: teamWork(), write: { "app.txt": "first\n" }, compact: true }, { output: teamWork(), write: { "app.txt": "fixed\n" } }],
+      team_pm_rule_lesson: [{ output: teamPm.ruleLesson("I1", "A reviewer names the file of every change it asks for.") }],
+    }));
+    expect(await teamRun().run()).toBe("done");
+    const works = fake.calls("team_work").filter((c) => c.member === "dev-1");
+    expect(works).toHaveLength(2);
+    // The same session goes on, but its earlier turns are a summary now: it is given what a fresh one is.
+    expect(works[1]!.resumed).toBe(works[0]!.session);
+    expect(works[1]!.prompt).not.toContain("This message continues your session");
+    expect(works[1]!.prompt).toContain("You are dev-1");
+    expect(works[1]!.prompt).toContain(`- R1: ${SEED.text}`);
+    expect(works[1]!.prompt).toContain("## Task T1");
   });
 
   it("gives them to the fresh session a failed resume falls back to", async () => {
@@ -165,12 +190,16 @@ describe("every call gets the current rules (AC2)", () => {
     // (A lost resume is logged without its member: it failed before the CLI took a turn.)
     const before = fake.calls().length;
     expect(await resume().run()).toBe("done");
-    const calls = fake.calls().slice(before);
+    const all = fake.calls();
+    const held = sessionHeld(all);
+    const calls = all.slice(before);
     expect(calls.some((c) => c.lost)).toBe(true);
-    for (const c of calls) expect(c.prompt, `${c.role} of ${c.member}${c.lost ? " (lost)" : ""}`).toContain(`- R1: ${SEED.text}`);
-    // The fallback is a fresh session, with the identity and the whole prompt.
+    // A lost resume reached no model; every call that did has the rule in its session.
+    calls.forEach((c, i) => { if (!c.lost) expect(held[before + i], `${c.role} of ${c.member}`).toContain(`- R1: ${SEED.text}`); });
+    // The fallback is a fresh session, with the identity and the whole prompt (the rules' text among it).
     const fallbacks = calls.filter((c) => !c.resumed && !c.lost);
     expect(fallbacks.length).toBeGreaterThan(0);
+    for (const c of fallbacks) expect(c.prompt, `${c.role} of ${c.member}`).toContain(`- R1: ${SEED.text}`);
   });
 
   it("gives a rule added while the run is stopped to the calls of the reopened run, and not to the earlier ones", async () => {
@@ -182,13 +211,16 @@ describe("every call gets the current rules (AC2)", () => {
     const added = rulesOf().append({ opId: "added:1", text: "Never leave a task without a test.", incident: "added by the PM" }).rule;
     expect(added.id).toBe("R2");
     expect(await resume().run()).toBe("done");
-    const calls = fake.calls().filter((c) => c.member);
-    for (const c of calls.slice(0, before)) expect(c.prompt, `${c.role} before`).not.toContain(added.text);
+    const all = fake.calls();
+    const held = sessionHeld(all);
+    const calls = all.map((c, i) => ({ c, held: held[i]! })).filter(({ c }) => c.member);
+    for (const { c } of calls.slice(0, before)) expect(c.prompt, `${c.role} before`).not.toContain(added.text);
     const after = calls.slice(before);
     expect(after.length).toBeGreaterThan(0);
-    for (const c of after) {
-      expect(c.prompt, `${c.role} of ${c.member} after`).toContain(`- R2: ${added.text}`);
-      expect(c.prompt).toContain(`- R1: ${SEED.text}`);
+    for (const { c, held } of after) {
+      expect(held, `${c.role} of ${c.member} after`).toContain(`- R2: ${added.text}`);
+      expect(held).toContain(`- R1: ${SEED.text}`);
+      if (c.resumed) expect(rulesInForce(c.prompt)).toEqual(["R1", "R2"]);
     }
   });
 
@@ -237,7 +269,11 @@ describe("the PM learns from what was settled (AC3)", () => {
     expect(events.at(-1)).toMatchObject({ type: "team.finished", outcome: "done" });
     const later = reads.filter((r) => r.rules.includes(lesson));
     expect(later.length).toBeGreaterThan(0);
-    for (const r of later) for (const prompt of r.prompts) expect(prompt, r.schema ?? undefined).toContain("R2: A reviewer names the file and the criterion");
+    // The whole prompt has its text; a continued one names it in force (with its text when the session was not given it yet).
+    for (const r of later) {
+      expect(r.prompts[0], r.schema ?? undefined).toContain("R2: A reviewer names the file and the criterion");
+      for (const prompt of r.prompts.slice(1)) expect(rulesInForce(prompt), r.schema ?? undefined).toEqual(["R1", "R2"]);
+    }
   });
 
   it("adds a rule after a deviation a member reported was settled, naming only rules the team has", async () => {

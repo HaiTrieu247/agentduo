@@ -13,6 +13,7 @@ import { TeamRun } from "../../src/team/team.js";
 import { testConfig, userDataEnv } from "../helpers/config.js";
 import { FakeClis } from "../helpers/fake-clis.js";
 import { makeRepo } from "../helpers/repo.js";
+import { rulesInForce, sessionHeld } from "../helpers/session-held.js";
 import { askException, brief, task, teamAnswer, teamCheck, teamPlan, teamPm, teamReview, teamTests, teamTriage, teamWork } from "../helpers/team-builders.js";
 import { tempDir } from "../helpers/tmp.js";
 
@@ -254,11 +255,15 @@ describe("what the PM shows and what the user actually decides (AC5–AC8)", () 
     const ex = saved().governance.exceptions[0];
     expect(ex).toMatchObject({ decision: { status: "rejected", by: mode === "reject" ? "user" : "pm", delivered: true } });
     expect(d.observed).toHaveLength(mode === "reject" ? 1 : 0);
-    const worker = fake.calls("team_work").filter((c) => c.member === "dev-1");
+    const all = fake.calls();
+    const held = sessionHeld(all);
+    const worker = all.flatMap((c, i) => (c.role === "team_work" && c.member === "dev-1" ? [{ c, held: held[i]! }] : []));
     expect(worker).toHaveLength(2);
-    expect(worker[1]!.prompt).toContain("refused");
-    expect(worker[1]!.prompt).toContain(RULE);
-    expect(worker[1]!.prompt).not.toContain("approved by the user for");
+    expect(worker[1]!.c.prompt).toContain("refused");
+    // The rule stands: the session holds it as written, and the turn that goes on is told it is in force.
+    expect(worker[1]!.held).toContain(RULE);
+    expect(rulesInForce(worker[1]!.c.prompt)).toContain("R1");
+    expect(worker[1]!.c.prompt).not.toContain("approved by the user for");
     expect(readFileSync(rules().path, "utf8")).toBe(originalRules);
   });
 

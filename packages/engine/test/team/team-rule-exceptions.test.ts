@@ -15,6 +15,7 @@ import { TeamRun } from "../../src/team/team.js";
 import { testConfig, userDataEnv } from "../helpers/config.js";
 import { FakeClis, type FakeCall } from "../helpers/fake-clis.js";
 import { git, makeRepo } from "../helpers/repo.js";
+import { sessionHeld } from "../helpers/session-held.js";
 import {
   askException, brief, task, teamCheck, teamPlan, teamPm, teamReview, teamTests, teamTriage, teamWork,
 } from "../helpers/team-builders.js";
@@ -176,7 +177,9 @@ describe("a member asks for an exception: the work waits, the PM assesses, the u
     expect(exceptionsFor(state, { task: "T2" })).toEqual([]);
     expect(exceptionsFor(state, { task: "T1" }).map((e) => e.id)).toEqual(["X1"]);
     expect(readFileSync(rulesOf().path, "utf8")).toBe(rules);
-    for (const c of fake.calls().filter((x) => x.member && x.member !== "pm")) expect(c.prompt).toContain("- R1: Always say which criterion a change serves.");
+    const all = fake.calls();
+    const held = sessionHeld(all);
+    all.forEach((c, i) => { if (c.member && c.member !== "pm") expect(held[i], `${c.role} of ${c.member}`).toContain("- R1: Always say which criterion a change serves."); });
   });
 
   it("works under the rules, never the exception, when the user refuses", async () => {

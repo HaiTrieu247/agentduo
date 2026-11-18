@@ -14,6 +14,7 @@ import { TeamRun } from "../../src/team/team.js";
 import { testConfig, userDataEnv } from "../helpers/config.js";
 import { FakeClis, type FakeCall } from "../helpers/fake-clis.js";
 import { makeRepo } from "../helpers/repo.js";
+import { rulesInForce, sessionHeld } from "../helpers/session-held.js";
 import { askException, brief, task, teamCheck, teamPlan, teamPm, teamReview, teamTests, teamWork } from "../helpers/team-builders.js";
 import { tempDir } from "../helpers/tmp.js";
 
@@ -137,7 +138,9 @@ describe("a team's rules across its runs (AC1–AC8)", () => {
     expect(second.governance.exceptions[0]!.decision).toMatchObject({ status: "approved", by: "user", delivered: true });
     expect(fake.calls("team_pm_rule_exception")).toHaveLength(1);
     const run2 = fake.calls().slice(run2Start);
-    for (const c of memberCalls(run2)) expect(c.prompt, `${c.role} of ${c.member}`).toContain(ruleLine);
+    const held = sessionHeld(fake.calls());
+    const heldOf = (c: FakeCall) => held[run2Start + run2.indexOf(c)]!;
+    for (const c of memberCalls(run2)) expect(heldOf(c), `${c.role} of ${c.member}`).toContain(ruleLine);
     const works = run2.filter((c) => c.role === "team_work" && c.member === "dev-1");
     expect(works).toHaveLength(2);
     expect(works[0]!.prompt).not.toContain("approved by the user");
@@ -165,8 +168,12 @@ describe("a team's rules across its runs (AC1–AC8)", () => {
     const fourth = stateOf();
     expect(fourth.governance.exceptions).toEqual([]);
     expect(exceptionsFor(fourth, { task: "T1" })).toEqual([]);
-    for (const c of memberCalls(fake.calls().slice(run4Start))) {
-      expect(c.prompt, `${c.role} of ${c.member}`).toContain(ruleLine);
+    const run4 = fake.calls().slice(run4Start);
+    const held4 = sessionHeld(fake.calls());
+    for (const c of memberCalls(run4)) {
+      const name = `${c.role} of ${c.member}`;
+      expect(held4[run4Start + run4.indexOf(c)], name).toContain(ruleLine);
+      if (c.resumed) expect(rulesInForce(c.prompt), name).toEqual(["R1"]);
       expect(c.prompt).not.toContain("approved by the user");
     }
     expect(rulesOf().rules().map((r) => r.id)).toEqual(["R1"]);

@@ -124,6 +124,11 @@ export interface AgentResult {
   sessionId: string | null;
   /** The answer came from the session the call continued, not from a fresh one. */
   resumed: boolean;
+  /**
+   * The CLI compacted the context of the session the answer came from during that attempt (Claude's compact_boundary):
+   * what its earlier turns were given may be gone. Never true for Codex, which does not report it.
+   */
+  compacted: boolean;
   /** CLI processes the call started (every attempt that ran, also one that failed). */
   calls: number;
   /** Of those, the ones whose CLI reported no cost (every Codex call): `costUsd` does not include them. */
@@ -450,6 +455,8 @@ export class AgentRunner {
     let rejected: { errors: string[]; answer: unknown } | null = null;
     const rejections: Rejection[] = [];
     let resuming: CallSession["resume"];
+    // Whether the CLI compacted the session of the current attempt: the answer's session is the last attempt's.
+    let compacted = false;
     let calls = 0;
     let priced = 0;
     const waits = new HumanWaits();
@@ -462,7 +469,7 @@ export class AgentRunner {
     const finish = (ok: boolean, attempts: number, data: unknown, error: string | null, interrupted = false, budgetStop: string | null = null): AgentResult => ({
       ok, data, error, attempts, durationSec: (Date.now() - started) / 1000,
       costUsd: costSeen ? cost : null, tokens: tokensSeen ? tokens : null, meta, backend: backend.name, interrupted, model,
-      sessionId: meta.sessionId ?? null, resumed: ok && !!resuming, calls, unpricedCalls: calls - priced, budgetStop, rejections,
+      sessionId: meta.sessionId ?? null, resumed: ok && !!resuming, compacted: ok && compacted, calls, unpricedCalls: calls - priced, budgetStop, rejections,
       waitedSec: waits.ms / 1000,
     });
     const budget = o.mode === "text" ? undefined : o.budget;
@@ -473,6 +480,7 @@ export class AgentRunner {
       const stop = budget?.stop({ tokens, costUsd: cost, calls, waitedSec: waits.ms / 1000 }) ?? null;
       if (stop) return finish(false, attempt - 1, null, stop, false, stop);
       resuming = attempt === 1 ? resume : undefined;
+      compacted = false;
       // The fresh session after a resumed attempt never saw that attempt: a lost session needs no note, but an answer
       // agentduo rejected does, or the new session would repeat it.
       const fellBack = attempt === 2 && !!resume;
@@ -589,6 +597,8 @@ export class AgentRunner {
               } else if (ev.type === "model") {
                 model = ev.model;
                 channel.model(ev.model);
+              } else if (ev.type === "compacted") {
+                compacted = true;
               } else {
                 channel.usage(ev.costUsd !== undefined ? baseCost + ev.costUsd : undefined, ev.tokens !== undefined ? baseTokens + ev.tokens : undefined);
               }
