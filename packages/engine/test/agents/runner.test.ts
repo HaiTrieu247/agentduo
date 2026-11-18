@@ -181,6 +181,14 @@ describe("AgentRunner", () => {
     expect(r.error).toBe("claude exited with code 1: claude reported an error: You've hit your 5-hour limit · resets 4am (Asia/Saigon)");
   });
 
+  it("says the error Codex reports in its stream, not the raw stream, when it exits with code 1", async () => {
+    const limit = "You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at 9:56 PM.";
+    fake.setScenario({ planner: [{ apiError: limit }] });
+    const r = await runner({ limits: { max_retries: 0 } }).call({ role: "planner", agentRole: "planner", prompt: prompt("planner"), schemaName: "plan", logPrefix: "005c" });
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe(`codex exited with code 1: codex failed: ${limit}`);
+  });
+
   it("times out", async () => {
     fake.setScenario({ planner: [{ output: plan(), sleep: 5000 }] });
     const r = await runner({ limits: { max_retries: 0, agent_timeout_sec: 1 } }).call({ role: "planner", agentRole: "planner", prompt: prompt("planner"), schemaName: "plan", logPrefix: "006" });

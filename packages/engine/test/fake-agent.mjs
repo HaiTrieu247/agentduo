@@ -226,6 +226,13 @@ async function main() {
       emit({ type: "item.completed", item: { ...item, exit_code: a.exit ?? 0, status: "completed" } });
     });
     await sleep();
+    // `apiError`: the API refused the turn (a usage limit), as codex-cli 0.167 reports it: an error event and a failed
+    // turn with the reason, no answer, and exit code 1.
+    if (resp.apiError) {
+      emit({ type: "error", message: resp.apiError });
+      emit({ type: "turn.failed", error: { message: resp.apiError } });
+      return resp.exit ?? 1;
+    }
     emit({ type: "item.completed", item: { id: "item_final", type: "agent_message", text } });
     emit({ type: "turn.completed", usage: threadUsage });
     if (!resp.noLastMessage) writeFileSync(args[args.indexOf("--output-last-message") + 1], text);

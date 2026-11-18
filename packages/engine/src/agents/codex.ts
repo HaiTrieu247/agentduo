@@ -225,8 +225,9 @@ export class CodexBackend implements AgentBackend {
     const fromFile = lastMessageFile && existsSync(lastMessageFile) ? readFileSync(lastMessageFile, "utf8") : "";
     const text = fromFile.trim() ? fromFile : p.lastAgentMessage ?? "";
     const meta: AgentMeta = { tokens: p.tokens || undefined, sessionId: p.threadId ?? undefined, permissionDenials: [] };
-    if (mode === "text" && p.failed) throw new AgentFailure(`codex failed: ${p.error}`, meta);
-    if (!text.trim()) throw new AgentFailure(p.error ? `codex failed: ${p.error}` : "codex produced no final message", meta);
+    // An error Codex reported (a usage limit says when to try again) is the reason, which beats its raw stream.
+    if (mode === "text" && p.failed) throw new AgentFailure(`codex failed: ${p.error}`, meta, true);
+    if (!text.trim()) throw new AgentFailure(p.error ? `codex failed: ${p.error}` : "codex produced no final message", meta, !!p.error);
     // An answer is shown as Codex wrote it, also when it happens to look like JSON.
     if (mode === "text") return { data: text, meta };
     try {

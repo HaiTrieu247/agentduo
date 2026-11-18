@@ -429,6 +429,16 @@ describe("a team run", () => {
     expect(events.filter((e) => e.type === "warning").map((e) => (e as { text: string }).text).at(-1)).toContain("The team stopped: the PM failed twice");
   });
 
+  it("says why the PM failed when its CLI said it, a usage limit say, and not the first line of its stream", async () => {
+    const limit = "You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at 9:56 PM.";
+    fake.setScenario({ team_pm_conversation: [{ apiError: limit }] });
+    expect(await teamRun({ decider: decider() }).run()).toBe("waiting");
+    const stop = events.filter((e) => e.type === "warning").map((e) => (e as { text: string }).text).at(-1)!;
+    expect(stop).toContain(`The team stopped: the PM failed twice (`);
+    expect(stop).toContain(limit);
+    expect(stop).not.toContain("thread.started");
+  });
+
   it("gives Claude's members your permission mode, as the implementer gets it", async () => {
     fake.setScenario(happy({ team_plan: [{ output: teamPlan([task("T1", { criteria: ["AC1", "AC2"] })]) }] }));
     const cfg = testConfig(fake, { gates: [] });
