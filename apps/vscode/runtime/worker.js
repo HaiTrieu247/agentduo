@@ -17931,6 +17931,7 @@ var ClaudeParser = class {
       this.model = event.model;
       return [{ type: "model", model: event.model }];
     }
+    if (event.type === "system" && event.subtype === "compact_boundary") return [{ type: "compacted" }];
     const out = event.type === "assistant" ? this.trackUsage(event.message) : [];
     const content = event.message?.content;
     if (!Array.isArray(content)) return out;
@@ -18642,6 +18643,7 @@ var AgentRunner = class {
     let rejected = null;
     const rejections = [];
     let resuming;
+    let compacted = false;
     let calls = 0;
     let priced = 0;
     const waits = new HumanWaits();
@@ -18662,6 +18664,7 @@ ${clarificationSection(answered, "## What the user already answered during an ea
       model,
       sessionId: meta.sessionId ?? null,
       resumed: ok && !!resuming,
+      compacted: ok && compacted,
       calls,
       unpricedCalls: calls - priced,
       budgetStop,
@@ -18674,6 +18677,7 @@ ${clarificationSection(answered, "## What the user already answered during an ea
       const stop = budget?.stop({ tokens, costUsd: cost, calls, waitedSec: waits.ms / 1e3 }) ?? null;
       if (stop) return finish(false, attempt - 1, null, stop, false, stop);
       resuming = attempt === 1 ? resume : void 0;
+      compacted = false;
       const fellBack = attempt === 2 && !!resume;
       if (fellBack) {
         if (text3) {
@@ -18797,6 +18801,8 @@ Return ONLY a JSON object that matches the required schema exactly.
               } else if (ev.type === "model") {
                 model = ev.model;
                 channel.model(ev.model);
+              } else if (ev.type === "compacted") {
+                compacted = true;
               } else {
                 channel.usage(ev.costUsd !== void 0 ? baseCost + ev.costUsd : void 0, ev.tokens !== void 0 ? baseTokens + ev.tokens : void 0);
               }
@@ -24884,6 +24890,7 @@ function render(parts, p) {
         return !since || since[key] !== d;
       });
       if (fresh.length) out.push([since ? part.changed : part.heading, ...fresh.map((i) => i.text)].join("\n"));
+      else if (since && part.unchanged) out.push(part.unchanged);
       else if (!since && !part.items.length && part.empty) out.push(`${part.heading}
 ${part.empty}`);
     } else {
@@ -25004,21 +25011,56 @@ function frame(kind, p, brief2, work) {
     p.identity ?? "",
     { key: "team", text: roster(p.members) },
     brief2 ? { key: "brief", text: briefSection(brief2) } : "",
-    rulesSection(p.rules),
+    rulesPart(p.rules),
     exceptionsSection(p.state, p.member, work),
-    p.member.kind === "pm" ? "" : memberGovernanceGuidance()
+    p.member.kind === "pm" ? "" : { key: "governance", text: memberGovernanceGuidance() }
   ];
 }
 var integrationWork = () => ({ unit: { kind: "integration", id: RUN_UNIT } });
 var applyWork = () => ({ unit: { kind: "apply", id: RUN_UNIT } });
 var planningWork = (group) => ({ unit: planningUnit(group) });
-function rulesSection(rules) {
+var LIFTED = "A rule is never lifted by anything but the user's approval of an exception, which is granted for named work only.";
+function ruleIdList(rules) {
+  const out = [];
+  let run = null;
+  const flush = () => {
+    if (run) out.push(run.first === run.last ? run.first : `${run.first}\u2013${run.last}`);
+    run = null;
+  };
+  for (const r of rules) {
+    const n = /^R(\d+)$/.exec(r.id)?.[1];
+    if (n === void 0) {
+      flush();
+      out.push(r.id);
+      continue;
+    }
+    if (run && Number(n) === run.n + 1) {
+      run.last = r.id;
+      run.n = Number(n);
+      continue;
+    }
+    flush();
+    run = { first: r.id, last: r.id, n: Number(n) };
+  }
+  flush();
+  return out.join(", ");
+}
+function rulesPart(rules) {
   if (!rules) return "";
-  const head = "## The team's rules\nThese rules come from what this team settled before. They hold for all of your work, whatever you were told earlier in this session. A rule is never lifted by anything but the user's approval of an exception, which is granted for named work only.";
-  if (!rules.length) return `${head}
+  const heading = `## The team's rules
+These rules come from what this team settled before. They hold for all of your work, whatever you were told earlier in this session. ${LIFTED}`;
+  if (!rules.length) return `${heading}
 (none yet)`;
-  return `${head}
-${rules.map((r) => `- ${r.id}: ${r.text}${r.incident ? ` (source: ${r.incident})` : ""}`).join("\n")}`;
+  const held = `## The team's rules
+In force: ${ruleIdList(rules)}. The rules you were given earlier in this session still hold, as written there, for all of your work. ${LIFTED}`;
+  return {
+    key: "rule",
+    heading,
+    items: rules.map((r) => ({ id: r.id, text: `- ${r.id}: ${r.text}` })),
+    changed: `${held}
+New or changed since your last turn:`,
+    unchanged: `${held} None is new since your last turn.`
+  };
 }
 var scopeText = (scope) => scope.unit ? `the ${scope.unit.kind}${scope.unit.id === RUN_UNIT ? "" : ` of ${scope.unit.id}`} (${scope.unit.occurrence})` : `task${scope.taskIds.length === 1 ? "" : "s"} ${scope.taskIds.join(", ")}`;
 function requestedHere(state, ex, work) {
@@ -25127,7 +25169,7 @@ ${feedback.map(([group, text3]) => group ? `- ${group}: ${text3}` : text3).join(
   }
   const governed = pmGovernanceSection(s, p.rules);
   if (governed) parts.push(governed);
-  parts.push(pmGovernanceGuidance(!!groups));
+  parts.push({ key: "pm-governance", text: pmGovernanceGuidance(!!groups) });
   parts.push(`## What to do now
 ${pmTask(s, p.occasion)}
 
@@ -25339,8 +25381,8 @@ ${checkLines(p.checks).join("\n")}` : ""}`);
 function areaPmPrompt(p) {
   const parts = frame(`pm_${p.occasion.kind}`, p, p.brief, null);
   parts.push({ key: "group", text: `You are the PM of group ${p.group.name}. You never talk to the user: ${p.head.name}, the head PM, does. You answer for your group's part.` });
-  parts.push(`## Rules and exceptions
-The team's rules above hold for your group too. A request to depart from a rule, and any question to the user about one, goes up to ${p.head.name} (escalate, naming the rules, the reason, the alternative and the work), who alone shows it to the user. You never approve an exception, and you never ask the user.`);
+  parts.push({ key: "group-governance", text: `## Rules and exceptions
+The team's rules hold for your group too. A request to depart from a rule, and any question to the user about one, goes up to ${p.head.name} (escalate, naming the rules, the reason, the alternative and the work), who alone shows it to the user. You never approve an exception, and you never ask the user.` });
   if (p.area) parts.push({ key: "area", text: areaSection(p.area) });
   if (p.plan) parts.push({ key: planKey(p.plan.group), text: planSection2(p.plan) });
   if (p.openEscalations.length) {
@@ -26573,6 +26615,7 @@ var TeamRun = class _TeamRun {
     const key = sessionKey(m, o.task, o.purpose ?? null);
     const session2 = s.sessions[key];
     const continued = keep && session2 && session2.backend === m.backend ? session2 : null;
+    const whole = !!continued?.compacted;
     const leadNotes = (from) => {
       const read = m.kind === "lead" ? s.leadNotes.slice(from).filter((n) => n.group === null || n.group === m.group) : [];
       return read.length ? `
@@ -26582,7 +26625,7 @@ ${read.map((n) => `- ${n.text}`).join("\n")}` : "";
     };
     const notesSeen = s.leadNotes.length;
     const files = this.files();
-    const given2 = new Set(continued?.files ?? []);
+    const given2 = new Set(continued && !whole ? continued.files ?? [] : []);
     const unseen = files.filter((a) => !given2.has(a.id));
     const locate = (a) => attachmentFile(this.o.store.runsDir, a);
     const listed = (list, next) => {
@@ -26601,7 +26644,7 @@ ${text3}` : "";
       resume = continued ? {
         id: continued.id,
         attachments: unseen,
-        prompt: build({ identity: null, since: continued.seen ?? null }) + leadNotes(continued.notes ?? s.leadNotesSeen[m.name] ?? 0) + listed(unseen, true)
+        prompt: whole ? full : build({ identity: null, since: continued.seen ?? null }) + leadNotes(continued.notes ?? s.leadNotesSeen[m.name] ?? 0) + listed(unseen, true)
       } : void 0;
     } finally {
       this.promptRules = null;
@@ -26645,13 +26688,14 @@ ${text3}` : "";
       throw new Error(res.error ?? "the call failed");
     }
     if (keep && res.sessionId) {
-      const seen = res.resumed && continued ? { ...continued.seen ?? {}, ...view2 } : view2;
+      const seen = res.resumed && continued && !whole ? { ...continued.seen ?? {}, ...view2 } : view2;
       s.sessions[key] = {
         backend: m.backend,
         id: res.sessionId,
         ...files.length ? { files: files.map((a) => a.id) } : {},
         ...m.kind === "lead" ? { notes: notesSeen } : {},
-        seen
+        seen,
+        ...res.compacted ? { compacted: true } : {}
       };
     }
     const report = res.data.governance ?? null;
