@@ -126,6 +126,8 @@ const DEFAULTS: ConfigData = {
 /** Keys from agentduo v1 that kept their meaning under a new name. */
 const RENAMED: Record<string, string> = { "codex.extra_args": "codex.args", "claude.extra_args": "claude.args" };
 /** Mappings whose keys are user-chosen (validated later) rather than fixed by the defaults. */
+/** Open mappings whose entries a layer may drop with null (`team.roles.qa: null`: the team has no qa role). */
+const DROPPABLE = new Set(["team.roles"]);
 const OPEN_MAPPINGS = new Set([
   "codex.role_args", "claude.role_args", "codex.role_models", "claude.role_models", "codex.role_efforts", "claude.role_efforts",
   "team.levels", "team.roles",
@@ -164,9 +166,14 @@ export function defaultConfig(): ConfigData {
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /** `over` on `base`, mapping by mapping (a list or a value replaces), with no key checked: an open mapping's entries are the user's. */
-function mergeOpen(base: Record<string, unknown>, over: Record<string, unknown>): Record<string, unknown> {
+function mergeOpen(base: Record<string, unknown>, over: Record<string, unknown>, droppable = false): Record<string, unknown> {
   const out = { ...base };
   for (const [key, value] of Object.entries(over)) {
+    // A layer's null drops an entry the layers under it (or the defaults) have: a role the team does without.
+    if (droppable && value === null) {
+      delete out[key];
+      continue;
+    }
     const current = base[key];
     out[key] = isPlainObject(current) && isPlainObject(value) ? mergeOpen(current, value) : value;
   }
@@ -186,7 +193,7 @@ function mergeInto(base: Record<string, unknown>, override: Record<string, unkno
     if (OPEN_MAPPINGS.has(path)) {
       // Merged per role (or level), so a user-level implementer entry survives a workspace plan_reviewer entry, and a level
       // the workspace changes in part keeps the rest.
-      out[key] = isPlainObject(current) && isPlainObject(value) ? mergeOpen(current, value) : value;
+      out[key] = isPlainObject(current) && isPlainObject(value) ? mergeOpen(current, value, DROPPABLE.has(path)) : value;
       continue;
     }
     if (isPlainObject(current)) {

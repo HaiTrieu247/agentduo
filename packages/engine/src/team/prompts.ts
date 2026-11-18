@@ -155,10 +155,14 @@ export function areaSection(area: Area): string {
   return `## Your group's part: ${area.group}\n${area.area}\nAcceptance criteria your group answers for: ${area.criteria.join(", ") || "(none)"}`;
 }
 
+/** The team: every member, then what each role the configuration describes does (once per role, of these members only). */
 export function roster(members: Member[]): string {
+  const described = new Map<string, string>();
+  for (const m of members) if (m.description && !described.has(m.role)) described.set(m.role, m.description);
   return ["## The team", ...members.map((m) =>
     `- ${m.name}: ${m.role} (${m.kind === "worker" ? "takes tasks" : m.kind === "checker" ? "tests tasks" : m.kind}), level ${m.level}` +
-    `${m.canReview && m.kind === "worker" ? ", reviews others" : ""}, on ${m.backend === "codex" ? "Codex" : "Claude"}`)].join("\n");
+    `${m.canReview && m.kind === "worker" ? ", reviews others" : ""}, on ${m.backend === "codex" ? "Codex" : "Claude"}`),
+  ...(described.size ? ["What the roles do:", ...[...described].map(([role, text]) => `- ${role}: ${text}`)] : [])].join("\n");
 }
 
 export function briefSection(brief: Brief, label = "The brief"): string {
@@ -498,6 +502,8 @@ export function planPrompt(p: PromptParts & {
   brief: Brief; feedback: string | null; previous: TeamPlan | null; existing: TaskState[]; additions: boolean; area: Area | null; group: TeamGroup | null;
 }): string {
   const parts = frame("plan", p, p.brief, planningWork(p.group?.name ?? null));
+  // A role that takes tasks and says what it does is given that work: the team above lists what each one does.
+  const byRole = (p.group?.members ?? p.members).some((m) => m.kind === "worker" && m.description);
   if (p.area && p.group) {
     parts.push({ key: "area", text: `${areaSection(p.area)}\nPlan only your group's part, and give its tasks only to your group: ` +
       `${p.group.members.filter((m) => m.kind === "worker").map((m) => m.name).join(", ")} take tasks, ` +
@@ -512,7 +518,7 @@ export function planPrompt(p: PromptParts & {
     ? "The brief changed. Plan only the new tasks the change needs (new ids; they may depend on existing tasks)."
     : "Read the repository, then plan the work."} Split it into tasks that can each be done and tested on their own and that rarely touch the same files, ` +
     "so members can work in parallel. Name each task's assignee (a member who takes tasks), its testers, the files or folders it touches, its dependencies, " +
-    `the acceptance criteria it serves and what its testers must cover. Assign by level. ${p.area ? "Every acceptance criterion of your group's part" : "Every acceptance criterion"} ` +
+    `the acceptance criteria it serves and what its testers must cover. Assign by level${byRole ? ", and by role: give a role the work its description says it does" : ""}. ${p.area ? "Every acceptance criterion of your group's part" : "Every acceptance criterion"} ` +
     "must be served by some task. `report` is one line for the PM." + json);
   return render(parts, p);
 }

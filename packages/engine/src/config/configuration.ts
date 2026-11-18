@@ -7,6 +7,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import YAML from "yaml";
 import { configErrors, ConfigError, configFromLayers, defaultConfig, userConfigPath, type ConfigData } from "./config.js";
+import type { TeamRole } from "../team/config.js";
 import { expandHome } from "../system/environment.js";
 import {
   checkSettingValue, configDocument, configText, removeKeys, SETTING_KEYS, settingKey, settings, valueAt, type SettingChange, type SettingKey, type SettingKind,
@@ -302,8 +303,11 @@ export function teamMembersSource(o: ConfigurationOptions): "project" | "global"
   return load(o).layers.filter(has).at(-1)?.info.scope ?? null;
 }
 
-/** What Settings → Team edits of team mode's configuration: who is in the team, the roles and levels, how many work at once. */
-export type TeamEdit = Pick<ConfigData["team"], "members" | "roles" | "levels" | "max_parallel">;
+/**
+ * What Settings → Team edits of team mode's configuration: who is in the team, the roles and levels, how many work at once.
+ * A role written null is one the team does without (`rolesToWrite`): the merge drops it, also one of agentduo's own.
+ */
+export type TeamEdit = Pick<ConfigData["team"], "members" | "levels" | "max_parallel"> & { roles: Record<string, TeamRole | null> };
 
 /**
  * Writes the team (team.members, team.roles, team.levels, team.max_parallel) into the user config or the workspace's
@@ -313,7 +317,12 @@ export type TeamEdit = Pick<ConfigData["team"], "members" | "roles" | "levels" |
 export function updateTeam(o: ConfigurationOptions, scope: "global" | "project", team: TeamEdit): ConfigurationView {
   const file = fileFor(o, scope);
   const doc = documentOf(file);
-  for (const key of TEAM_KEYS) doc.setIn(["team", key], structuredClone(team[key]));
+  // A null role drops one the layers under this file have (agentduo's, the user config's for a project's file); one
+  // only this file had is left out instead, since the file's team.roles is written whole.
+  const under = load(o).layers.filter((l) => !l.info.error && scope === "project" && l.info.scope === "global").map((l) => l.raw);
+  const below = configFromLayers(under).team.roles;
+  const roles = Object.fromEntries(Object.entries(team.roles).filter(([name, role]) => role !== null || name in below));
+  for (const key of TEAM_KEYS) doc.setIn(["team", key], structuredClone(key === "roles" ? roles : team[key]));
   guard(o, scope, doc);
   atomicWrite(file, configText(doc));
   return readConfiguration(o);

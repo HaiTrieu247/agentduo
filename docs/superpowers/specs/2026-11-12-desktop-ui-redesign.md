@@ -96,7 +96,7 @@ Each area is owned by one task and one stylesheet. "States" lists what must be d
 | Settings | Settings page: sections, cards, rows, scope switch, config tabs, advanced | changed, inherited, invalid, saving, locked by another agentduo, invalid YAML | T4 · settings.css · settings.ts |
 | Settings | Claude & Codex: CLI cards, sign-in, usage | found, missing, signed out, error, loading | T4 · settings.css · settings.ts |
 | Settings | Option editor (CLI args) and its add menu | empty, draft, menu up / down, invalid | T4 · settings.css · argumentOptions.ts |
-| Settings | Settings → Team: members, groups, identity editor, member form, preview | empty, invalid team, unsaved, member open, preview pending / error | T4 · settings.css · team.ts |
+| Settings | Settings → Team: Team and Roles panels (divider, show/hide), members, groups, roles, identity editor, member and role forms, preview | empty, invalid team, unsaved, member or role open, one panel hidden, narrow (stacked, Roles first), preview pending / error | T4 · settings.css · team.ts · team-roles.ts |
 | Settings | Diagnostics, Data & storage, About | checks ok / failing, long paths | T4 · settings.css · settings.ts |
 | Settings | Onboarding | CLIs missing, signed out, ready | T4 · settings.css · onboarding.ts |
 | All | Primitives: buttons, icon buttons, fields, selects, segmented, tags, pills, meters, notices | hover, active, focus-visible, disabled, invalid, warning, error | T1 · base.css |

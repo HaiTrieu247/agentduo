@@ -26,6 +26,11 @@ export interface TeamLevel {
 
 export interface TeamRole {
   kind: RoleKind;
+  /**
+   * What the role does, in one line (at most 300 characters): every team prompt shows it after the role's members, so
+   * the techlead gives the role the work it is for. Absent: the role's name says it.
+   */
+  description?: string;
 }
 
 /** One entry of `team.members`: `count` members of a role at a level, on a CLI. */
@@ -121,6 +126,8 @@ export interface Member {
   model: string | null;
   effort: string | null;
   args: string[];
+  /** What its role does (`team.roles.<role>.description`); absent: the configuration does not say. */
+  description?: string;
 }
 
 /** What a member's call runs with on its CLI, over what every call of that CLI gets. */
@@ -138,6 +145,8 @@ const isPosInt = (v: unknown): boolean => Number.isInteger(v) && (v as number) >
 const isStringList = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");
 const isModel = (v: unknown): boolean => typeof v === "string" && !!v.trim() && v.length <= 200 && !/[\s\u0000-\u001f]/.test(v);
 const describeName = "must be lowercase letters, digits, '-' or '_' (at most 40), starting with a letter or digit";
+/** A role's description: one line of text, short enough for every prompt. */
+const isRoleDescription = (v: unknown): boolean => typeof v === "string" && !!v.trim() && v.length <= 300 && !/[\r\n]/.test(v);
 
 /**
  * The names each entry makes: its own name, else its role's; a PM or techlead is named after its role (and group),
@@ -172,19 +181,31 @@ export function memberNames(team: Pick<TeamConfig, "roles" | "members">): string
   return entryNames(team.members, (role) => (typeof role === "string" ? team.roles[role]?.kind : undefined));
 }
 
+/**
+ * The roles a team edit writes into a config layer: the team's roles, and null for each role it leaves out that agentduo's
+ * defaults or `before` (the roles the team had, every layer merged) have. A layer's null drops the role in the merge
+ * (`team.roles` is merged per role), so a role removed in Settings does not come back from the defaults or another file.
+ */
+export function rolesToWrite(roles: Record<string, TeamRole>, before: Iterable<string>): Record<string, TeamRole | null> {
+  const out: Record<string, TeamRole | null> = structuredClone(roles);
+  for (const name of new Set([...Object.keys(TEAM_DEFAULTS.roles), ...before])) if (!(name in roles)) out[name] = null;
+  return out;
+}
+
 /** Each member of the team, named, in the order the config lists them. Assumes a config without errors. */
 export function teamMembers(team: TeamConfig): Member[] {
   const levels = Object.keys(team.levels);
   const names = entryNames(team.members, (role) => team.roles[role as string]?.kind);
   const out: Member[] = [];
   team.members.forEach((entry, i) => {
-    const kind = team.roles[entry.role]!.kind;
+    const { kind, description } = team.roles[entry.role]!;
     const level = team.levels[entry.level] ?? {};
     const cli = level[entry.cli] ?? {};
     for (const name of names[i]!) {
       out.push({
         name, role: entry.role, kind, group: entry.group ?? null, level: entry.level, levelRank: levels.indexOf(entry.level), canReview: level.can_review === true,
         backend: entry.cli, model: entry.model ?? cli.model ?? null, effort: entry.effort ?? cli.effort ?? null, args: [...(entry.args ?? [])],
+        ...(description ? { description } : {}),
       });
     }
   });
@@ -270,7 +291,10 @@ export function teamConfigErrors(raw: unknown): string[] {
         continue;
       }
       if (!ROLE_KINDS.includes(role.kind as RoleKind)) errors.push(`team.roles.${name}.kind must be one of ${ROLE_KINDS.join(", ")}`);
-      const extra = Object.keys(role).filter((k) => k !== "kind");
+      if ("description" in role && !isRoleDescription(role.description)) {
+        errors.push(`team.roles.${name}.description must be one line of text (at most 300 characters)`);
+      }
+      const extra = Object.keys(role).filter((k) => k !== "kind" && k !== "description");
       if (extra.length) errors.push(`team.roles.${name}: unknown keys ${extra.sort().join(", ")}`);
     }
   }

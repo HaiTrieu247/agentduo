@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { configErrors, configFromLayers, defaultConfig } from "../../src/config/config.js";
-import { headPm, memberNames, memberProfile, TEAM_DEFAULTS, teamConfigErrors, teamId, teamGroups, teamMembers, type TeamConfig } from "../../src/team/config.js";
+import { headPm, memberNames, memberProfile, rolesToWrite, TEAM_DEFAULTS, teamConfigErrors, teamId, teamGroups, teamMembers, type TeamConfig } from "../../src/team/config.js";
 
 const team = (over: Partial<TeamConfig> = {}): TeamConfig => ({ ...structuredClone(TEAM_DEFAULTS), ...over });
 
@@ -141,6 +141,45 @@ describe("team config", () => {
       "team.worktree.setup must be a list of strings",
       "team.worktree.link[0] must be a relative path inside the workspace",
     ]));
+  });
+
+  it("takes a line saying what a role does, which its members carry", () => {
+    const described = team({
+      roles: { ...TEAM_DEFAULTS.roles, designer: { kind: "worker", description: "Designs and builds the UI: layout, styles, components." } },
+      members: [...TEAM_DEFAULTS.members, { role: "designer", level: "mid", cli: "claude" }],
+    });
+    expect(teamConfigErrors(described)).toEqual([]);
+    const members = teamMembers(described);
+    expect(members.find((m) => m.name === "designer-1")!.description).toBe("Designs and builds the UI: layout, styles, components.");
+    expect(members.find((m) => m.name === "dev-1")!.description).toBeUndefined();
+    // A project's file describes a role of the defaults, or adds one with its description.
+    const cfg = configFromLayers([{ team: { roles: { dev: { description: "Writes the product code." }, designer: { kind: "worker", description: "Designs the UI." } } } }]);
+    expect(cfg.team.roles.dev).toEqual({ kind: "worker", description: "Writes the product code." });
+    expect(cfg.team.roles.designer).toEqual({ kind: "worker", description: "Designs the UI." });
+    expect(configErrors(cfg)).toEqual([]);
+  });
+
+  it("lets a layer drop a role with null, one of agentduo's own too, and a later layer bring it back", () => {
+    const dropped = configFromLayers([{ team: { roles: { qa: null, tester: { kind: "checker" } } } }]);
+    expect(Object.keys(dropped.team.roles)).toEqual(["pm", "techlead", "dev", "tester"]);
+    const back = configFromLayers([{ team: { roles: { qa: null } } }, { team: { roles: { qa: { kind: "checker" } } } }]);
+    expect(back.team.roles.qa).toEqual({ kind: "checker" });
+    // The default team's members name qa: without the role it cannot start, and says so.
+    expect(configErrors(dropped).join("\n")).toContain("unknown role 'qa'");
+  });
+
+  it("writes null for every role an edit leaves out that agentduo's defaults or the saved team had", () => {
+    const roles = { pm: { kind: "pm" as const }, techlead: { kind: "lead" as const }, dev: { kind: "worker" as const }, designer: { kind: "worker" as const, description: "UI." } };
+    expect(rolesToWrite(roles, ["pm", "techlead", "dev", "qa", "old"])).toEqual({ ...roles, qa: null, old: null });
+    // A default left out is written null even when the saved team no longer had it (its file's null is kept).
+    expect(rolesToWrite(roles, [])).toEqual({ ...roles, qa: null });
+  });
+
+  it("refuses a role's description that is not one short line of text", () => {
+    const bad = (description: unknown) => teamConfigErrors(team({ roles: { ...TEAM_DEFAULTS.roles, dev: { kind: "worker", description } } } as unknown as Partial<TeamConfig>));
+    const message = "team.roles.dev.description must be one line of text (at most 300 characters)";
+    for (const value of [3, "", "   ", "two\nlines", "x".repeat(301)]) expect(bad(value), JSON.stringify(value)).toContain(message);
+    expect(bad("x".repeat(300))).toEqual([]);
   });
 
   it("is part of the configuration: errors are config errors, and a project's levels and roles add to the defaults", () => {

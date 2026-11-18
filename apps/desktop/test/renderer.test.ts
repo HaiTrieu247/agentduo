@@ -19,7 +19,8 @@ import {
 import { accountRefreshTitle, projectBusy } from "../src/renderer/sidebar.js";
 import { turnEnded, UsageStore } from "../src/renderer/usage.js";
 import type { AccountUsage } from "@agentduo/host/protocol";
-import { sidebarWidth } from "../src/renderer/resizer.js";
+import { sidebarWidth, splitDragged, teamSplit } from "../src/renderer/resizer.js";
+import { nextPanels, roleProblem, roleUsers, withoutRole } from "../src/renderer/team-roles.js";
 import { clampFontSize, resolveTheme } from "../src/renderer/theme.js";
 import { restartQuestion, updateAction, updateLine, updateNotice } from "../src/renderer/update.js";
 import { LINKS, type CliStatus, type ConversationItem } from "../src/shared/protocol.js";
@@ -61,6 +62,16 @@ describe("theme", () => {
     expect(sidebarWidth(400, 700)).toBe(340);
     expect(sidebarWidth(400, 400)).toBe(180);
     expect(sidebarWidth(Number.NaN, 1400)).toBe(248);
+  });
+  it("keeps Settings → Team's split between its limits, in whole percents, and follows a drag by its share of the width", () => {
+    expect(teamSplit(60)).toBe(60);
+    expect(teamSplit(10)).toBe(35);
+    expect(teamSplit(99)).toBe(75);
+    expect(teamSplit(52.6)).toBe(53);
+    expect(teamSplit(Number.NaN)).toBe(60);
+    // 1000px wide: 100px to the left is 10 points off the Team column.
+    expect(teamSplit(splitDragged(60, -100, 1000))).toBe(50);
+    expect(splitDragged(60, 50, 0)).toBe(60);
   });
 });
 
@@ -352,5 +363,43 @@ describe("about", () => {
   it("links the website first, and only links main knows", () => {
     expect(LINKS[ABOUT_LINKS[0]![1]]).toBe("https://agentduo.netlify.app/");
     for (const [, link] of ABOUT_LINKS) expect(LINKS[link]).toMatch(/^https:\/\//);
+  });
+});
+
+describe("Settings → Team's roles", () => {
+  const roles = { pm: { kind: "pm" as const }, techlead: { kind: "lead" as const }, dev: { kind: "worker" as const }, qa: { kind: "checker" as const } };
+  const members = [
+    { role: "pm", level: "senior", cli: "codex" as const }, { role: "dev", level: "mid", cli: "claude" as const, count: 2 }, { role: "qa", level: "mid", cli: "claude" as const },
+  ];
+  const form = (over: Partial<Parameters<typeof roleProblem>[0]> = {}) => ({ role: null, name: "designer", kind: "worker" as const, description: "", tried: true, ...over });
+
+  it("checks a role before it is added or changed: a name like a member's, new, and a one-line description of at most 300 characters", () => {
+    expect(roleProblem(form(), roles)).toBeNull();
+    expect(roleProblem(form({ name: " " }), roles)).toMatch(/Give the role a name/);
+    expect(roleProblem(form({ name: "UI Designer" }), roles)).toMatch(/A role's name is lowercase/);
+    expect(roleProblem(form({ name: "dev" }), roles)).toMatch(/There is a role dev already/);
+    expect(roleProblem(form({ description: "x".repeat(301) }), roles)).toMatch(/at most 300 characters/);
+    // A role being changed keeps its name.
+    expect(roleProblem(form({ role: "dev", name: "dev", description: "Writes the code." }), roles)).toBeNull();
+  });
+
+  it("names a role's members as the team names them", () => {
+    expect(roleUsers({ roles, members }, "dev")).toEqual(["dev-1", "dev-2"]);
+    expect(roleUsers({ roles, members }, "techlead")).toEqual([]);
+  });
+
+  it("removes a role and every member that has it", () => {
+    const left = withoutRole({ roles, members }, "dev");
+    expect(Object.keys(left.roles)).toEqual(["pm", "techlead", "qa"]);
+    expect(left.members.map((m) => m.role)).toEqual(["pm", "qa"]);
+  });
+
+  it("shows or hides a panel, never both", () => {
+    expect(nextPanels("both", "team")).toBe("roles");
+    expect(nextPanels("both", "roles")).toBe("team");
+    expect(nextPanels("roles", "team")).toBe("both");
+    expect(nextPanels("team", "roles")).toBe("both");
+    expect(nextPanels("team", "team")).toBe("team");
+    expect(nextPanels("roles", "roles")).toBe("roles");
   });
 });

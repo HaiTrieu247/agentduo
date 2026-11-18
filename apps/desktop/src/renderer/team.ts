@@ -1,30 +1,32 @@
-// Settings → Team: one list of who is in the team, grouped as the team runs (the head PM, then each group), with what
-// each member runs on; one form adds or changes a member (its role, level, CLI, model, group and how many), and makes a
-// new role, level or group on the way; each member's row opens its role's, its level's and its own identity text.
-// Everything is saved through main, which checks the team can start before it writes the configuration, and names
-// identity files by kind and name only.
+// Settings → Team: two panels side by side, Team and Roles (team-roles.ts), with a divider to resize them and a button
+// each to show or hide them (one stays); a narrow page stacks them, Roles first. Team lists who is in the team, grouped
+// as the team runs (the head PM, then each group), with what each member runs on; one form adds or changes a member (its
+// role, picked from Roles, its level, CLI, model, group and how many), and makes a new level or group on the way; each
+// member's row opens its role's, its level's and its own identity text. Everything is saved through main, which checks
+// the team can start before it writes the configuration, and names identity files by kind and name only.
 import { CLAUDE_EFFORTS, CLAUDE_MODELS, CODEX_EFFORTS, type ModelChoice } from "@agentduo/engine/chat/commands";
 import type { TeamEdit } from "@agentduo/engine/config/configuration";
-import { memberNames, TEAM_DEFAULTS, teamConfigErrors, type RoleKind } from "@agentduo/engine/team/config";
+import { memberNames, rolesToWrite, TEAM_DEFAULTS, teamConfigErrors, type RoleKind } from "@agentduo/engine/team/config";
 import type { TeamIdentityFile } from "@agentduo/engine/team/model";
+import { TEAM_SPLIT, type TeamPanels } from "../shared/protocol.js";
 import { busy, button, call, el, icon } from "./bridge.js";
 import { confirmDialog } from "./dialog.js";
+import { checkbox, input, segmented, select } from "./form-controls.js";
+import { teamSplitter } from "./resizer.js";
+import {
+  KIND_TAG, KIND_WORD, KINDS, NAME, NAME_RULE, NO_DESCRIPTION, nextPanels, roleUsers, rolesPanel, withoutRole, type RoleForm, type TeamDraft,
+} from "./team-roles.js";
 
 type Scope = "global" | "project";
 type Entry = TeamEdit["members"][number];
 type Cli = Entry["cli"];
 type IdentityKind = TeamIdentityFile["kind"];
 
-const KINDS: readonly RoleKind[] = ["pm", "lead", "worker", "checker"];
-const KIND_TAG: Record<RoleKind, string> = { pm: "PM", lead: "Lead", worker: "Dev", checker: "Test" };
-const KIND_WORD: Record<RoleKind, string> = { pm: "talks with you", lead: "plans, reviews and merges", worker: "takes tasks", checker: "tests tasks" };
 const CLI_WORD: Record<Cli, string> = { claude: "Claude", codex: "Codex" };
 const SCOPE_WORD: Record<Scope, string> = { global: "Every project", project: "This project" };
 const SOURCE_WORD: Record<string, string> = {
   project: "this project's file", global: "your file for every project", default: "agentduo's text (no file yet)", none: "empty (no file yet)",
 };
-const NAME = /^[a-z0-9][a-z0-9_-]{0,39}$/;
-const NAME_RULE = "lowercase letters, digits, '-' or '_', starting with a letter or digit";
 /** The value of a menu's "New …" option: never a name, which starts with a letter or digit. */
 const NEW = "+new";
 /** The model menu's "Other model…": never a model name, which has no control characters. */
@@ -32,44 +34,11 @@ const OTHER_MODEL = "\u0000other";
 const effortsOf = (cli: Cli): readonly string[] => (cli === "codex" ? CODEX_EFFORTS : CLAUDE_EFFORTS);
 const joinAnd = (xs: string[]): string => (xs.length < 2 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
 
-function select(options: Array<[string, string]>, value: string, onChange: (v: string) => void, label: string, cls?: string): HTMLSelectElement {
-  const s = el("select", { class: cls, attrs: { "aria-label": label } }, ...options.map(([v, text]) => {
-    const o = el("option", { text, attrs: { value: v } });
-    o.selected = v === value;
-    return o;
-  }));
-  s.addEventListener("change", () => onChange(s.value));
-  return s;
-}
-
-function input(value: string, onChange: (v: string) => void, label: string, o: { placeholder?: string; type?: string; class?: string } = {}): HTMLInputElement {
-  const i = el("input", { class: o.class, attrs: { type: o.type ?? "text", "aria-label": label, placeholder: o.placeholder ?? "" } });
-  i.value = value;
-  i.addEventListener("input", () => onChange(i.value));
-  return i;
-}
-
-function checkbox(checked: boolean, onChange: (v: boolean) => void, label: string, text: string): HTMLLabelElement {
-  const box = el("input", { attrs: { type: "checkbox", "aria-label": label } });
-  box.checked = checked;
-  box.addEventListener("change", () => onChange(box.checked));
-  return el("label", { class: "check-label" }, box, el("span", { text }));
-}
-
-function segmented(options: Array<[string, string]>, value: string, onChange: (v: string) => void, label: string): HTMLElement {
-  return el("div", { class: "segmented", attrs: { role: "radiogroup", "aria-label": label } }, ...options.map(([v, text]) => {
-    const b = el("button", { class: `seg${v === value ? " active" : ""}`, text, attrs: { type: "button", role: "radio", "aria-checked": String(v === value) } });
-    b.addEventListener("click", () => onChange(v));
-    return b;
-  }));
-}
-
 /** What the form holds while a member is added or changed; `index` null: a new member. */
 interface Form {
   index: number | null;
+  /** One of the team's roles (Roles panel). */
   role: string;
-  newRole: string;
-  newKind: RoleKind;
   level: string;
   newLevel: string;
   /** The level's "reviews others' code" (the level's own, shared by everyone at it). */
@@ -104,18 +73,31 @@ interface Readiness {
   groups: Map<string, string[]>;
 }
 
+/** How Settings → Team was laid out last (the app's preferences), and where a change of it goes. */
+export interface TeamLayout {
+  /** The Team column's share (%) beside Roles. */
+  split: number;
+  panels: TeamPanels;
+  save(patch: { teamSplit?: number; teamPanels?: TeamPanels }): void;
+}
+
 /**
  * The Team page of Settings, for the project open (or the user config with none). `codexModels`: Codex's models as a
- * chat's worker listed them (null until one has); Claude's are its aliases.
+ * chat's worker listed them (null until one has); Claude's are its aliases. `layout`: the panels' layout, kept by the app.
  */
-export async function teamPage(projectId: string | null, o: { codexModels(): readonly ModelChoice[] | null } = { codexModels: () => null }): Promise<Node[]> {
+export async function teamPage(projectId: string | null, o: { codexModels(): readonly ModelChoice[] | null; layout?: TeamLayout } = { codexModels: () => null }): Promise<Node[]> {
   let info = await call({ method: "team.read", projectId });
   /** The list starts as the saved team; with none saved it is empty (agentduo's own team runs until one is). */
-  const startDraft = (): TeamEdit => {
+  const startDraft = (): TeamDraft => {
     const d = structuredClone(info.config);
     if (!info.membersFrom) d.members = [];
     return d;
   };
+  let panels: TeamPanels = o.layout?.panels ?? "both";
+  let split = o.layout?.split ?? TEAM_SPLIT.default;
+  /** The role form (Roles panel), and the role whose IDENTITY.md is open there. */
+  let roleForm: RoleForm | null = null;
+  let roleIdentity: string | null = null;
   let draft = startDraft();
   let scope: Scope = info.membersFrom ?? (projectId ? "project" : "global");
   let form: Form | null = null;
@@ -135,13 +117,15 @@ export async function teamPage(projectId: string | null, o: { codexModels(): rea
     return draft.members.flatMap((m, i) => names[i]!.map((name) => ({ name, kind: kindOf(m.role), group: m.group ?? null })));
   };
 
-  /** Custom roles and levels nobody is at any more are left out; agentduo's own always hold (they are the defaults). */
-  const pruned = (d: TeamEdit): TeamEdit => {
-    const roles = new Set(d.members.map((m) => m.role));
+  /**
+   * Custom levels nobody is at any more are left out (agentduo's own always hold: they are the defaults). Roles are the
+   * Roles panel's: every one stays, used or not, and the ones it removed are written null (`rolesToWrite`) on save.
+   */
+  const pruned = (d: TeamDraft): TeamDraft => {
     const levels = new Set(d.members.map((m) => m.level));
     return {
       members: structuredClone(d.members),
-      roles: Object.fromEntries(Object.entries(d.roles).filter(([r]) => r in TEAM_DEFAULTS.roles || roles.has(r))),
+      roles: structuredClone(d.roles),
       levels: Object.fromEntries(Object.entries(d.levels).filter(([l]) => l in TEAM_DEFAULTS.levels || levels.has(l))),
       max_parallel: d.max_parallel,
     };
@@ -229,7 +213,7 @@ export async function teamPage(projectId: string | null, o: { codexModels(): rea
       status.textContent = `${who} is out of the list. Save the team to keep it.`;
       draw();
     };
-    const row = el("div", { class: `team-member${identityOf === i ? " open" : ""}`, attrs: { "data-member": names[0] ?? "" } },
+    const row = el("div", { class: `team-member${identityOf === i ? " open" : ""}`, attrs: { "data-member": names[0] ?? "", "data-role": e.role } },
       el("span", { class: `kind-tag kind-${kind}`, text: KIND_TAG[kind], title: `${e.role}: ${KIND_WORD[kind]}` }),
       el("div", { class: "member-text" },
         el("div", { class: "member-name" }, el("span", { text: who }), (e.count ?? 1) > 1 ? el("span", { class: "tag count", text: `×${e.count}` }) : null),
@@ -286,6 +270,8 @@ export async function teamPage(projectId: string | null, o: { codexModels(): rea
         button("Add a member", () => openForm(null), { class: "primary", icon: "person-add" }),
         button("Start from agentduo's team", () => {
           draft.members = structuredClone(TEAM_DEFAULTS.members);
+          // Its members need agentduo's roles: the ones removed come back (the others are kept as they are).
+          draft.roles = { ...structuredClone(TEAM_DEFAULTS.roles), ...draft.roles };
           status.textContent = "agentduo's team is in the list: change it, then save it.";
           draw();
         }, { icon: "copy" })));
@@ -355,14 +341,14 @@ export async function teamPage(projectId: string | null, o: { codexModels(): rea
   // ------------------------------------------------------------------ the form
 
   const blank = (o: Pick<Form, "index" | "role" | "level" | "cli" | "group">): Form => ({
-    ...o, newRole: "", newKind: "worker", newLevel: "", reviews: draft.levels[o.level]?.can_review === true,
+    ...o, newLevel: "", reviews: draft.levels[o.level]?.can_review === true,
     model: "", customModel: false, effort: "", newGroup: "", count: "1", name: "", tried: false,
   });
 
   /** A new member's form, set to what the team still needs: its head PM, then each group's techlead, devs and QA. */
   function suggested(): Form {
     const all = placed();
-    const roleOf = (k: RoleKind) => roleNames().find((r) => draft.roles[r]!.kind === k) ?? roleNames()[0]!;
+    const roleOf = (k: RoleKind) => roleNames().find((r) => draft.roles[r]!.kind === k) ?? roleNames()[0] ?? "";
     const levels = levelNames();
     const top = levels.at(-1)!;
     const middle = levels.includes("mid") ? "mid" : levels[Math.floor((levels.length - 1) / 2)]!;
@@ -392,12 +378,8 @@ export async function teamPage(projectId: string | null, o: { codexModels(): rea
 
   /** The member the form describes, with the list it makes and its names; or what is wrong with it. */
   function candidate(f: Form): { entry: Entry; members: Entry[]; names: string[] } | { error: string } {
-    const role = f.role === NEW ? f.newRole.trim() : f.role;
-    if (f.role === NEW) {
-      if (!role) return { error: "Give the new role a name (security, designer…)." };
-      if (!NAME.test(role)) return { error: `A role's name is ${NAME_RULE}.` };
-      if (draft.roles[role]) return { error: `There is a role ${role} already: pick it in the menu.` };
-    }
+    const role = f.role;
+    if (!draft.roles[role]) return { error: "Pick a role: the Roles panel lists them (add one there)." };
     const level = f.level === NEW ? f.newLevel.trim() : f.level;
     if (f.level === NEW) {
       if (!level) return { error: "Give the new level a name (staff, principal…)." };
@@ -429,7 +411,7 @@ export async function teamPage(projectId: string | null, o: { codexModels(): rea
     if (f.index === null) members.push(entry);
     else members[f.index] = entry;
     const at = f.index ?? members.length - 1;
-    const roles = f.role === NEW ? { ...draft.roles, [role]: { kind: f.newKind } } : draft.roles;
+    const roles = draft.roles;
     const all = memberNames({ roles, members });
     const taken = new Set(all.flatMap((n, i) => (i === at ? [] : n)));
     const clash = all[at]!.find((n) => taken.has(n));
@@ -467,7 +449,7 @@ export async function teamPage(projectId: string | null, o: { codexModels(): rea
         preview.replaceChildren(icon(f.tried ? "error" : "info"), el("span", { text: c.error }));
         return;
       }
-      const kind = f.role === NEW ? f.newKind : kindOf(c.entry.role) ?? "worker";
+      const kind = kindOf(c.entry.role) ?? "worker";
       const reviews = f.reviews && (kind === "worker" || kind === "checker");
       preview.replaceChildren(icon("person-add"), el("div", {},
         el("div", {}, el("span", { text: f.index === null ? "Adds " : "Becomes " }), el("strong", { text: c.names.join(", ") }),
@@ -477,19 +459,17 @@ export async function teamPage(projectId: string | null, o: { codexModels(): rea
     const field = (label: string, control: Node) => [el("span", { class: "form-label", text: label }), control];
     const byKind = (a: string, b: string) => KINDS.indexOf(kindOf(a)!) - KINDS.indexOf(kindOf(b)!);
 
-    const role = el("div", { class: "form-line" },
-      select([...[...roleNames()].sort(byKind).map((r): [string, string] => [r, `${r} — ${KIND_WORD[kindOf(r)!]}`]), [NEW, "New role…"]], f.role, (v) => {
-        f.role = v;
-        again("Role");
-      }, "Role", "grow"),
-      f.role === NEW ? input(f.newRole, (v) => {
-        f.newRole = v;
-        showPreview();
-      }, "New role's name", { placeholder: "security", class: "w-name" }) : null,
-      f.role === NEW ? select(KINDS.map((k): [string, string] => [k, KIND_WORD[k]]), f.newKind, (v) => {
-        f.newKind = v as RoleKind;
-        again("New role's kind");
-      }, "New role's kind") : null);
+    // The roles are the Roles panel's: what the picked one does shows under it, and "Edit role" opens it there.
+    const roleNow = draft.roles[f.role];
+    const role = el("div", { class: "role-pick" },
+      el("div", { class: "form-line" },
+        select([...[...roleNames()].sort(byKind).map((r): [string, string] => [r, `${r} — ${KIND_WORD[kindOf(r)!]}`])], f.role, (v) => {
+          f.role = v;
+          again("Role");
+        }, "Role", "grow")),
+      el("div", { class: "role-hint" },
+        el("span", { class: roleNow?.description ? "" : "none", text: roleNow ? roleNow.description ?? NO_DESCRIPTION : "Add a role in the Roles panel first." }),
+        roleNow ? button("Edit role", () => openRoleForm(f.role), { class: "ghost small" }) : null));
 
     const level = el("div", { class: "form-line" },
       select([...levelNames().map((l): [string, string] => [l, l]), [NEW, "New level…"]], f.level, (v) => {
@@ -578,7 +558,6 @@ export async function teamPage(projectId: string | null, o: { codexModels(): rea
         showPreview();
         return;
       }
-      if (f.role === NEW) draft.roles[c.entry.role] = { kind: f.newKind };
       if (f.level === NEW) draft.levels[c.entry.level] = { can_review: f.reviews };
       else if ((draft.levels[c.entry.level]!.can_review === true) !== f.reviews) draft.levels[c.entry.level]!.can_review = f.reviews;
       draft.members = c.members;
@@ -621,11 +600,14 @@ export async function teamPage(projectId: string | null, o: { codexModels(): rea
       confirm: "Remove it",
       cancel: "Keep it",
     });
-    info = await call({ method: "team.save", projectId, scope: at, team: pruned(draft) });
+    const team = pruned(draft);
+    info = await call({ method: "team.save", projectId, scope: at, team: { ...team, roles: rolesToWrite(team.roles, Object.keys(info.config.roles)) } });
     if (dropProject) info = await call({ method: "team.reset", projectId, scope: "project" });
     draft = startDraft();
     form = null;
     identityOf = null;
+    roleForm = null;
+    roleIdentity = null;
     status.textContent = dropProject
       ? "Saved for every project, and this project's own team removed: this project runs it too."
       : at === "global" && info.membersFrom === "project"
@@ -639,16 +621,123 @@ export async function teamPage(projectId: string | null, o: { codexModels(): rea
   }, "Where the team is saved")
     : el("span", { class: "muted small", text: SCOPE_WORD.global });
 
+  // ------------------------------------------------------------------ roles
+
+  function openRoleForm(role: string | null): void {
+    const r = role === null ? null : draft.roles[role];
+    roleForm = { role, name: "", kind: r?.kind ?? "worker", description: r?.description ?? "", tried: false };
+    roleIdentity = null;
+    if (panels === "team") setPanels("both");
+    status.textContent = "";
+    draw();
+    const box = body.querySelector<HTMLElement>(".role-form");
+    box?.scrollIntoView({ block: "nearest" });
+    box?.querySelector<HTMLElement>("input")?.focus();
+  }
+
+  function applyRole(f: RoleForm): void {
+    const name = (f.role ?? f.name).trim();
+    const description = f.description.trim();
+    draft.roles[name] = { kind: f.kind, ...(description ? { description } : {}) };
+    roleForm = null;
+    status.textContent = `${f.role === null ? "Added" : "Changed"} the role ${name}. Save the team to keep it.`;
+    draw();
+  }
+
+  /** Removes `role`, and its members once you agree (they cannot stay without it). */
+  async function removeRole(role: string): Promise<void> {
+    const users = roleUsers(draft, role);
+    if (users.length && !await confirmDialog({
+      title: `Remove the role ${role}?`,
+      message: `${joinAnd(users)} ${users.length > 1 ? "have" : "has"} this role and ${users.length > 1 ? "leave" : "leaves"} the team with it. ` +
+        "Nothing is written until you save the team.",
+      confirm: users.length > 1 ? `Remove the role and ${users.length} members` : "Remove the role and its member",
+      cancel: "Keep it",
+    })) return;
+    const before = draft.members.length;
+    draft = withoutRole(draft, role);
+    if (roleForm?.role === role) roleForm = null;
+    if (roleIdentity === role) roleIdentity = null;
+    // The rows of the members list moved: an open member form or identity panel is closed.
+    if (draft.members.length !== before) {
+      form = form?.index === null ? form : null;
+      identityOf = null;
+    }
+    if (form && !draft.roles[form.role]) form = null;
+    status.textContent = `The role ${role}${users.length ? ` and ${joinAnd(users)}` : ""} ${users.length ? "are" : "is"} out of the team. Save the team to keep it.`;
+    draw();
+  }
+
+  /** Marks the members who have `role` (null: none) in the Team panel. */
+  const highlight = (role: string | null) => {
+    for (const row of body.querySelectorAll<HTMLElement>(".team-member")) row.classList.toggle("hl", role !== null && row.dataset.role === role);
+  };
+
+  function roles(): HTMLElement {
+    return rolesPanel({
+      team: draft, form: roleForm, identityOf: roleIdentity,
+      openForm: openRoleForm,
+      closeForm: () => {
+        roleForm = null;
+        draw();
+      },
+      apply: applyRole,
+      remove: (role) => void removeRole(role),
+      toggleIdentity: (role) => {
+        roleIdentity = roleIdentity === role ? null : role;
+        draw();
+      },
+      identity: (role) => el("div", { class: "identity-panel" },
+        identityEditor("role", role, `The role's IDENTITY.md, shared by every ${role}: the text its members start from.`)),
+      highlight,
+    });
+  }
+
+  // ------------------------------------------------------------------ the layout
+
+  function setPanels(next: TeamPanels): void {
+    if (next === panels) return;
+    panels = next;
+    o.layout?.save({ teamPanels: next });
+  }
+
+  /** Show or hide Team and Roles (one always shows); the layout is the app's, kept across windows and restarts. */
+  function toolbar(): HTMLElement {
+    const toggle = (which: "team" | "roles", label: string, iconName: string) => {
+      const shown = panels === "both" || panels === which;
+      const b = button(label, () => {
+        setPanels(nextPanels(panels, which));
+        draw();
+      }, { class: "small toggle", icon: iconName, title: shown ? (panels === which ? `${label} stays: it is the one shown` : `Hide ${label}`) : `Show ${label}` });
+      b.setAttribute("aria-pressed", String(shown));
+      return b;
+    };
+    return el("div", { class: "team-toolbar", attrs: { role: "group", "aria-label": "Panels shown" } },
+      el("span", { class: "muted small", text: "Show" }), toggle("team", "Team", "organization"), toggle("roles", "Roles", "tag"));
+  }
+
+  function teamPanel(r: Readiness): HTMLElement {
+    const adding = form && form.index === null;
+    const parts: Node[] = [el("div", { class: "panel-head" }, el("h4", { text: "Team" }),
+      draft.members.length && !adding ? button("Add a member", () => openForm(null), { class: "small", icon: "person-add" }) : null)];
+    if (!draft.members.length) parts.push(emptyState());
+    else parts.push(list(r));
+    if (adding) parts.push((formEl = formView(form!)));
+    return el("section", { class: "team-panel", attrs: { "aria-label": "Team" } }, ...parts);
+  }
+
   function draw(): void {
     formEl = null;
     const r = readiness();
-    const parts: Node[] = [];
-    if (!draft.members.length) parts.push(emptyState());
-    else parts.push(strip(r), list(r));
-    if (form && form.index === null) parts.push((formEl = formView(form)));
-    if (draft.members.length && !(form && form.index === null)) {
-      parts.push(el("div", { class: "row-actions" }, button("Add a member", () => openForm(null), { icon: "person-add" })));
-    }
+    const parts: Node[] = [toolbar()];
+    if (draft.members.length) parts.push(strip(r));
+    const divider = el("div", { class: "team-divider" });
+    const columns = el("div", { class: `team-columns panels-${panels}` }, teamPanel(r), divider, roles());
+    teamSplitter(divider, columns, split, (next) => {
+      split = next;
+      o.layout?.save({ teamSplit: next });
+    });
+    parts.push(columns);
     const from = info.membersFrom === "project" ? "this project's team" : info.membersFrom === "global" ? "your team for every project" : "agentduo's team (none saved yet)";
     parts.push(el("div", { class: "team-save" }, el("span", { class: "muted small from", text: `/team runs ${from}.` }),
       el("span", { class: "muted small", text: "Save in" }), where, unsaved, save));

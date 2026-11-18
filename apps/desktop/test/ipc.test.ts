@@ -17,6 +17,8 @@ describe("parseDesktopRequest", () => {
     expect(parseDesktopRequest({ method: "app.state" })).toEqual({ method: "app.state" });
     expect(parseDesktopRequest({ method: "prefs.set", patch: { theme: "dark", fontSize: 14 } })).toEqual({ method: "prefs.set", patch: { theme: "dark", fontSize: 14 } });
     expect(parseDesktopRequest({ method: "prefs.set", patch: { accountOpen: false } })).toEqual({ method: "prefs.set", patch: { accountOpen: false } });
+    // Settings → Team's layout: the Team column's share (%) and which panels show.
+    expect(parseDesktopRequest({ method: "prefs.set", patch: { teamSplit: 45, teamPanels: "team" } })).toEqual({ method: "prefs.set", patch: { teamSplit: 45, teamPanels: "team" } });
     expect(parseDesktopRequest({ method: "settings.update", projectId: null, scope: "global", key: "claude.model", value: "opus" }))
       .toEqual({ method: "settings.update", projectId: null, scope: "global", key: "claude.model", value: "opus" });
     expect(parseDesktopRequest({ method: "changes.file", projectId: "0123456789abcdef", listId: "l3", index: 2 }).method).toBe("changes.file");
@@ -30,7 +32,12 @@ describe("parseDesktopRequest", () => {
       expect(parseDesktopRequest({ method, ...conversation, path: "/etc" })).toEqual({ method, ...conversation });
     }
     expect(parseDesktopRequest({ method: "conversation.archived", projectId: "0123456789abcdef" })).toEqual({ method: "conversation.archived", projectId: "0123456789abcdef" });
-    const team = { members: [{ role: "dev", level: "mid", cli: "claude", count: 2, group: "web", model: null }], roles: { dev: { kind: "worker" } }, levels: { mid: { can_review: false, claude: { model: "sonnet" } } }, max_parallel: 3 };
+    // A role's description is the team's own (the techlead reads it): saving the team keeps it.
+    const team = {
+      members: [{ role: "dev", level: "mid", cli: "claude", count: 2, group: "web", model: null }],
+      // A role written null is one the team does without (a default dropped).
+      roles: { dev: { kind: "worker" }, designer: { kind: "worker", description: "Designs the UI." }, qa: null }, levels: { mid: { can_review: false, claude: { model: "sonnet" } } }, max_parallel: 3,
+    };
     expect(parseDesktopRequest({ method: "team.save", projectId: null, scope: "project", team })).toEqual({ method: "team.save", projectId: null, scope: "project", team });
     expect(parseDesktopRequest({ method: "team.reset", projectId: null, scope: "project", team })).toEqual({ method: "team.reset", projectId: null, scope: "project" });
     expect(parseDesktopRequest({ method: "team.openIdentity", projectId: null, scope: "global", kind: "role", name: "frontend-dev" }))
@@ -49,6 +56,10 @@ describe("parseDesktopRequest", () => {
       { method: "prefs.set", patch: { sidebarWidth: 100 } },
       { method: "prefs.set", patch: { sidebarWidth: 900 } },
       { method: "prefs.set", patch: { sidebarWidth: 250.5 } },
+      { method: "prefs.set", patch: { teamSplit: 20 } },
+      { method: "prefs.set", patch: { teamSplit: 90 } },
+      { method: "prefs.set", patch: { teamSplit: 50.5 } },
+      { method: "prefs.set", patch: { teamPanels: "none" } },
       { method: "prefs.set", patch: { accountOpen: "no" } },
       { method: "prefs.set", patch: { autoUpdate: 1 } },
       { method: "prefs.set", patch: { nodeIntegration: true } },
@@ -66,6 +77,8 @@ describe("parseDesktopRequest", () => {
       { method: "team.reset", projectId: null, scope: "/" },
       { method: "team.save", projectId: null, scope: "global", team: { members: [{ role: "dev", level: "mid", cli: "gemini" }], roles: {}, levels: {}, max_parallel: 1 } },
       { method: "team.save", projectId: null, scope: "global", team: { members: [], roles: { "a/b": { kind: "worker" } }, levels: {}, max_parallel: 1 } },
+      { method: "team.save", projectId: null, scope: "global", team: { members: [], roles: { dev: { kind: "worker", description: "x".repeat(301) } }, levels: {}, max_parallel: 1 } },
+      { method: "team.save", projectId: null, scope: "global", team: { members: [], roles: { dev: { kind: "worker", description: 3 } }, levels: {}, max_parallel: 1 } },
       "app.state",
       null,
     ];

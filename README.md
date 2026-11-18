@@ -326,12 +326,20 @@ team:
   levels:   # lowest first; a level's model and effort per CLI, and whether it reviews others
     junior: { can_review: false, claude: { model: sonnet, effort: low },  codex: { effort: low } }
     senior: { can_review: true,  claude: { model: opus,   effort: high }, codex: { effort: high } }
-  roles: { pm: { kind: pm }, techlead: { kind: lead }, dev: { kind: worker }, qa: { kind: checker }, security: { kind: checker } }
+  roles:    # a role's kind (pm, lead, worker, checker), and what it does: the techlead gives a role the work its description names
+    pm: { kind: pm }
+    techlead: { kind: lead }
+    dev: { kind: worker }
+    designer: { kind: worker, description: "Designs and builds the UI: layout, styles, components." }
+    # qa: null   # null drops a role, one of agentduo's own too
+    qa: { kind: checker }
+    security: { kind: checker, description: "Looks for security holes in each task." }
   members:
     - { role: pm, level: senior, cli: codex }
     - { role: techlead, level: senior, cli: codex }
     - { role: dev, level: senior, cli: claude }
     - { role: dev, level: junior, cli: claude, count: 2 }   # dev-2, dev-3
+    - { role: designer, level: mid, cli: claude }
     - { role: qa, level: mid, cli: claude }
   max_parallel: 3
   limits: { max_review_rounds: 3, max_task_attempts: 3 }
@@ -383,9 +391,13 @@ then you.
 Each member's prompt carries its role's `IDENTITY.md`, its level's, and its own `AGENT.md`. Each is one whole text: the
 project's file (`.agentduo/team/roles/<role>/IDENTITY.md`, `levels/<level>/IDENTITY.md`, `agents/<name>/AGENT.md`), else
 the user config's `team/` file (every project), else agentduo's own. A file starts as agentduo's text, and you add to it
-or rewrite it. The desktop app's Settings → Team shows the team as one list: "Add a member" opens a form that sets its
-role, level, CLI, model, group and how many (and can make a new role, level or group), and the list says what the team
-still needs before it can start. Until you save a team, `/team` runs agentduo's own (a PM, a techlead, two devs and a
+or rewrite it. The desktop app's Settings → Team has two panels side by side, Team and Roles: drag the divider between
+them to resize them, hide either one with its button at the top (one always shows), and in a narrow window they stack,
+Roles first. Roles lists every role with its kind, what it does and who has it: add one, change its kind or
+description, or remove any role (one that members have asks first and takes them out with it; a role of agentduo's own
+you remove is written `null`, which drops it from the defaults). In Team, "Add a member" opens a form that sets its role
+(picked from Roles, with what it does and a link to edit it), level, CLI, model, group and how many (and can make a new
+level or group), and the list says what the team still needs before it can start. Until you save a team, `/team` runs agentduo's own (a PM, a techlead, two devs and a
 QA); "Start from agentduo's team" puts it in the list to change. Each row opens its role's, level's and own identity
 text, edited in place (saved for every project or this one, or back to the default), and the page can write the default
 files into the project. Team runs live in

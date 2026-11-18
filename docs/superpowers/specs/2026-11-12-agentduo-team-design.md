@@ -165,6 +165,16 @@ team:
   worktree: { setup: [], link: [] }
 ```
 
+- A role is `{ kind, description? }` (amended 2026-11-18). `description` is one line (at most 300 characters) of what
+  the role does: every prompt's team (`roster`, a kept part) lists the members, then once per role of theirs what it
+  does ("What the roles do:"), and when a role that takes tasks is described the plan prompt says to assign by role as
+  well as by level. A role's name alone said nothing beyond its kind, so a techlead could only guess from it (a
+  `designer` got backend tasks as readily as UI ones). The description reaches the role's members through the same
+  roster; their identity stays the role's IDENTITY.md. Settings → Team edits it in its Roles panel, and the desktop's
+  `team.save` keeps it.
+- A layer drops a role with null (`team.roles.qa: null`; amended 2026-11-18): `team.roles` is merged per role, so
+  without it a role of agentduo's own, or one another file has, would always come back. Settings writes null for every
+  role it removed that the defaults or the merged team had (`rolesToWrite`); a later layer may define the role again.
 - A member is `{ role, level, cli, count?, name?, model?, effort?, args? }`. `count` makes `<role>-1`, `<role>-2`…
   (numbered per role across entries); `name` names one member. A member's model and effort win over its level's.
 - Exactly one member of kind `pm`, exactly one of kind `lead`, at least one worker and at least one checker; names are
@@ -326,15 +336,23 @@ A team learns from what it settled, and keeps it beyond its runs; the user grant
 - The three approvals are the PM's question forms (through the broker): approve, or change with your words.
 - Terminal: the chat with the PM, and a board in the footer (members, their task and step). VS Code and desktop: the PM's
   messages and documents in the timeline and a read-only team card above the composer (phase, who works on what, the
-  task board); the composer says the message goes to the PM. Desktop Settings → Team is one list of members, grouped
-  as the team runs (the head PM, then each group), each row with its kind, names, level and what it runs on. One form
-  adds or changes a member: its role, level, CLI, model and effort (empty: the level's; only a value that differs is
-  the member's own), group, how many and name, with a preview of the names it makes (`memberNames`); it can make a new
-  role (with its kind), level (above every other, with "reviews others' code", which is the level's) or group on the
-  way. A line above the list says, in words, what the team still needs to start (per group too). With no file setting
+  task board); the composer says the message goes to the PM. Desktop Settings → Team (amended 2026-11-18) has two
+  panels side by side, Team and Roles (`team-roles.ts`), on a page wider than Settings' others: a divider resizes them
+  (the Team column's share, 35–75%, kept in the app's preferences as `teamSplit`; keys, double-click to reset, as the
+  sidebar's edge), a button each shows or hides them (`teamPanels`: both, team or roles; the last one shown stays), and
+  a page narrower than 940px (a container query) stacks them, Roles first. Roles lists every role (by kind) with its
+  kind, description and who has it; one form adds a role (name, kind, what it does) or changes one (a role's name stays
+  once made: members and its IDENTITY.md folder are named by it); every role can be removed, one that members have
+  after you agree, its members with it; hovering a role marks its members in Team; its row opens its IDENTITY.md. Team
+  is one list of members, grouped as the team runs (the head PM, then each group), each row with its kind, names,
+  level and what it runs on. One form adds or changes a member: its role (one of Roles', with its description and
+  "Edit role"), level, CLI, model and effort (empty: the level's; only a value that differs is the member's own), group,
+  how many and name, with a preview of the names it makes (`memberNames`); it can make a new level (above every other,
+  with "reviews others' code", which is the level's) or group on the way. A line above the list says, in words, what the team still needs to start (per group too). With no file setting
   `team.members` (`teamMembersSource`, `TeamInfo.membersFrom`) the list starts empty and agentduo's team runs until one
   is saved; "Start from agentduo's team" fills the list with it. Saved into the user config or the project's file
-  (`team.save`, refused while the team could not start); custom roles and levels no member uses are left out. A
+  (`team.save`, refused while the team could not start); custom levels no member uses are left out, roles stay as Roles
+  has them. A
 project's team wins over the user config's, so saving for every project while the project has a team of its own says
 so beside the save and asks whether to remove the project's (`team.reset`, `resetTeam`): kept, the list would show the
 project's team again after the save, as if the edit were lost. A row

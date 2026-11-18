@@ -884,6 +884,77 @@ describe("agentduo desktop", () => {
     await settings.locator("button", { hasText: "Save the team" }).click();
     await expect.poll(async () => (await team()).members.map((m) => m.name), { timeout: 10_000 }).toContain("qa-lead");
     expect((await team()).membersFrom).toBe("project");
+    // Roles: a role is added in its panel with what it does (the techlead gives it that work), then a member picks it.
+    const roles = settings.locator(".roles-panel");
+    await roles.locator("button", { hasText: "Add a role" }).click();
+    const roleForm = roles.locator(".role-form");
+    await roleForm.locator('input[aria-label="New role\'s name"]').fill("designer");
+    await roleForm.locator('input[aria-label="What the role does"]').fill("Designs and builds the UI.");
+    await roleForm.locator("button", { hasText: "Add the role" }).click();
+    const designerRole = roles.locator(".role-row", { hasText: "designer" });
+    await designerRole.waitFor({ timeout: 10_000 });
+    expect(await designerRole.textContent()).toContain("Designs and builds the UI.");
+    await settings.locator("button", { hasText: "Add a member" }).click();
+    const designer = settings.locator(".team-panel .team-form");
+    await designer.locator('select[aria-label="Role"]').selectOption("designer");
+    await expect.poll(async () => designer.locator(".role-hint").textContent()).toContain("Designs and builds the UI.");
+    await designer.locator("button", { hasText: "Add to the team" }).click();
+    await settings.locator(".team-member", { hasText: "designer-1" }).waitFor({ timeout: 10_000 });
+    const sizeTo = (width: number) => app!.evaluate(({ BrowserWindow }, w) => BrowserWindow.getAllWindows()[0]!.setSize(w, 800), width);
+    const teamShot = async (name: string) => {
+      if (process.env.AGENTDUO_E2E_SHOTS) await page.screenshot({ path: join(process.env.AGENTDUO_E2E_SHOTS, `team-${name}.png`) });
+    };
+    // A role's row marks its members in the Team panel.
+    await designerRole.hover();
+    await expect.poll(async () => settings.locator(".team-member.hl").allTextContents()).toEqual([expect.stringContaining("designer-1")]);
+    await sizeTo(1500);
+    await teamShot("both");
+    await settings.locator("button", { hasText: "Save the team" }).click();
+    const projectConfig = join(scratch.path, "plain project", ".agentduo", "config.yaml");
+    await expect.poll(() => (existsSync(projectConfig) ? readFileSync(projectConfig, "utf8") : ""), { timeout: 10_000 }).toContain("description: Designs and builds the UI.");
+    // Every role can be removed; one that members have asks first, and takes them out with it.
+    await designerRole.locator('button[title="Remove the role designer"]').click();
+    const askRemove = page.getByRole("alertdialog");
+    await expect.poll(() => askRemove.getByRole("heading").textContent(), { timeout: 5000 }).toBe("Remove the role designer?");
+    await askRemove.getByRole("button", { name: "Keep it" }).click();
+    expect(await designerRole.count()).toBe(1);
+    await designerRole.locator('button[title="Remove the role designer"]').click();
+    await page.getByRole("alertdialog").getByRole("button", { name: "Remove the role and its member" }).click();
+    await expect.poll(() => designerRole.count()).toBe(0);
+    expect(await settings.locator(".team-member", { hasText: "designer-1" }).count()).toBe(0);
+    await settings.locator("button", { hasText: "Save the team" }).click();
+    await expect.poll(() => readFileSync(projectConfig, "utf8"), { timeout: 10_000 }).not.toContain("designer");
+    // The panels side by side (a wide window): one hides (the other takes the width), the last one shown stays, and the
+    // choice is kept.
+    const prefs = async () => (await invoke<{ prefs: { teamPanels: string; teamSplit: number } }>({ method: "app.state" })).prefs;
+    const toggle = (name: string) => settings.locator(".team-toolbar button", { hasText: name });
+    await toggle("Roles").click();
+    await expect.poll(() => roles.isHidden()).toBe(true);
+    await teamShot("roles-hidden");
+    await expect.poll(async () => (await prefs()).teamPanels).toBe("team");
+    await toggle("Team").click();
+    expect(await settings.locator(".team-panel").isVisible()).toBe(true);
+    await toggle("Roles").click();
+    await expect.poll(() => roles.isVisible()).toBe(true);
+    await expect.poll(async () => (await prefs()).teamPanels).toBe("both");
+    // The divider: the keys move it, a double-click puts it back, and the share is kept.
+    const divider = settings.locator(".team-divider");
+    const widths = () => Promise.all([settings.locator(".team-panel"), roles].map((l) => l.evaluate((e) => Math.round(e.getBoundingClientRect().width))));
+    const [teamBefore] = await widths();
+    await divider.focus();
+    await page.keyboard.press("ArrowLeft");
+    await expect.poll(async () => (await prefs()).teamSplit).toBe(55);
+    expect((await widths())[0]).toBeLessThan(teamBefore!);
+    await divider.dblclick();
+    await expect.poll(async () => (await prefs()).teamSplit).toBe(60);
+    // A narrow window stacks them, Roles above Team.
+    const tops = () => Promise.all([roles, settings.locator(".team-panel")].map((l) => l.evaluate((e) => Math.round(e.getBoundingClientRect().top))));
+    await sizeTo(820);
+    await expect.poll(async () => { const [r, tm] = await tops(); return r! < tm!; }, { timeout: 5000 }).toBe(true);
+    expect(await divider.isHidden()).toBe(true);
+    await teamShot("narrow");
+    await sizeTo(1360);
+    await expect.poll(async () => { const [r, tm] = await tops(); return r === tm; }, { timeout: 5000 }).toBe(true);
     // A member's row opens its role's, its level's and its own identity text.
     await settings.locator(".team-member", { hasText: "dev-1" }).locator('button[title^="Identity of"]').click();
     const panel = settings.locator(".identity-panel");

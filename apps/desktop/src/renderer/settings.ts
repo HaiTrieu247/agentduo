@@ -1,4 +1,4 @@
-import { CONVERSATIONS_PROJECT_ID } from "../shared/protocol.js";
+import { CONVERSATIONS_PROJECT_ID, TEAM_SPLIT } from "../shared/protocol.js";
 // Settings: the desktop's own preferences (theme, font size, who a message goes to), both CLIs' state, agentduo's
 // configuration by layer (user config, the project's file, this session) with where each value comes from and when
 // a change applies, where data lives (read-only), diagnostics, and what the app is (About). Every change goes through main, which uses the
@@ -422,7 +422,8 @@ export class SettingsPanel {
 
   private page(nodes: Node[]): HTMLElement {
     const title = SECTIONS.find(([id]) => id === this.section)![1];
-    return el("div", { class: "settings-page" }, el("h1", { class: "page-title", text: title }), ...nodes);
+    // Team's two panels sit side by side: its page may be wider than the others.
+    return el("div", { class: `settings-page${this.section === "team" ? " wide" : ""}` }, el("h1", { class: "page-title", text: title }), ...nodes);
   }
 
   private async draw(): Promise<void> {
@@ -821,7 +822,15 @@ export class SettingsPanel {
   // ------------------------------------------------------------------ team
   /** /team's department: its members, roles and levels (edited and saved here), and each identity's text (packages/engine/src/team). */
   private async team(): Promise<Node[]> {
-    return teamPage(this.projectId(), { codexModels: () => this.host.codexModels() });
+    const prefs = this.host.snapshot()?.prefs;
+    return teamPage(this.projectId(), {
+      codexModels: () => this.host.codexModels(),
+      layout: {
+        split: prefs?.teamSplit ?? TEAM_SPLIT.default,
+        panels: prefs?.teamPanels ?? "both",
+        save: (patch) => void this.host.setPrefs(patch).catch(() => undefined),
+      },
+    });
   }
 
   // ------------------------------------------------------------------ about

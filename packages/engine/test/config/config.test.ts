@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { configFromSaved, ConfigError, defaultConfig, loadConfig, userConfigPath, validateConfig } from "../../src/config/config.js";
 import {
-  clearConfiguration, ConfigurationError, filesConfiguration, readConfiguration, resetTeam, teamMembersSource, updateConfiguration, updateTeam, type ConfigurationOptions, type ConfigurationView,
+  clearConfiguration, ConfigurationError, filesConfiguration, readConfiguration, resetTeam, teamMembersSource, updateConfiguration, updateTeam, type ConfigurationOptions, type ConfigurationView, type TeamEdit,
 } from "../../src/config/configuration.js";
 import { TEAM_DEFAULTS } from "../../src/team/config.js";
 import { userConfigEnv } from "../helpers/config.js";
@@ -218,6 +218,38 @@ describe("the team in Settings", () => {
     broken.members = broken.members.filter((m) => m.role !== "techlead");
     expect(() => updateTeam(o, "project", broken)).toThrow(/exactly one member whose role is of kind lead/);
     expect(filesConfiguration(o).team.max_parallel).toBe(5);
+  });
+
+  it("writes a role the team does without as null, so the merged team drops it, and writes it back when the team has it again", () => {
+    const { dir, env } = setup("");
+    const o = { workspace: dir, env };
+    const team = structuredClone(TEAM_DEFAULTS) as TeamEdit;
+    team.roles = { ...team.roles, qa: null, tester: { kind: "checker", description: "Tests every task." } };
+    team.members = team.members.map((m) => (m.role === "qa" ? { ...m, role: "tester" } : m));
+    updateTeam(o, "project", team);
+    expect(readFileSync(join(dir, ".agentduo", "config.yaml"), "utf8")).toMatch(/qa: null/);
+    const cfg = filesConfiguration(o);
+    expect(Object.keys(cfg.team.roles)).toEqual(["pm", "techlead", "dev", "tester"]);
+    expect(cfg.team.roles.tester).toEqual({ kind: "checker", description: "Tests every task." });
+  });
+
+  it("leaves out, rather than writes null, a removed role that only the file it saves into had", () => {
+    const { dir, env } = setup("");
+    const o = { workspace: dir, env };
+    const withDesigner = structuredClone(TEAM_DEFAULTS) as TeamEdit;
+    withDesigner.roles = { ...withDesigner.roles, designer: { kind: "worker" } };
+    updateTeam({ workspace: null, env }, "global", { ...structuredClone(TEAM_DEFAULTS), roles: { ...TEAM_DEFAULTS.roles, shared: { kind: "worker" } } });
+    updateTeam(o, "project", withDesigner);
+    // Removed in Settings: designer was the project file's own, shared the user config's, qa agentduo's.
+    const removed = structuredClone(TEAM_DEFAULTS) as TeamEdit;
+    removed.roles = { pm: { kind: "pm" }, techlead: { kind: "lead" }, dev: { kind: "worker" }, qa: null, designer: null, shared: null, tester: { kind: "checker" } };
+    removed.members = removed.members.map((m) => (m.role === "qa" ? { ...m, role: "tester" } : m));
+    updateTeam(o, "project", removed);
+    const text = readFileSync(join(dir, ".agentduo", "config.yaml"), "utf8");
+    expect(text).not.toContain("designer");
+    expect(text).toMatch(/qa: null/);
+    expect(text).toMatch(/shared: null/);
+    expect(Object.keys(filesConfiguration(o).team.roles)).toEqual(["pm", "techlead", "dev", "tester"]);
   });
 
   it("says which file's team holds: the project's over the user config's, and none when only other team keys are set", () => {

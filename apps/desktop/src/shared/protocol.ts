@@ -24,6 +24,11 @@ export type Theme = (typeof THEMES)[number];
 export const FONT_SIZES = { min: 11, max: 20, default: 13 } as const;
 /** The conversations sidebar's width in px, as its edge is dragged; `step` is an arrow key's. */
 export const SIDEBAR_WIDTHS = { min: 180, max: 480, default: 248, step: 16 } as const;
+/** Settings → Team: the Team column's share (%) beside Roles, as the divider between them was set. */
+export const TEAM_SPLIT = { min: 35, max: 75, default: 60, step: 5 } as const;
+/** Settings → Team: which of its two panels show. */
+export const TEAM_PANELS = ["both", "team", "roles"] as const;
+export type TeamPanels = (typeof TEAM_PANELS)[number];
 
 /** The desktop's own preferences (userData/preferences.json); agentduo's engine settings live in its config files. */
 export interface Preferences {
@@ -41,10 +46,14 @@ export interface Preferences {
   autoUpdate: boolean;
   /** The conversations sidebar's width (px), as the user dragged it; a narrow window may show it narrower. */
   sidebarWidth: number;
+  /** Settings → Team: the Team column's share (%) of the two, as the user dragged the divider. */
+  teamSplit: number;
+  /** Settings → Team: the panels shown (one may be hidden, never both). */
+  teamPanels: TeamPanels;
 }
 
 export const DEFAULT_PREFERENCES: Preferences = { theme: "system", fontSize: FONT_SIZES.default, inspector: true, defaultRecipient: "codex", onboarded: false, accountOpen: true, autoUpdate: true,
-  sidebarWidth: SIDEBAR_WIDTHS.default };
+  sidebarWidth: SIDEBAR_WIDTHS.default, teamSplit: TEAM_SPLIT.default, teamPanels: "both" };
 
 /** The persistent conversation group used before a project is opened. */
 export const CONVERSATIONS_PROJECT_ID = "0000000000000000";
@@ -383,6 +392,15 @@ export function parsePreferences(v: unknown): Partial<Preferences> {
         }
         out.sidebarWidth = value as number;
         break;
+      case "teamSplit":
+        if (!Number.isInteger(value) || (value as number) < TEAM_SPLIT.min || (value as number) > TEAM_SPLIT.max) {
+          throw new ProtocolError(`teamSplit must be ${TEAM_SPLIT.min} to ${TEAM_SPLIT.max}`);
+        }
+        out.teamSplit = value as number;
+        break;
+      case "teamPanels":
+        out.teamPanels = oneOf(value, TEAM_PANELS, "teamPanels");
+        break;
       case "inspector":
       case "onboarded":
       case "accountOpen":
@@ -478,7 +496,15 @@ function teamEdit(v: unknown): TeamEdit {
   };
   return {
     members,
-    roles: Object.fromEntries(Object.entries(roles).map(([k, r]) => [name(k, "role"), { kind: oneOf(obj(r, "role").kind, ["pm", "lead", "worker", "checker"] as const, "kind") }])),
+    roles: Object.fromEntries(Object.entries(roles).map(([k, r]) => {
+      // null: a role the team does without (one of agentduo's own, or one another file has), dropped when merged.
+      if (r === null) return [name(k, "role"), null];
+      const role = obj(r, "role");
+      const out: TeamEdit["roles"][string] = { kind: oneOf(role.kind, ["pm", "lead", "worker", "checker"] as const, "kind") };
+      // What the role does (the techlead reads it): kept, so saving the team never drops it.
+      if (role.description !== undefined) out.description = short(role.description, "a role's description", 300);
+      return [name(k, "role"), out];
+    })),
     levels: Object.fromEntries(Object.entries(levels).map(([k, l]) => {
       const level = obj(l, "level");
       const out: TeamEdit["levels"][string] = {};
