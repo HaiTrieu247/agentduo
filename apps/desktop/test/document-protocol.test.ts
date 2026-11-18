@@ -1,6 +1,9 @@
 // The "Mở" contract (shared/documents.ts, shared/protocol.ts): what a link says and where it points, the ids main grants,
 // the registry of formats, and how every document request is checked. The renderer is untrusted for paths: it never
 // names one, only ids main handed out.
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { TimelineItem } from "@agentduo/host/viewState";
 import {
@@ -37,10 +40,13 @@ describe("where a link points", () => {
   it("reads a relative path from the conversation's workspace, and nowhere else", () => {
     expect(target("docs/a.md").path).toBe("/work/app/docs/a.md");
     expect(target("./docs/./a.md").path).toBe("/work/app/docs/a.md");
-    expect(target("docs/../README.md").path).toBe("/work/app/README.md");
-    // `..` may leave the workspace: that is what the link says. It never goes above the root.
-    expect(target("../other/a.md").path).toBe("/work/other/a.md");
-    expect(target("../../../../../a.md").path).toBe("/a.md");
+    // A POSIX path keeps its `..` as written: only the file system can say where `docs/..` leads (a symlink).
+    expect(target("docs/../README.md").path).toBe("/work/app/docs/../README.md");
+    expect(target("../other/a.md").path).toBe("/work/app/../other/a.md");
+    expect(target("/a/link/../b.md").path).toBe("/a/link/../b.md");
+    expect(refused("/a/b/..").code).toBe("link-invalid");
+    expect(refused("docs/..").code).toBe("link-invalid");
+    expect(refused("..").code).toBe("link-invalid");
     // The workspace's trailing slash changes nothing.
     expect(target("a.md", "/work/app/").path).toBe("/work/app/a.md");
     // No label or name search: a bare name is the workspace's own path, even if the file is elsewhere.
@@ -107,7 +113,7 @@ describe("where a link points", () => {
     expect(decodeOnce("%E0%A4%A")).toBe("%E0%A4%A");
     expect(decodeOnce("a%20b")).toBe("a b");
     // `..` hidden by encoding is still resolved once, as the path that was written.
-    expect(target("docs/%2E%2E/a.md").path).toBe("/work/app/a.md");
+    expect(target("docs/%2E%2E/a.md").path).toBe("/work/app/docs/../a.md");
   });
 
   it("handles Windows paths: drives, both separators, UNC shares, file URLs, and a Windows workspace", () => {
@@ -136,6 +142,37 @@ describe("where a link points", () => {
     const s = splitHref("file:///a/b.md#L3");
     expect(s).toEqual({ ok: true, value: { kind: "file-url", raw: "file:///a/b.md", position: { line: 3, column: null }, anchor: null } });
     expect(splitHref("a/b.md#intro")).toEqual({ ok: true, value: { kind: "path", raw: "a/b.md", position: null, anchor: "intro" } });
+  });
+});
+
+describe("a link through a symlink, with `..`", () => {
+  // workspace/link -> outside/child, so `workspace/link/../note.md` is outside/note.md (the kernel resolves `..` after the link),
+  // while collapsing it first would read workspace/note.md: another file, which a save would then overwrite.
+  it.skipIf(process.platform === "win32")("points at the file the kernel opens, never at the one a collapsed path names", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "duo-link-")));
+    try {
+      const workspace = join(root, "workspace");
+      mkdirSync(workspace);
+      mkdirSync(join(root, "outside", "child"), { recursive: true });
+      writeFileSync(join(root, "outside", "note.md"), "outside\n");
+      writeFileSync(join(workspace, "note.md"), "workspace\n");
+      symlinkSync(join(root, "outside", "child"), join(workspace, "link"));
+      const read = (p: string) => readFileSync(realpathSync.native(p), "utf8");
+
+      const relative = target("link/../note.md", workspace);
+      expect(relative.path).toBe(`${workspace}/link/../note.md`);
+      expect(read(relative.path)).toBe("outside\n");
+      const absolute = target(`${workspace}/link/../note.md`, null);
+      expect(read(absolute.path)).toBe("outside\n");
+      const fileUrl = target(`file://${workspace}/link/../note.md`, null);
+      expect(read(fileUrl.path)).toBe("outside\n");
+      // The trap: what a lexical collapse names is the other file.
+      expect(read(resolve(relative.path))).toBe("workspace\n");
+      expect(realpathSync.native(relative.path)).toBe(join(root, "outside", "note.md"));
+      expect(realpathSync.native(relative.path)).not.toBe(realpathSync.native(resolve(relative.path)));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

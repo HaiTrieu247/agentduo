@@ -264,7 +264,14 @@ export interface LinkContext {
 }
 
 export interface LinkTarget {
-  /** Absolute and normalized (`.` and `..` resolved, separators of its style, a Windows drive letter in capitals). */
+  /**
+   * Absolute, with separators of its style, empty and `.` segments dropped, a Windows drive letter in capitals.
+   * **A POSIX path keeps every `..` as written**: the kernel resolves `a/link/..` through the symlink's real folder, so
+   * collapsing it here (`a/link/..` → `a`) would point at another file. Only the file system can resolve it: main
+   * opens the path with `fs.realpath.native` (never `path.resolve`, `path.normalize`, `new URL` or the JS `realpathSync`,
+   * which collapse `..` first). A Windows path has its `..` resolved here because Windows does exactly that, before it
+   * looks at any link.
+   */
   path: string;
   style: PathStyle;
   position: LinkPosition | null;
@@ -274,7 +281,10 @@ export interface LinkTarget {
 const isWindowsAbsolute = (p: string): boolean => DRIVE_SLASH.test(p) || /^\\\\[^\\/]/.test(p);
 const isAbsolute = (p: string): boolean => p.startsWith("/") || isWindowsAbsolute(p);
 
-/** An absolute path's root and its segments, `.` and `..` resolved (`..` never goes above the root). */
+/**
+ * An absolute path's root and its segments: empty and `.` segments are dropped (they change nothing, links or not). On
+ * Windows `..` is resolved (never above the drive or share); on POSIX it stays, for the file system to resolve.
+ */
 function normalize(path: string, style: PathStyle): { root: string; segments: string[] } | null {
   let root = "";
   let rest = path;
@@ -296,7 +306,7 @@ function normalize(path: string, style: PathStyle): { root: string; segments: st
   const segments: string[] = [];
   for (const s of rest.split(style === "windows" ? /[\\/]+/ : /\/+/)) {
     if (!s || s === ".") continue;
-    if (s === "..") segments.pop();
+    if (s === ".." && style === "windows") segments.pop();
     else segments.push(s);
   }
   return { root, segments };
@@ -307,7 +317,7 @@ const join = (n: { root: string; segments: string[] }, style: PathStyle): string
 /** Decoded path text that names a file (not a folder, no control character); an error otherwise. */
 function checked(decoded: string, shown: string): Result<string> {
   if (CONTROL.test(decoded)) return { ok: false, error: documentError("link-invalid", shown, "it holds control characters") };
-  if (/[\\/]$/.test(decoded)) return { ok: false, error: documentError("link-invalid", shown, "it names a folder") };
+  if (/[\\/]$/.test(decoded) || /(^|[\\/])\.\.?$/.test(decoded)) return { ok: false, error: documentError("link-invalid", shown, "it names a folder") };
   return { ok: true, value: decoded };
 }
 
@@ -336,7 +346,7 @@ function fileUrlPath(raw: string, shown: string): Result<{ path: string; style: 
 /**
  * The file a link points to. An absolute path or a file URL keeps its target, wherever it is (a worktree, an attachment
  * folder outside the workspace); a relative path is read from the conversation's workspace (`..` may leave it: that is
- * what the link says); `~`, a drive-relative `C:x`, or a relative path with no workspace cannot be told, so it is an
+ * what the link says, and a POSIX path keeps it unresolved, see `LinkTarget.path`); `~`, a drive-relative `C:x`, or a relative path with no workspace cannot be told, so it is an
  * error and nothing is guessed. Never looks a file up by its name or label. Percent-decoding happens once.
  */
 export function resolveLink(link: SplitLink, ctx: LinkContext, shown: string = link.raw): Result<LinkTarget> {
@@ -364,7 +374,7 @@ export function resolveLink(link: SplitLink, ctx: LinkContext, shown: string = l
     path = `${workspace}${style === "windows" ? "\\" : "/"}${path}`;
   }
   const n = normalize(path, style);
-  if (!n || !n.segments.length) return { ok: false, error: documentError("link-invalid", shown, "it names no file") };
+  if (!n || !n.segments.some((x) => x !== "..")) return { ok: false, error: documentError("link-invalid", shown, "it names no file") };
   return { ok: true, value: { path: join(n, style), style, position: link.position, anchor: link.anchor } };
 }
 
