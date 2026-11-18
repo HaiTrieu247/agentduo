@@ -81,6 +81,21 @@ describe("T1 QA · AC1: the linked file is the original, independent of the app'
     expect(targets).toEqual(["/worktrees/dev-1/actual.md", "/attachments/plan.md", "/workspace/docs/plan.md"]);
     expect(new Set(grants.map((grant) => grant.linkId)).size).toBe(3);
   });
+
+  it.each([
+    ["[Mở](</attachments/review notes.md>)", "/attachments/review notes.md"],
+    ["[Mở](/worktrees/dev-1/review(final).md)", "/worktrees/dev-1/review(final).md"],
+    ["[Mở](file:///attachments/review%20notes.md)", "/attachments/review notes.md"],
+  ])("keeps the actual target of a valid team Markdown link: %s", (text, path) => {
+    // Exercise chat text → grant → lookup → target. Testing linkTarget alone misses parsing losses in chat.
+    const timeline: TimelineItem[] = [{ kind: "pm", id: "pm-filename", text }];
+    const sites = documentLinkSites(timeline);
+    expect(sites, "a valid .md link in the PM's message must receive an Open reference").toHaveLength(1);
+    const table = new DocumentLinkTable();
+    const grant = table.sync(owner, context.view, sites).grants[0]!;
+    const href = table.href(owner, context.view, grant.linkId)!;
+    expect(linkTarget(href, { workspace: "/workspace" })).toMatchObject({ ok: true, value: { path } });
+  });
 });
 
 describe("T1 QA · AC1/AC8: main grants scoped IDs; the click carries no path", () => {
