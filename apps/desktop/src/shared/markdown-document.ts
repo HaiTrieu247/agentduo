@@ -688,8 +688,26 @@ const HR = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const QUOTE = /^ {0,3}>/;
 const SETEXT = /^ {0,3}(=+|-+)[ \t]*$/;
 const FOOTNOTE_DEF = /^ {0,3}\[\^[^\]\s]+\]:/;
-const LINK_DEF = /^ {0,3}\[(?!\^)((?:[^\]\\]|\\.)+)\]:[ \t]*(<[^>\n]*>|\S+)(?:[ \t]+(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^)\\]|\\.)*\)))?[ \t]*$/;
-const TITLE_LINE = /^[ \t]*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^)\\]|\\.)*\))[ \t]*$/;
+/**
+ * A link reference definition at the start of a paragraph, whole: `[label]: destination "title"`, where the destination may
+ * be on the line after the label and the title on the line after the destination (or spread over several lines), and the
+ * label itself may span lines. It is matched on the paragraph's text, so the lines of one definition are never split
+ * between an immutable part and an editable one.
+ */
+const LINK_DEF =
+  /^ {0,3}\[(?!\^)((?:[^\]\\[]|\\.)*[^\s\]\\[](?:[^\]\\[]|\\.)*)\]:[ \t]*\n?[ \t]*(<(?:[^<>\n\\]|\\.)*>|(?!<)\S+)(?:(?:[ \t]+|[ \t]*\n[ \t]*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\)))?[ \t]*(?:\n|$)/;
+const DEF_LOOKAHEAD = 12;
+
+/** The definition that starts at `lines[i]`: how many lines it takes and its label, or null. */
+function linkDefinitionAt(lines: string[], i: number): { count: number; label: string } | null {
+  if (!/^ {0,3}\[(?!\^)/.test(lines[i]!)) return null;
+  let end = i + 1;
+  while (end < lines.length && end < i + DEF_LOOKAHEAD && !isBlank(lines[end]!) && !startsBlock(lines[end]!)) end++;
+  const text = lines.slice(i, end).join("\n");
+  const m = LINK_DEF.exec(text);
+  if (!m) return null;
+  return { count: m[0].replace(/\n$/, "").split("\n").length, label: m[1]! };
+}
 const BLOCK_TAGS =
   "address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul";
 const HTML_TYPE6 = new RegExp(`^<\\/?(?:${BLOCK_TAGS})(?:[ \\t]|\\/?>|$)`, "i");
@@ -924,11 +942,11 @@ function scan(lines: string[], top: boolean, ctx: ScanCtx): Seg[] {
       i = j;
       continue;
     }
-    const def = LINK_DEF.exec(line);
+    const def = linkDefinitionAt(lines, i);
     if (def) {
-      ctx.labels.add(normalizeLabel(def[1]!));
-      segs.push({ kind: "raw", from: i, to: i + 1, construct: "link reference definition" });
-      i++;
+      ctx.labels.add(normalizeLabel(def.label));
+      segs.push({ kind: "raw", from: i, to: i + def.count, construct: "link reference definition" });
+      i += def.count;
       continue;
     }
     if (tableAt(lines, i)) {

@@ -722,3 +722,80 @@ describe("property check: random documents and random edits", () => {
   });
 });
 
+
+describe("a link reference definition is one immutable region, however many lines it takes (AC5 regression)", () => {
+  const cases: [string, string, number][] = [
+    ["title on the next line", '[ref]: /url\n  "Original title"\n\nSee [label][ref].\n', 2],
+    ["destination on the next line", "[ref]:\n  /url\n\nSee [label][ref].\n", 2],
+    ["destination and title on their own lines", '[ref]:\n  /url\n  "Original title"\n\nSee [label][ref].\n', 3],
+    ["a title over two lines", "[ref]: /url 'first\nsecond'\n\nSee [label][ref].\n", 2],
+    ["a title in parentheses on the next line", "[ref]: </my url>\n(Original title)\n\nSee [label][ref].\n", 2],
+    ["a label over two lines", '[a\nref]: /url "T"\n\nSee [label][a ref].\n', 2],
+    ["two definitions in a row, the first with a title line", '[one]: /1\n"t"\n[two]: /2\n\nSee [label][one] and [two].\n', 3],
+  ];
+
+  for (const [label, src, defLines] of cases) {
+    for (const [variant, text] of variants(src)) {
+      it(`${label}, ${variant}: the definition is one block that cannot be edited, and an edit next to it leaves it as it was`, () => {
+        const doc = parseMarkdownDocument(text);
+        const defs = doc.blocks.filter((b) => b.construct === "link reference definition");
+        expect(defs.length).toBeGreaterThan(0);
+        // together the definitions cover all their lines: the block after them is the paragraph
+        const lastDef = defs[defs.length - 1]!;
+        const covered = text.slice(defs[0]!.span!.start, lastDef.span!.end).split(/\r\n|\r|\n/).length;
+        expect(covered).toBe(defLines);
+        const paragraph = doc.blocks.find((b) => b.kind === "paragraph" && doc.blockSource(b.id).includes("See"))!;
+        expect(paragraph.editable).toBe(true);
+        expect(doc.blocks.filter((b) => b.editable).map((b) => b.id)).toEqual([paragraph.id]);
+        // wrap the paragraph's content in strong, as the editor does: the definition lines stay byte for byte
+        const p = para(doc, paragraph.id);
+        const out = written(doc.replaceNodes(paragraph.id, [{ ...p, inlines: [{ type: "strong", children: p.inlines }] }]));
+        const after = parseMarkdownDocument(out);
+        const eol = /\r\n|\r|\n/.exec(text)?.[0] ?? "\n";
+        expect(out.startsWith(text.slice(0, paragraph.span!.start))).toBe(true);
+        expect(out).toContain("**See ");
+        expect(after.blocks.filter((b) => b.construct === "link reference definition").map((b) => after.blockSource(b.id))).toEqual(
+          defs.map((b) => doc.blockSource(b.id)),
+        );
+        // and no title line has become a paragraph
+        expect(after.blocks.filter((b) => b.kind === "paragraph")).toHaveLength(1);
+        void eol;
+        // an edit inside the definition is refused, naming it
+        const r = refusal(doc.replace(defs[0]!.id, "[ref]: /other"));
+        expect(r[0]).toMatchObject({ code: "unsupported-construct", construct: "link reference definition", line: 1 + (text.replace(/^﻿/, "").slice(0, defs[0]!.span! .start - (text.startsWith("﻿") ? 1 : 0)).split(/\r\n|\r|\n/).length - 1) });
+      });
+    }
+  }
+
+  it("a title line that is not a title is a paragraph after the definition", () => {
+    const doc = parseMarkdownDocument('[a]: /u\n"t" junk\n\n[b]: /v\n');
+    expect(doc.blocks.map((b) => [b.kind, doc.blockSource(b.id)])).toEqual([
+      ["other", "[a]: /u"],
+      ["paragraph", '"t" junk'],
+      ["other", "[b]: /v"],
+    ]);
+  });
+
+  it("a definition that does not hold together is a paragraph, as in CommonMark", () => {
+    for (const text of ["[a]:\n\nnext", "[a]: <b\n\nx", "[a] : /u", "[]: /u", "[a]: /u 'unclosed"]) {
+      const kinds = parseBlocks(text).map((b) => b.type);
+      expect(kinds, text).not.toContain("raw");
+    }
+  });
+
+  it("a definition inside a list item or a quote makes that block not editable, whole", () => {
+    for (const text of ['- [r]: /u\n  "title"\n\n  text\n', '> [r]: /u\n> "title"\n>\n> text\n']) {
+      const doc = parseMarkdownDocument(text);
+      expect(doc.blocks).toHaveLength(1);
+      expect(doc.blocks[0]).toMatchObject({ editable: false, construct: "link reference definition" });
+      expect(refusal(doc.replace("b1", "x"))[0]).toMatchObject({ code: "unsupported-construct" });
+      expect(written(doc)).toBe(text);
+    }
+  });
+
+  it("links to the definition keep resolving to it: a paragraph written next to it keeps `[x][ref]` as a reference link", () => {
+    const doc = parseMarkdownDocument('[ref]: /url\n  "Original title"\n\nSee [label][ref].\n');
+    expect(doc.labels.has("ref")).toBe(true);
+    expect(para(doc, "b2").inlines.some((n) => n.type === "raw" && n.construct === "reference link")).toBe(true);
+  });
+});
