@@ -649,27 +649,39 @@ describe("the identity of the opened file, concurrent opens and the in-place bac
     }
   });
 
-  it("a swap in the instant of the rename: the session follows the file that was written and verified, and saves again", async () => {
+  it("a file put at the path right after the rename is reported, never taken as the document's identity", async () => {
     if (!posix) return;
     const f = file("race.md", "same");
+    const published = join(root, "published.md");
     const m = await fs();
     let swapped = false;
     const s = service({
       rename: (async (from: string, to: string) => {
+        await m.promises.rename(from, to);
         if (!swapped) {
           swapped = true;
-          m.renameSync(f, join(root, "gone.md"));
-          writeFileSync(f, "same");
+          // the file just saved is moved away and another file with the same bytes takes its place
+          m.renameSync(f, published);
+          writeFileSync(f, "mine");
         }
-        return m.promises.rename(from, to);
       }) as FileOps["rename"],
     });
     const d = doc(await openLink(s, f));
     const first = await s.save(d.documentId, d.revision, "mine", false);
-    // The swap happened after the last check (nothing can close that window); the identity is taken from the file read back.
-    expect(first.ok).toBe(true);
+    expect(first.ok ? "ok" : first.error.code).toBe("changed-on-disk");
     expect(readFileSync(f, "utf8")).toBe("mine");
-    expect(await s.save(d.documentId, first.ok ? first.revision : "", "mine2", false)).toMatchObject({ ok: true });
+    expect(tmpLeft()).toEqual([]);
+    expect(s.ids()).toEqual([d.documentId]);
+    for (const overwrite of [false, true]) {
+      const again = await s.save(d.documentId, d.revision, "mine2", overwrite);
+      expect(again.ok ? "ok" : again.error.code).toBe("changed-on-disk");
+      expect(readFileSync(f, "utf8")).toBe("mine");
+    }
+    // the user's choice to start from the file on disk takes it as the one
+    const re = doc(await s.reload(d.documentId));
+    expect(await s.save(d.documentId, re.revision, "mine2", false)).toMatchObject({ ok: true });
+    expect(readFileSync(f, "utf8")).toBe("mine2");
+    expect(readFileSync(published, "utf8")).toBe("mine");
   });
 
   it("two opens of one file at once give one session: the same id, one new and one existing, owners of both", async () => {

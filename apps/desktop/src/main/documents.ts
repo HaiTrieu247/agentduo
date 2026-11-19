@@ -304,8 +304,9 @@ export class DocumentService {
 
   /**
    * The folder allowed a temporary file: write it whole, flush it, give it the old mode, check again, then rename it over
-   * the file. Returns the identity of the file now at the session's path, taken from a read of that file after the rename
-   * that found exactly the bytes written (or from the handle written in place).
+   * the file. Returns the identity of the file now at the session's path: the one of the handle that wrote the temporary
+   * file, confirmed by a read of the path after the rename (a different file there is a conflict, not a new identity), or
+   * the handle written in place.
    */
   private async write(s: Session, bytes: Buffer, found: { mode: number }, check: () => Promise<unknown>, revision: string, overwrite: boolean): Promise<string> {
     const real = s.real;
@@ -318,10 +319,13 @@ export class DocumentService {
       if (["EACCES", "EPERM", "EROFS"].includes(code(e))) return this.writeInPlace(s, bytes, revision, overwrite);
       throw e;
     }
+    let written: string;
     try {
       try {
         await writeAll(fh, bytes, 0);
         await fh.sync();
+        // The identity of the file that is about to take the path: the handle that wrote it, not whatever lies there later.
+        written = identityOf(await fh.stat({ bigint: true }));
       } finally {
         await fh.close();
       }
@@ -333,14 +337,16 @@ export class DocumentService {
       await this.ops.rm(tmp, { force: true }).catch(() => undefined);
       throw e;
     }
-    // What now lies at the path is read back through its own handle: the session continues from that file, and only if
-    // it holds what was written (another process may have replaced it in the moment after the rename).
+    // What now lies at the path is read back through its own handle: it must be the very file that was written (the
+    // identity of the temporary file's handle) and hold what was written. Another process may have replaced it in the
+    // moment after the rename; the session then keeps its old identity, so no later save goes into that file.
     let now: { bytes: Buffer; identity: string };
     try {
       now = await this.readFile(real, s.format.maxBytes, s.name);
     } catch (e) {
       throw new Failure(documentError("save-failed", s.name, `the file was written, but could not be checked afterwards (${e instanceof Failure ? e.error.message : detailOf(e)})`));
     }
+    if (now.identity !== written) throw new Failure(documentError("changed-on-disk", s.name));
     if (!now.bytes.equals(bytes)) throw new Failure(documentError("save-failed", s.name, "the file was changed by another program just after it was saved; reload it to see what is on disk"));
     return now.identity;
   }

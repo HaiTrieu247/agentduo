@@ -28,3 +28,8 @@ No assertion of QA was edited, skipped or weakened.
 - Whole desktop suite: 430 collected, 429 passed, 1 failed (the same Q1). `typecheck` and `build` of apps/desktop passed (root and desktop `npm ci --offline --ignore-scripts`).
 - `test:e2e` (Electron) was not run, so it is not recorded as passed.
 - qa-1 must run from the candidate's root and record the commit and tree actually tested.
+
+## Follow-up after the techlead's review (R5)
+- A replace-save now takes the identity of the temporary file from the handle that wrote it (`fh.stat({bigint:true})` after the flush). After the rename the path is read back through its own handle: a different identity is `changed-on-disk` (session kept, old identity kept, so no later save, `overwrite` or not, goes into the file found there until the user reloads); then the bytes must equal what was written.
+- Regression in `documents.test.ts`: a real rename, then the saved file is moved to `published.md` and a separate file with the same bytes put at the path. The first save reports `changed-on-disk`, later saves too (both `overwrite` values), the replacement is untouched, and a reload takes it as the document.
+- Dev run (worktree on 1d997d3 + uncommitted `documents.ts` / `documents.test.ts`): desktop suite 430 collected, 429 passed, 1 failed (Q1, T1 parser, not fixed); typecheck passed. Not a QA run; `test:e2e` not run.
