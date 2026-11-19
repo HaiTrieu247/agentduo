@@ -1135,6 +1135,13 @@ export function parseBlocks(markdown: string, labels: ReadonlySet<string> = NO_L
   return scan(lines, false, ctx).map((s) => buildBlock(lines, s, ctx.labels));
 }
 
+/** The blocks of a whole file as it opens: front matter first, its final line ending ending the last line. */
+function parseFileBlocks(text: string, labels: ReadonlySet<string>): MdBlock[] {
+  const lines = splitLines(toLf(text.replace(/^\ufeff/, "")));
+  const ctx: ScanCtx = { labels: new Set(labels) };
+  return scan(lines, true, ctx).map((s) => buildBlock(lines, s, ctx.labels));
+}
+
 /** The top-level blocks of a text as sources and constructs, for comparing (no inline parsing). */
 function topSegs(markdown: string, labels: ReadonlySet<string>, wholeFile = false, endsFile = wholeFile): { source: string; raw: string | null; kind: string; line: number }[] {
   // A block's text has no line ending of its own at its end (a span stops before it), so it is split exactly: a newline at
@@ -1711,7 +1718,7 @@ class Doc implements EditableMarkdownDocument {
     // The text is the source with operations at places in it: an edited block's span is replaced, a removed block's span
     // is cut (nothing around it is touched), an inserted block goes in at a position. Every stretch of the source between
     // the operations (the BOM, the blank lines, the final newline, the blocks not edited) is copied as it is.
-    type Mark = { entry: OrderEntry; rel: number; len: number };
+    type Mark = { entry: OrderEntry; rel: number; len: number; eol: string };
     type Op = { at: number; to: number; text: string; rank: number; marks: Mark[] };
     const ops: Op[] = [];
     const front = core.blocks[0]?.construct === "front matter" ? core.blocks[0] : null;
@@ -1720,7 +1727,7 @@ class Doc implements EditableMarkdownDocument {
     for (let idx = 0; idx < entries.length; idx++) {
       const e = entries[idx]!;
       if (e.block) {
-        if (e.edit) ops.push({ at: e.block.start, to: e.block.end, text: e.edit.md.replace(/\n/g, e.block.eol), rank: 1, marks: [{ entry: e, rel: 0, len: e.edit.md.length + (e.block.eol.length - 1) * (e.edit.md.match(/\n/g)?.length ?? 0) }] });
+        if (e.edit) ops.push({ at: e.block.start, to: e.block.end, text: e.edit.md.replace(/\n/g, e.block.eol), rank: 1, marks: [{ entry: e, rel: 0, len: e.edit.md.length + (e.block.eol.length - 1) * (e.edit.md.match(/\n/g)?.length ?? 0), eol: e.block.eol }] });
         continue;
       }
       if (!e.edit || e.edit.md === "") continue;
@@ -1740,7 +1747,7 @@ class Doc implements EditableMarkdownDocument {
         const sep = core.eol + core.eol;
         list.forEach((it, n) => {
           if (n > 0) text += sep;
-          marks.push({ entry: it.entry, rel: text.length, len: it.text.length });
+          marks.push({ entry: it.entry, rel: text.length, len: it.text.length, eol: core.eol });
           text += it.text;
         });
         const first = core.blocks[0];
@@ -1750,7 +1757,7 @@ class Doc implements EditableMarkdownDocument {
         const b = core.blocks.find((x) => x.id === anchor)!;
         for (const it of list) {
           text += b.eol + b.eol;
-          marks.push({ entry: it.entry, rel: text.length, len: it.text.length });
+          marks.push({ entry: it.entry, rel: text.length, len: it.text.length, eol: b.eol });
           text += it.text;
         }
         ops.push({ at: b.end, to: b.end, text, rank: 2, marks });
@@ -1761,16 +1768,30 @@ class Doc implements EditableMarkdownDocument {
     let cursor = 0;
     const kept: { out: number; from: number; to: number }[] = [];
     const outEnd = new Map<OrderEntry, number>();
+    const eolOfMark = new Map<OrderEntry, string>();
     for (const op of ops) {
       if (op.at < cursor) return { ok: false, blocks: [{ code: "roundtrip-mismatch", construct: null, line: null, message: "two edits overlap, so nothing was written." }] };
       if (op.at > cursor) kept.push({ out: text.length, from: cursor, to: op.at });
       text += core.source.slice(cursor, op.at);
-      for (const m of op.marks) outEnd.set(m.entry, text.length + m.rel + m.len);
+      for (const m of op.marks) {
+        outEnd.set(m.entry, text.length + m.rel + m.len);
+        eolOfMark.set(m.entry, m.eol);
+      }
       text += op.text;
       cursor = op.to;
     }
     if (cursor < core.source.length) kept.push({ out: text.length, from: cursor, to: core.source.length });
     text += core.source.slice(cursor);
+    // The convention at the end of a file: its final line ending ends the last line, it is not text. So what the editor
+    // wrote as a tree, if it is the end of the file and its text ends with a newline (an unclosed code fence whose value
+    // does), gets that line ending after it: the file then opens with the very value the editor gave.
+    const terminated = new Set<OrderEntry>();
+    for (const e of entries) {
+      if (e.edit && e.edit.expect !== null && e.edit.md.endsWith("\n") && outEnd.get(e) === text.length) {
+        text += eolOfMark.get(e) ?? core.eol;
+        terminated.add(e);
+      }
+    }
     // every stretch of the source that no edit names stands in the output byte for byte: the BOM, the gaps, the end of the file
     for (const k of kept) {
       if (text.slice(k.out, k.out + (k.to - k.from)) !== core.source.slice(k.from, k.to)) {
@@ -1779,9 +1800,9 @@ class Doc implements EditableMarkdownDocument {
     }
 
     // Read it again: the blocks must be exactly those that were meant.
-    const expected: { source: string; line: number | null; edited: boolean }[] = [];
+    const expected: { source: string; line: number | null; edited: boolean; entry?: OrderEntry }[] = [];
     for (const e of entries) {
-      if (e.edit) for (const s of topSegs(e.edit.md, core.labels, false, (outEnd.get(e) ?? 0) >= text.length)) expected.push({ source: s.source, line: lineOf(e), edited: true });
+      if (e.edit) for (const s of topSegs(e.edit.md, core.labels, false, !terminated.has(e) && (outEnd.get(e) ?? 0) >= text.length)) expected.push({ source: s.source, line: lineOf(e), edited: true, entry: e });
       else expected.push({ source: e.block!.lf, line: lineOf(e), edited: false });
     }
     const got = topSegs(toLf(text.slice(core.bom.length)), core.labels, true);
@@ -1804,6 +1825,24 @@ class Doc implements EditableMarkdownDocument {
           },
         ],
       };
+    }
+    // And what the editor gave as a tree must be what the finished file opens as: its code values, text and marks, with the
+    // end of the file read as it will be read when it is opened again.
+    const opened = parseFileBlocks(text, core.labels);
+    if (opened.length === expected.length) {
+      for (let k = 0; k < expected.length; k++) {
+        const e = expected[k]!.entry;
+        if (!e?.edit || e.edit.expect === null) continue;
+        const mine = expected.map((x, i) => (x.entry === e ? i : -1)).filter((i) => i >= 0);
+        if (mine[0] !== k) continue;
+        if (expectedShape(mine.map((i) => opened[i]!)) !== e.edit.expect) {
+          const line = lineOf(e);
+          return {
+            ok: false,
+            blocks: [{ code: "roundtrip-mismatch", construct: null, line, message: `${line ? `Line ${line}: ` : ""}the file, opened again, would not hold what the editor showed (a text that ends the file would change), so nothing was written.` }],
+          };
+        }
+      }
     }
     return { ok: true, text };
   }

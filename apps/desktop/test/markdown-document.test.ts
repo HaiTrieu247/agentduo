@@ -1014,10 +1014,14 @@ describe("an unclosed code fence keeps all of its text, the newlines at its end 
     }
 
     it(`insert keeps the newlines of an unclosed fence it is given: ${JSON.stringify(src)}`, () => {
+      // as text the bytes are exactly the ones given
       expect(written(parseMarkdownDocument("").insert(null, src))).toBe(src);
       expect(written(parseMarkdownDocument("# T\n").insert("b1", src))).toBe(`# T\n\n${src}\n`);
-      const into = parseMarkdownDocument("");
-      expect(written(into.insertNodes(null, parseBlocks(src)))).toBe(src);
+      // as a tree: the file ends with the line ending that ends the code's last line, so it opens with the same value
+      const tree = parseBlocks(src);
+      const outTree = written(parseMarkdownDocument("").insertNodes(null, tree));
+      expect(outTree).toBe(src.endsWith("\n") ? src + "\n" : src);
+      expect(parseMarkdownDocument(outTree).structure("b1")[0]).toMatchObject({ type: "code", value: (tree[0] as Extract<MdBlock, { type: "code" }>).value });
     });
   }
 
@@ -1085,10 +1089,8 @@ describe("one safe fence for closed and unclosed code (Q5)", () => {
           const out = written(doc.replaceNodes("b1", [{ ...node, value }]));
           const back = parseMarkdownDocument(out);
           expect(back.blocks, JSON.stringify(out)).toHaveLength(1);
-          // a file that ends in a newline ends its last line with it: an unclosed fence that is the end of a file with no
-          // final newline of its own reads back without the newline its text ends with (the bytes written are the text's)
-          const readBack = node.unclosed && !/\n$/.test(src) && value.endsWith("\n") ? value.slice(0, -1) : value;
-          expect(codeOf(back), JSON.stringify(out)).toMatchObject({ value: readBack, info: node.info });
+          // the value given is the value the file opens with, at the end of a file too (Q6)
+          expect(codeOf(back), JSON.stringify(out)).toMatchObject({ value, info: node.info });
           expect(codeOf(back).unclosed ?? false).toBe(node.unclosed ?? false);
           // the opener it had stays when it is safe
           if (!/\n(?: {0,3})(`{3,}|~{3,})[ \t]*(?:\n|$)/.test("\n" + value)) expect(out.replace(/^\ufeff/, "").startsWith(src.slice(0, src.indexOf("\n")))).toBe(true);
@@ -1127,5 +1129,69 @@ describe("one safe fence for closed and unclosed code (Q5)", () => {
     const doc = parseMarkdownDocument("para\n\n```md\nORIGINAL\n\n");
     const node = codeOf(doc, "b2");
     expect(written(doc.replaceNodes("b2", [{ ...node, value: "a\n```\nb\n" }]))).toBe("para\n\n````md\na\n```\nb\n\n");
+  });
+});
+
+describe("the value the editor gives is the value the file opens with, at the end of a file too (Q6)", () => {
+  const codeOf = (doc: EditableMarkdownDocument, id = "b1"): Extract<MdBlock, { type: "code" }> => {
+    const b = doc.structure(id)[0];
+    if (b?.type !== "code") throw new Error("not code");
+    return b;
+  };
+
+  it("the review's case: source '```md\\nORIGINAL', value 'CHANGED\\n' opens again as 'CHANGED\\n' (it was 'CHANGED')", () => {
+    const doc = parseMarkdownDocument("```md\nORIGINAL");
+    const out = written(doc.replaceNodes("b1", [{ ...codeOf(doc), value: "CHANGED\n" }]));
+    expect(out).toBe("```md\nCHANGED\n\n");
+    expect(codeOf(parseMarkdownDocument(out)).value).toBe("CHANGED\n");
+  });
+
+  it("the other case: insertNodes with value '\\n' opens again as '\\n' (it was empty)", () => {
+    const template = parseMarkdownDocument("```md\nORIGINAL");
+    const out = written(parseMarkdownDocument("").insertNodes(null, [{ ...codeOf(template), value: "\n" }]));
+    expect(out).toBe("```md\n\n\n");
+    expect(codeOf(parseMarkdownDocument(out)).value).toBe("\n");
+  });
+
+  for (const source of ["```md\nORIGINAL", "```md\r\nORIGINAL", "﻿~~~text\nORIGINAL", "﻿```md\r\nORIGINAL", "```md\nORIGINAL\n", "```md\nORIGINAL\n\n"]) {
+    for (const value of ["", "C", "C\n", "C\n\n", "\n", "\n\n", "a\n\nb\n", "a\n```\nb\n"]) {
+      it(`replaceNodes and insertNodes: ${JSON.stringify(source)} with ${JSON.stringify(value)}: the file opens with that value, or nothing is written`, () => {
+        const doc = parseMarkdownDocument(source);
+        const node = codeOf(doc);
+        const eolOfSource = /\r\n/.test(source) ? "\r\n" : "\n";
+        for (const r of [doc.replaceNodes("b1", [{ ...node, value }]).serialize(), parseMarkdownDocument("").insertNodes(null, [{ ...node, value }]).serialize()]) {
+          if (r.ok) {
+            const again = parseMarkdownDocument(r.text);
+            expect(again.blocks, JSON.stringify(r.text)).toHaveLength(1);
+            expect(codeOf(again).value, JSON.stringify(r.text)).toBe(value);
+            expect(codeOf(again).unclosed).toBe(true);
+          } else {
+            expect(r).not.toHaveProperty("text");
+            expect(r.blocks.length).toBeGreaterThan(0);
+          }
+        }
+        // the line endings of the file are the ones written
+        const out = written(doc.replaceNodes("b1", [{ ...node, value }]));
+        if (eolOfSource === "\r\n") expect(out.replace(/\r\n/g, "")).not.toContain("\n");
+        expect(written(doc)).toBe(source);
+      });
+    }
+  }
+
+  it("a closed fence and an unclosed one that something follows are not given a line ending they do not need", () => {
+    const closed = parseMarkdownDocument("```md\nORIGINAL\n```");
+    expect(written(closed.replaceNodes("b1", [{ ...codeOf(closed), value: "C\n" }]))).toBe("```md\nC\n\n```");
+    const nested = parseMarkdownDocument("> ```md\n> ORIGINAL");
+    const q = nested.structure("b1")[0] as Extract<MdBlock, { type: "quote" }>;
+    const inner = q.children[0] as Extract<MdBlock, { type: "code" }>;
+    const out = written(nested.replaceNodes("b1", [{ ...q, children: [{ ...inner, value: "C\n" }] }]));
+    const back = parseMarkdownDocument(out).structure("b1")[0] as Extract<MdBlock, { type: "quote" }>;
+    expect((back.children[0] as Extract<MdBlock, { type: "code" }>).value).toBe("C\n");
+  });
+
+  it("text edits (replace, insert) write exactly the bytes given, as before", () => {
+    const doc = parseMarkdownDocument("```md\nORIGINAL");
+    expect(written(doc.replace("b1", "```md\nCHANGED\n"))).toBe("```md\nCHANGED\n");
+    expect(written(parseMarkdownDocument("").insert(null, "```md\n\n"))).toBe("```md\n\n");
   });
 });
