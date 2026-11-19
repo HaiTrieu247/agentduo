@@ -64,6 +64,33 @@ describe("opening: which file", () => {
     expect(new Set(s.ids()).size).toBe(3);
   });
 
+  it("opens plan(1).md from `plan\\(1\\).md` and its single-escape forms, never a same-named neighbour (Q1, R28, R29)", async () => {
+    const ws = join(root, "ws");
+    file("ws/plan(1).md", "paren pair\n");
+    file("ws/plan(1.md", "open paren\n");
+    file("ws/plan).md", "close paren\n");
+    file("ws/).md", "decoy\n");
+    file("ws/plan.md", "decoy plan\n");
+    file("ws/plan1.md", "decoy plan1\n");
+    const s = service();
+    const text = async (markdown: string) => {
+      s.syncLinks(P, C, 1, [pm("q1", markdown)], true);
+      const ev = events.filter((e) => e.type === "documentLinks").at(-1) as Extract<DesktopEvent, { type: "documentLinks" }>;
+      return doc(await s.open({ projectId: P, conversationId: C, view: 1, linkId: ev.links[0]!.linkId, workspace: ws })).text;
+    };
+    expect(await text("[open](plan\\(1\\).md)")).toBe("paren pair\n");
+    expect(await text("[open](plan(1).md)")).toBe("paren pair\n");
+    expect(await text("[open](plan\\(1.md)")).toBe("open paren\n");
+    expect(await text("[open](plan\\).md)")).toBe("close paren\n");
+    expect(await text('[open](plan\\(1\\).md "title")')).toBe("paren pair\n");
+    expect(await text("[open](<plan(1).md>)")).toBe("paren pair\n");
+    // a name that exists nowhere is an error, not another file
+    s.syncLinks(P, C, 1, [pm("q2", "[open](plan\\(9\\).md)")], true);
+    const ev = events.filter((e) => e.type === "documentLinks").at(-1) as Extract<DesktopEvent, { type: "documentLinks" }>;
+    const r = await s.open({ projectId: P, conversationId: C, view: 1, linkId: ev.links[0]!.linkId, workspace: ws });
+    expect(r.ok ? "ok" : r.error.code).toBe("not-found");
+  });
+
   it("reads spaces, Unicode, percent-encoding, a fragment and a line", async () => {
     file("ws/my notes/Tài liệu ✓.md", "# xin chào\n");
     const s = service();

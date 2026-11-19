@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { TimelineItem } from "@agentduo/host/viewState";
 import { DocumentService } from "../src/main/documents.js";
 import type { DesktopEvent } from "../src/shared/protocol.js";
+import { parseInline } from "@agentduo/webview/markdown";
 
 const P = "0123456789abcdef";
 const C = "20261031-120000-tab-abcd1234";
@@ -80,5 +81,41 @@ describe("granting ids to the chat's links", () => {
     const id = events[0]!.links[0]!.linkId;
     const r = await s.open({ projectId: P, conversationId: "c2", view: 1, linkId: id, workspace: null });
     expect(r.ok ? "ok" : r.error.code).toBe("link-stale");
+  });
+});
+
+// Q1 (T1's parser, fixed in T3 attempt 3 with the PM's approval): the chat's parser is the one place that reads a link's
+// target, for the page and for main alike (`documentLinkSites`), so an escape is read there and nowhere else.
+describe("a bare target with escaped parentheses (R29)", () => {
+  const href = (src: string) => (parseInline(src).find((n) => n.type === "link") as { href: string } | undefined)?.href;
+
+  it("reads `\\(` and `\\)` as the parentheses of the name, in pairs and alone, with a title and text after the link", () => {
+    expect(href("[open](plan\\(1\\).md)")).toBe("plan(1).md");
+    expect(href("[open](plan\\(1.md)")).toBe("plan(1.md");
+    expect(href("[open](plan\\).md)")).toBe("plan).md");
+    expect(href("[open](docs/a\\(1\\)\\(2\\).md:4)")).toBe("docs/a(1)(2).md:4");
+    expect(href('[open](plan\\(1\\).md "a title")')).toBe("plan(1).md");
+    expect(parseInline("[open](plan\\(1\\).md) (note)")).toEqual([
+      { type: "link", href: "plan(1).md", children: [{ type: "text", text: "open" }] },
+      { type: "text", text: " (note)" },
+    ]);
+    expect(href("[open](plan(1).md)")).toBe("plan(1).md");
+  });
+
+  it("keeps a Windows path as written: a folder in parentheses, a drive, a UNC share, the <…> form", () => {
+    expect(href("[a](dir\\(x)\\a.md)")).toBe("dir\\(x)\\a.md");
+    expect(href("[a](dir\\(x)\\(y)\\a.md)")).toBe("dir\\(x)\\(y)\\a.md");
+    expect(href("[a](C:\\dir\\(x)\\a.md)")).toBe("C:\\dir\\(x)\\a.md");
+    expect(href("[a](C:\\dir\\(x\\)\\a.md)")).toBe("C:\\dir\\(x\\)\\a.md");
+    expect(href("[a](\\\\server\\share\\(x)\\a.md)")).toBe("\\\\server\\share\\(x)\\a.md");
+    expect(href("[a](<C:\\My Docs\\(x)\\a.md>)")).toBe("C:\\My Docs\\(x)\\a.md");
+    expect(href("[a](<plan\\(1\\).md>)")).toBe("plan\\(1\\).md");
+    expect(href("[a](x\\y.md)")).toBe("x\\y.md");
+  });
+
+  it("main grants the link with the same target the page reads, so the ids stay in step", () => {
+    const { s, events } = make();
+    s.syncLinks(P, C, 1, [pm("a", "[w](https://x.test) [open](plan\\(1\\).md) [b](dir\\(x)\\b.md)")], true);
+    expect(events[0]!.links.map((l) => l.ordinal)).toEqual([1, 2]);
   });
 });

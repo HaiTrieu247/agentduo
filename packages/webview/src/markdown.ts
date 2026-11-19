@@ -201,7 +201,7 @@ type Misses = Map<string, number>;
 /**
  * The target of a link whose `(` is just before `start`, and where the link ends (after its `)`): `<…>` may hold spaces
  * (`<my notes.md>`), a bare target may hold balanced parentheses (`a(1).md`), and a title after it (`"…"`, `'…'`) is
- * dropped. A backslash stays a backslash (Windows paths). Nothing is decoded: the target is kept as written. A target
+ * dropped. A backslash stays a backslash (Windows paths) except in `\(` / `\)` of a bare target that then closes cleanly (see `readDestination`). Nothing is decoded: the target is kept as written. A target
  * the strict reading cannot close (unbalanced parentheses) ends at the first `)`, as it always did. Null: not a link (empty, a line break, no `)`).
  */
 function linkDestination(src: string, start: number, to: number): { href: string; end: number } | null {
@@ -214,30 +214,44 @@ function linkDestination(src: string, start: number, to: number): { href: string
   return word ? { href: word, end: paren + 1 } : null;
 }
 
-function readDestination(src: string, start: number, to: number): { href: string; end: number } | null {
-  let i = start;
-  while (i < to && (src[i] === " " || src[i] === "\t")) i++;
+/**
+ * A bare target (no `<…>`) from `i`, up to the first space or the `)` that closes the link. Parentheses must balance.
+ * With `escapes`, `\(` and `\)` are Markdown escapes: they are not counted and the target holds the bare parenthesis
+ * (`plan\(1\).md` is `plan(1).md`). Without, a backslash is a letter, as in a Windows path (`dir\(x)\a.md`); `mixed`
+ * then says that a `\(` is closed by a `)` with no backslash before it, which is how a Windows folder `(x)` reads.
+ */
+function bareDestination(src: string, i: number, to: number, escapes: boolean): { href: string; end: number; mixed: boolean } | null {
   let href = "";
-  if (src[i] === "<") {
-    const gt = src.indexOf(">", i + 1);
-    if (gt < 0 || gt >= to) return null;
-    href = src.slice(i + 1, gt);
-    if (/[\n<]/.test(href)) return null;
-    i = gt + 1;
-  } else {
-    const first = i;
-    let depth = 0;
-    while (i < to && !/\s/.test(src[i]!)) {
-      if (src[i] === "(") depth++;
-      else if (src[i] === ")") {
-        if (depth === 0) break;
-        depth--;
-      }
-      i++;
+  let depth = 0;
+  let mixed = false;
+  const opens: boolean[] = [];
+  while (i < to && !/\s/.test(src[i]!)) {
+    const c = src[i]!;
+    if (escapes && c === "\\" && i + 1 < to && (src[i + 1] === "(" || src[i + 1] === ")")) {
+      href += src[i + 1];
+      i += 2;
+      continue;
     }
-    if (depth > 0) return null;
-    href = src.slice(first, i);
+    if (c === "(") {
+      depth++;
+      opens.push(src[i - 1] === "\\");
+    } else if (c === ")") {
+      if (depth === 0) break;
+      depth--;
+      if (opens.pop() && src[i - 1] !== "\\") mixed = true;
+    }
+    href += c;
+    i++;
   }
+  return depth > 0 ? null : { href, end: i, mixed };
+}
+
+/**
+ * What follows a target: an optional title and the `)` of the link. `strict` accepts only that (so a reading that left
+ * something else before the `)` is not the one meant); otherwise anything else before the `)` is dropped, as before.
+ */
+function closeLink(src: string, start: number, to: number, href: string, at: number, strict: boolean): { href: string; end: number } | null {
+  let i = at;
   if (!href.trim()) return null;
   while (i < to && /[ \t]/.test(src[i]!)) i++;
   if (src[i] === '"' || src[i] === "'") {
@@ -248,10 +262,36 @@ function readDestination(src: string, start: number, to: number): { href: string
     }
   }
   if (src[i] === ")" && i < to) return { href: href.trim(), end: i + 1 };
+  if (strict) return null;
   // Anything else before the `)` (a title in another form) is dropped, as before.
   const paren = src.indexOf(")", i);
   if (paren < 0 || paren >= to || src.slice(start, paren).includes("\n")) return null;
   return { href: href.trim(), end: paren + 1 };
+}
+
+function readDestination(src: string, start: number, to: number): { href: string; end: number } | null {
+  let i = start;
+  while (i < to && (src[i] === " " || src[i] === "\t")) i++;
+  if (src[i] === "<") {
+    const gt = src.indexOf(">", i + 1);
+    if (gt < 0 || gt >= to) return null;
+    const href = src.slice(i + 1, gt);
+    if (/[\n<]/.test(href)) return null;
+    return closeLink(src, start, to, href, gt + 1, false);
+  }
+  // `plan\(1\).md` is `plan(1).md`: an escape is read when the link then closes cleanly at its own `)`. A Windows path
+  // is read as written: a drive or UNC path always, and a relative one in which a `\(` is closed by a bare `)` (the
+  // folder `dir\(x)\a.md`) when it too closes cleanly.
+  const plain = bareDestination(src, i, to, false);
+  const asWritten = plain && closeLink(src, start, to, plain.href, plain.end, true);
+  const windows = /^(?:[A-Za-z]:[\\/]|\\\\)/.test(src.slice(i, i + 3));
+  if (asWritten && (windows || plain.mixed)) return asWritten;
+  if (!windows) {
+    const e = bareDestination(src, i, to, true);
+    const closed = e && closeLink(src, start, to, e.href, e.end, true);
+    if (closed) return closed;
+  }
+  return plain && closeLink(src, start, to, plain.href, plain.end, false);
 }
 
 export function parseInline(src: string): Inline[] {
