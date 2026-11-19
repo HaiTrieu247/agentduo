@@ -1337,21 +1337,40 @@ function itemUnchanged(it: MdListItem, list: Extract<MdBlock, { type: "list" }>,
 }
 
 /** The longest run of `ch` in `s`. */
-const longestRun = (s: string, ch: string): number => Math.max(0, ...(s.match(new RegExp(`\\${ch}+`, "g")) ?? []).map((r) => r.length));
 
-export function renderFence(value: string, info: string): string {
+/** The longest run of `ch` that makes a line a closing fence line (3 or more of it, up to 3 spaces before, nothing after). */
+function closerLikeRun(value: string, ch: string): number {
+  let max = 0;
+  for (const line of value.split("\n")) {
+    const m = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+    if (m && m[1]![0] === ch) max = Math.max(max, m[1]!.length);
+  }
+  return max;
+}
+
+/**
+ * The opening fence for a code block, the same for a closed fence and an unclosed one: a fence line in the text would
+ * close the fence (and an unclosed fence would end there too), so the fence must be longer than any such line; a backtick
+ * fence cannot carry an info string with a backtick. The fence the block was read with stays whenever it is safe; else it
+ * gets longer, or the other delimiter is used.
+ */
+export function chooseFence(value: string, info: string, fenceAsRead: string | null = null): string {
   const cleanInfo = info.replace(/[\r\n]+/g, " ").trim();
-  const ch = cleanInfo.includes("`") ? "~" : "`";
-  const len = Math.max(3, longestRun(value, ch) + 1);
-  const fence = ch.repeat(len);
+  const ch = fenceAsRead?.[0] === "~" || cleanInfo.includes("`") ? "~" : "`";
+  const keep = fenceAsRead !== null && fenceAsRead[0] === ch ? fenceAsRead.length : 3;
+  return ch.repeat(Math.max(keep, closerLikeRun(value, ch) + 1));
+}
+
+export function renderFence(value: string, info: string, fenceAsRead: string | null = null): string {
+  const cleanInfo = info.replace(/[\r\n]+/g, " ").trim();
+  const fence = chooseFence(value, cleanInfo, fenceAsRead);
   return `${fence}${cleanInfo}\n${value === "" ? "" : value + "\n"}${fence}`;
 }
 
 /** A fence with no closing line: its text is everything after the opening line, every newline of it included. */
 export function renderOpenFence(value: string, info: string, fenceAsRead: string | null = null): string {
   const cleanInfo = info.replace(/[\r\n]+/g, " ").trim();
-  // the fence it was read with stays, unless its info could not follow a backtick fence
-  const fence = fenceAsRead !== null && (fenceAsRead[0] === "~" || !cleanInfo.includes("`")) ? fenceAsRead : (cleanInfo.includes("`") ? "~" : "`").repeat(3);
+  const fence = chooseFence(value, cleanInfo, fenceAsRead);
   return value === "" ? `${fence}${cleanInfo}` : `${fence}${cleanInfo}\n${value}`;
 }
 
@@ -1373,7 +1392,7 @@ function renderBlock(b: MdBlock, ctx: RenderCtx): string {
       return text === "" ? "#".repeat(level) : `${"#".repeat(level)} ${text}`;
     }
     case "code":
-      return b.unclosed ? renderOpenFence(b.value, b.info, b.fence) : renderFence(b.value, b.info);
+      return b.unclosed ? renderOpenFence(b.value, b.info, b.fence) : renderFence(b.value, b.info, b.fence);
     case "rule":
       return "---";
     case "quote": {

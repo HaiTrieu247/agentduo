@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  escapeText, normalizeInlines, parseBlocks, parseInlines, parseMarkdownDocument, renderBlocks, renderCodeSpan, renderFence,
+  chooseFence, escapeText, normalizeInlines, parseBlocks, parseInlines, parseMarkdownDocument, renderBlocks, renderCodeSpan, renderFence,
   type EditableMarkdownDocument, type MdBlock, type MdInline,
 } from "../src/shared/markdown-document.js";
 
@@ -1042,5 +1042,90 @@ describe("an unclosed code fence keeps all of its text, the newlines at its end 
     expect(inner.unclosed).toBe(true);
     expect(written(quote.replaceNodes("b1", [{ ...q, children: [{ ...inner, value: inner.value.replace("ORIGINAL", "CHANGED") }] }]))).toBe("> ```md\n> CHANGED\n>\n");
     expect(written(quote)).toBe("> ```md\n> ORIGINAL\n>\n");
+  });
+});
+
+describe("one safe fence for closed and unclosed code (Q5)", () => {
+  it("chooseFence keeps the fence it was read with when the text cannot close it, else grows it or changes delimiter", () => {
+    expect(chooseFence("x", "")).toBe("```");
+    expect(chooseFence("x", "", "````")).toBe("````");
+    expect(chooseFence("x", "", "~~~")).toBe("~~~");
+    expect(chooseFence("a\n```\nb", "", "```")).toBe("````");
+    expect(chooseFence("a\n`````\nb", "", "```")).toBe("``````");
+    expect(chooseFence("a\n```\nb", "", "````")).toBe("````");
+    expect(chooseFence("a\n````\nb", "", "````")).toBe("`````");
+    expect(chooseFence("a\n~~~\nb", "", "~~~")).toBe("~~~~");
+    expect(chooseFence("a\n~~~~~~\nb", "", "~~~")).toBe("~~~~~~~");
+    // the other delimiter in the text is no danger, nor is a run that is not a line of its own
+    expect(chooseFence("a\n~~~\nb", "", "```")).toBe("```");
+    expect(chooseFence("a ``` b\n```js\n``` x", "", "```")).toBe("```");
+    expect(chooseFence("  ```", "", "```")).toBe("````");
+    expect(chooseFence("    ```", "", "```")).toBe("```");
+    // an info with a backtick cannot follow a backtick fence
+    expect(chooseFence("x", "a`b", "```")).toBe("~~~");
+    expect(chooseFence("x", "a`b")).toBe("~~~");
+    expect(chooseFence("~~~\nx", "a`b", "```")).toBe("~~~~");
+    expect(chooseFence("x", "a`b", "~~~~")).toBe("~~~~");
+  });
+
+  const codeOf = (doc: EditableMarkdownDocument, id = "b1"): Extract<MdBlock, { type: "code" }> => {
+    const b = doc.structure(id)[0];
+    if (b?.type !== "code") throw new Error("not code");
+    return b;
+  };
+  const payloads = ["first\n```\nlast", "first\n`````\nlast", "first\n~~~\nlast", "first\n~~~~~~~~\nlast", "a\n```\n~~~\n```\nb", "  ```\nx", "``` not a closer\nx", "x\n\n```\n\n"];
+  const sources = ["```md\nORIGINAL\n\n", "```md\nORIGINAL", "````md\nORIGINAL\n\n", "~~~text\nORIGINAL\n\n", "~~~text\nORIGINAL", "```md\nORIGINAL\n```\n", "~~~\nORIGINAL\n~~~\n", "````\nORIGINAL\n````"];
+
+  for (const src of sources) {
+    for (const [variant, text] of [["LF", src], ["CRLF", src.replace(/\n/g, "\r\n")], ["BOM", "\ufeff" + src]] as const) {
+      it(`replaceNodes: a payload with fence lines is saved as code, the state (closed or not) and info kept: ${JSON.stringify(src)} ${variant}`, () => {
+        const doc = parseMarkdownDocument(text);
+        const node = codeOf(doc);
+        for (const value of payloads) {
+          const out = written(doc.replaceNodes("b1", [{ ...node, value }]));
+          const back = parseMarkdownDocument(out);
+          expect(back.blocks, JSON.stringify(out)).toHaveLength(1);
+          // a file that ends in a newline ends its last line with it: an unclosed fence that is the end of a file with no
+          // final newline of its own reads back without the newline its text ends with (the bytes written are the text's)
+          const readBack = node.unclosed && !/\n$/.test(src) && value.endsWith("\n") ? value.slice(0, -1) : value;
+          expect(codeOf(back), JSON.stringify(out)).toMatchObject({ value: readBack, info: node.info });
+          expect(codeOf(back).unclosed ?? false).toBe(node.unclosed ?? false);
+          // the opener it had stays when it is safe
+          if (!/\n(?: {0,3})(`{3,}|~{3,})[ \t]*(?:\n|$)/.test("\n" + value)) expect(out.replace(/^\ufeff/, "").startsWith(src.slice(0, src.indexOf("\n")))).toBe(true);
+          if (text.includes("\r\n")) expect(out.replace(/\r\n/g, "")).not.toContain("\n");
+        }
+        expect(written(doc)).toBe(text);
+      });
+    }
+  }
+
+  it("insertNodes: an unclosed or closed fence tree whose payload contains the delimiter is written safely", () => {
+    for (const fence of ["```", "~~~", "````"]) {
+      for (const unclosed of [true, false]) {
+        const value = `first\n${fence}\nlast`;
+        const out = written(parseMarkdownDocument("").insertNodes(null, [{ type: "code", value, info: "text", fence, ...(unclosed ? { unclosed: true } : {}) }]));
+        const back = parseMarkdownDocument(out);
+        expect(back.blocks, out).toHaveLength(1);
+        expect(codeOf(back), out).toMatchObject({ value, info: "text" });
+        expect(codeOf(back).unclosed ?? false).toBe(unclosed);
+        expect(out.startsWith(fence + "text") ).toBe(false);
+      }
+    }
+  });
+
+  it("an info with a backtick on a code block read with a backtick fence moves it to tildes, closed or not", () => {
+    for (const src of ["```a\nx\n```\n", "```a\nx\n"]) {
+      const doc = parseMarkdownDocument(src);
+      const node = codeOf(doc);
+      const out = written(doc.replaceNodes("b1", [{ ...node, info: "a`b" }]));
+      expect(out.startsWith("~~~a`b\n")).toBe(true);
+      expect(codeOf(parseMarkdownDocument(out))).toMatchObject({ info: "a`b", value: "x" });
+    }
+  });
+
+  it("nothing written for a fence that cannot be read back: a payload that would close it is never the cause of a refusal", () => {
+    const doc = parseMarkdownDocument("para\n\n```md\nORIGINAL\n\n");
+    const node = codeOf(doc, "b2");
+    expect(written(doc.replaceNodes("b2", [{ ...node, value: "a\n```\nb\n" }]))).toBe("para\n\n````md\na\n```\nb\n\n");
   });
 });
