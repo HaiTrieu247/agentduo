@@ -1,0 +1,128 @@
+/* "Mở": a document opened from a link in the chat, over the chat in the middle of the window (renderer/documents.ts,
+   renderer/markdown-editor.ts; design docs/superpowers/specs/2026-11-18-desktop-open-markdown-design.md). Its head
+   (the feature's name, the file and where it is, its state, Save, Close), what went wrong, what is kept as it is, the
+   formatting toolbar and the page, edited in place. And the chat's links that open a document. Tokens only (tokens.css);
+   both themes come from them. */
+
+/* ------------------------------------------------------------------ the layer over the chat */
+.center.doc-open > .chat-area, .center.doc-open > .center-empty { display: none; }
+.doc-view { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
+
+/* The head: "Mở", the file's name over where it is, its state, Save and Close. It wraps in a narrow window. */
+.doc-head { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); padding: var(--space-2) var(--space-3) var(--space-2) var(--space-4); border-bottom: 1px solid var(--line); }
+.doc-feature { flex: none; display: inline-flex; align-items: center; gap: 6px; height: var(--control-sm); padding: 0 var(--space-2); border-radius: var(--r-pill); color: var(--accent-c); background: var(--hover-bg); font-size: var(--text-sm); font-weight: var(--weight-strong); }
+.doc-titles { flex: 1 1 200px; display: flex; flex-direction: column; min-width: 0; }
+.doc-name { margin: 0; font-size: var(--text-md); font-weight: var(--weight-strong); line-height: var(--leading-ui); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doc-name:focus { outline: none; }
+.doc-name:focus-visible { outline: var(--focus-w) solid var(--focus-c); outline-offset: var(--focus-offset); border-radius: var(--r-sm); }
+/* The full path, cut at its start (the file's end of it is what tells it apart); the whole of it is the tooltip. */
+.doc-location { direction: rtl; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-muted); user-select: text; }
+.doc-location-text { unicode-bidi: isolate; }
+.doc-status { flex: none; padding: 2px var(--space-2); border-radius: var(--r-pill); font-size: var(--text-sm); color: var(--fg-muted); white-space: nowrap; }
+.doc-status.status-dirty { color: var(--warn-c); background: var(--warn-bg); }
+.doc-status.status-dirty::before { content: "● "; }
+.doc-status.status-saving { background: var(--hover-bg); }
+.doc-status.status-saved { color: var(--ok-c); background: var(--ok-bg); }
+.doc-status.status-saved::before { content: "✓ "; }
+.doc-status.status-error { color: var(--err-c); background: var(--err-bg); }
+.doc-status.status-error::before { content: "! "; }
+.doc-status.status-read-only { border: 1px solid var(--line-strong); }
+.btn.doc-save { flex: none; }
+.icon-btn.doc-close { flex: none; width: var(--control-md); height: var(--control-md); justify-content: center; padding: 0; border-radius: var(--r-sm); }
+
+/* What went wrong: its title in the tone's colour, the message in the text colour, and what can be done. */
+.doc-banner { flex: none; display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-2) var(--space-3); margin: var(--space-2) var(--space-4) 0; padding: var(--space-2) var(--space-3); border-radius: var(--r-md); border-left: 3px solid currentColor; }
+.doc-banner.tone-err { color: var(--err-c); background: var(--err-bg); }
+.doc-banner.tone-warn { color: var(--warn-c); background: var(--warn-bg); }
+.doc-banner > .codicon { flex: none; margin-top: 3px; }
+.doc-banner-text { flex: 1 1 240px; min-width: 0; }
+.doc-banner-title { display: block; font-weight: var(--weight-strong); }
+.doc-banner-message { margin: 2px 0 0; color: var(--fg); line-height: var(--leading-read); overflow-wrap: anywhere; }
+.doc-banner-details { margin: var(--space-1) 0 0; padding-left: var(--space-4); color: var(--fg); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.doc-banner-actions { flex: none; display: flex; flex-wrap: wrap; gap: var(--space-2); margin-left: auto; }
+
+/* What is shown as it is: a quiet line that opens to the list. */
+.doc-notices { flex: none; margin: var(--space-2) var(--space-4) 0; }
+.doc-notice { padding: var(--space-1) var(--space-3); border-radius: var(--r-md); background: var(--bg-raised); color: var(--fg-muted); font-size: var(--text-sm); }
+.doc-notice summary { cursor: pointer; line-height: var(--leading-ui); }
+.doc-notice summary:focus-visible { outline-offset: 0; border-radius: var(--r-sm); }
+.doc-notice ul { margin: var(--space-1) 0; padding-left: var(--space-5); color: var(--fg); overflow-wrap: anywhere; }
+
+.doc-body { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.doc-loading { display: flex; align-items: center; justify-content: center; gap: var(--space-2); padding: var(--space-6) var(--space-4); color: var(--fg-muted); }
+
+/* ------------------------------------------------------------------ the toolbar and the link bar */
+.md-editor { display: flex; flex-direction: column; min-height: 100%; }
+.doc-tools { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--line); }
+.doc-toolbar { display: flex; align-items: center; gap: 2px; padding: var(--space-1) var(--space-4); overflow-x: auto; }
+.doc-kind { flex: none; min-height: var(--control-sm); margin-right: var(--space-2); padding: 2px 6px; font-size: var(--text-sm); }
+.icon-btn.doc-tool { flex: none; width: var(--control-md); height: var(--control-md); justify-content: center; padding: 0; border-radius: var(--r-sm); }
+.icon-btn.doc-tool[aria-pressed="true"] { color: var(--fg); background: var(--select-bg); }
+.doc-tool-sep { flex: none; width: 1px; height: var(--icon-size); margin: 0 var(--space-1); background: var(--line-strong); }
+.doc-linkbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-4) var(--space-2); }
+.doc-linkbar-label { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-muted); font-size: var(--text-sm); }
+input[type="text"].doc-linkbar-input { flex: 1 1 200px; min-width: 0; font-family: var(--font-mono); font-size: var(--text-sm); }
+
+/* ------------------------------------------------------------------ the page: the document as it reads, edited in place */
+.doc-page { box-sizing: border-box; width: 100%; max-width: var(--read-w); margin: 0 auto; padding: var(--space-5) var(--space-5) var(--space-6); color: var(--fg); font-size: var(--text-md); line-height: var(--leading-read); overflow-wrap: anywhere; }
+.doc-page:focus { outline: none; }
+/* A field is quiet until it has the caret: then a bar in the focus colour on its left and the hover tint behind it. */
+.doc-field { margin-left: calc(-1 * var(--space-2)); margin-right: calc(-1 * var(--space-2)); padding: 1px var(--space-2); border-radius: var(--r-sm); white-space: pre-wrap; caret-color: var(--accent-c); outline: none; transition: background-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease); }
+.doc-field[contenteditable]:hover { background: var(--hover-bg); }
+.doc-field:focus { background: var(--hover-bg); box-shadow: inset var(--focus-w) 0 0 var(--focus-c); }
+.doc-block { position: relative; }
+.doc-p { margin-top: 0; margin-bottom: var(--space-3); }
+.doc-h { margin-top: var(--space-5); margin-bottom: var(--space-2); font-weight: var(--weight-strong); line-height: 1.3; }
+.doc-block:first-child > .doc-h:first-child { margin-top: 0; }
+.doc-h1 { font-size: var(--text-2xl); }
+.doc-h2 { font-size: var(--text-xl); }
+.doc-h3 { font-size: var(--text-lg); }
+.doc-h4 { font-size: var(--text-md); }
+.doc-h5 { font-size: var(--text-sm); }
+.doc-h6 { font-size: var(--text-sm); color: var(--fg-muted); }
+.doc-page strong { font-weight: var(--weight-strong); }
+.doc-code { padding: 1px 4px; border-radius: var(--r-sm); background: var(--code-c); font-family: var(--font-mono); font-size: var(--text-sm); }
+/* A link is text here (never followed): its target is the tooltip and the link bar. */
+.doc-link { color: var(--accent-c); text-decoration: underline; text-underline-offset: 2px; cursor: text; }
+/* What the editor keeps as written (an image, inline HTML, a footnote reference…): its source, untouchable. */
+.doc-raw { padding: 0 4px; border: 1px dashed var(--line-strong); border-radius: var(--r-sm); background: var(--bg-raised); color: var(--fg-muted); font-family: var(--font-mono); font-size: var(--text-sm); cursor: default; }
+.doc-code-block { margin: 0 0 var(--space-3); border: 1px solid var(--line); border-radius: var(--r-md); background: var(--code-c); overflow: hidden; }
+.doc-code-info { padding: 2px var(--space-3); border-bottom: 1px solid var(--line); color: var(--fg-muted); font-family: var(--font-mono); font-size: var(--text-xs); }
+.doc-pre { margin: 0; padding: var(--space-2) var(--space-3); overflow-x: auto; }
+.doc-code-field { display: block; min-height: 1.5em; margin: 0; white-space: pre; font-family: var(--font-mono); font-size: var(--text-sm); line-height: var(--leading-ui); }
+/* A last empty line of code still shows (and takes the caret). */
+.doc-code-field::after { content: "\200b"; }
+.doc-code-field:focus { box-shadow: inset var(--focus-w) 0 0 var(--focus-c); }
+.doc-list { margin: 0 0 var(--space-3); padding-left: var(--space-5); }
+.doc-li { margin: 2px 0; }
+.doc-li > .doc-p { margin-bottom: 2px; }
+.doc-li > .doc-list { margin-bottom: var(--space-1); }
+.doc-task { float: left; margin-right: 6px; color: var(--fg-muted); }
+.doc-task.done { color: var(--ok-c); }
+.doc-quote { margin: 0 0 var(--space-3); padding-left: var(--space-3); border-left: 3px solid var(--line-strong); color: var(--fg-muted); }
+.doc-rule { margin: var(--space-4) 0; border: 0; border-top: 1px solid var(--line-strong); }
+/* A block kept as it is (raw HTML, a table, front matter…): its source, labelled, never editable. */
+.doc-kept { margin: 0 0 var(--space-3); border: 1px dashed var(--line-strong); border-radius: var(--r-md); background: var(--bg-raised); }
+.doc-kept-label { display: flex; align-items: center; gap: 6px; padding: 2px var(--space-3); border-bottom: 1px dashed var(--line-strong); color: var(--fg-muted); font-size: var(--text-xs); }
+.doc-kept-source { margin: 0; padding: var(--space-2) var(--space-3); color: var(--fg); font-family: var(--font-mono); font-size: var(--text-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
+.doc-kept-source:focus-visible { outline-offset: -2px; }
+/* Where the link pointed: lit for a moment when it opens. */
+.doc-target { animation: doc-target 2.4s var(--ease); }
+@keyframes doc-target { from { background-color: var(--select-bg); } to { background-color: transparent; } }
+.md-editor.read-only .doc-field:hover { background: none; }
+
+/* A narrow window: the page and the head give room back. */
+body.narrow .doc-page { padding: var(--space-4) var(--space-4) var(--space-5); }
+body.narrow .doc-head { padding-left: var(--space-3); }
+
+@media (prefers-reduced-motion: reduce) {
+  .doc-field { transition: none; }
+  .doc-target { animation: none; outline: var(--focus-w) solid var(--focus-c); outline-offset: var(--focus-offset); }
+}
+
+/* ------------------------------------------------------------------ the chat's links that open a document */
+/* Underlined (not told by colour alone), a pointer, and a focus ring: it is a real link now, reached with Tab, opened with
+   Enter or a click. A link that does not open keeps the chat's look. */
+body.agentduo-desktop .md-link.md-link-open { cursor: pointer; text-decoration: underline; text-underline-offset: 2px; border-radius: 2px; }
+body.agentduo-desktop .md-link.md-link-open:hover { text-decoration-thickness: 2px; }
+body.agentduo-desktop .md-link.md-link-open:focus-visible { outline: var(--focus-w) solid var(--focus-c); outline-offset: 1px; }

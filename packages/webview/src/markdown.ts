@@ -8,7 +8,7 @@ export type Inline =
   | { type: "code"; text: string }
   | { type: "strong" | "em" | "del"; children: Inline[] }
   /** The target is only shown (as a tooltip), never opened: the webview opens nothing an agent names. */
-  | { type: "link"; href: string; children: Inline[] };
+  | { type: "link"; href: string; children: Inline[]; ambiguous?: true };
 
 export type Align = "left" | "center" | "right" | null;
 
@@ -198,6 +198,106 @@ const WORD = /[\p{L}\p{N}]/u;
  */
 type Misses = Map<string, number>;
 
+/**
+ * The target of a link whose `(` is just before `start`, and where the link ends (after its `)`): `<…>` may hold spaces
+ * (`<my notes.md>`), a bare target may hold balanced parentheses (`a(1).md`), and a title after it (`"…"`, `'…'`) is
+ * dropped. A backslash stays a backslash (Windows paths) except in `\(` / `\)` of a bare target that then closes cleanly (see `readDestination`). Nothing is decoded: the target is kept as written. A target
+ * the strict reading cannot close (unbalanced parentheses) ends at the first `)`, as it always did. Null: not a link (empty, a line break, no `)`).
+ */
+/** A link's target and where the link ends; `ambiguous`: the target can be read two ways (see `readDestination`). */
+interface Destination {
+  href: string;
+  end: number;
+  ambiguous?: true;
+}
+
+function linkDestination(src: string, start: number, to: number): Destination | null {
+  const read = readDestination(src, start, to);
+  if (read || /^[ \t]*</.test(src.slice(start, start + 8))) return read;
+  // As it always was: up to the first `)`, and the first word of what is between.
+  const paren = src.indexOf(")", start);
+  if (paren < 0 || paren >= to || src.slice(start, paren).includes("\n")) return null;
+  const word = src.slice(start, paren).trim().split(/\s+/)[0] ?? "";
+  return word ? { href: word, end: paren + 1 } : null;
+}
+
+/**
+ * A bare target (no `<…>`) from `i`, up to the first space or the `)` that closes the link. Parentheses must balance.
+ * With `escapes`, `\(` and `\)` are Markdown escapes: they are not counted and the target holds the bare parenthesis
+ * (`plan\(1\).md` is `plan(1).md`). Without, a backslash is a letter, as in a Windows path (`dir\(x)\a.md`).
+ */
+function bareDestination(src: string, i: number, to: number, escapes: boolean): { href: string; end: number } | null {
+  let href = "";
+  let depth = 0;
+  while (i < to && !/\s/.test(src[i]!)) {
+    const c = src[i]!;
+    if (escapes && c === "\\" && i + 1 < to && (src[i + 1] === "(" || src[i + 1] === ")")) {
+      href += src[i + 1];
+      i += 2;
+      continue;
+    }
+    if (c === "(") depth++;
+    else if (c === ")") {
+      if (depth === 0) break;
+      depth--;
+    }
+    href += c;
+    i++;
+  }
+  return depth > 0 ? null : { href, end: i };
+}
+
+/**
+ * What follows a target: an optional title and the `)` of the link. `strict` accepts only that (so a reading that left
+ * something else before the `)` is not the one meant); otherwise anything else before the `)` is dropped, as before.
+ */
+function closeLink(src: string, start: number, to: number, href: string, at: number, strict: boolean): Destination | null {
+  let i = at;
+  if (!href.trim()) return null;
+  while (i < to && /[ \t]/.test(src[i]!)) i++;
+  if (src[i] === '"' || src[i] === "'") {
+    const q = src.indexOf(src[i]!, i + 1);
+    if (q >= 0 && q < to && !src.slice(i, q).includes("\n")) {
+      i = q + 1;
+      while (i < to && /[ \t]/.test(src[i]!)) i++;
+    }
+  }
+  if (src[i] === ")" && i < to) return { href: href.trim(), end: i + 1 };
+  if (strict) return null;
+  // Anything else before the `)` (a title in another form) is dropped, as before.
+  const paren = src.indexOf(")", i);
+  if (paren < 0 || paren >= to || src.slice(start, paren).includes("\n")) return null;
+  return { href: href.trim(), end: paren + 1 };
+}
+
+function readDestination(src: string, start: number, to: number): Destination | null {
+  let i = start;
+  while (i < to && (src[i] === " " || src[i] === "\t")) i++;
+  if (src[i] === "<") {
+    const gt = src.indexOf(">", i + 1);
+    if (gt < 0 || gt >= to) return null;
+    const href = src.slice(i + 1, gt);
+    if (/[\n<]/.test(href)) return null;
+    return closeLink(src, start, to, href, gt + 1, false);
+  }
+  // A drive or UNC path is read as written. Otherwise a target with `\(` or `\)` has two readings: the escapes
+  // (`plan\(1\).md` is `plan(1).md`) and the backslash as a letter (a Windows path). Each must close the link cleanly.
+  //  - Both end the link at the same `)`: they differ only in the backslashes, and the escape is what Markdown says.
+  //  - Only one closes cleanly: that one. (A target that ends in a backslash names a folder, so it is not a reading.)
+  //  - Both close, at different `)`: the text cannot tell which file is meant (`dir\(x)\a.md` is a Windows folder or
+  //    `dir(x` followed by text), so the link is marked `ambiguous` and nothing opens it: no reading is chosen because
+  //    a file by that name exists. The link is still a link, so the page and main count the same links.
+  const plain = bareDestination(src, i, to, false);
+  const asWritten = plain && !plain.href.endsWith("\\") ? closeLink(src, start, to, plain.href, plain.end, true) : null;
+  if (/^(?:[A-Za-z]:[\\/]|\\\\)/.test(src.slice(i, i + 3))) return asWritten ?? (plain && closeLink(src, start, to, plain.href, plain.end, false));
+  const e = bareDestination(src, i, to, true);
+  const escaped = e && e.href !== plain?.href ? closeLink(src, start, to, e.href, e.end, true) : null;
+  if (escaped && asWritten) return escaped.end === asWritten.end ? escaped : { ...asWritten, ambiguous: true };
+  if (escaped) return escaped;
+  if (asWritten) return asWritten;
+  return plain && closeLink(src, start, to, plain.href, plain.end, false);
+}
+
 export function parseInline(src: string): Inline[] {
   return inline(src, 0, src.length, new Map(), 0);
 }
@@ -279,12 +379,11 @@ function inline(src: string, from: number, to: number, misses: Misses, depth: nu
       const close = missed(misses, "]", to) ? -1 : src.indexOf("]", i + 1);
       if (close < 0 || close >= to) misses.set("]", to);
       else if (src[close + 1] === "(") {
-        const paren = src.indexOf(")", close + 2);
-        const href = paren >= 0 && paren < to ? src.slice(close + 2, paren).trim().split(/\s+/)[0] ?? "" : "";
-        if (href && !src.slice(close + 2, paren).includes("\n")) {
+        const dest = linkDestination(src, close + 2, to);
+        if (dest) {
           flush();
-          out.push({ type: "link", href, children: inline(src, i + 1, close, misses, depth + 1) });
-          i = paren + 1;
+          out.push({ type: "link", href: dest.href, children: inline(src, i + 1, close, misses, depth + 1), ...(dest.ambiguous ? { ambiguous: true as const } : {}) });
+          i = dest.end;
           continue;
         }
       }

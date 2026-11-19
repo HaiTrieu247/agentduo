@@ -52,6 +52,33 @@ export interface Actions {
   draft(text: string): void;
   /** An @ in the composer: the workspace's paths for `query`; they come back through `fileMatches` with `seq`. */
   findFiles(seq: number, query: string): void;
+  /**
+   * Optional: each link drawn in a Markdown part of a timeline item, with where it is (`LinkSite`), for a host that can
+   * open some links (the desktop's "Mở"). The host decides whether the element opens anything and draws it so. Without
+   * it a link stays what it always was: its text, with the target as a tooltip, opening nothing.
+   */
+  link?(el: HTMLElement, site: LinkSite): void;
+}
+
+/**
+ * Where a drawn link was written: the timeline item, the part of it that is Markdown (`text` for the PM's message,
+ * `answer` for an answer or a discussion's final answer, `turn.<n>` for a discussion's turn), and the link's number in
+ * that part's text, 0-based, in document order (a paragraph's or heading's inline links, a list's items in order, a
+ * quote's blocks, a table's head cells then its rows; links in code are not links). It is the same order the desktop's
+ * main numbers them in (`markdownLinks`, apps/desktop/src/shared/documents.ts), so a site names one link on both sides.
+ */
+export interface LinkSite {
+  itemId: string;
+  part: string;
+  ordinal: number;
+}
+
+/** A Markdown part being drawn whose links go to `Actions.link`: where it is, and the next link's ordinal. */
+interface LinkCounter {
+  itemId: string;
+  part: string;
+  next: number;
+  hook: (el: HTMLElement, site: LinkSite) => void;
 }
 
 /** A path as the @ list shows it: its own name (a folder's with its `/`), then the folder it is in. */
@@ -123,7 +150,7 @@ function shortModel(m: ModelIdentity | null | undefined): string {
 }
 
 // ------------------------------------------------------------------ markdown
-function inlineNodes(nodes: Inline[]): Node[] {
+function inlineNodes(nodes: Inline[], links: LinkCounter | null = null): Node[] {
   return nodes.map((n): Node => {
     switch (n.type) {
       case "text":
@@ -133,53 +160,63 @@ function inlineNodes(nodes: Inline[]): Node[] {
       case "code":
         return h("code", { class: "md-code" }, n.text);
       case "strong":
-        return h("strong", {}, ...inlineNodes(n.children));
+        return h("strong", {}, ...inlineNodes(n.children, links));
       case "em":
-        return h("em", {}, ...inlineNodes(n.children));
+        return h("em", {}, ...inlineNodes(n.children, links));
       case "del":
-        return h("del", {}, ...inlineNodes(n.children));
-      case "link":
-        // Shown, never followed: the target is only its tooltip.
-        return h("span", { class: "md-link", title: n.href }, ...inlineNodes(n.children));
+        return h("del", {}, ...inlineNodes(n.children, links));
+      case "link": {
+        // Shown, never followed: the target is only its tooltip. A host with a link hook may make it open something;
+        // its ordinal is taken before its own text's links, as `markdownLinks` counts them.
+        const ordinal = links ? links.next++ : -1;
+        const el = h("span", { class: "md-link", title: n.href }, ...inlineNodes(n.children, links));
+        if (links) links.hook(el, { itemId: links.itemId, part: links.part, ordinal });
+        return el;
+      }
     }
   });
 }
 
 const HEADINGS = ["h3", "h4", "h5", "h6"] as const;
 
-function blockNodes(blocks: Block[], actions: Actions): HTMLElement[] {
+function blockNodes(blocks: Block[], actions: Actions, links: LinkCounter | null = null): HTMLElement[] {
   return blocks.map((b): HTMLElement => {
     switch (b.type) {
       case "paragraph":
-        return h("p", {}, ...inlineNodes(b.children));
+        return h("p", {}, ...inlineNodes(b.children, links));
       case "heading":
-        return h(HEADINGS[Math.min(b.level, HEADINGS.length) - 1]!, { class: `md-h md-h${b.level}` }, ...inlineNodes(b.children));
+        return h(HEADINGS[Math.min(b.level, HEADINGS.length) - 1]!, { class: `md-h md-h${b.level}` }, ...inlineNodes(b.children, links));
       case "code":
         return h("div", { class: "md-code-block" },
           h("pre", { class: "md-pre", label: b.lang ? `${b.lang} code` : "code", attrs: { tabindex: "0" } }, h("code", {}, b.text)),
           copyButton(b.text, "code", actions));
       case "list": {
-        const el = h(b.ordered ? "ol" : "ul", { class: "md-list" }, ...b.items.map((item) => h("li", {}, ...blockNodes(item, actions))));
+        const el = h(b.ordered ? "ol" : "ul", { class: "md-list" }, ...b.items.map((item) => h("li", {}, ...blockNodes(item, actions, links))));
         if (b.ordered && b.start !== 1) el.setAttribute("start", String(b.start));
         return el;
       }
       case "quote":
-        return h("blockquote", { class: "md-quote" }, ...blockNodes(b.children, actions));
+        return h("blockquote", { class: "md-quote" }, ...blockNodes(b.children, actions, links));
       case "rule":
         return h("hr", { class: "md-rule" });
       case "table": {
-        const cell = (tag: "th" | "td", content: Inline[], n: number) => h(tag, { class: b.align[n] ? `align-${b.align[n]}` : undefined }, ...inlineNodes(content));
-        return h("div", { class: "md-table-wrap", attrs: { tabindex: "0" } }, h("table", { class: "md-table" },
-          h("thead", {}, h("tr", {}, ...b.head.map((c, n) => cell("th", c, n)))),
-          h("tbody", {}, ...b.rows.map((r) => h("tr", {}, ...r.map((c, n) => cell("td", c, n)))))));
+        const cell = (tag: "th" | "td", content: Inline[], n: number) => h(tag, { class: b.align[n] ? `align-${b.align[n]}` : undefined }, ...inlineNodes(content, links));
+        // The head's cells first, then the rows' (array arguments are made in that order).
+        const head = h("thead", {}, h("tr", {}, ...b.head.map((c, n) => cell("th", c, n))));
+        const body = h("tbody", {}, ...b.rows.map((r) => h("tr", {}, ...r.map((c, n) => cell("td", c, n)))));
+        return h("div", { class: "md-table-wrap", attrs: { tabindex: "0" } }, h("table", { class: "md-table" }, head, body));
       }
     }
   });
 }
 
-/** An answer as the agent wrote it: its Markdown as elements and text nodes, never as markup. */
-export function markdownBody(text: string, actions: Actions): HTMLElement {
-  return h("div", { class: "md" }, ...blockNodes(parseMarkdown(text), actions));
+/**
+ * An answer as the agent wrote it: its Markdown as elements and text nodes, never as markup. `site` names the timeline
+ * item and part it is, so its links go to `actions.link` (when the host has that hook) with their ordinals.
+ */
+export function markdownBody(text: string, actions: Actions, site?: { itemId: string; part: string }): HTMLElement {
+  const links: LinkCounter | null = site && actions.link ? { itemId: site.itemId, part: site.part, next: 0, hook: actions.link.bind(actions) } : null;
+  return h("div", { class: "md" }, ...blockNodes(parseMarkdown(text), actions, links));
 }
 
 const inlineText = (text: string): Node[] => inlineNodes(parseInline(text));
@@ -271,7 +308,8 @@ function verdictChip(place: NonNullable<TurnCard["discussion"]>): HTMLElement | 
   return h("span", { class: `verdict verdict-${place.verdict ?? "none"}` }, verdictText(place.verdict));
 }
 
-function answerCard(t: TurnCard, actions: Actions, live: { now: number } | null): HTMLElement {
+/** `site`: the timeline item and part its answer is, for the links in it (none for a card under way). */
+function answerCard(t: TurnCard, actions: Actions, live: { now: number } | null, site?: { itemId: string; part: string }): HTMLElement {
   const p = PROVIDERS[t.backend];
   const time = live ? formatClock((live.now - t.startedAt) / 1000) : formatDuration(t.durationSec);
   const meta = [time, live ? "" : usageText(t.costUsd, t.tokens)].filter(Boolean).join(" · ");
@@ -281,7 +319,7 @@ function answerCard(t: TurnCard, actions: Actions, live: { now: number } | null)
     ? [h("span", { class: "role", title: modelTitle(t.model) }, live ? discussionDoing(place) : discussionStepText(place)), verdictChip(place)]
     : [h("span", { class: "model", title: modelTitle(t.model) }, shortModel(t.model))];
   const body = live ? working(t.activities, place?.step === "critique" ? "Reviewing…" : place?.step === "synthesis" ? "Synthesizing…" : "Thinking…")
-    : t.status === "success" ? [row("row-text row-answer", markdownBody(t.answer ?? "", actions))]
+    : t.status === "success" ? [row("row-text row-answer", markdownBody(t.answer ?? "", actions, site))]
       : t.status === "interrupted" ? [row("row-text s-warn", h("span", { class: "warn-text" }, "Stopped before it answered."))]
         : [row("row-text s-err", h("span", { class: "err-text", role: "alert" }, `No answer: ${t.error ?? "the call failed"}`))];
   return h("article", { class: `turn turn-${t.backend}${live ? " live" : ""}${!live && t.status !== "success" ? " failed" : ""}`, label: `${p.agent} (${p.company}) answer` },
@@ -297,7 +335,7 @@ const OUTCOME_ICON: Record<NonNullable<DiscussionCard["status"]>, { icon: string
  * A /discuss: while it goes on, each turn whole as it finishes and the one under way; once it is over, how it ended,
  * its turns folded, and its answer (the response) whole.
  */
-function discussionCard(d: DiscussionCard, actions: Actions, live: { now: number; turn: TurnCard | null } | null): HTMLElement {
+function discussionCard(d: DiscussionCard, actions: Actions, live: { now: number; turn: TurnCard | null } | null, itemId?: string): HTMLElement {
   const who = `${PROVIDERS[d.answerer].agent} answers · ${PROVIDERS[d.critic].agent} reviews`;
   const title = h("span", { class: "speaker-id" }, icon("comment-discussion"), h("strong", {}, "Discussion"));
   if (live) {
@@ -315,11 +353,11 @@ function discussionCard(d: DiscussionCard, actions: Actions, live: { now: number
     cardHead(title, [h("span", { class: "role" }, who)], meta),
     h("div", { class: `discussion-outcome note-${o.tone}` }, icon(o.icon, "note-icon"), h("span", {}, discussionOutcome(status)), d.error ? h("span", { class: "err-text" }, `: ${d.error}`) : null),
     n ? h("details", { class: "discussion-fold" }, h("summary", {}, `${n} turn${n === 1 ? "" : "s"}`, icon("chevron-right", "fold-chevron")),
-      h("div", { class: "discussion-turns" }, ...d.turns.map((t) => answerCard(t, actions, null)))) : null,
+      h("div", { class: "discussion-turns" }, ...d.turns.map((t, k) => answerCard(t, actions, null, itemId === undefined ? undefined : { itemId, part: `turn.${k}` })))) : null,
     d.answer !== null && d.answer !== undefined
       ? h("section", { class: "discussion-final", label: "Final answer" },
         h("div", { class: "final-head" }, providerMark(by), h("strong", {}, "Final answer"), h("span", { class: "muted" }, `· ${PROVIDERS[by].agent}`)),
-        markdownBody(d.answer, actions))
+        markdownBody(d.answer, actions, itemId === undefined ? undefined : { itemId, part: "answer" }))
       : null);
 }
 
@@ -381,9 +419,9 @@ function timelineItem(item: TimelineItem, actions: Actions): HTMLElement {
     case "step":
       return stepCard(item.step, actions, null);
     case "answer":
-      return answerCard(item.turn, actions, null);
+      return answerCard(item.turn, actions, null, { itemId: item.id, part: "answer" });
     case "discussion":
-      return discussionCard(item.discussion, actions, null);
+      return discussionCard(item.discussion, actions, null, item.id);
     case "warning":
       return note("warning", "warn", h("span", { class: "sr-only" }, "warning: "), item.text);
     case "permission":
@@ -394,7 +432,7 @@ function timelineItem(item: TimelineItem, actions: Actions): HTMLElement {
     case "question":
       return questionHistory(item);
     case "pm":
-      return h("div", { class: "pm-msg" }, h("div", { class: "pm-head" }, icon("person", "note-icon"), "PM"), markdownBody(item.text, actions));
+      return h("div", { class: "pm-msg" }, h("div", { class: "pm-head" }, icon("person", "note-icon"), "PM"), markdownBody(item.text, actions, { itemId: item.id, part: "text" }));
     case "document":
       return h("details", { class: "team-doc", attrs: { open: "" } },
         h("summary", {}, icon(item.docKind === "plan" ? "checklist" : item.docKind === "acceptance" ? "pass" : "note", "note-icon"), item.title),

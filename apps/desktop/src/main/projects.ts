@@ -19,6 +19,8 @@ import { shownImages, type ViewState } from "@agentduo/host/viewState";
 import type { ArchivedConversation, ConversationItem, DesktopEvent, ProjectSummary, RunItem } from "../shared/protocol.js";
 import type { PreferencesStore } from "./preferences.js";
 import type { ResourceTokens } from "./resources.js";
+import { DocumentService } from "./documents.js";
+import { documentError, type DocumentOpened } from "../shared/documents.js";
 
 /** What the host does for a session that needs the window: pick files, copy text. */
 export interface DesktopHost {
@@ -37,6 +39,8 @@ export interface ProjectManagerOptions {
   resolveNode(): NodeLookup;
   /** Where pasted and dropped files are written before the worker copies them. */
   stagingDir: string;
+  /** The file service of "Mở"; the manager makes its own (posting through `post`) when none is given. */
+  documents?: DocumentService;
   post(event: DesktopEvent): void;
   log(line: string): void;
 }
@@ -98,6 +102,8 @@ interface Project {
   lists: Map<string, ChangeList>;
   /** Conversations made here and not opened yet: they start with the desktop's default recipient (a saved one keeps its own). */
   fresh: Set<string>;
+  /** Pending (debounced) syncs of a conversation's document links, by conversation. */
+  linkTimers: Map<string, NodeJS.Timeout>;
 }
 
 export class ProjectManager {
@@ -107,8 +113,11 @@ export class ProjectManager {
   private listCounter = 0;
   private activeProject: string | null = null;
   private activeConversation: string | null = null;
+  /** The ids of the chat's links to files "Mở" opens, and the files opened (main/documents.ts). */
+  readonly documents: DocumentService;
 
   constructor(private readonly o: ProjectManagerOptions) {
+    this.documents = o.documents ?? new DocumentService({ post: (e) => o.post(e), log: (l) => o.log(l) });
     this.entry(homeFolder(o.env()), CONVERSATIONS_PROJECT_ID);
     this.activeProject = CONVERSATIONS_PROJECT_ID;
     for (const p of o.prefs.projects) this.entry(p.path);
@@ -119,7 +128,7 @@ export class ProjectManager {
   private entry(path: string, id = projectIdOf(path)): Project {
     let p = this.projects.get(id);
     if (!p) {
-      p = { id, path, session: null, views: new Map(), granted: new Map(), listTimer: null, lists: new Map(), fresh: new Set() };
+      p = { id, path, session: null, views: new Map(), granted: new Map(), listTimer: null, lists: new Map(), fresh: new Set(), linkTimers: new Map() };
       this.projects.set(id, p);
     }
     return p;
@@ -185,6 +194,7 @@ export class ProjectManager {
       onChange: (conversation, state) => {
         this.scheduleList(p);
         this.grantImages(p, conversation, state, false);
+        this.scheduleLinks(p, conversation);
       },
       onQuestion: (conversation, kind, text) => {
         if (this.activeProject === p.id && this.activeConversation === conversation) return;
@@ -239,6 +249,7 @@ export class ProjectManager {
     if (id === CONVERSATIONS_PROJECT_ID) throw new Error("Conversations cannot be removed");
     const p = this.project(id);
     await this.stopProject(p);
+    this.documents.closeProject(id);
     this.o.prefs.forget(p.path);
     this.projects.delete(id);
     if (this.activeProject === id) {
@@ -251,6 +262,8 @@ export class ProjectManager {
   async restart(id: string): Promise<void> {
     const p = this.project(id);
     this.o.tokens.revokeProject(id);
+    this.clearLinks(p);
+    this.documents.revokeProject(id);
     p.granted.clear();
     p.lists.clear();
     await this.session(id).restart();
@@ -273,6 +286,8 @@ export class ProjectManager {
     const owner = `${p.id}/${conversationId}`;
     const old = p.views.get(conversationId);
     if (old !== undefined) this.o.tokens.revoke(owner, old);
+    this.cancelLinks(p, conversationId);
+    this.documents.revokeConversation(p.id, conversationId);
     p.views.set(conversationId, view);
     p.granted.delete(conversationId);
     this.activeProject = projectId;
@@ -283,7 +298,10 @@ export class ProjectManager {
     handle.attach((message: HostMessage) => {
       if (p.views.get(conversationId) !== view) return;
       this.o.post({ type: "host", projectId, conversationId, view, message });
-      if (message.type === "snapshot") this.grantImages(p, conversationId, message.state, true);
+      if (message.type === "snapshot") {
+        this.grantImages(p, conversationId, message.state, true);
+        this.syncLinks(p, conversationId, view, message.state, true);
+      }
     });
     // A new conversation's plain messages go where Settings says; one from the history keeps the recipient it had.
     if (p.fresh.delete(conversationId)) {
@@ -428,6 +446,60 @@ export class ProjectManager {
     if (Object.keys(uris).length) this.o.post({ type: "host", projectId: p.id, conversationId: conversation, view, message: { type: "attachmentUris", uris } });
   }
 
+  // ------------------------------------------------------------------ documents ("Mở")
+  /**
+   * The links of a conversation's chat that open a file get ids (the renderer is told which, never where they point).
+   * The timeline is read with the contract's own functions, so the numbering is the one the page draws.
+   */
+  private syncLinks(p: Project, conversation: string, view: number, state: ViewState, fresh: boolean): void {
+    if (p.views.get(conversation) !== view) return;
+    try {
+      this.documents.syncLinks(p.id, conversation, view, state.timeline, fresh);
+    } catch (e) {
+      this.o.log(`could not grant document links: ${(e as Error).message}`);
+    }
+  }
+
+  /** A change of the chat (a streamed answer): the links are read again shortly, once for a burst of changes. */
+  private scheduleLinks(p: Project, conversation: string): void {
+    if (!p.views.has(conversation) || p.linkTimers.has(conversation)) return;
+    const timer = setTimeout(() => {
+      p.linkTimers.delete(conversation);
+      const view = p.views.get(conversation);
+      const session = p.session;
+      if (view === undefined || !session) return;
+      this.syncLinks(p, conversation, view, session.conversation(conversation).state, false);
+    }, 100);
+    timer.unref?.();
+    p.linkTimers.set(conversation, timer);
+  }
+
+  private cancelLinks(p: Project, conversation: string): void {
+    const timer = p.linkTimers.get(conversation);
+    if (timer) clearTimeout(timer);
+    p.linkTimers.delete(conversation);
+  }
+
+  private clearLinks(p: Project): void {
+    for (const timer of p.linkTimers.values()) clearTimeout(timer);
+    p.linkTimers.clear();
+  }
+
+  /** The conversation closed: its ids are dropped and its page (if it still listens) is told. */
+  private revokeLinks(projectId: string, conversationId: string, view: number): void {
+    const revoked = this.documents.revokeConversation(projectId, conversationId);
+    if (revoked.length) this.o.post({ type: "documentLinks", projectId, conversationId, view, links: [], revoked });
+  }
+
+  /** A click on a link of the chat: the target is what main kept for the link id, resolved from the conversation's own workspace. */
+  async openDocument(projectId: string, conversationId: string, view: number, linkId: string): Promise<DocumentOpened> {
+    const p = this.project(projectId);
+    if (p.views.get(conversationId) !== view) return { ok: false, error: documentError("link-stale", "") };
+    const state = p.session && p.session.conversations.includes(conversationId) ? p.session.conversation(conversationId).state : null;
+    const workspace = state?.workspace ?? (p.id === CONVERSATIONS_PROJECT_ID ? null : p.path);
+    return this.documents.open({ projectId, conversationId, view, linkId, workspace });
+  }
+
   // ------------------------------------------------------------------ the list
   conversations(projectId: string): ConversationItem[] {
     const p = this.project(projectId);
@@ -508,6 +580,8 @@ export class ProjectManager {
     p.fresh.delete(conversationId);
     if (view !== undefined) {
       this.o.tokens.revoke(`${p.id}/${conversationId}`, view);
+      this.cancelLinks(p, conversationId);
+      this.revokeLinks(p.id, conversationId, view);
       p.views.delete(conversationId);
       p.granted.delete(conversationId);
       await p.session?.conversation(conversationId).close();
@@ -573,6 +647,8 @@ export class ProjectManager {
     if (p.listTimer) clearTimeout(p.listTimer);
     p.listTimer = null;
     this.o.tokens.revokeProject(p.id);
+    this.clearLinks(p);
+    this.documents.revokeProject(p.id);
     p.views.clear();
     p.granted.clear();
     p.fresh.clear();

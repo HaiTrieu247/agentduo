@@ -1,7 +1,7 @@
 // The confirmation dialog (renderer/dialog.ts) on a small fake document: its labels, the button focused first, Tab
 // kept inside, Escape and a click outside cancelling, the page inert while it is open, and focus given back.
 import { describe, expect, it } from "vitest";
-import { confirmDialog, trapIndex } from "../src/renderer/dialog.js";
+import { choiceDialog, confirmDialog, trapIndex } from "../src/renderer/dialog.js";
 
 type Listener = (e: FakeEvent) => void;
 interface FakeEvent { type: string; key?: string; shiftKey?: boolean; target: FakeElement | null; defaultPrevented: boolean; preventDefault(): void; stopPropagation(): void }
@@ -233,5 +233,68 @@ describe("confirmDialog", () => {
     parts(doc).confirm!.click();
     await expect(answer).resolves.toBe(true);
     expect(doc.activeElement).not.toBe(opener);
+  });
+});
+
+// "Mở": leaving a document with unsaved edits asks Save, Discard or Keep editing in the same dialog.
+describe("choiceDialog", () => {
+  const LEAVE = {
+    title: "Rời tài liệu?",
+    message: "Có thay đổi chưa lưu.",
+    choices: [
+      { value: "keep", label: "Tiếp tục chỉnh sửa" },
+      { value: "discard", label: "Bỏ thay đổi", tone: "danger" },
+      { value: "save", label: "Lưu", tone: "primary" },
+    ],
+    cancel: "keep",
+  } as const;
+  const buttons = (doc: FakeDocument) => doc.body.find("dialog-actions")!.children;
+
+  it("draws one button per choice, in order, with its tone, and focuses the cancelling one first", () => {
+    const { doc, asDoc } = page();
+    void choiceDialog(LEAVE, asDoc);
+    const b = buttons(doc);
+    expect(b.map((n) => n.textContent)).toEqual(["Tiếp tục chỉnh sửa", "Bỏ thay đổi", "Lưu"]);
+    expect(b[0]!.className.split(" ")).toContain("dialog-cancel");
+    expect(b[1]!.className.split(" ")).toContain("danger");
+    expect(b[2]!.className.split(" ")).toContain("primary");
+    expect(b.every((n) => n.getAttribute("type") === "button")).toBe(true);
+    expect(doc.activeElement).toBe(b[0]);
+    expect(parts(doc).box!.getAttribute("role")).toBe("alertdialog");
+    doc.key("Escape");
+  });
+
+  it.each([[0, "keep"], [1, "discard"], [2, "save"]] as const)("button %i answers %s and gives focus back", async (index, value) => {
+    const { doc, opener, asDoc } = page();
+    const answer = choiceDialog(LEAVE, asDoc);
+    buttons(doc)[index]!.click();
+    await expect(answer).resolves.toBe(value);
+    expect(parts(doc).scrim).toBeUndefined();
+    expect(doc.activeElement).toBe(opener);
+  });
+
+  it("Escape, a click outside and another dialog answer the cancelling choice (nothing is left or lost)", async () => {
+    for (const how of [(doc: FakeDocument) => doc.key("Escape"), (doc: FakeDocument) => parts(doc).scrim!.click()]) {
+      const { doc, asDoc } = page();
+      const answer = choiceDialog(LEAVE, asDoc);
+      how(doc);
+      await expect(answer).resolves.toBe("keep");
+    }
+    const { asDoc } = page();
+    const first = choiceDialog(LEAVE, asDoc);
+    void confirmDialog({ title: "?", confirm: "Yes" }, asDoc);
+    await expect(first).resolves.toBe("keep");
+  });
+
+  it("keeps Tab inside its three buttons, and focuses `initial` when given", () => {
+    const { doc, asDoc } = page();
+    void choiceDialog({ ...LEAVE, initial: "save" }, asDoc);
+    const b = buttons(doc);
+    expect(doc.activeElement).toBe(b[2]);
+    doc.key("Tab");
+    expect(doc.activeElement).toBe(b[0]);
+    doc.key("Tab", true);
+    expect(doc.activeElement).toBe(b[2]);
+    doc.key("Escape");
   });
 });
