@@ -177,6 +177,10 @@ export class DocumentService {
     try {
       const href = this.links.href(`${r.projectId}/${r.conversationId}`, r.view, r.linkId);
       if (href === null) throw new Failure(documentError("link-stale", ""));
+      // The text of the link can be read two ways: no file is chosen for it (not even one that exists by that name).
+      if (this.links.ambiguous(`${r.projectId}/${r.conversationId}`, r.view, r.linkId)) {
+        throw new Failure(documentError("link-invalid", href, "it can be read two ways (an escaped parenthesis, or a Windows folder); write the path as it is between angle brackets, as in [name](<folder\\(1)\\file.md>), or with slashes"));
+      }
       const t = linkTarget(href, { workspace: r.workspace });
       if (!t.ok) throw new Failure(t.error);
       return await this.openTarget(t.value, href, { projectId: r.projectId, conversationId: r.conversationId });

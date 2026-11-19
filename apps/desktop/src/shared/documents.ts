@@ -393,6 +393,8 @@ export interface DocumentLinkSite {
   ordinal: number;
   /** The link's target exactly as written. Only main keeps it; the renderer is never sent it. */
   href: string;
+  /** The parser could not tell which of two files the target names (`ambiguous` on the link node): it is never opened. */
+  ambiguous?: true;
 }
 
 /** What the renderer is told: which link of which text has an id. The text itself, it has already. */
@@ -409,10 +411,15 @@ export interface DocumentLinkGrant {
  * The renderer numbers the links it draws in this same order, so a link's ordinal is the same on both sides.
  */
 export function markdownLinks(text: string): string[] {
-  const out: string[] = [];
+  return markdownLinkRefs(text).map((l) => l.href);
+}
+
+/** `markdownLinks` with what the parser says about each target: the one place a link is read, for the page and main alike. */
+export function markdownLinkRefs(text: string): { href: string; ambiguous?: true }[] {
+  const out: { href: string; ambiguous?: true }[] = [];
   const inline = (list: readonly Inline[]): void => {
     for (const n of list) {
-      if (n.type === "link") out.push(n.href);
+      if (n.type === "link") out.push(n.ambiguous ? { href: n.href, ambiguous: true } : { href: n.href });
       if (n.type === "link" || n.type === "strong" || n.type === "em" || n.type === "del") inline(n.children);
     }
   };
@@ -471,8 +478,8 @@ export function documentLinkSites(timeline: readonly TimelineItem[], formats: re
   const sites: DocumentLinkSite[] = [];
   for (const item of timeline) {
     for (const { part, text } of linkParts(item)) {
-      markdownLinks(text).forEach((href, ordinal) => {
-        if (linkFormat(href, formats)) sites.push({ itemId: item.id, part, ordinal, href });
+      markdownLinkRefs(text).forEach(({ href, ambiguous }, ordinal) => {
+        if (linkFormat(href, formats)) sites.push({ itemId: item.id, part, ordinal, href, ...(ambiguous ? { ambiguous } : {}) });
       });
     }
   }
@@ -525,7 +532,7 @@ export class DocumentLinkTable {
     const grants: DocumentLinkGrant[] = [];
     for (const [key, h] of held.links) {
       const s = wanted.get(key);
-      if (!s || s.href !== h.site.href) {
+      if (!s || s.href !== h.site.href || Boolean(s.ambiguous) !== Boolean(h.site.ambiguous)) {
         revoked.push(h.id);
         held.links.delete(key);
       } else if (fresh) {
@@ -547,6 +554,14 @@ export class DocumentLinkTable {
     if (!held || held.view !== view) return null;
     for (const h of held.links.values()) if (h.id === linkId) return h.site.href;
     return null;
+  }
+
+  /** Whether the parser marked the link's target ambiguous (same conditions as `href`). */
+  ambiguous(owner: string, view: number, linkId: string): boolean {
+    const held = this.views.get(owner);
+    if (!held || held.view !== view) return false;
+    for (const h of held.links.values()) if (h.id === linkId) return h.site.ambiguous === true;
+    return false;
   }
 
   /** Every id of an owner (its view went: closed, archived, deleted, its worker restarted). Returns the ids revoked. */

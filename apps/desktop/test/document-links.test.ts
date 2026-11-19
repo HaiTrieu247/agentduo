@@ -5,6 +5,7 @@ import type { TimelineItem } from "@agentduo/host/viewState";
 import { DocumentService } from "../src/main/documents.js";
 import type { DesktopEvent } from "../src/shared/protocol.js";
 import { parseInline } from "@agentduo/webview/markdown";
+import { markdownLinkRefs } from "../src/shared/documents.js";
 
 const P = "0123456789abcdef";
 const C = "20261031-120000-tab-abcd1234";
@@ -102,15 +103,35 @@ describe("a bare target with escaped parentheses (R29)", () => {
     expect(href("[open](plan(1).md)")).toBe("plan(1).md");
   });
 
-  it("keeps a Windows path as written: a folder in parentheses, a drive, a UNC share, the <…> form", () => {
-    expect(href("[a](dir\\(x)\\a.md)")).toBe("dir\\(x)\\a.md");
-    expect(href("[a](dir\\(x)\\(y)\\a.md)")).toBe("dir\\(x)\\(y)\\a.md");
+  it("reads nested and unbalanced escapes as escapes (R6): one reading, never the backslashes kept", () => {
+    expect(href("[open](plan\\(x(y\\))z.md)")).toBe("plan(x(y))z.md");
+    expect(href("[open](plan\\(x\\(y\\)\\)z.md)")).toBe("plan(x(y))z.md");
+    expect(href("[open](plan\\(x(y)\\)z.md)")).toBe("plan(x(y))z.md");
+    expect(href("[open](a\\(b(c)d.md)")).toBe("a(b(c)d.md");
+    for (const src of ["[open](plan\\(x(y\\))z.md)", "[open](plan\\(1\\).md)", "[open](plan\\(1.md)", "[open](plan\\).md)"]) {
+      expect(parseInline(src)[0]).not.toHaveProperty("ambiguous");
+    }
+  });
+
+  it("keeps a Windows path as written when only that reading is a path: a drive, a UNC share, <…>, a plain backslash", () => {
     expect(href("[a](C:\\dir\\(x)\\a.md)")).toBe("C:\\dir\\(x)\\a.md");
     expect(href("[a](C:\\dir\\(x\\)\\a.md)")).toBe("C:\\dir\\(x\\)\\a.md");
     expect(href("[a](\\\\server\\share\\(x)\\a.md)")).toBe("\\\\server\\share\\(x)\\a.md");
     expect(href("[a](<C:\\My Docs\\(x)\\a.md>)")).toBe("C:\\My Docs\\(x)\\a.md");
+    expect(href("[a](<dir\\(x)\\a.md>)")).toBe("dir\\(x)\\a.md");
     expect(href("[a](<plan\\(1\\).md>)")).toBe("plan\\(1\\).md");
     expect(href("[a](x\\y.md)")).toBe("x\\y.md");
+    for (const src of ["[a](C:\\dir\\(x)\\a.md)", "[a](<dir\\(x)\\a.md>)", "[a](x\\y.md)"]) {
+      expect(parseInline(src)[0]).not.toHaveProperty("ambiguous");
+    }
+  });
+
+  it("marks a relative target that reads two ways (an escape, or a Windows folder) ambiguous, keeping it as written", () => {
+    for (const written of ["dir\\(x)\\a.md", "dir\\(x)\\(y)\\a.md", "plan\\(x).md"]) {
+      expect(parseInline(`[a](${written})`)).toEqual([{ type: "link", href: written, ambiguous: true, children: [{ type: "text", text: "a" }] }]);
+    }
+    expect(parseInline("[a](dir\\(x)\\a.md) and [b](c.md)").filter((n) => n.type === "link")).toHaveLength(2);
+    expect(markdownLinkRefs("[a](dir\\(x)\\a.md) [b](plan\\(1\\).md)")).toEqual([{ href: "dir\\(x)\\a.md", ambiguous: true }, { href: "plan(1).md" }]);
   });
 
   it("main grants the link with the same target the page reads, so the ids stay in step", () => {

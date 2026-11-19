@@ -8,7 +8,7 @@ export type Inline =
   | { type: "code"; text: string }
   | { type: "strong" | "em" | "del"; children: Inline[] }
   /** The target is only shown (as a tooltip), never opened: the webview opens nothing an agent names. */
-  | { type: "link"; href: string; children: Inline[] };
+  | { type: "link"; href: string; children: Inline[]; ambiguous?: true };
 
 export type Align = "left" | "center" | "right" | null;
 
@@ -204,7 +204,14 @@ type Misses = Map<string, number>;
  * dropped. A backslash stays a backslash (Windows paths) except in `\(` / `\)` of a bare target that then closes cleanly (see `readDestination`). Nothing is decoded: the target is kept as written. A target
  * the strict reading cannot close (unbalanced parentheses) ends at the first `)`, as it always did. Null: not a link (empty, a line break, no `)`).
  */
-function linkDestination(src: string, start: number, to: number): { href: string; end: number } | null {
+/** A link's target and where the link ends; `ambiguous`: the target can be read two ways (see `readDestination`). */
+interface Destination {
+  href: string;
+  end: number;
+  ambiguous?: true;
+}
+
+function linkDestination(src: string, start: number, to: number): Destination | null {
   const read = readDestination(src, start, to);
   if (read || /^[ \t]*</.test(src.slice(start, start + 8))) return read;
   // As it always was: up to the first `)`, and the first word of what is between.
@@ -217,14 +224,11 @@ function linkDestination(src: string, start: number, to: number): { href: string
 /**
  * A bare target (no `<…>`) from `i`, up to the first space or the `)` that closes the link. Parentheses must balance.
  * With `escapes`, `\(` and `\)` are Markdown escapes: they are not counted and the target holds the bare parenthesis
- * (`plan\(1\).md` is `plan(1).md`). Without, a backslash is a letter, as in a Windows path (`dir\(x)\a.md`); `mixed`
- * then says that a `\(` is closed by a `)` with no backslash before it, which is how a Windows folder `(x)` reads.
+ * (`plan\(1\).md` is `plan(1).md`). Without, a backslash is a letter, as in a Windows path (`dir\(x)\a.md`).
  */
-function bareDestination(src: string, i: number, to: number, escapes: boolean): { href: string; end: number; mixed: boolean } | null {
+function bareDestination(src: string, i: number, to: number, escapes: boolean): { href: string; end: number } | null {
   let href = "";
   let depth = 0;
-  let mixed = false;
-  const opens: boolean[] = [];
   while (i < to && !/\s/.test(src[i]!)) {
     const c = src[i]!;
     if (escapes && c === "\\" && i + 1 < to && (src[i + 1] === "(" || src[i + 1] === ")")) {
@@ -232,25 +236,22 @@ function bareDestination(src: string, i: number, to: number, escapes: boolean): 
       i += 2;
       continue;
     }
-    if (c === "(") {
-      depth++;
-      opens.push(src[i - 1] === "\\");
-    } else if (c === ")") {
+    if (c === "(") depth++;
+    else if (c === ")") {
       if (depth === 0) break;
       depth--;
-      if (opens.pop() && src[i - 1] !== "\\") mixed = true;
     }
     href += c;
     i++;
   }
-  return depth > 0 ? null : { href, end: i, mixed };
+  return depth > 0 ? null : { href, end: i };
 }
 
 /**
  * What follows a target: an optional title and the `)` of the link. `strict` accepts only that (so a reading that left
  * something else before the `)` is not the one meant); otherwise anything else before the `)` is dropped, as before.
  */
-function closeLink(src: string, start: number, to: number, href: string, at: number, strict: boolean): { href: string; end: number } | null {
+function closeLink(src: string, start: number, to: number, href: string, at: number, strict: boolean): Destination | null {
   let i = at;
   if (!href.trim()) return null;
   while (i < to && /[ \t]/.test(src[i]!)) i++;
@@ -269,7 +270,7 @@ function closeLink(src: string, start: number, to: number, href: string, at: num
   return { href: href.trim(), end: paren + 1 };
 }
 
-function readDestination(src: string, start: number, to: number): { href: string; end: number } | null {
+function readDestination(src: string, start: number, to: number): Destination | null {
   let i = start;
   while (i < to && (src[i] === " " || src[i] === "\t")) i++;
   if (src[i] === "<") {
@@ -279,18 +280,21 @@ function readDestination(src: string, start: number, to: number): { href: string
     if (/[\n<]/.test(href)) return null;
     return closeLink(src, start, to, href, gt + 1, false);
   }
-  // `plan\(1\).md` is `plan(1).md`: an escape is read when the link then closes cleanly at its own `)`. A Windows path
-  // is read as written: a drive or UNC path always, and a relative one in which a `\(` is closed by a bare `)` (the
-  // folder `dir\(x)\a.md`) when it too closes cleanly.
+  // A drive or UNC path is read as written. Otherwise a target with `\(` or `\)` has two readings: the escapes
+  // (`plan\(1\).md` is `plan(1).md`) and the backslash as a letter (a Windows path). Each must close the link cleanly.
+  //  - Both end the link at the same `)`: they differ only in the backslashes, and the escape is what Markdown says.
+  //  - Only one closes cleanly: that one. (A target that ends in a backslash names a folder, so it is not a reading.)
+  //  - Both close, at different `)`: the text cannot tell which file is meant (`dir\(x)\a.md` is a Windows folder or
+  //    `dir(x` followed by text), so the link is marked `ambiguous` and nothing opens it: no reading is chosen because
+  //    a file by that name exists. The link is still a link, so the page and main count the same links.
   const plain = bareDestination(src, i, to, false);
-  const asWritten = plain && closeLink(src, start, to, plain.href, plain.end, true);
-  const windows = /^(?:[A-Za-z]:[\\/]|\\\\)/.test(src.slice(i, i + 3));
-  if (asWritten && (windows || plain.mixed)) return asWritten;
-  if (!windows) {
-    const e = bareDestination(src, i, to, true);
-    const closed = e && closeLink(src, start, to, e.href, e.end, true);
-    if (closed) return closed;
-  }
+  const asWritten = plain && !plain.href.endsWith("\\") ? closeLink(src, start, to, plain.href, plain.end, true) : null;
+  if (/^(?:[A-Za-z]:[\\/]|\\\\)/.test(src.slice(i, i + 3))) return asWritten ?? (plain && closeLink(src, start, to, plain.href, plain.end, false));
+  const e = bareDestination(src, i, to, true);
+  const escaped = e && e.href !== plain?.href ? closeLink(src, start, to, e.href, e.end, true) : null;
+  if (escaped && asWritten) return escaped.end === asWritten.end ? escaped : { ...asWritten, ambiguous: true };
+  if (escaped) return escaped;
+  if (asWritten) return asWritten;
   return plain && closeLink(src, start, to, plain.href, plain.end, false);
 }
 
@@ -378,7 +382,7 @@ function inline(src: string, from: number, to: number, misses: Misses, depth: nu
         const dest = linkDestination(src, close + 2, to);
         if (dest) {
           flush();
-          out.push({ type: "link", href: dest.href, children: inline(src, i + 1, close, misses, depth + 1) });
+          out.push({ type: "link", href: dest.href, children: inline(src, i + 1, close, misses, depth + 1), ...(dest.ambiguous ? { ambiguous: true as const } : {}) });
           i = dest.end;
           continue;
         }

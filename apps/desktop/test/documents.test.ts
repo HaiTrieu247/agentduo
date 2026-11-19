@@ -91,6 +91,43 @@ describe("opening: which file", () => {
     expect(r.ok ? "ok" : r.error.code).toBe("not-found");
   });
 
+  it("nested escaped parentheses open the intended file and save into it, never a file named with the backslashes (R6, R28)", async () => {
+    if (!posix) return;
+    const ws = join(root, "ws");
+    const intended = file("ws/plan(x(y))z.md", "INTENDED\n");
+    const decoy = file("ws/plan\\(x(y\\))z.md", "DECOY\n");
+    const s = service();
+    s.syncLinks(P, C, 1, [pm("r6", "[open](plan\\(x(y\\))z.md)")], true);
+    const ev = events.filter((e) => e.type === "documentLinks").at(-1) as Extract<DesktopEvent, { type: "documentLinks" }>;
+    const d = doc(await s.open({ projectId: P, conversationId: C, view: 1, linkId: ev.links[0]!.linkId, workspace: ws }));
+    expect(d.text).toBe("INTENDED\n");
+    expect(d.location).toBe(intended);
+    expect(await s.save(d.documentId, d.revision, "EDITED\n", false)).toMatchObject({ ok: true });
+    expect(readFileSync(intended, "utf8")).toBe("EDITED\n");
+    expect(readFileSync(decoy, "utf8")).toBe("DECOY\n");
+  });
+
+  it("a target that reads two ways opens no file, whichever files exist, and says how to write it (R29)", async () => {
+    if (!posix) return;
+    const ws = join(root, "ws");
+    const asWritten = file("ws/dir\\(x)\\a.md", "AS WRITTEN\n");
+    const folder = file("ws/dir(x)/a.md", "FOLDER\n");
+    const escaped = file("ws/dir(x", "NOT MD\n");
+    const s = service();
+    s.syncLinks(P, C, 1, [pm("amb", "[open](dir\\(x)\\a.md) [explicit](<dir\\(x)\\a.md>)")], true);
+    const ev = events.filter((e) => e.type === "documentLinks").at(-1) as Extract<DesktopEvent, { type: "documentLinks" }>;
+    const request = (n: number) => ({ projectId: P, conversationId: C, view: 1, linkId: ev.links.find((l) => l.ordinal === n)!.linkId, workspace: ws });
+    const refused = await s.open(request(0));
+    expect(refused.ok ? "ok" : refused.error.code).toBe("link-invalid");
+    if (!refused.ok) expect(refused.error.message).toContain("<");
+    expect(s.ids()).toEqual([]);
+    // the explicit form is the path as it is: the file named with the backslashes
+    expect(doc(await s.open(request(1))).text).toBe("AS WRITTEN\n");
+    expect(readFileSync(folder, "utf8")).toBe("FOLDER\n");
+    expect(readFileSync(escaped, "utf8")).toBe("NOT MD\n");
+    expect(readFileSync(asWritten, "utf8")).toBe("AS WRITTEN\n");
+  });
+
   it("reads spaces, Unicode, percent-encoding, a fragment and a line", async () => {
     file("ws/my notes/Tài liệu ✓.md", "# xin chào\n");
     const s = service();
