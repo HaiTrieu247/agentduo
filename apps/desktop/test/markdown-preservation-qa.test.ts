@@ -3,18 +3,15 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { MarkdownBlockInfo, MarkdownDocument, SerializeResult } from "../src/shared/documents.js";
+import { parseMarkdownDocument } from "../src/shared/markdown-document.js";
 
 type Fixture = { name: string; source: string };
 const fixtures: Fixture[] = JSON.parse(readFileSync(new URL("./fixtures/open-markdown/qa-preservation.json", import.meta.url), "utf8"));
 const opaque: Fixture[] = JSON.parse(readFileSync(new URL("./fixtures/open-markdown/qa-opaque.json", import.meta.url), "utf8"));
 
-// T1 specifies the returned interface, but not the factory's name. Keep that integration binding here.
-// A runtime import lets Vitest collect and run every case while T2's module has yet to be implemented.
+// T1 specifies the returned interface. Bind the factory that T2 exports after integration.
 async function open(source: string): Promise<MarkdownDocument> {
-  const modulePath = "../src/shared/markdown-document.js";
-  const model = await import(modulePath) as { createMarkdownDocument: (source: string) => MarkdownDocument };
-  expect(model.createMarkdownDocument, "T2 factory binding: createMarkdownDocument(source)").toBeTypeOf("function");
-  return model.createMarkdownDocument(source);
+  return parseMarkdownDocument(source);
 }
 
 function text(doc: MarkdownDocument): string {
@@ -69,7 +66,8 @@ describe("T2 QA · AC5: unedited source is the truth", () => {
       expect(start).toBeGreaterThanOrEqual(previousEnd);
       expect(end).toBeGreaterThan(start);
       expect(end).toBeLessThanOrEqual(source.length);
-      expect(doc.blockSource(block.id)).toBe(source.slice(start, end));
+      // The editor-facing accessor uses LF. Span offsets still address the original UTF-16 source.
+      expect(doc.blockSource(block.id)).toBe(source.slice(start, end).replace(/\r\n|\r/g, "\n"));
       previousEnd = end;
     }
     for (const marker of ["Heading", "Tiếng", "one", "const x"]) expect(blockWith(doc, marker).editable).toBe(true);
@@ -271,11 +269,11 @@ describe("T2 QA · AC5: opaque syntax is preserved or explicitly refused", () =>
     const source = `${preserved}\n\nEditable ORIGINAL.\n\nUnchanged tail.\n`;
     const doc = await open(source);
     const target = blockWith(doc, "ORIGINAL");
-    const changed = doc.replace(target.id, doc.blockSource(target.id).replace("ORIGINAL", "changed"));
+    const changed = doc.replace(target.id, doc.blockSource(target.id).replace("ORIGINAL", "QA_EDITED"));
     const result = changed.serialize();
-    if (result.ok) expect(result.text).toBe(source.replace("ORIGINAL", "changed"));
+    if (result.ok) expect(result.text).toBe(source.replace("ORIGINAL", "QA_EDITED"));
     else refused(result);
-    expect(changed.blockSource(blockWith(changed, "changed").id)).toContain("changed");
+    expect(changed.blockSource(blockWith(changed, "QA_EDITED").id)).toContain("QA_EDITED");
     expect(doc.source).toBe(source);
   });
 

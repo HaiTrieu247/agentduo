@@ -1,6 +1,6 @@
 # T2 independent QA fixtures
 
-**Scoped T2 conclusion: PASS.** This is the PM-approved correction of the report's classification, based on the already recorded Q6-fix verification. No test, build or typecheck was rerun for this correction. Assertions, product code and the existing review are unchanged. Historical results below are retained; the report correction at the end identifies the verified revision and separates overall desktop validation from T2 acceptance.
+**Scoped T2 conclusion: PASS.** The latest section records a fresh verification of revision `9e07a1b9`, with the established QA assertions restored unchanged. The earlier report-only classification correction and its historical evidence are retained below. Overall desktop typecheck/E2E status is reported separately; this is not whole-product acceptance or a check exemption.
 
 QA owns `markdown-preservation-qa.test.ts`, `markdown-tree-qa.test.ts`, `markdown-fence-qa.test.ts` and the `qa-*` files in this folder. Dev owns `markdown-document.test.ts` and may use separate fixture names (R19). The execution sections below retain historical results; the latest recheck is at the end.
 
@@ -159,3 +159,27 @@ All four cited test files exist in snapshot `709ced2e`; they are not asserted to
 | Desktop build / browser bundle | PASS in the preceding verification; not rerun for this correction. |
 
 Q4 and the E2E execution limitation remain open in overall verification. They are not counted as T2 acceptance failures, and they have not been exempted, fixed or declared passed. Only this report and its classification were updated.
+
+## Fresh scoped recheck of revision 9e07a1b9 (2026-11-19)
+
+This section records new executions requested after the report-only correction above. The prior results are not presented as these new runs.
+
+- Starting revision: `9e07a1b9c2d450e1957b7ac7a7e3facf2c4a6f0b`. Its desktop product sources and dev model tests have no diff against the previously verified snapshot `709ced2eacd9c1ccd50003a329bff9bced14c157`.
+- The worktree again lacked tree/fence QA and held the initial preservation adapter. QA restored all three test files from `709ced2e` and verified their Git blob hashes exactly. No assertion, product code or review was changed, and no new cases were added. This is the existing handoff issue, not a new product finding.
+- All four referenced test files are present in this working tree for the new run. The commands at the top of this report can now be run here from the repository root.
+
+### New results for scoped T2: PASS
+
+| New execution | Result and source |
+| --- | --- |
+| Four-file model suite | **514/514 pass**, zero failed/pending. Dev 379, preservation 87, tree 31, fence 17. Source: `/tmp/qa-t2-9e07-model.json`, started `2026-11-19T06:15:52.654Z`. |
+| Independent QA / Q6 | **135/135 QA pass**, including all six Q6 cases with unchanged assertions. |
+| Entire desktop unit suite | **847/847 pass**, zero failed/pending. Source: `/tmp/qa-t2-9e07-unit.json`, started `2026-11-19T06:15:53.707Z`. |
+| Build / standalone browser bundle | Both pass in this new verification. |
+
+No remaining T2 finding was observed against the model-level acceptance criteria serving AC2–AC5 and the prescribed preservation/unsafe-save focus. The scoped verdict remains **PASS**, independently of the overall validation rows below.
+
+### New overall desktop verification, outside the T2 verdict
+
+- **Typecheck: FAIL (Q4, baseline).** `npm --prefix apps/desktop run typecheck` again reports `TS2366` at `src/main/ipc.ts:84` (missing ending return). No diagnostic points into T2 or QA tests. This is not waived and is not an in-scope T2 finding.
+- **Electron E2E: UNVERIFIED.** The fresh run settled with 37 pending cases and no test body executed. Setup again timed out at 120000ms or reported Electron launch failure (`SIGABRT`, cleanup `EPERM`). Source: `/tmp/qa-t2-9e07-e2e.json`. The cause remains unknown; no causal link to T2 is inferred. This is a separate overall execution limitation, not an in-scope T2 failure.
