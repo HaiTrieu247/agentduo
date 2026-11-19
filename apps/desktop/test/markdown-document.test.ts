@@ -977,3 +977,70 @@ describe("the output is the source with operations at places in it (R32)", () =>
     expect(checked).toBeGreaterThan(200);
   });
 });
+
+describe("an unclosed code fence keeps all of its text, the newlines at its end included (tree API and insert)", () => {
+  const sources = ["```md\nORIGINAL\n\n", "```md\nORIGINAL\n", "```md\nORIGINAL", "```md\nORIGINAL\n\n\n\n", "~~~\nx\n\n\ny\n\n"];
+  const code = (doc: EditableMarkdownDocument): Extract<MdBlock, { type: "code" }> => {
+    const b = doc.structure("b1")[0];
+    if (b?.type !== "code") throw new Error("not code");
+    return b;
+  };
+
+  it("reads the text of the fence to the end of the file as the value, a final newline ending the last line", () => {
+    expect(code(parseMarkdownDocument("```md\nORIGINAL\n\n")).value).toBe("ORIGINAL\n");
+    expect(code(parseMarkdownDocument("```md\nORIGINAL\n")).value).toBe("ORIGINAL");
+    expect(code(parseMarkdownDocument("```md\nORIGINAL")).value).toBe("ORIGINAL");
+    expect(code(parseMarkdownDocument("```md\nORIGINAL\n\n\n\n")).value).toBe("ORIGINAL\n\n\n");
+    const doc = parseMarkdownDocument("```md\nORIGINAL\n\n");
+    expect(doc.blocks).toHaveLength(1);
+    expect(doc.blockSource("b1")).toBe("```md\nORIGINAL\n");
+  });
+
+  for (const src of sources) {
+    for (const [variant, text] of variants(src)) {
+      it(`replaceNodes keeps the fence unclosed and every newline of its text: ${JSON.stringify(src)}, ${variant}`, () => {
+        const doc = parseMarkdownDocument(text);
+        const node = code(doc);
+        const out = written(doc.replaceNodes("b1", [{ ...node, value: node.value.replace(/ORIGINAL|x/, "CHANGED") }]));
+        expect(out).toBe(text.replace(/ORIGINAL|x/, "CHANGED"));
+        // reading the result back gives the same text with only the word changed
+        expect(code(parseMarkdownDocument(out)).value).toBe(node.value.replace(/ORIGINAL|x/, "CHANGED"));
+      });
+
+      it(`replace by text keeps them too: ${JSON.stringify(src)}, ${variant}`, () => {
+        const doc = parseMarkdownDocument(text);
+        expect(written(doc.replace("b1", doc.blockSource("b1").replace(/ORIGINAL|x/, "CHANGED")))).toBe(text.replace(/ORIGINAL|x/, "CHANGED"));
+      });
+    }
+
+    it(`insert keeps the newlines of an unclosed fence it is given: ${JSON.stringify(src)}`, () => {
+      expect(written(parseMarkdownDocument("").insert(null, src))).toBe(src);
+      expect(written(parseMarkdownDocument("# T\n").insert("b1", src))).toBe(`# T\n\n${src}\n`);
+      const into = parseMarkdownDocument("");
+      expect(written(into.insertNodes(null, parseBlocks(src)))).toBe(src);
+    });
+  }
+
+  it("the exact cases from the review: value changed through the tree, and the fence inserted into an empty file", () => {
+    const doc = parseMarkdownDocument("```md\nORIGINAL\n\n");
+    const node = code(doc);
+    expect(written(doc.replaceNodes("b1", [{ ...node, value: "CHANGED\n" }]))).toBe("```md\nCHANGED\n\n");
+    expect(written(parseMarkdownDocument("").insert(null, "```md\nORIGINAL\n\n"))).toBe("```md\nORIGINAL\n\n");
+  });
+
+  it("a fence written unclosed that would swallow what follows is refused, not written closed or cut", () => {
+    const doc = parseMarkdownDocument("```md\nA\n\n");
+    const node = code(doc);
+    const r = doc.replaceNodes("b1", [{ ...node, value: "A" }, { type: "paragraph", inlines: [{ type: "text", value: "after" }] }]).serialize();
+    expect(r.ok).toBe(false);
+  });
+
+  it("in a quote or a list item the fence text stays in it", () => {
+    const quote = parseMarkdownDocument("> ```md\n> ORIGINAL\n>\n");
+    const q = quote.structure("b1")[0] as Extract<MdBlock, { type: "quote" }>;
+    const inner = q.children[0] as Extract<MdBlock, { type: "code" }>;
+    expect(inner.unclosed).toBe(true);
+    expect(written(quote.replaceNodes("b1", [{ ...q, children: [{ ...inner, value: inner.value.replace("ORIGINAL", "CHANGED") }] }]))).toBe("> ```md\n> CHANGED\n>\n");
+    expect(written(quote)).toBe("> ```md\n> ORIGINAL\n>\n");
+  });
+});

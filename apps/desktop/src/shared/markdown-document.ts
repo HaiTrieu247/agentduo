@@ -57,7 +57,7 @@ export type MdBlock =
   | { type: "paragraph"; inlines: MdInline[]; source?: string }
   | { type: "heading"; level: number; inlines: MdInline[]; source?: string }
   /** `fence`: the fence as written (```` ``` ````, `~~~`), `null` for an indented block. */
-  | { type: "code"; value: string; info: string; fence: string | null; source?: string }
+  | { type: "code"; value: string; info: string; fence: string | null; /** an unclosed fence (it runs to the end): written unclosed again, so no text of it moves out of the code */ unclosed?: boolean; source?: string }
   | { type: "rule"; source?: string }
   /** `marker`: the bullet (`-`, `+`, `*`) or, for an ordered list, its delimiter (`.` or `)`). */
   | { type: "list"; ordered: boolean; start: number; marker: string; tight: boolean; items: MdListItem[]; source?: string }
@@ -885,9 +885,8 @@ function scan(lines: string[], top: boolean, ctx: ScanCtx): Seg[] {
           break;
         }
       }
-      let to = closed ? j + 1 : n;
-      // the blank lines at the end of an unclosed fence are not the block's: they stay outside, in the gap
-      while (!closed && to > i + 1 && isBlank(lines[to - 1]!)) to--;
+      // an unclosed fence runs to the end of its container, the blank lines at the end included: they are its text
+      const to = closed ? j + 1 : n;
       segs.push({ kind: "code", from: i, to, fence: { ...fence, closed } });
       i = to;
       continue;
@@ -929,9 +928,7 @@ function scan(lines: string[], top: boolean, ctx: ScanCtx): Seg[] {
       let j = i;
       if (html.end) {
         while (j < n && !html.end.test(lines[j]!)) j++;
-        const closedHtml = j < n;
         j = Math.min(j + 1, n);
-        while (!closedHtml && j > i + 1 && isBlank(lines[j - 1]!)) j--;
       } else {
         while (j < n && !isBlank(lines[j]!)) j++;
       }
@@ -1078,6 +1075,13 @@ function findRaw(seg: Seg): string | null {
 }
 
 // ------------------------------------------------------------------ segs to nodes
+/** The lines of an LF text. A final newline ends the last line; it does not start another (so it is not a blank line of the text). */
+function splitLines(lf: string): string[] {
+  const lines = lf.split("\n");
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
 function paragraphText(lines: string[]): string {
   return lines.map((l) => l.replace(/^[ \t]+/, "")).join("\n").replace(/[ \t]+$/, "");
 }
@@ -1095,7 +1099,7 @@ function buildBlock(lines: string[], seg: Seg, labels: ReadonlySet<string>): MdB
     case "code": {
       if (seg.fence) {
         const body = slice.slice(1, seg.fence.closed ? -1 : undefined).map((l) => stripUpTo(l, seg.fence!.indent));
-        return { type: "code", value: body.join("\n"), info: unescapeString(seg.fence.info), fence: seg.fence.open, source };
+        return { type: "code", value: body.join("\n"), info: unescapeString(seg.fence.info), fence: seg.fence.open, ...(seg.fence.closed ? {} : { unclosed: true }), source };
       }
       const body = slice.map((l) => stripIndent(l, 4));
       return { type: "code", value: body.join("\n"), info: "", fence: null, source };
@@ -1126,14 +1130,16 @@ const NO_LABELS: ReadonlySet<string> = new Set();
 
 /** The blocks of a Markdown text as a tree (for an editor, and to read an edit back). */
 export function parseBlocks(markdown: string, labels: ReadonlySet<string> = NO_LABELS): MdBlock[] {
-  const lines = markdown.replace(/^\ufeff/, "").split(/\r\n|\r|\n/);
+  const lines = toLf(markdown.replace(/^\ufeff/, "")).split("\n");
   const ctx: ScanCtx = { labels: new Set(labels) };
   return scan(lines, false, ctx).map((s) => buildBlock(lines, s, ctx.labels));
 }
 
 /** The top-level blocks of a text as sources and constructs, for comparing (no inline parsing). */
-function topSegs(markdown: string, labels: ReadonlySet<string>, wholeFile = false): { source: string; raw: string | null; kind: string; line: number }[] {
-  const lines = markdown.split("\n");
+function topSegs(markdown: string, labels: ReadonlySet<string>, wholeFile = false, endsFile = wholeFile): { source: string; raw: string | null; kind: string; line: number }[] {
+  // A block's text has no line ending of its own at its end (a span stops before it), so it is split exactly: a newline at
+  // its end is a blank line of the block. A whole file's final line ending ends its last line instead.
+  const lines = endsFile ? splitLines(markdown) : markdown.split("\n");
   const ctx: ScanCtx = { labels: new Set(labels) };
   return scan(lines, wholeFile, ctx).map((s) => ({ source: lines.slice(s.from, s.to).join("\n"), raw: findRaw(s), kind: kindOf(s), line: s.from + 1 }));
 }
@@ -1341,6 +1347,14 @@ export function renderFence(value: string, info: string): string {
   return `${fence}${cleanInfo}\n${value === "" ? "" : value + "\n"}${fence}`;
 }
 
+/** A fence with no closing line: its text is everything after the opening line, every newline of it included. */
+export function renderOpenFence(value: string, info: string, fenceAsRead: string | null = null): string {
+  const cleanInfo = info.replace(/[\r\n]+/g, " ").trim();
+  // the fence it was read with stays, unless its info could not follow a backtick fence
+  const fence = fenceAsRead !== null && (fenceAsRead[0] === "~" || !cleanInfo.includes("`")) ? fenceAsRead : (cleanInfo.includes("`") ? "~" : "`").repeat(3);
+  return value === "" ? `${fence}${cleanInfo}` : `${fence}${cleanInfo}\n${value}`;
+}
+
 const indentLines = (text: string, first: string, rest: string): string =>
   text
     .split("\n")
@@ -1359,7 +1373,7 @@ function renderBlock(b: MdBlock, ctx: RenderCtx): string {
       return text === "" ? "#".repeat(level) : `${"#".repeat(level)} ${text}`;
     }
     case "code":
-      return renderFence(b.value, b.info);
+      return b.unclosed ? renderOpenFence(b.value, b.info, b.fence) : renderFence(b.value, b.info);
     case "rule":
       return "---";
     case "quote": {
@@ -1460,9 +1474,12 @@ function readSource(source: string): Core {
     eols.push(m[0]);
     pos = m.index + m[0].length;
   }
-  starts.push(pos);
-  lines.push(body.slice(pos));
-  eols.push("");
+  // a final line ending ends the last line: no empty line follows it
+  if (pos < body.length || lines.length === 0) {
+    starts.push(pos);
+    lines.push(body.slice(pos));
+    eols.push("");
+  }
   const eol = eols.find((e) => e !== "") ?? "\n";
   const ctx: ScanCtx = { labels: new Set() };
   const segs = scan(lines, true, ctx);
@@ -1675,45 +1692,62 @@ class Doc implements EditableMarkdownDocument {
     // The text is the source with operations at places in it: an edited block's span is replaced, a removed block's span
     // is cut (nothing around it is touched), an inserted block goes in at a position. Every stretch of the source between
     // the operations (the BOM, the blank lines, the final newline, the blocks not edited) is copied as it is.
-    type Op = { at: number; to: number; text: string; rank: number };
+    type Mark = { entry: OrderEntry; rel: number; len: number };
+    type Op = { at: number; to: number; text: string; rank: number; marks: Mark[] };
     const ops: Op[] = [];
     const front = core.blocks[0]?.construct === "front matter" ? core.blocks[0] : null;
-    // blocks inserted at the start go before the first block, but after the front matter if there is one
-    const runs = new Map<string, string[]>(); // anchor id ("" start) -> inserted blocks, in order, with their line ending
-    const pending: Record<string, string[]> = {};
-    for (const e of entries) {
+    // inserted blocks by the original block they follow ("" is the start of the file), in order
+    const runs = new Map<string, { entry: OrderEntry; text: string }[]>();
+    for (let idx = 0; idx < entries.length; idx++) {
+      const e = entries[idx]!;
       if (e.block) {
-        if (e.edit) ops.push({ at: e.block.start, to: e.block.end, text: e.edit.md.replace(/\n/g, e.block.eol), rank: 1 });
+        if (e.edit) ops.push({ at: e.block.start, to: e.block.end, text: e.edit.md.replace(/\n/g, e.block.eol), rank: 1, marks: [{ entry: e, rel: 0, len: e.edit.md.length + (e.block.eol.length - 1) * (e.edit.md.match(/\n/g)?.length ?? 0) }] });
         continue;
       }
       if (!e.edit || e.edit.md === "") continue;
       // the anchor of an inserted block is the original block before it in the order (or the start)
-      const idx = entries.indexOf(e);
       let k = idx - 1;
       while (k >= 0 && !entries[k]!.block) k--;
-      const anchor = k >= 0 ? entries[k]!.block!.id : front ? front.id : "";
-      const eol = k >= 0 ? entries[k]!.block!.eol : front ? front.eol : core.eol;
-      (pending[anchor] ??= []).push(e.edit.md.replace(/\n/g, eol));
-      runs.set(anchor, pending[anchor]!);
+      const anchor = k >= 0 ? entries[k]!.block!.id : "";
+      const eol = k >= 0 ? entries[k]!.block!.eol : core.eol;
+      const list = runs.get(anchor) ?? [];
+      list.push({ entry: e, text: e.edit.md.replace(/\n/g, eol) });
+      runs.set(anchor, list);
     }
-    for (const [anchor, texts] of runs) {
+    for (const [anchor, list] of runs) {
+      const marks: Mark[] = [];
+      let text = "";
       if (anchor === "") {
+        const sep = core.eol + core.eol;
+        list.forEach((it, n) => {
+          if (n > 0) text += sep;
+          marks.push({ entry: it.entry, rel: text.length, len: it.text.length });
+          text += it.text;
+        });
         const first = core.blocks[0];
-        if (first) ops.push({ at: first.start, to: first.start, text: texts.join(core.eol + core.eol) + core.eol + core.eol, rank: 0 });
-        else ops.push({ at: core.bom.length, to: core.bom.length, text: texts.join(core.eol + core.eol), rank: 0 });
+        if (first) ops.push({ at: first.start, to: first.start, text: text + sep, rank: 0, marks });
+        else ops.push({ at: core.bom.length, to: core.bom.length, text, rank: 0, marks });
       } else {
         const b = core.blocks.find((x) => x.id === anchor)!;
-        ops.push({ at: b.end, to: b.end, text: texts.map((t) => b.eol + b.eol + t).join(""), rank: 2 });
+        for (const it of list) {
+          text += b.eol + b.eol;
+          marks.push({ entry: it.entry, rel: text.length, len: it.text.length });
+          text += it.text;
+        }
+        ops.push({ at: b.end, to: b.end, text, rank: 2, marks });
       }
     }
     ops.sort((x, y) => x.at - y.at || x.rank - y.rank);
     let text = "";
     let cursor = 0;
     const kept: { out: number; from: number; to: number }[] = [];
+    const outEnd = new Map<OrderEntry, number>();
     for (const op of ops) {
       if (op.at < cursor) return { ok: false, blocks: [{ code: "roundtrip-mismatch", construct: null, line: null, message: "two edits overlap, so nothing was written." }] };
       if (op.at > cursor) kept.push({ out: text.length, from: cursor, to: op.at });
-      text += core.source.slice(cursor, op.at) + op.text;
+      text += core.source.slice(cursor, op.at);
+      for (const m of op.marks) outEnd.set(m.entry, text.length + m.rel + m.len);
+      text += op.text;
       cursor = op.to;
     }
     if (cursor < core.source.length) kept.push({ out: text.length, from: cursor, to: core.source.length });
@@ -1728,7 +1762,7 @@ class Doc implements EditableMarkdownDocument {
     // Read it again: the blocks must be exactly those that were meant.
     const expected: { source: string; line: number | null; edited: boolean }[] = [];
     for (const e of entries) {
-      if (e.edit) for (const s of topSegs(e.edit.md, core.labels)) expected.push({ source: s.source, line: lineOf(e), edited: true });
+      if (e.edit) for (const s of topSegs(e.edit.md, core.labels, false, (outEnd.get(e) ?? 0) >= text.length)) expected.push({ source: s.source, line: lineOf(e), edited: true });
       else expected.push({ source: e.block!.lf, line: lineOf(e), edited: false });
     }
     const got = topSegs(toLf(text.slice(core.bom.length)), core.labels, true);
