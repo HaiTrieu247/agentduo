@@ -1,0 +1,66 @@
+[
+  {
+    "name": "empty",
+    "source": ""
+  },
+  {
+    "name": "BOM only",
+    "source": "\ufeff"
+  },
+  {
+    "name": "spaces and blank lines",
+    "source": "  \n\n\t\n"
+  },
+  {
+    "name": "LF, no final newline",
+    "source": "# Title\n\nbody"
+  },
+  {
+    "name": "LF with trailing blank lines",
+    "source": "# Title  \n\nbody\n\n\n"
+  },
+  {
+    "name": "BOM, CRLF and no final newline",
+    "source": "\ufeff# Ti\u1ebfng Vi\u1ec7t \ud83d\ude00\r\n\r\n**\u0111\u1eadm** _nghi\u00eang_"
+  },
+  {
+    "name": "mixed endings",
+    "source": "# Heading\r\n\r\nfirst\n\nsecond\r\n"
+  },
+  {
+    "name": "headings and exact closing markers",
+    "source": "# One #\n\nTitle two\n=========\n\nSubtitle\n--------\n"
+  },
+  {
+    "name": "nested inline formatting and escapes",
+    "source": "**bold *italic* inside** and __bold__ _italic_ \\*literal\\* \\[literal\\] &amp; e\u0301.\n"
+  },
+  {
+    "name": "hard and soft line breaks",
+    "source": "line with two spaces  \nnext\\\nsoft\nline\n"
+  },
+  {
+    "name": "nested ordered and loose lists",
+    "source": "3) outer\n   - nested **bold**\n   - *italic*\n4) tail\n\n   continuation\n"
+  },
+  {
+    "name": "link destination, title and escapes",
+    "source": "[label](docs/a(v2).md \"title\")\n\n[label](<folder/my file.md> 'single title')\n\n[label](a\\(b\\).md \"a \\\"quote\\\" title\")\n"
+  },
+  {
+    "name": "long fence with nested backticks",
+    "source": "`````markdown extra metadata\n```ts\nconst ticks = \"````\";\n```\n`````\n"
+  },
+  {
+    "name": "tilde fence",
+    "source": "~~~~text\n~~~\n```\n~~~~"
+  },
+  {
+    "name": "Unicode normalization stays unchanged",
+    "source": "Ti\u1ebfng Vi\u1ec7t \ud83d\ude00 e\u0301 \u00e9 \ud841\udf0e\n"
+  },
+  {
+    "name": "inline code delimiters",
+    "source": "Text ``a ` b`` and `code` untouched.\n"
+  }
+]

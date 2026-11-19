@@ -1,0 +1,50 @@
+[
+  {
+    "name": "frontmatter",
+    "source": "---\ntitle: \"Do not normalize\"\ntags: [one, two]\n---\n\n# Body"
+  },
+  {
+    "name": "raw HTML block",
+    "source": "<div data-value=\"1 > 0\">\n<strong>HTML &amp; text</strong>\n</div>"
+  },
+  {
+    "name": "HTML comment and inline HTML",
+    "source": "<!-- private source comment -->\n\nText <span data-x=\"value\">raw</span>."
+  },
+  {
+    "name": "table alignment and escaped pipes",
+    "source": "| left | right |\n| :--- | ---: |\n| a \\| b | `x` |"
+  },
+  {
+    "name": "images with title",
+    "source": "![alternative **text**](<images/a b.png> \"keep image title\")"
+  },
+  {
+    "name": "reference links and definition",
+    "source": "[visible][my-id] and [my-id][]\n\n[my-id]: <docs/a b.md> \"keep title\""
+  },
+  {
+    "name": "task list state",
+    "source": "- [x] completed **task**\n- [ ] pending task"
+  },
+  {
+    "name": "footnotes",
+    "source": "A note[^n].\n\n[^n]: Footnote **body**\n\n    continuation"
+  },
+  {
+    "name": "unknown directive",
+    "source": ":::warning {#custom}\nDo not flatten unknown syntax.\n:::"
+  },
+  {
+    "name": "math",
+    "source": "$$\nx = \\frac{a}{b}\n$$"
+  },
+  {
+    "name": "unclosed fence consumes tail",
+    "source": "```md\n# This is code, not a heading\n\nStill inside the fence"
+  },
+  {
+    "name": "unclosed HTML boundary",
+    "source": "<script>\nconst text = \"# Not a heading\";\n\nNo closing tag"
+  }
+]
