@@ -799,3 +799,96 @@ describe("a link reference definition is one immutable region, however many line
     expect(para(doc, "b2").inlines.some((n) => n.type === "raw" && n.construct === "reference link")).toBe(true);
   });
 });
+
+describe("a definition of any length is one immutable region (no fixed limit)", () => {
+  const body = (n: number): string => Array.from({ length: n }, (_, k) => `line ${k + 1} of the title`).join("\n");
+  for (const n of [11, 12, 13, 14, 50, 3000]) {
+    for (const [variant, text] of variants(`[ref]: /url "first\n${body(n)}\nlast"\n\nSee [ref].\n`)) {
+      it(`a title over ${n + 2} lines, ${variant}`, () => {
+        const doc = parseMarkdownDocument(text);
+        expect(doc.blocks.map((b) => [b.kind, b.editable, b.construct])).toEqual([
+          ["other", false, "link reference definition"],
+          ["paragraph", true, null],
+        ]);
+        const defText = text.slice(doc.blocks[0]!.span!.start, doc.blocks[0]!.span!.end);
+        expect(defText.split(/\r\n|\r|\n/)).toHaveLength(n + 2);
+        const p = para(doc, "b2");
+        expect(p.inlines.some((x) => x.type === "raw" && x.construct === "reference link")).toBe(true);
+        const out = written(doc.replaceNodes("b2", [{ ...p, inlines: [{ type: "strong", children: p.inlines }] }]));
+        expect(out.startsWith(text.slice(0, doc.blocks[1]!.span!.start))).toBe(true);
+        expect(out).toContain("**See [ref].**");
+        expect(refusal(doc.replace("b1", "[ref]: /other"))[0]).toMatchObject({ code: "unsupported-construct", construct: "link reference definition", line: 1 });
+      });
+    }
+  }
+
+  it("a label, a destination line and a title that each take many lines", () => {
+    const label = Array.from({ length: 40 }, (_, k) => `word${k}`).join("\n");
+    const text = `[${label}]:\n  /url\n  'a\n${body(30)}\nb'\n\n[x]\n`;
+    const doc = parseMarkdownDocument(text);
+    expect(doc.blocks.map((b) => b.construct)).toEqual(["link reference definition", null]);
+    expect(doc.blocks[0]!.span!.end).toBe(text.indexOf("b'") + 2);
+  });
+
+  it("a run of many definitions is read in linear time and each stays whole", () => {
+    const text = Array.from({ length: 5000 }, (_, k) => `[r${k}]: /u${k}\n"t${k}"`).join("\n") + "\n\ntext\n";
+    const t0 = Date.now();
+    const doc = parseMarkdownDocument(text);
+    expect(Date.now() - t0).toBeLessThan(3000);
+    expect(doc.blocks).toHaveLength(5001);
+    expect(doc.blocks.slice(0, 5000).every((b) => b.construct === "link reference definition" && !b.editable)).toBe(true);
+    expect(doc.labels.has("r4999")).toBe(true);
+  });
+
+  it("a very long line that starts like a definition but is not one does not hang", () => {
+    for (const text of ["[" + "a".repeat(1_000_000), "[" + "a ".repeat(500_000) + "]", "[a]: " + "<" + "x".repeat(500_000)]) {
+      const t0 = Date.now();
+      const doc = parseMarkdownDocument(text);
+      expect(written(doc)).toBe(text);
+      expect(Date.now() - t0).toBeLessThan(3000);
+    }
+  });
+});
+
+describe("a block that was not edited is copied byte for byte, whatever line endings it holds (AC5 regression)", () => {
+  it("keeps a LF inside a CRLF code block when another block is replaced", () => {
+    const text = "```\r\nfirst\nsecond\r\n```\r\n\r\nold\r\n";
+    const out = written(parseMarkdownDocument(text).replace("b2", "new"));
+    expect(out).toBe("```\r\nfirst\nsecond\r\n```\r\n\r\nnew\r\n");
+  });
+
+  it("keeps mixed endings, lone CR and a final line of its own kind in every block that is not edited, also around insertions and removals", () => {
+    const text = "﻿a\nb\r\nc\r\n\r\n```\r\nx\ny\rz\n```\n\n- i\r\n- j\n\r\nold\n";
+    const doc = parseMarkdownDocument(text);
+    const ids = doc.blocks.map((b) => b.id);
+    const raw = (id: string): string => {
+      const b = doc.blocks.find((x) => x.id === id)!;
+      return text.slice(b.span!.start, b.span!.end);
+    };
+    for (const id of ids) {
+      for (const next of [doc.replace(id, "changed"), doc.insert(id, "added"), doc.replace(id, "")]) {
+        const out = written(next);
+        for (const other of ids.filter((x) => x !== id)) expect(out, `${id} / ${other}`).toContain(raw(other));
+      }
+    }
+    expect(written(doc.replace(ids[ids.length - 1]!, "new"))).toBe(text.replace("old", "new"));
+  });
+
+  it("property: every block that is not edited is in the output as its own bytes", () => {
+    let seed = 777;
+    const rnd = (): number => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    const pick = <T>(a: T[]): T => a[Math.floor(rnd() * a.length)]!;
+    const lines = ["# H", "text", "- a", "> q", "```", "code", "---", "", "", "[r]: /u", '"t"', "<div>", "| a | b |", "|---|---|"];
+    const eols = ["\n", "\r\n", "\r"];
+    for (let iter = 0; iter < 500; iter++) {
+      let text = "";
+      for (let k = 0, n = 2 + Math.floor(rnd() * 12); k < n; k++) text += pick(lines) + pick(eols);
+      const doc = parseMarkdownDocument(text);
+      for (const b of doc.blocks.filter((x) => x.editable)) {
+        const r = doc.replace(b.id, pick(["x", "# y", "a\nb"])).serialize();
+        if (!r.ok) continue;
+        for (const o of doc.blocks.filter((x) => x.id !== b.id)) expect(r.text, JSON.stringify([text, b.id, o.id])).toContain(text.slice(o.span!.start, o.span!.end));
+      }
+    }
+  });
+});

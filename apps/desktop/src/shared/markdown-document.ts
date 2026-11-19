@@ -695,18 +695,31 @@ const FOOTNOTE_DEF = /^ {0,3}\[\^[^\]\s]+\]:/;
  * between an immutable part and an editable one.
  */
 const LINK_DEF =
-  /^ {0,3}\[(?!\^)((?:[^\]\\[]|\\.)*[^\s\]\\[](?:[^\]\\[]|\\.)*)\]:[ \t]*\n?[ \t]*(<(?:[^<>\n\\]|\\.)*>|(?!<)\S+)(?:(?:[ \t]+|[ \t]*\n[ \t]*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\)))?[ \t]*(?:\n|$)/;
-const DEF_LOOKAHEAD = 12;
+  /[ ]{0,3}\[(?!\^)((?:[^\]\\[]|\\[^])+)\]:[ \t]*\n?[ \t]*(<(?:[^<>\n\\]|\\[^])*>|(?!<)\S+)(?:(?:[ \t]+|[ \t]*\n[ \t]*)("(?:[^"\\]|\\[^])*"|'(?:[^'\\]|\\[^])*'|\((?:[^()\\]|\\[^])*\)))?[ \t]*(?:\n|$)/y;
 
-/** The definition that starts at `lines[i]`: how many lines it takes and its label, or null. */
-function linkDefinitionAt(lines: string[], i: number): { count: number; label: string } | null {
-  if (!/^ {0,3}\[(?!\^)/.test(lines[i]!)) return null;
+/**
+ * The run of definitions that starts at `lines[i]`, each as the lines it takes and its label (empty: none). The whole
+ * paragraph (to the next blank line or block start) is read, whatever its length, so a definition is never cut where a
+ * limit falls; a title or label over many lines stays inside its definition.
+ */
+function linkDefinitionRun(lines: string[], i: number): { from: number; to: number; label: string }[] {
+  if (!/^ {0,3}\[(?!\^)/.test(lines[i]!)) return [];
   let end = i + 1;
-  while (end < lines.length && end < i + DEF_LOOKAHEAD && !isBlank(lines[end]!) && !startsBlock(lines[end]!)) end++;
+  while (end < lines.length && !isBlank(lines[end]!) && !startsBlock(lines[end]!)) end++;
   const text = lines.slice(i, end).join("\n");
-  const m = LINK_DEF.exec(text);
-  if (!m) return null;
-  return { count: m[0].replace(/\n$/, "").split("\n").length, label: m[1]! };
+  const out: { from: number; to: number; label: string }[] = [];
+  let at = 0;
+  let line = i;
+  while (at < text.length) {
+    LINK_DEF.lastIndex = at;
+    const m = LINK_DEF.exec(text);
+    if (!m || m[1]!.trim() === "") break;
+    const count = m[0].replace(/\n$/, "").split("\n").length;
+    out.push({ from: line, to: line + count, label: m[1]! });
+    line += count;
+    at = LINK_DEF.lastIndex;
+  }
+  return out;
 }
 const BLOCK_TAGS =
   "address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul";
@@ -942,11 +955,13 @@ function scan(lines: string[], top: boolean, ctx: ScanCtx): Seg[] {
       i = j;
       continue;
     }
-    const def = linkDefinitionAt(lines, i);
-    if (def) {
-      ctx.labels.add(normalizeLabel(def.label));
-      segs.push({ kind: "raw", from: i, to: i + def.count, construct: "link reference definition" });
-      i += def.count;
+    const defs = linkDefinitionRun(lines, i);
+    if (defs.length > 0) {
+      for (const d of defs) {
+        ctx.labels.add(normalizeLabel(d.label));
+        segs.push({ kind: "raw", from: d.from, to: d.to, construct: "link reference definition" });
+      }
+      i = defs[defs.length - 1]!.to;
       continue;
     }
     if (tableAt(lines, i)) {
@@ -1646,24 +1661,25 @@ class Doc implements EditableMarkdownDocument {
     if (problems.length > 0) return { ok: false, blocks: problems };
 
     // text: each kept block with the gap that follows it
-    type Piece = { text: string; gap: string };
+    type Piece = { text: string; gap: string; verbatim: boolean };
     const kept: Piece[] = [];
     const head: string[] = [];
     let anchorEol = core.eol;
     let lastOriginalRemoved = false;
     for (const e of entries) {
       const eol = e.block?.eol ?? anchorEol;
-      const text = (e.edit ? e.edit.md : e.block!.lf).replace(/\n/g, eol);
+      // an unedited block is copied from the source as it is (its own line endings, mixed or not); an edited one follows the block's
+      const text = e.edit ? e.edit.md.replace(/\n/g, eol) : core.source.slice(e.block!.start, e.block!.end);
       if (e.block) {
         anchorEol = e.block.eol;
         lastOriginalRemoved = text === "";
-        if (text !== "") kept.push({ text, gap: e.block.gapAfter });
+        if (text !== "") kept.push({ text, gap: e.block.gapAfter, verbatim: !e.edit });
       } else if (text !== "") {
         const prev = kept[kept.length - 1];
         if (!prev) head.push(text);
         else {
           // the blank line goes between; the original gap moves to the end of the run
-          kept.push({ text, gap: prev.gap });
+          kept.push({ text, gap: prev.gap, verbatim: false });
           prev.gap = eol + eol;
         }
       }
@@ -1672,7 +1688,15 @@ class Doc implements EditableMarkdownDocument {
     if (lastOriginalRemoved && kept.length > 0) kept[kept.length - 1]!.gap = finalGap;
     let text = core.bom + core.lead;
     if (head.length > 0) text += head.join(core.eol + core.eol) + (kept.length > 0 ? core.eol + core.eol : core.eol);
-    for (const p of kept) text += p.text + p.gap;
+    const verbatimOffsets: [number, string][] = [];
+    for (const p of kept) {
+      if (p.verbatim) verbatimOffsets.push([text.length, p.text]);
+      text += p.text + p.gap;
+    }
+    // every block that was not edited must stand in the output byte for byte (line endings included)
+    for (const [at, raw] of verbatimOffsets) {
+      if (text.slice(at, at + raw.length) !== raw) return { ok: false, blocks: [{ code: "roundtrip-mismatch", construct: null, line: null, message: "a part of the file that was not edited would change when written." }] };
+    }
 
     // Read it again: the blocks must be exactly those that were meant.
     const expected: { source: string; line: number | null; edited: boolean }[] = [];
