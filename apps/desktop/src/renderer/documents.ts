@@ -11,7 +11,7 @@
 //    is, its state, Save and Close, what went wrong, and the format's viewer.
 //  - The viewer is picked by the document's format (`VIEWERS`): a new type is one more entry, and a format with none is
 //    shown as an error, never a blank page. Nothing else here knows a format.
-import { formatById, type DocumentError, type DocumentInfo, type DocumentOpened, type DocumentSaved } from "../shared/documents.js";
+import { formatById, type DocumentError, type DocumentErrorCode, type DocumentInfo, type DocumentOpened, type DocumentSaved } from "../shared/documents.js";
 import type { DesktopEvent, DesktopRequest, DesktopResults } from "../shared/protocol.js";
 import { createMarkdownViewer, type DocumentViewer, type ViewerContext } from "./markdown-editor.js";
 
@@ -28,8 +28,14 @@ export type LeaveReason = "leave" | "quit" | "window";
 export type SaveStatus = "clean" | "dirty" | "saving" | "saved" | "error" | "read-only";
 
 /** What went wrong with the open document, and what the user can do about it. */
+/**
+ * A problem the page shows: main's errors, and the page's own `reload-superseded` (a reload answered after the user typed
+ * again: the page keeps what they typed and nothing is replaced).
+ */
+export type PageError = Omit<DocumentError, "code"> & { code: DocumentErrorCode | "reload-superseded" };
+
 export interface Problem {
-  error: DocumentError;
+  error: PageError;
   /** The model's reasons, one per line, when the text could not be written safely. */
   details: string[];
   actions: Array<"retry" | "reload" | "overwrite">;
@@ -126,7 +132,7 @@ export class DocumentController {
     const o = this.current;
     if (!o) return "clean";
     if (o.saving) return "saving";
-    if (o.problem && o.problem.context !== "open") return "error";
+    if (o.problem && o.problem.context !== "open" && o.problem.error.code !== "reload-superseded") return "error";
     if (!o.info.save.allowed) return "read-only";
     if (this.dirty()) return "dirty";
     return o.savedAt !== null ? "saved" : "clean";
@@ -293,6 +299,9 @@ export class DocumentController {
       });
       if (!yes || this.current !== o) return false;
     }
+    // The user agreed to drop the edits made until now, not those typed while the file is read: the answer replaces the
+    // page only if nothing was edited since (`edits` counts every change, undo included).
+    const at = o.edits;
     let r: DocumentOpened;
     try {
       r = await this.deps.request({ method: "document.reload", documentId: o.info.documentId });
@@ -300,6 +309,18 @@ export class DocumentController {
       r = { ok: false, error: { code: "unreadable", retryable: true, message: `Không đọc lại được ${o.info.name}: ${errorText(e)}` } };
     }
     if (this.current !== o) return false;
+    if (o.edits !== at) {
+      // Kept as typed, and still unsaved: the user decides again (reload once more, or save over the disk's text, which
+      // the revision this page was opened at protects).
+      o.problem = {
+        error: { code: "reload-superseded", retryable: true, message: `${o.info.name} chưa được tải lại: bạn đã sửa thêm trong lúc đọc file. Nội dung đang sửa vẫn giữ nguyên; bấm “Tải lại từ đĩa” nếu vẫn muốn bỏ nó.` },
+        details: [],
+        actions: ["reload"],
+        context: "reload",
+      };
+      this.emit();
+      return false;
+    }
     if (!r.ok) {
       o.problem = { error: r.error, details: [], actions: r.error.retryable ? ["reload"] : [], context: "reload" };
       this.emit();
@@ -540,7 +561,8 @@ export class DocumentLayer {
     const title = !info ? "Không mở được tài liệu"
       : c.unsupported ? "Không hiển thị được tài liệu này"
         : p.context === "open" ? "Không mở được tài liệu khác (tài liệu này vẫn giữ nguyên)"
-          : p.context === "reload" ? "Không đọc lại được file"
+          : p.error.code === "reload-superseded" ? "Chưa tải lại: bạn đã sửa thêm trong lúc đọc file"
+            : p.context === "reload" ? "Không đọc lại được file"
             : p.error.code === "unsafe-to-save" ? "Chưa lưu: có phần không thể ghi an toàn"
               : p.error.code === "changed-on-disk" ? "File đã đổi trên đĩa"
                 : "Không lưu được";
@@ -564,8 +586,9 @@ export class DocumentLayer {
     if (p.actions.includes("overwrite")) action("Ghi đè", () => void c.overwrite());
     if (info) action("Ẩn", () => c.dismissProblem());
     else action("Đóng", () => void c.leave("leave"));
-    this.banner.replaceChildren(this.icon(info && p.error.code === "changed-on-disk" ? "warning" : "error"), text, actions);
-    this.banner.className = `doc-banner ${p.error.code === "changed-on-disk" ? "tone-warn" : "tone-err"}`;
+    const warn = p.error.code === "changed-on-disk" || p.error.code === "reload-superseded";
+    this.banner.replaceChildren(this.icon(info && warn ? "warning" : "error"), text, actions);
+    this.banner.className = `doc-banner ${warn ? "tone-warn" : "tone-err"}`;
     this.banner.setAttribute("role", "alert");
     this.banner.hidden = false;
   }

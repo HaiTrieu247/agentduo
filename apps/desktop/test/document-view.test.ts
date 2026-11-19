@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { markdownLinkRefs, type DocumentInfo } from "../src/shared/documents.js";
 import { parseMarkdownDocument, type MdBlock, type MdInline } from "../src/shared/markdown-document.js";
 import {
-  containerOf, nodeAt, prune, reconcileInlines, removeAt, replaceAt, setTextKind, slug, splitAt, tidyInlines, toggleList, type DocumentViewer, type ViewerContext,
+  caretLength, containerOf, nodeAt, prune, reconcileInlines, removeAt, replaceAt, setTextKind, slug, splitAt, tidyInlines, toggleList, type DocumentViewer, type ViewerContext,
 } from "../src/renderer/markdown-editor.js";
 import { DocumentController, leaveQuestion, type ControllerDeps, type LeaveChoice } from "../src/renderer/documents.js";
 import { applyGrants, markLink, siteKey } from "../src/renderer/chat.js";
@@ -153,6 +153,20 @@ describe("editing on the formatted text keeps what was not edited, byte for byte
     expect(r.text).toBe("a \\* b or \\_c\\_ end\n");
   });
 
+  it("the caret's count: text, a line break as one, a raw part as its text, and a fragment as its children (not 0)", () => {
+    type N = { nodeType: number; data?: string; tagName?: string; dataset?: Record<string, string>; textContent?: string; childNodes: N[] };
+    const t = (data: string): N => ({ nodeType: 3, data, childNodes: [] });
+    const elem = (tagName: string, childNodes: N[], dataset: Record<string, string> = {}): N =>
+      ({ nodeType: 1, tagName, dataset, childNodes, textContent: childNodes.map((c) => c.data ?? c.textContent ?? "").join("") });
+    const node = (n: N) => n as unknown as Node;
+    // What `Range.cloneContents()` gives for a caret after "Hel" in "Hello": a fragment (nodeType 11).
+    expect(caretLength(node({ nodeType: 11, childNodes: [t("Hel")] }))).toBe(3);
+    expect(caretLength(node({ nodeType: 11, childNodes: [t("a "), elem("STRONG", [t("bc")]), elem("BR", []), elem("SPAN", [t("<x>")], { raw: "0" })] }))).toBe(8);
+    expect(caretLength(node({ nodeType: 11, childNodes: [] }))).toBe(0);
+    expect(caretLength(node(elem("EM", [t("ab"), elem("A", [t("cd")])])))).toBe(4);
+    expect(caretLength(node({ nodeType: 8, childNodes: [] }))).toBe(0);
+  });
+
   it("anchors are matched as GitHub writes them", () => {
     expect(slug("Tiêu đề: Một (hai)")).toBe("tiêu-đề-một-hai");
     expect(slug("API v2_x")).toBe("api-v2_x");
@@ -195,6 +209,7 @@ function setup(o: { answers?: LeaveChoice[]; confirm?: boolean; opened?: Documen
   const opened = [...(o.opened ?? [info()])];
   let held: Pending | null = null;
   let holdSave = false;
+  let holdReload: ((v: unknown) => void) | null | false = null;
   const saveResults: unknown[] = [];
   const asked: Array<{ name: string; reason: string }> = [];
   const deps: ControllerDeps = {
@@ -206,6 +221,7 @@ function setup(o: { answers?: LeaveChoice[]; confirm?: boolean; opened?: Documen
           return next ? { ok: true, document: next, existing: false } : { ok: false, error: { code: "not-found", retryable: true, message: "docs/x.md does not exist." } };
         }
         case "document.reload":
+          if (holdReload === false) return new Promise((resolve) => (holdReload = resolve as (v: unknown) => void));
           return { ok: true, document: info({ revision: "c".repeat(16), text: "# From disk\n" }), existing: true };
         case "document.save":
           if (holdSave) return new Promise((resolve, reject) => (held = { resolve, reject }));
@@ -238,6 +254,13 @@ function setup(o: { answers?: LeaveChoice[]; confirm?: boolean; opened?: Documen
     c, requests, viewers, asked, link, saveResults,
     methods: () => requests.map((r) => r.method),
     hold: () => (holdSave = true),
+    /** The next reload is answered only by `answerReload`. */
+    holdReload: () => (holdReload = false),
+    answerReload: () => {
+      const answer = holdReload as (v: unknown) => void;
+      holdReload = null;
+      answer({ ok: true, document: info({ revision: "c".repeat(16), text: "# From disk\n" }), existing: true });
+    },
     release: (v: unknown) => {
       holdSave = false;
       held!.resolve(v);
@@ -349,6 +372,47 @@ describe("the document controller", () => {
     expect(u.viewers[0]!.destroyed).toBe(true);
     expect(u.viewers[1]!.ctx.info.text).toBe("# From disk\n");
     expect(u.c.dirty()).toBe(false);
+  });
+
+  it("a reload answered after the user typed again keeps what they typed, unsaved, and lets them decide again", async () => {
+    const t = setup({ confirm: true });
+    await t.c.openLink(t.link);
+    t.viewers[0]!.type();
+    t.holdReload();
+    const reloading = t.c.reload();
+    await flush();
+    expect(t.methods()).toContain("document.reload");
+    // Typed while the file is read: the user agreed to drop the earlier edits, not these.
+    t.viewers[0]!.type();
+    t.answerReload();
+    expect(await reloading).toBe(false);
+    expect(t.viewers.length).toBe(1);
+    expect(t.viewers[0]!.destroyed).toBe(false);
+    expect(t.c.viewer).toBe(t.viewers[0]);
+    expect(t.c.dirty()).toBe(true);
+    expect(t.c.status).toBe("dirty");
+    expect(t.c.canSave).toBe(true);
+    expect(t.c.problem).toMatchObject({ context: "reload", actions: ["reload"], error: { code: "reload-superseded" } });
+    expect(t.requests.filter((r) => r.method === "document.dirty").at(-1)).toEqual({ method: "document.dirty", documentId: "d1", dirty: true });
+    // Saving now names the revision the page was opened at (main refuses it if the disk changed meanwhile).
+    expect(await t.c.save()).toBe(true);
+    expect(t.requests.find((r) => r.method === "document.save")).toMatchObject({ revision: "a".repeat(16) });
+    // Reloading again with no typing meanwhile replaces the page.
+    expect(await t.c.reload()).toBe(true);
+    expect(t.viewers[1]!.ctx.info.text).toBe("# From disk\n");
+  });
+
+  it("a late reload answer with no typing meanwhile still replaces the page", async () => {
+    const t = setup({ confirm: true });
+    await t.c.openLink(t.link);
+    t.viewers[0]!.type();
+    t.holdReload();
+    const reloading = t.c.reload();
+    await flush();
+    t.answerReload();
+    expect(await reloading).toBe(true);
+    expect(t.viewers[0]!.destroyed).toBe(true);
+    expect(t.c.dirty()).toBe(false);
   });
 
   it("text the model cannot write safely is not sent: the reasons are shown and the edits stay (AC5)", async () => {

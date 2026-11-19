@@ -318,6 +318,29 @@ export interface DocumentViewer {
   destroy(): void;
 }
 
+// ------------------------------------------------------------------ the caret's count
+/**
+ * The length of a node as the caret counts it: text, a line break as one, an uneditable part (`data-raw`) as its text,
+ * and an element or a fragment as the sum of its children. A fragment counts too: the caret's offset is measured on
+ * `Range.cloneContents()`, which is one, so a fragment counted as 0 would put every caret at the start of its field
+ * (and Backspace in the middle of a heading would turn it into a paragraph, in a paragraph join it to the one before).
+ */
+export function caretLength(n: Node): number {
+  if (n.nodeType === 3) return (n as Text).data.length;
+  if (n.nodeType === 11) {
+    let len = 0;
+    n.childNodes.forEach((c) => (len += caretLength(c)));
+    return len;
+  }
+  if (n.nodeType !== 1) return 0;
+  const e = n as HTMLElement;
+  if (e.tagName === "BR") return 1;
+  if (e.dataset.raw !== undefined) return (e.textContent ?? "").length;
+  let len = 0;
+  e.childNodes.forEach((c) => (len += caretLength(c)));
+  return len;
+}
+
 // ------------------------------------------------------------------ the viewer
 interface Field {
   blockId: string;
@@ -677,17 +700,7 @@ export function createMarkdownViewer(ctx: ViewerContext): DocumentViewer {
   };
 
   // ---------------------------------------------------------------- caret
-  /** The length of a node as the caret counts it: text, a line break as one, an uneditable part as its text. */
-  const lengthOf = (n: Node): number => {
-    if (n.nodeType === 3) return (n as Text).data.length;
-    if (n.nodeType !== 1) return 0;
-    const e = n as HTMLElement;
-    if (e.tagName === "BR") return 1;
-    if (e.dataset.raw !== undefined) return (e.textContent ?? "").length;
-    let len = 0;
-    e.childNodes.forEach((c) => (len += lengthOf(c)));
-    return len;
-  };
+  const lengthOf = caretLength;
 
   function caretIn(el: HTMLElement): number | null {
     const sel = doc.getSelection();
