@@ -81,9 +81,27 @@ interface Open {
 
 const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
+/**
+ * The life of the requests that open a document and of the sessions they get from main, in one place:
+ *  - Every click on a link is a generation (`opening`). Only the latest one may show its document, and it checks that
+ *    after every wait (main's answer, the question when it replaces a document with unsaved edits). A way out of the
+ *    document that the user takes (closing it, another conversation, project or page: `leave`) starts a generation of
+ *    its own, so an open asked before it never shows afterwards. The open that replaces a document leaves it from the
+ *    inside (`leave(…, internal)`), which does not end its own generation.
+ *  - Main gives one session per file (R39), so two opens may hold the same `documentId`. A session nobody shows any more
+ *    is not closed at once: it is `abandoned`, and closed (`sweep`) only when no open is still waiting for main (any of
+ *    them may come back with it) and neither the shown document nor an open about to show one (`candidates`) holds it.
+ *    Once every request has ended, every abandoned session has been closed.
+ */
 export class DocumentController {
   private current: Open | null = null;
   private opening = 0;
+  /** Opens sent to main and not answered yet, by generation. */
+  private readonly inflight = new Set<number>();
+  /** Opens answered and about to show their session, once the shown document is left, by generation. */
+  private readonly candidates = new Map<number, string>();
+  /** Sessions nothing shows any more, to close once nothing may still hold them. */
+  private readonly abandoned = new Set<string>();
   /** A link being opened (no document shown yet), and why the last one could not be. */
   loading: { label: string } | null = null;
   openError: { error: DocumentError; retry: (() => void) | null } | null = null;
@@ -146,20 +164,25 @@ export class DocumentController {
   /** The user clicked a link in the chat. */
   async openLink(link: OpenLink): Promise<void> {
     const token = ++this.opening;
+    const live = () => token === this.opening;
     if (!this.current) {
       this.loading = { label: link.label };
       this.openError = null;
       this.emit();
     }
+    this.inflight.add(token);
     let r: DocumentOpened;
     try {
       r = await this.deps.request({ method: "document.open", projectId: link.projectId, conversationId: link.conversationId, view: link.view, linkId: link.linkId });
     } catch (e) {
       r = { ok: false, error: { code: "unreadable", retryable: true, message: `Không mở được “${link.label}”: ${errorText(e)}` } };
+    } finally {
+      this.inflight.delete(token);
     }
-    if (token !== this.opening) {
-      // A later click won: a session opened only for this one is let go.
-      if (r.ok && r.document.documentId !== this.current?.info.documentId) void this.endSession(r.document.documentId);
+    if (!live()) {
+      // A later click, or the user leaving, won: the session this answer holds may be another's too (one per file).
+      if (r.ok) this.abandon(r.document.documentId);
+      else this.sweep();
       return;
     }
     this.loading = null;
@@ -167,19 +190,46 @@ export class DocumentController {
       const retry = r.error.retryable ? () => void this.openLink(link) : null;
       if (this.current) this.current.problem = { error: r.error, details: [], actions: [], context: "open" };
       else this.openError = { error: r.error, retry };
-      return this.emit();
+      this.emit();
+      return this.sweep();
     }
-    if (this.current?.info.documentId === r.document.documentId) {
+    const id = r.document.documentId;
+    if (this.current?.info.documentId === id) {
       // The same file: it stays as it is, with its edits.
       this.emit();
       this.current.viewer?.reveal(r.document.position, r.document.anchor);
-      return;
+      return this.sweep();
     }
     if (this.current) {
-      const left = await this.leave("leave");
-      if (!left) return void this.endSession(r.document.documentId);
+      // The shown document is left first (asked when it has unsaved edits); this session waits, held, meanwhile.
+      this.candidates.set(token, id);
+      let left = false;
+      try {
+        left = await this.leave("leave", true);
+      } finally {
+        this.candidates.delete(token);
+      }
+      if (!left || !live() || this.current) return this.abandon(id);
     }
     this.show(r.document);
+    this.sweep();
+  }
+
+  /** A session nothing shows any more: closed once nothing may still hold it. */
+  private abandon(documentId: string): void {
+    this.abandoned.add(documentId);
+    this.sweep();
+  }
+
+  /** Closes the abandoned sessions, once no open is waiting for main, but never the shown one or a candidate's. */
+  private sweep(): void {
+    if (this.inflight.size > 0) return;
+    const held = new Set(this.candidates.values());
+    if (this.current) held.add(this.current.info.documentId);
+    for (const id of Array.from(this.abandoned)) {
+      this.abandoned.delete(id);
+      if (!held.has(id)) void this.endSession(id);
+    }
   }
 
   private show(info: DocumentInfo): void {
@@ -335,13 +385,15 @@ export class DocumentController {
 
   /**
    * Leaves the document (closing it, another document, conversation or project, a page over it): with unsaved edits the
-   * user chooses Save, Discard or Keep editing. True when it is closed; false when it stays (Keep editing, a failed save).
+   * user chooses Save, Discard or Keep editing. True when it is closed; false when it stays (Keep editing, a failed save),
+   * with its edits. A way out the user takes (`internal` false) also ends every open asked before it, so none shows a
+   * document afterwards; `openLink` leaves the shown document from the inside, which keeps its own open going.
    */
-  async leave(reason: LeaveReason = "leave"): Promise<boolean> {
+  async leave(reason: LeaveReason = "leave", internal = false): Promise<boolean> {
+    if (!internal) this.opening++;
     const o = this.current;
     if (!o) {
       if (this.loading || this.openError) {
-        this.opening++;
         this.loading = null;
         this.openError = null;
         this.emit();
@@ -358,18 +410,19 @@ export class DocumentController {
         return false;
       }
       if (choice === "save" && (!(await this.save()) || this.dirty())) return false;
+      if (this.current !== o) return true;
     }
-    await this.close(o);
+    this.close(o);
     return true;
   }
 
-  /** The document goes: its session ends in main. */
-  private async close(o: Open): Promise<void> {
+  /** The document goes: its session is let go (closed in main once no open may still hold it). */
+  private close(o: Open): void {
     if (this.current !== o) return;
     this.current = null;
     o.viewer?.destroy();
     this.emit();
-    await this.endSession(o.info.documentId);
+    this.abandon(o.info.documentId);
   }
 
   private async endSession(documentId: string): Promise<void> {
@@ -397,6 +450,8 @@ export class DocumentController {
         await this.deps.request({ method: "document.dirty", documentId: o.info.documentId, dirty: false }).catch(() => undefined);
       }
     }
+    // Settled: the window or the app is going, so an open asked before shows nothing now (main ends its sessions).
+    if (outcome === "settled") this.opening++;
     await this.deps.request({ method: "document.closeResponse", requestId: e.requestId, outcome }).catch(() => undefined);
   }
 

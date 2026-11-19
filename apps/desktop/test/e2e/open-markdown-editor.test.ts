@@ -130,3 +130,39 @@ describe("Backspace inside a field deletes one character (the caret's offset is 
     expect(await press(FILE, "Hello", 2, "Delete")).toBe(FILE.replace("# Hello", "# Helo"));
   });
 });
+
+describe("typing over a selection inside a link or a mark keeps the link or the mark", () => {
+  /** Opens `text`, selects `needle` (inside one text node), and types `typed` over it. */
+  async function typeOver(text: string, needle: string, typed: string): Promise<string> {
+    await page.evaluate(([text, needle]) => {
+      (window as unknown as { __open(t: string): void }).__open(text);
+      for (const root of Array.from(document.querySelectorAll<HTMLElement>(".doc-field"))) {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
+          const at = n.data.indexOf(needle);
+          if (at < 0) continue;
+          root.focus();
+          const r = document.createRange();
+          r.setStart(n, at);
+          r.setEnd(n, at + needle.length);
+          document.getSelection()!.removeAllRanges();
+          document.getSelection()!.addRange(r);
+          return;
+        }
+      }
+      throw new Error(`no text ${needle}`);
+    }, [text, needle] as const);
+    await page.keyboard.insertText(typed);
+    return written();
+  }
+
+  it.each([
+    ["all of a link's label", "See [Label original](<docs/target (old).md>) here.\n", "Label original", "Nhãn mới", "See [Nhãn mới](<docs/target (old).md>) here.\n"],
+    ["part of a link's label", "See [Label original](a.md) here.\n", "original", "mới", "See [Label mới](a.md) here.\n"],
+    ["all of a bold text", "A **Bold original** z\n", "Bold original", "Đậm mới", "A **Đậm mới** z\n"],
+    ["all of an italic text", "A *Italic original* z\n", "Italic original", "Nghiêng", "A *Nghiêng* z\n"],
+    ["plain text (the browser types it)", "Paragraph original.\n", "original", "mới", "Paragraph mới.\n"],
+  ])("%s", async (_, text, needle, typed, expected) => {
+    expect(await typeOver(text, needle, typed)).toBe(expected);
+  });
+});

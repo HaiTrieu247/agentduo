@@ -684,3 +684,162 @@ describe("the chat's Markdown links and main's count", () => {
     }
   });
 });
+
+// ------------------------------------------------------------------ the opens' life and the sessions they hold
+describe("opening documents: one life for the requests and the sessions (late, reversed, cancelled, shared)", () => {
+  /** Main's answers held per link id until `answer`; the viewers made; every request. */
+  function harness(choices: LeaveChoice[] = []) {
+    const requests: Array<Record<string, unknown>> = [];
+    const viewers: FakeViewer[] = [];
+    const held = new Map<string, (v: unknown) => void>();
+    const left = [...choices];
+    const c = new DocumentController({
+      request: ((r: Record<string, unknown>) => {
+        requests.push(r);
+        if (r.method === "document.open") return new Promise((resolve) => held.set(r.linkId as string, resolve as (v: unknown) => void));
+        if (r.method === "document.save") return Promise.resolve({ ok: true, revision: "b".repeat(16) });
+        return Promise.resolve({ closed: true, recorded: true, accepted: true });
+      }) as ControllerDeps["request"],
+      ask: async () => left.shift() ?? "keep",
+      confirm: async () => true,
+      viewers: { markdown: (ctx) => { const v = new FakeViewer(ctx); viewers.push(v); return v; } },
+    });
+    const open = (linkId: string) => c.openLink({ projectId: "p1", conversationId: "c1", view: 1, linkId, label: linkId });
+    const answer = (linkId: string, documentId: string) => {
+      const resolve = held.get(linkId)!;
+      held.delete(linkId);
+      resolve({ ok: true, document: info({ documentId, name: `${documentId}.md` }), existing: false });
+    };
+    const closed = () => requests.filter((r) => r.method === "document.close").map((r) => r.documentId);
+    return { c, viewers, open, answer, closed };
+  }
+
+  it("a normal switch: the second document replaces the first, whose session is closed", async () => {
+    const t = harness();
+    const a = t.open("k1");
+    t.answer("k1", "d1");
+    await a;
+    const b = t.open("k2");
+    t.answer("k2", "d2");
+    await b;
+    expect(t.c.document?.documentId).toBe("d2");
+    expect(t.viewers[0]!.destroyed).toBe(true);
+    expect(t.closed()).toEqual(["d1"]);
+  });
+
+  it("a switch over unsaved edits: Keep editing keeps them and lets the new session go; Save writes then switches", async () => {
+    const t = harness(["keep", "save"]);
+    const a = t.open("k1");
+    t.answer("k1", "d1");
+    await a;
+    t.viewers[0]!.type();
+    const b = t.open("k2");
+    t.answer("k2", "d2");
+    await b;
+    expect(t.c.document?.documentId).toBe("d1");
+    expect(t.c.dirty()).toBe(true);
+    expect(t.viewers[0]!.destroyed).toBe(false);
+    expect(t.closed()).toEqual(["d2"]);
+    const again = t.open("k3");
+    t.answer("k3", "d3");
+    await again;
+    expect(t.c.document?.documentId).toBe("d3");
+    expect(t.closed()).toEqual(["d2", "d1"]);
+  });
+
+  it("answers in reverse order: the latest click shows, the earlier answer's session is closed after", async () => {
+    const t = harness();
+    const a = t.open("k1");
+    const b = t.open("k2");
+    t.answer("k2", "d2");
+    await b;
+    expect(t.c.document?.documentId).toBe("d2");
+    expect(t.closed()).toEqual([]); // k1 may still come back holding d2 (one session per file)
+    t.answer("k1", "d1");
+    await a;
+    expect(t.c.document?.documentId).toBe("d2");
+    expect(t.closed()).toEqual(["d1"]);
+  });
+
+  it("an earlier answer that holds the shown document's session never closes it", async () => {
+    const t = harness();
+    const a = t.open("k1");
+    const b = t.open("k2");
+    t.answer("k2", "d1");
+    await b;
+    t.answer("k1", "d1");
+    await a;
+    expect(t.c.document?.documentId).toBe("d1");
+    expect(t.closed()).toEqual([]);
+  });
+
+  it("a stale answer shared with a still-pending winner is not closed until that winner shows it", async () => {
+    const t = harness();
+    const a = t.open("k1");
+    const b = t.open("k2");
+    t.answer("k1", "d1");
+    await a;
+    expect(t.closed()).toEqual([]);
+    t.answer("k2", "d1");
+    await b;
+    expect(t.c.document?.documentId).toBe("d1");
+    expect(t.closed()).toEqual([]);
+  });
+
+  it("leaving, then cancelled navigation: Keep editing keeps the document and its edits; nothing is closed", async () => {
+    const t = harness(["keep"]);
+    const a = t.open("k1");
+    t.answer("k1", "d1");
+    await a;
+    t.viewers[0]!.type();
+    expect(await t.c.leave("leave")).toBe(false);
+    expect(t.c.document?.documentId).toBe("d1");
+    expect(t.c.dirty()).toBe(true);
+    expect(t.closed()).toEqual([]);
+  });
+
+  it("a navigation while an open waits: the open never shows, and both sessions are closed once it answers", async () => {
+    const t = harness();
+    const a = t.open("k1");
+    t.answer("k1", "d1");
+    await a;
+    const b = t.open("k2");
+    expect(await t.c.leave("leave")).toBe(true);
+    expect(t.closed()).toEqual([]); // k2 may come back holding d1
+    t.answer("k2", "d2");
+    await b;
+    expect(t.c.shown).toBe(false);
+    expect(t.closed().sort()).toEqual(["d1", "d2"]);
+  });
+
+  it("a navigation during the question an open asked (over unsaved edits) cancels that open", async () => {
+    const asks: Array<(c: LeaveChoice) => void> = [];
+    const requests: Array<Record<string, unknown>> = [];
+    const viewers: FakeViewer[] = [];
+    const c = new DocumentController({
+      request: (async (r: Record<string, unknown>) => {
+        requests.push(r);
+        if (r.method === "document.open") return { ok: true, document: info({ documentId: r.linkId === "k1" ? "d1" : "d2" }), existing: false };
+        return { closed: true, recorded: true };
+      }) as ControllerDeps["request"],
+      ask: () => new Promise((resolve) => asks.push(resolve)),
+      confirm: async () => true,
+      viewers: { markdown: (ctx) => { const v = new FakeViewer(ctx); viewers.push(v); return v; } },
+    });
+    await c.openLink({ projectId: "p1", conversationId: "c1", view: 1, linkId: "k1", label: "a" });
+    viewers[0]!.type();
+    const b = c.openLink({ projectId: "p1", conversationId: "c1", view: 1, linkId: "k2", label: "b" });
+    await flush();
+    expect(asks.length).toBe(1);
+    // The user goes to another conversation: that asks again (a new dialog cancels the first, which answers Keep).
+    const nav = c.leave("leave");
+    await flush();
+    asks[0]!("keep");
+    asks[1]!("discard");
+    expect(await nav).toBe(true);
+    await b;
+    expect(c.shown).toBe(false);
+    expect(viewers.length).toBe(1);
+    expect(requests.filter((r) => r.method === "document.close").map((r) => r.documentId).sort()).toEqual(["d1", "d2"]);
+  });
+});

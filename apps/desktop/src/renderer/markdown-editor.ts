@@ -984,6 +984,7 @@ export function createMarkdownViewer(ctx: ViewerContext): DocumentViewer {
     return null;
   };
   const MARK_TAGS: Record<"strong" | "em" | "code", string[]> = { strong: ["STRONG", "B"], em: ["EM", "I"], code: ["CODE"] };
+  const INLINE_TAGS = new Set(Object.values(MARK_TAGS).flat());
 
   /** Every piece of text the range covers is inside one of `tags`. */
   function allMarked(range: Range, el: HTMLElement, tags: string[]): boolean {
@@ -1309,6 +1310,19 @@ export function createMarkdownViewer(ctx: ViewerContext): DocumentViewer {
           range.setEnd(target.endContainer, target.endOffset);
         }
         return pasteText(el, text, range);
+      }
+      case "insertText": {
+        // Typing over a selection that lies inside one link or mark (all of a link's label, say): the browser would
+        // take the element away with the text it deletes and type outside it, so the link or the mark would be lost.
+        // It is replaced here, inside the element.
+        const sel = doc.getSelection();
+        if (f.kind !== "inline" || !sel || sel.isCollapsed || sel.rangeCount === 0 || !e.data) return;
+        const r = sel.getRangeAt(0);
+        const wrapper = (n: Node) => ancestor(n, el, (x) => x.classList.contains("doc-link") || INLINE_TAGS.has(x.tagName));
+        const inside = wrapper(r.startContainer);
+        if (!inside || inside !== wrapper(r.endContainer)) return;
+        e.preventDefault();
+        return pasteText(el, e.data, r.cloneRange());
       }
       case "formatBold":
         e.preventDefault();
