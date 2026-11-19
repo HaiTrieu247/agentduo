@@ -169,12 +169,33 @@ describe("an edit changes the block it names and nothing else (guarantee 2)", ()
     expect(changed.replace("b2", doc.blockSource("b2")).edited).toBe(false);
   });
 
-  it("removes a block with its blank line, also the last one, keeping the final newline", () => {
-    expect(written(parseMarkdownDocument("a\n\nb\n\nc\n").replace("b2", ""))).toBe("a\n\nc\n");
-    expect(written(parseMarkdownDocument("a\n\nb\n\nc\n").replace("b3", ""))).toBe("a\n\nb\n");
-    expect(written(parseMarkdownDocument("a\n\nb\n\nc").replace("b3", ""))).toBe("a\n\nb");
-    expect(written(parseMarkdownDocument("a\n\nb\n").replace("b1", ""))).toBe("b\n");
-    expect(written(parseMarkdownDocument("a\n").replace("b1", ""))).toBe("");
+  it("removes exactly the block's own text: the blank lines and newlines around it stay (nothing is cleaned up)", () => {
+    expect(written(parseMarkdownDocument("a\n\nb\n\nc\n").replace("b2", ""))).toBe("a\n\n\n\nc\n");
+    expect(written(parseMarkdownDocument("a\n\nb\n\nc\n").replace("b3", ""))).toBe("a\n\nb\n\n\n");
+    expect(written(parseMarkdownDocument("a\n\nb\n\nc").replace("b3", ""))).toBe("a\n\nb\n\n");
+    expect(written(parseMarkdownDocument("a\n\nb\n").replace("b1", ""))).toBe("\n\nb\n");
+    expect(written(parseMarkdownDocument("a\n").replace("b1", ""))).toBe("\n");
+    expect(written(parseMarkdownDocument("# Keep\n\nRemove ORIGINAL.\n\nTail.\n").replace("b2", ""))).toBe("# Keep\n\n\n\nTail.\n");
+    expect(written(parseMarkdownDocument("\ufeff# Keep\r\n\r\nRemove\r\n\r\nTail").replace("b2", ""))).toBe("\ufeff# Keep\r\n\r\n\r\n\r\nTail");
+  });
+
+  it("keeps newlines that belong to what the editor wrote: nothing is trimmed from a replacement or an insertion", () => {
+    expect(written(parseMarkdownDocument("a\n\nb\n").replace("b1", "x\n"))).toBe("x\n\n\nb\n");
+    expect(written(parseMarkdownDocument("a\n\nb\n").replace("b1", "\n\nx"))).toBe("\n\nx\n\nb\n");
+    // a new block's own end newlines are separators (dropped); the same newlines in a replacement are kept
+    expect(written(parseMarkdownDocument("a\n\nb\n").insert("b1", "\nz\n"))).toBe("a\n\nz\n\nb\n");
+  });
+
+  it("an unclosed code fence keeps every newline of its text through an edit of its own text", () => {
+    const doc = parseMarkdownDocument("```md\nORIGINAL\n\n");
+    expect(doc.blocks).toHaveLength(1);
+    expect(written(doc.replace("b1", doc.blockSource("b1").replace("ORIGINAL", "CHANGED")))).toBe("```md\nCHANGED\n\n");
+    const more = parseMarkdownDocument("```md\nORIGINAL\n\n\nlast\n\n");
+    expect(written(more.replace("b1", more.blockSource("b1").replace("ORIGINAL", "CHANGED")))).toBe("```md\nCHANGED\n\n\nlast\n\n");
+    for (const [, text] of variants("```md\nORIGINAL\n\n")) {
+      const d = parseMarkdownDocument(text);
+      expect(written(d.replace("b1", d.blockSource("b1").replace("ORIGINAL", "X")))).toBe(text.replace("ORIGINAL", "X"));
+    }
   });
 
   it("inserts a block after another, at the start (after front matter) and into an empty file", () => {
@@ -184,8 +205,10 @@ describe("an edit changes the block it names and nothing else (guarantee 2)", ()
     expect(written(doc.insert("b1", "new"))).toBe("---\nk: v\n---\n\nnew\n\na\n\nb\n");
     expect(written(parseMarkdownDocument("a\n\nb").insert("b2", "z"))).toBe("a\n\nb\n\nz");
     expect(written(parseMarkdownDocument("a\n\nb\n").insert(null, "z"))).toBe("z\n\na\n\nb\n");
-    expect(written(parseMarkdownDocument("").insert(null, "# Mới"))).toBe("# Mới\n");
-    expect(written(parseMarkdownDocument("\ufeff\r\n").insert(null, "x"))).toBe("\ufeff\r\nx\r\n");
+    expect(written(parseMarkdownDocument("").insert(null, "# Mới"))).toBe("# Mới");
+    expect(written(parseMarkdownDocument("").insert(null, "# New\n\n**content**"))).toBe("# New\n\n**content**");
+    expect(written(parseMarkdownDocument("\ufeff\r\n").insert(null, "x"))).toBe("\ufeffx\r\n");
+    expect(written(parseMarkdownDocument("---\nk: v\n---\n").insert(null, "new"))).toBe("---\nk: v\n---\n\nnew\n");
   });
 
   it("keeps the order of several insertions and lists inserted blocks without a span", () => {
@@ -354,7 +377,7 @@ describe("new text is escaped and read back (AC5)", () => {
 
   it("writes text that is only spaces or empty as no block", () => {
     const doc = parseMarkdownDocument("x\n\ny\n");
-    expect(written(doc.replaceNodes("b1", [{ type: "paragraph", inlines: [{ type: "text", value: "  " }] }]))).toBe("y\n");
+    expect(written(doc.replaceNodes("b1", [{ type: "paragraph", inlines: [{ type: "text", value: "  " }] }]))).toBe("\n\ny\n");
   });
 
   it("chooses a code span delimiter that cannot clash with the code", () => {
@@ -890,5 +913,67 @@ describe("a block that was not edited is copied byte for byte, whatever line end
         for (const o of doc.blocks.filter((x) => x.id !== b.id)) expect(r.text, JSON.stringify([text, b.id, o.id])).toContain(text.slice(o.span!.start, o.span!.end));
       }
     }
+  });
+});
+
+describe("the output is the source with operations at places in it (R32)", () => {
+  /** The expected text built a second way: cut and paste on the original, from the last place to the first. */
+  const spliced = (text: string, ops: { start: number; end: number; with: string }[]): string => {
+    let out = text;
+    for (const op of [...ops].sort((a, b) => b.start - a.start)) out = out.slice(0, op.start) + op.with + out.slice(op.end);
+    return out;
+  };
+
+  it("several edits at once touch only their own places: the BOM, the gaps and the end of the file stay", () => {
+    const text = "﻿\n  \n# One\r\n\r\n\r\ntwo\r\n\r\n- three\r\n\r\n\r\n";
+    const doc = parseMarkdownDocument(text);
+    const [one, two, three] = doc.blocks;
+    const next = doc.replace(one!.id, "# 1").replace(three!.id, "").insert(two!.id, "after two");
+    expect(written(next)).toBe(
+      spliced(text, [
+        { start: one!.span!.start, end: one!.span!.end, with: "# 1" },
+        { start: two!.span!.end, end: two!.span!.end, with: "\r\n\r\nafter two" },
+        { start: three!.span!.start, end: three!.span!.end, with: "" },
+      ]),
+    );
+  });
+
+  it("property: with random edits the output is the source cut and pasted at the blocks' own places", () => {
+    let seed = 4242;
+    const rnd = (): number => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    const pick = <T>(a: T[]): T => a[Math.floor(rnd() * a.length)]!;
+    const parts = ["# H", "text", "- a", "> q", "---", "```\ncode\n```", "<div>", "[r]: /u", "| a |\n|---|"];
+    let checked = 0;
+    for (let iter = 0; iter < 600; iter++) {
+      const eol = pick(["\n", "\r\n"]);
+      const gap = (): string => pick(["\n\n", "\n\n\n", "\n \n", "\n\n\n\n"]).replace(/\n/g, eol);
+      let text = pick(["", "﻿", gap(), "﻿" + gap()]);
+      for (let k = 0, n = 1 + Math.floor(rnd() * 5); k < n; k++) text += pick(parts).replace(/\n/g, eol) + (k < n - 1 ? gap() : pick(["", eol, eol + eol, eol + "  " + eol]));
+      const doc = parseMarkdownDocument(text);
+      let next = doc;
+      const ops: { start: number; end: number; with: string }[] = [];
+      for (const b of doc.blocks.filter((x) => x.editable)) {
+        const act = pick(["none", "replace", "remove", "insert"]);
+        const after = doc.blocks[doc.blocks.indexOf(b) + 1];
+        const eolIn = (s: string): string | undefined => /\r\n|\r|\n/.exec(s)?.[0];
+        // the line ending of the block itself, else of the gap after it, else the file's first, else LF
+        const own = eolIn(text.slice(b.span!.start, b.span!.end)) ?? eolIn(text.slice(b.span!.end, after?.span!.start ?? text.length)) ?? eolIn(text) ?? "\n";
+        if (act === "replace") {
+          next = next.replace(b.id, "line one\nline two");
+          ops.push({ start: b.span!.start, end: b.span!.end, with: "line one\nline two".replace(/\n/g, own) });
+        } else if (act === "remove") {
+          next = next.replace(b.id, "");
+          ops.push({ start: b.span!.start, end: b.span!.end, with: "" });
+        } else if (act === "insert") {
+          next = next.insert(b.id, "new *block*");
+          ops.push({ start: b.span!.end, end: b.span!.end, with: own + own + "new *block*" });
+        }
+      }
+      const r = next.serialize();
+      if (!r.ok) continue;
+      checked++;
+      expect(r.text, JSON.stringify(text)).toBe(spliced(text, ops));
+    }
+    expect(checked).toBeGreaterThan(200);
   });
 });

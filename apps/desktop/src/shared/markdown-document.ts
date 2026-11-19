@@ -885,7 +885,9 @@ function scan(lines: string[], top: boolean, ctx: ScanCtx): Seg[] {
           break;
         }
       }
-      const to = closed ? j + 1 : n;
+      let to = closed ? j + 1 : n;
+      // the blank lines at the end of an unclosed fence are not the block's: they stay outside, in the gap
+      while (!closed && to > i + 1 && isBlank(lines[to - 1]!)) to--;
       segs.push({ kind: "code", from: i, to, fence: { ...fence, closed } });
       i = to;
       continue;
@@ -927,7 +929,9 @@ function scan(lines: string[], top: boolean, ctx: ScanCtx): Seg[] {
       let j = i;
       if (html.end) {
         while (j < n && !html.end.test(lines[j]!)) j++;
+        const closedHtml = j < n;
         j = Math.min(j + 1, n);
+        while (!closedHtml && j > i + 1 && isBlank(lines[j - 1]!)) j--;
       } else {
         while (j < n && !isBlank(lines[j]!)) j++;
       }
@@ -1547,9 +1551,12 @@ class Doc implements EditableMarkdownDocument {
         emit(id);
       }
     };
-    emit("");
+    // blocks inserted at the start go after the front matter, which must stay the first thing in the file
+    const frontFirst = this.core.blocks[0]?.construct === "front matter";
+    if (!frontFirst) emit("");
     for (const b of this.core.blocks) {
       out.push({ id: b.id, block: b, edit: this.edits.get(b.id) ?? null });
+      if (frontFirst && b === this.core.blocks[0]) emit("");
       emit(b.id);
     }
     return out;
@@ -1592,7 +1599,7 @@ class Doc implements EditableMarkdownDocument {
 
   private withEdit(blockId: string, md: string, expect: string | null): Doc {
     const original = this.known(blockId);
-    const clean = toLf(md).replace(/^\n+/, "").replace(/\n+$/, "");
+    const clean = toLf(md);
     const edits = new Map(this.edits);
     if (original && clean === original.lf) edits.delete(blockId);
     else edits.set(blockId, { md: clean, expect });
@@ -1615,7 +1622,12 @@ class Doc implements EditableMarkdownDocument {
     // a block inserted right after an anchor comes before the ones inserted there earlier
     inserts.set(anchor, [id, ...(inserts.get(anchor) ?? [])]);
     const edits = new Map(this.edits);
-    edits.set(id, { md: toLf(md).replace(/^\n+/, "").replace(/\n+$/, ""), expect });
+    // A new block is set apart by blank lines of its own, so the newlines at its ends are separators, not text: they are
+    // dropped unless dropping them would change what the text reads as (then they are kept as they were written).
+    const lf = toLf(md);
+    const trimmed = lf.replace(/^\n+/, "").replace(/\n+$/, "");
+    const same = JSON.stringify(topSegs(trimmed, this.core.labels).map((x) => x.source)) === JSON.stringify(topSegs(lf, this.core.labels).map((x) => x.source));
+    edits.set(id, { md: same ? trimmed : lf, expect });
     return new Doc(this.core, edits, inserts, this.counter + 1);
   }
 
@@ -1660,42 +1672,57 @@ class Doc implements EditableMarkdownDocument {
     }
     if (problems.length > 0) return { ok: false, blocks: problems };
 
-    // text: each kept block with the gap that follows it
-    type Piece = { text: string; gap: string; verbatim: boolean };
-    const kept: Piece[] = [];
-    const head: string[] = [];
-    let anchorEol = core.eol;
-    let lastOriginalRemoved = false;
+    // The text is the source with operations at places in it: an edited block's span is replaced, a removed block's span
+    // is cut (nothing around it is touched), an inserted block goes in at a position. Every stretch of the source between
+    // the operations (the BOM, the blank lines, the final newline, the blocks not edited) is copied as it is.
+    type Op = { at: number; to: number; text: string; rank: number };
+    const ops: Op[] = [];
+    const front = core.blocks[0]?.construct === "front matter" ? core.blocks[0] : null;
+    // blocks inserted at the start go before the first block, but after the front matter if there is one
+    const runs = new Map<string, string[]>(); // anchor id ("" start) -> inserted blocks, in order, with their line ending
+    const pending: Record<string, string[]> = {};
     for (const e of entries) {
-      const eol = e.block?.eol ?? anchorEol;
-      // an unedited block is copied from the source as it is (its own line endings, mixed or not); an edited one follows the block's
-      const text = e.edit ? e.edit.md.replace(/\n/g, eol) : core.source.slice(e.block!.start, e.block!.end);
       if (e.block) {
-        anchorEol = e.block.eol;
-        lastOriginalRemoved = text === "";
-        if (text !== "") kept.push({ text, gap: e.block.gapAfter, verbatim: !e.edit });
-      } else if (text !== "") {
-        const prev = kept[kept.length - 1];
-        if (!prev) head.push(text);
-        else {
-          // the blank line goes between; the original gap moves to the end of the run
-          kept.push({ text, gap: prev.gap, verbatim: false });
-          prev.gap = eol + eol;
-        }
+        if (e.edit) ops.push({ at: e.block.start, to: e.block.end, text: e.edit.md.replace(/\n/g, e.block.eol), rank: 1 });
+        continue;
+      }
+      if (!e.edit || e.edit.md === "") continue;
+      // the anchor of an inserted block is the original block before it in the order (or the start)
+      const idx = entries.indexOf(e);
+      let k = idx - 1;
+      while (k >= 0 && !entries[k]!.block) k--;
+      const anchor = k >= 0 ? entries[k]!.block!.id : front ? front.id : "";
+      const eol = k >= 0 ? entries[k]!.block!.eol : front ? front.eol : core.eol;
+      (pending[anchor] ??= []).push(e.edit.md.replace(/\n/g, eol));
+      runs.set(anchor, pending[anchor]!);
+    }
+    for (const [anchor, texts] of runs) {
+      if (anchor === "") {
+        const first = core.blocks[0];
+        if (first) ops.push({ at: first.start, to: first.start, text: texts.join(core.eol + core.eol) + core.eol + core.eol, rank: 0 });
+        else ops.push({ at: core.bom.length, to: core.bom.length, text: texts.join(core.eol + core.eol), rank: 0 });
+      } else {
+        const b = core.blocks.find((x) => x.id === anchor)!;
+        ops.push({ at: b.end, to: b.end, text: texts.map((t) => b.eol + b.eol + t).join(""), rank: 2 });
       }
     }
-    const finalGap = core.blocks.length > 0 ? core.blocks[core.blocks.length - 1]!.gapAfter : "";
-    if (lastOriginalRemoved && kept.length > 0) kept[kept.length - 1]!.gap = finalGap;
-    let text = core.bom + core.lead;
-    if (head.length > 0) text += head.join(core.eol + core.eol) + (kept.length > 0 ? core.eol + core.eol : core.eol);
-    const verbatimOffsets: [number, string][] = [];
-    for (const p of kept) {
-      if (p.verbatim) verbatimOffsets.push([text.length, p.text]);
-      text += p.text + p.gap;
+    ops.sort((x, y) => x.at - y.at || x.rank - y.rank);
+    let text = "";
+    let cursor = 0;
+    const kept: { out: number; from: number; to: number }[] = [];
+    for (const op of ops) {
+      if (op.at < cursor) return { ok: false, blocks: [{ code: "roundtrip-mismatch", construct: null, line: null, message: "two edits overlap, so nothing was written." }] };
+      if (op.at > cursor) kept.push({ out: text.length, from: cursor, to: op.at });
+      text += core.source.slice(cursor, op.at) + op.text;
+      cursor = op.to;
     }
-    // every block that was not edited must stand in the output byte for byte (line endings included)
-    for (const [at, raw] of verbatimOffsets) {
-      if (text.slice(at, at + raw.length) !== raw) return { ok: false, blocks: [{ code: "roundtrip-mismatch", construct: null, line: null, message: "a part of the file that was not edited would change when written." }] };
+    if (cursor < core.source.length) kept.push({ out: text.length, from: cursor, to: core.source.length });
+    text += core.source.slice(cursor);
+    // every stretch of the source that no edit names stands in the output byte for byte: the BOM, the gaps, the end of the file
+    for (const k of kept) {
+      if (text.slice(k.out, k.out + (k.to - k.from)) !== core.source.slice(k.from, k.to)) {
+        return { ok: false, blocks: [{ code: "roundtrip-mismatch", construct: null, line: null, message: "a part of the file that was not edited would change when written." }] };
+      }
     }
 
     // Read it again: the blocks must be exactly those that were meant.
