@@ -68,6 +68,8 @@ interface Session {
   name: string;
   text: string;
   revision: string;
+  /** The file system identity (device and inode) of the file as read through the handle at open, reload or the last save. */
+  identity: string;
   dirty: boolean;
   save: DocumentInfo["save"];
   origin: { projectId: string; conversationId: string };
@@ -87,6 +89,8 @@ class Failure extends Error {
 const digest = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 const code = (e: unknown): string => String((e as NodeJS.ErrnoException)?.code ?? "");
 const detailOf = (e: unknown): string => ((e as Error)?.message ?? String(e)).replace(/\s+/g, " ").slice(0, 300);
+/** A file's identity on its device, from a stat (bigint stats keep every digit of an inode). */
+const identityOf = (st: { dev: number | bigint; ino: number | bigint }): string => `${st.dev}:${st.ino}`;
 const lastName = (path: string): string => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 
 /** What the system said about a file, in the contract's codes (`subject` names the file for the user). */
@@ -203,23 +207,28 @@ export class DocumentService {
     const key = this.keyOf(real);
     const held = this.byKey(key);
     if (held) return this.reopened(held, owner, target);
-    const bytes = await this.readFile(real, realFormat.maxBytes, shown);
+    const { bytes, identity } = await this.readFile(real, realFormat.maxBytes, shown);
     const text = codec.decode(bytes);
     if (text === null) throw new Failure(documentError("not-text", shown));
-    // Another click may have opened it while the file was read: one session per real file.
+    const save = await this.saveAllowance(real);
+    // Another click may have opened it while the file was read: one session per real file. Nothing is awaited between
+    // this check and the registration, so two opens that overlap end with one session (the later one is `existing`).
     const again = this.byKey(key);
     if (again) return this.reopened(again, owner, target);
     const session: Session = {
-      id: `d${++this.counter}`, format: realFormat, real, key, name: shown, text, revision: digest(bytes), dirty: false,
-      save: await this.saveAllowance(real), origin, owners: new Set([owner]), queue: Promise.resolve(),
+      id: `d${++this.counter}`, format: realFormat, real, key, name: shown, text, revision: digest(bytes), identity, dirty: false,
+      save, origin, owners: new Set([owner]), queue: Promise.resolve(),
     };
     this.sessions.set(session.id, session);
     return { ok: true, document: this.info(session, target), existing: false };
   }
 
   private async reopened(s: Session, owner: string, target: LinkTarget): Promise<DocumentOpened> {
+    const save = await this.saveAllowance(s.real);
+    // The session may have ended while its allowance was read: it is not given to a new owner then.
+    if (this.sessions.get(s.id) !== s) throw new Failure(documentError("session-unknown", s.name));
     s.owners.add(owner);
-    s.save = await this.saveAllowance(s.real);
+    s.save = save;
     return { ok: true, document: this.info(s, target), existing: true };
   }
 
@@ -228,11 +237,13 @@ export class DocumentService {
     return this.exclusive(documentId, async (s) => {
       const codec = this.codecs.get(s.format.id)!;
       await this.ensureSamePlace(s);
-      const bytes = await this.readFile(s.real, s.format.maxBytes, s.name);
+      const { bytes, identity } = await this.readFile(s.real, s.format.maxBytes, s.name);
       const text = codec.decode(bytes);
       if (text === null) throw new Failure(documentError("not-text", s.name));
       s.text = text;
       s.revision = digest(bytes);
+      // The user chose to start from what is on disk now, so the file read through this handle is the one that counts.
+      s.identity = identity;
       s.save = await this.saveAllowance(s.real);
       return { ok: true as const, document: this.info(s, null), existing: true };
     });
@@ -252,28 +263,31 @@ export class DocumentService {
       if (!bytes) throw new Failure(documentError("save-failed", s.name, "the text cannot be written as it is (NUL or a broken character)"));
       if (bytes.length > s.format.maxBytes) throw new Failure(documentError("save-failed", s.name, `the text is larger than ${s.format.maxBytes} bytes`));
       // Checked now and again right before the file is replaced: what lies between (a temporary file, a flush) takes time.
-      const check = (): Promise<{ mode: number; current: Buffer | null }> => this.verify(s, revision, overwrite);
+      const check = (): Promise<{ mode: number }> => this.verify(s, revision, overwrite);
       const first = await check();
+      let identity: string;
       try {
-        await this.write(s, Buffer.from(bytes), first, check, revision, overwrite);
+        identity = await this.write(s, Buffer.from(bytes), first, check, revision, overwrite);
       } catch (e) {
         if (e instanceof Failure) throw e;
         throw new Failure(documentError("save-failed", s.name, detailOf(e)));
       }
       s.text = text;
       s.revision = digest(bytes);
+      s.identity = identity;
       return { ok: true as const, revision: s.revision };
     });
   }
 
   /**
-   * The file is where the session opened it, still a regular file, and (unless `overwrite`) its content still is the
-   * session's revision and the page's. Throws the error the user reads; returns the mode and the bytes it found.
+   * The file is where the session opened it, still a regular file, the very file the session read (the identity of the
+   * handle it is read through, so a replacement with the same bytes is another file), and (unless `overwrite`) its content
+   * still is the session's revision and the page's. Throws the error the user reads; returns the mode it found.
    */
-  private async verify(s: Session, revision: string, overwrite: boolean): Promise<{ mode: number; current: Buffer | null }> {
+  private async verify(s: Session, revision: string, overwrite: boolean): Promise<{ mode: number }> {
     await this.ensureSamePlace(s);
     let mode: number;
-    let current: Buffer | null;
+    let current: { bytes: Buffer | null; identity: string };
     try {
       const st = await this.ops.stat(s.real);
       if (!st.isFile()) throw new Failure(documentError("not-a-file", s.name));
@@ -283,12 +297,17 @@ export class DocumentService {
       if (e instanceof Failure) throw e;
       throw fileFailure(e, s.name);
     }
-    if (!overwrite && (revision !== s.revision || current === null || digest(current) !== s.revision)) throw new Failure(documentError("changed-on-disk", s.name));
-    return { mode, current };
+    if (current.identity !== s.identity) throw new Failure(documentError("changed-on-disk", s.name));
+    if (!overwrite && (revision !== s.revision || current.bytes === null || digest(current.bytes) !== s.revision)) throw new Failure(documentError("changed-on-disk", s.name));
+    return { mode };
   }
 
-  /** The folder allowed a temporary file: write it whole, flush it, give it the old mode, check again, then rename it over the file. */
-  private async write(s: Session, bytes: Buffer, found: { mode: number; current: Buffer | null }, check: () => Promise<unknown>, revision: string, overwrite: boolean): Promise<void> {
+  /**
+   * The folder allowed a temporary file: write it whole, flush it, give it the old mode, check again, then rename it over
+   * the file. Returns the identity of the file now at the session's path, taken from a read of that file after the rename
+   * that found exactly the bytes written (or from the handle written in place).
+   */
+  private async write(s: Session, bytes: Buffer, found: { mode: number }, check: () => Promise<unknown>, revision: string, overwrite: boolean): Promise<string> {
     const real = s.real;
     const tmp = join(dirname(real), `.${basename(real)}.${randomBytes(6).toString("hex")}.agentduo-tmp`);
     let fh: Awaited<ReturnType<FileOps["open"]>>;
@@ -314,44 +333,62 @@ export class DocumentService {
       await this.ops.rm(tmp, { force: true }).catch(() => undefined);
       throw e;
     }
+    // What now lies at the path is read back through its own handle: the session continues from that file, and only if
+    // it holds what was written (another process may have replaced it in the moment after the rename).
+    let now: { bytes: Buffer; identity: string };
+    try {
+      now = await this.readFile(real, s.format.maxBytes, s.name);
+    } catch (e) {
+      throw new Failure(documentError("save-failed", s.name, `the file was written, but could not be checked afterwards (${e instanceof Failure ? e.error.message : detailOf(e)})`));
+    }
+    if (!now.bytes.equals(bytes)) throw new Failure(documentError("save-failed", s.name, "the file was changed by another program just after it was saved; reload it to see what is on disk"));
+    return now.identity;
   }
 
   /**
    * In place: the new bytes first (all of them), then the length, so a failure never leaves a truncated file; a half
    * write is put back. What is checked is the handle that will be written: it is a regular file, it is the file now at
-   * the session's path (same device and inode), and its own content (read through it) is the revision, unless `overwrite`.
+   * the session's path and the one the session read (same device and inode), and its own content (read through it) is
+   * the revision, unless `overwrite`. The whole content it had is read first, because it is what puts the file back if
+   * the write fails: a file too long to be held is refused before the first byte is written, `overwrite` or not.
    */
-  private async writeInPlace(s: Session, bytes: Buffer, revision: string, overwrite: boolean): Promise<void> {
+  private async writeInPlace(s: Session, bytes: Buffer, revision: string, overwrite: boolean): Promise<string> {
     const fh = await this.ops.open(s.real, "r+");
     try {
       let original: Buffer | null;
+      let own: string;
       try {
-        const own = await fh.stat();
-        if (!own.isFile()) throw new Failure(documentError("not-a-file", s.name));
+        const st = await fh.stat({ bigint: true });
+        if (!st.isFile()) throw new Failure(documentError("not-a-file", s.name));
+        own = identityOf(st);
         await this.ensureSamePlace(s);
-        const there = await this.ops.stat(s.real);
-        if (!there.isFile() || there.dev !== own.dev || there.ino !== own.ino) throw new Failure(documentError("changed-on-disk", s.name));
+        const there = await this.ops.stat(s.real, { bigint: true });
+        if (!there.isFile() || identityOf(there) !== own || own !== s.identity) throw new Failure(documentError("changed-on-disk", s.name));
         original = await readHandle(fh, s.format.maxBytes);
       } catch (e) {
         if (e instanceof Failure) throw e;
         throw fileFailure(e, s.name);
       }
-      if (!overwrite && (revision !== s.revision || original === null || digest(original) !== s.revision)) throw new Failure(documentError("changed-on-disk", s.name));
+      if (original === null) {
+        throw new Failure(overwrite
+          ? documentError("save-failed", s.name, `the file on disk is longer than ${s.format.maxBytes} bytes, so it could not be put back if the write failed; nothing was written`)
+          : documentError("changed-on-disk", s.name));
+      }
+      if (!overwrite && (revision !== s.revision || digest(original) !== s.revision)) throw new Failure(documentError("changed-on-disk", s.name));
       try {
         await writeAll(fh, bytes, 0);
         await fh.truncate(bytes.length);
         await fh.sync();
       } catch (e) {
-        if (original) {
-          try {
-            await writeAll(fh, original, 0);
-            await fh.truncate(original.length);
-          } catch {
-            // the original could not be put back: the error below says the save failed
-          }
+        try {
+          await writeAll(fh, original, 0);
+          await fh.truncate(original.length);
+        } catch {
+          // the original could not be put back: the error below says the save failed
         }
         throw e;
       }
+      return own;
     } finally {
       await fh.close().catch(() => undefined);
     }
@@ -467,7 +504,7 @@ export class DocumentService {
   }
 
   /** The file's bytes through one handle (checked a regular file there too, so a swap in between is seen), within the limit. */
-  private async readFile(path: string, maxBytes: number, subject: string): Promise<Buffer> {
+  private async readFile(path: string, maxBytes: number, subject: string): Promise<{ bytes: Buffer; identity: string }> {
     let size: number;
     try {
       const st = await this.ops.stat(path);
@@ -480,10 +517,11 @@ export class DocumentService {
     let fh: Awaited<ReturnType<FileOps["open"]>> | null = null;
     try {
       fh = await this.ops.open(path, "r");
-      if (!(await fh.stat()).isFile()) throw new Failure(documentError("not-a-file", subject));
+      const own = await fh.stat({ bigint: true });
+      if (!own.isFile()) throw new Failure(documentError("not-a-file", subject));
       const bytes = await fh.readFile();
       if (bytes.length > maxBytes) throw new Failure(documentError("too-large", subject, `more than ${maxBytes} bytes`));
-      return bytes;
+      return { bytes, identity: identityOf(own) };
     } catch (e) {
       throw e instanceof Failure ? e : fileFailure(e, subject);
     } finally {
@@ -491,13 +529,28 @@ export class DocumentService {
     }
   }
 
-  /** The content now, or null when it is over the limit (so it cannot be what was opened). */
-  private async readCurrent(s: Session): Promise<Buffer | null> {
+  /** The content now and the identity of the file it was read from; null bytes when it is over the limit (so it cannot be what was opened). */
+  private async readCurrent(s: Session): Promise<{ bytes: Buffer | null; identity: string }> {
     try {
       return await this.readFile(s.real, s.format.maxBytes, s.name);
     } catch (e) {
-      if (e instanceof Failure && e.error.code === "too-large") return null;
+      if (e instanceof Failure && e.error.code === "too-large") return { bytes: null, identity: await this.identityNow(s) };
       throw e;
+    }
+  }
+
+  /** The identity of the file at the session's path, through a handle (for a file too long to be read). */
+  private async identityNow(s: Session): Promise<string> {
+    let fh: Awaited<ReturnType<FileOps["open"]>> | null = null;
+    try {
+      fh = await this.ops.open(s.real, "r");
+      const own = await fh.stat({ bigint: true });
+      if (!own.isFile()) throw new Failure(documentError("not-a-file", s.name));
+      return identityOf(own);
+    } catch (e) {
+      throw e instanceof Failure ? e : fileFailure(e, s.name);
+    } finally {
+      await fh?.close().catch(() => undefined);
     }
   }
 }

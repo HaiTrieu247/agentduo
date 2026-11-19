@@ -609,3 +609,130 @@ describe("a write that takes fewer bytes, and a file that changes while it is be
     }
   });
 });
+
+describe("the identity of the opened file, concurrent opens and the in-place backup", () => {
+  const fs = () => import("node:fs");
+  const noTmp = (): FileOps["open"] => (async (p: string, flags: string, mode?: number) => {
+    if (flags === "wx") throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+    return (await fs()).promises.open(p, flags, mode);
+  }) as FileOps["open"];
+
+  it("refuses a replacement file with the same bytes, keeps the session, and a reload takes the new file as the one", async () => {
+    const f = file("same.md", "same\n");
+    const other = file("other.md", "same\n");
+    const s = service();
+    const d = doc(await openLink(s, f));
+    (await fs()).renameSync(f, join(root, "gone.md"));
+    (await fs()).renameSync(other, f);
+    for (const overwrite of [false, true]) {
+      const r = await s.save(d.documentId, d.revision, "mine\n", overwrite);
+      expect(r.ok ? "ok" : r.error.code).toBe("changed-on-disk");
+    }
+    expect(readFileSync(f, "utf8")).toBe("same\n");
+    expect(tmpLeft()).toEqual([]);
+    const again = doc(await s.reload(d.documentId));
+    expect(again.documentId).toBe(d.documentId);
+    expect(await s.save(d.documentId, again.revision, "mine\n", false)).toMatchObject({ ok: true });
+    expect(readFileSync(f, "utf8")).toBe("mine\n");
+  });
+
+  it("a successful save keeps the session usable: the next save passes the identity check (replace and in place)", async () => {
+    for (const inPlace of [false, true]) {
+      const f = file(`again-${inPlace}.md`, "v0");
+      const s = service(inPlace ? { open: noTmp() } : undefined);
+      const d = doc(await openLink(s, f));
+      const a = await s.save(d.documentId, d.revision, "v1", false);
+      expect(a.ok).toBe(true);
+      const b = await s.save(d.documentId, a.ok ? a.revision : "", "v2", false);
+      expect(b).toMatchObject({ ok: true });
+      expect(readFileSync(f, "utf8")).toBe("v2");
+    }
+  });
+
+  it("a swap in the instant of the rename: the session follows the file that was written and verified, and saves again", async () => {
+    if (!posix) return;
+    const f = file("race.md", "same");
+    const m = await fs();
+    let swapped = false;
+    const s = service({
+      rename: (async (from: string, to: string) => {
+        if (!swapped) {
+          swapped = true;
+          m.renameSync(f, join(root, "gone.md"));
+          writeFileSync(f, "same");
+        }
+        return m.promises.rename(from, to);
+      }) as FileOps["rename"],
+    });
+    const d = doc(await openLink(s, f));
+    const first = await s.save(d.documentId, d.revision, "mine", false);
+    // The swap happened after the last check (nothing can close that window); the identity is taken from the file read back.
+    expect(first.ok).toBe(true);
+    expect(readFileSync(f, "utf8")).toBe("mine");
+    expect(await s.save(d.documentId, first.ok ? first.revision : "", "mine2", false)).toMatchObject({ ok: true });
+  });
+
+  it("two opens of one file at once give one session: the same id, one new and one existing, owners of both", async () => {
+    const f = file("both.md", "base");
+    const s = service();
+    s.syncLinks(P, C, 1, [pm("a", `[x](<${f}>)`)], true);
+    s.syncLinks(P, "other-conversation", 1, [pm("b", `[x](<${f}>)`)], true);
+    const links = events.filter((e): e is Extract<DesktopEvent, { type: "documentLinks" }> => e.type === "documentLinks");
+    const idOf = (cid: string) => links.find((e) => e.conversationId === cid)!.links[0]!.linkId;
+    const [a, b] = await Promise.all([
+      s.open({ projectId: P, conversationId: C, view: 1, linkId: idOf(C), workspace: root }),
+      s.open({ projectId: P, conversationId: "other-conversation", view: 1, linkId: idOf("other-conversation"), workspace: root }),
+    ]);
+    expect(doc(a).documentId).toBe(doc(b).documentId);
+    expect([a.ok && a.existing, b.ok && b.existing].sort()).toEqual([false, true]);
+    expect(s.ids()).toHaveLength(1);
+    // the project is forgotten: both owners are of it, so the session ends
+    expect(s.closeProject(P)).toEqual([doc(a).documentId]);
+  });
+
+  it("a failed open leaves no session and a later open of the same file succeeds", async () => {
+    const f = file("retry.md", "base");
+    let fail = true;
+    const m = await fs();
+    const s = service({
+      open: (async (p: string, flags: string, mode?: number) => {
+        if (fail && flags === "r") throw Object.assign(new Error("EIO"), { code: "EIO" });
+        return m.promises.open(p, flags, mode);
+      }) as FileOps["open"],
+    });
+    const [linkId] = grant(s, f);
+    const request = { projectId: P, conversationId: C, view: 1, linkId: linkId!, workspace: root };
+    const [x, y] = await Promise.all([s.open(request), s.open(request)]);
+    expect(x.ok || y.ok).toBe(false);
+    expect(s.ids()).toEqual([]);
+    fail = false;
+    expect(doc(await s.open(request)).text).toBe("base");
+  });
+
+  it("in place: a file longer than the limit is refused before the first byte, with overwrite too, and stays whole", async () => {
+    const f = file("big.md", "BASE");
+    const outside = "x".repeat(40);
+    const m = await fs();
+    let writes = 0;
+    const open = (async (p: string, flags: string, mode?: number) => {
+      if (flags === "wx") throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+      const fh = await m.promises.open(p, flags, mode);
+      if (flags === "r+") {
+        const w = fh.write.bind(fh) as (...a: unknown[]) => Promise<{ bytesWritten: number }>;
+        fh.write = ((...a: unknown[]) => (writes++, w(...a))) as typeof fh.write;
+      }
+      return fh;
+    }) as FileOps["open"];
+    const s = service({ open }, { formats: [{ id: "markdown", label: "Markdown", extensions: [".md"], maxBytes: 16 }] });
+    const d = doc(await openLink(s, f));
+    writeFileSync(f, outside);
+    for (const overwrite of [false, true]) {
+      const r = await s.save(d.documentId, d.revision, "EDIT", overwrite);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.code).toBe(overwrite ? "save-failed" : "changed-on-disk");
+    }
+    expect(writes).toBe(0);
+    expect(readFileSync(f, "utf8")).toBe(outside);
+    expect(s.ids()).toEqual([d.documentId]);
+  });
+});
