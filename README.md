@@ -421,7 +421,8 @@ See [apps/vscode/README.md](apps/vscode/README.md) for requirements, usage and c
 
 `apps/desktop` is AgentDuo, agentduo as an Electron app for macOS, Windows and Linux, on the same engine as `duo` and
 the extension: a sidebar of projects and conversations, the three-way chat, an inspector for the plan, the changes as a
-diff and the checks, Settings with global/project/session scopes, and a first-run check of both CLIs. It runs the engine
+diff and the checks, Settings with global/project/session scopes, a first-run check of both CLIs, and *Mở*: a link to a
+`.md` file in the chat opens that file formatted, to edit in place and save on purpose. It runs the engine
 on the Node inside Electron, so it needs no Node of its own; it does need Claude Code and Codex CLI installed and signed
 in.
 Build it from source (`npm ci`, then `npm ci --prefix apps/desktop`, then `npm --prefix apps/desktop run dev`). A pushed

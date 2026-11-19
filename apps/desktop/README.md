@@ -84,6 +84,19 @@ copies the app's PNG to `dist/main` for the window on Windows and Linux and the 
 7. **Stop** (or Esc) stops what runs; quitting stops every run's process tree, answers open questions as the engine does
    on shutdown, and frees each project's lock. A run that was going stays resumable. While another window works in the
    project, a banner says so, and a message you send comes back to the composer to send again once it is done.
+8. **Mở (Open) a Markdown file from the chat**: a link to a `.md` file in an agent's answer, the team PM's message or a
+   discussion's answer is drawn as a link you can click; links to other files look as before. Clicking opens the file
+   the link names over the chat, formatted, and you edit it right there: text, headings, lists, bold and italic, links
+   and code blocks. Nothing is written until you press **Lưu** (Save), and only to that file: an absolute path or a
+   `file:` URL is exactly that file (a team member's worktree, an attachment), a relative one is read from the
+   conversation's folder, and a file of the same name elsewhere is never used instead. Parts the editor cannot show
+   (tables, HTML, front matter…) are kept as they are and cannot be edited; a change that could not be written back
+   without loss is refused with the reason, and the edits stay. A file changed on disk since it was opened is not
+   overwritten unless you choose to. Leaving a document with unsaved edits (closing it, another document, conversation
+   or project, Settings), closing the window, quitting or restarting to update asks first: **Lưu**, **Bỏ thay đổi**
+   (Discard) or **Tiếp tục chỉnh sửa** (Keep editing). Keep editing, or a save that fails, cancels the quit or close,
+   and the next one asks again. Only Markdown opens today; another type is one entry in `DOCUMENT_FORMATS`, a codec in
+   main and a viewer in the page (design: `docs/superpowers/specs/2026-11-18-desktop-open-markdown-design.md`).
 
 ### Settings
 

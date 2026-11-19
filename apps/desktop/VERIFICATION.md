@@ -2,6 +2,36 @@
 
 This file lists only what was run, with its results. If an OS, a package type or CI is not listed below, it has not been verified yet.
 
+## 2026-11-20 · Mở: view and edit Markdown (macOS 27.2.1, Apple Silicon arm64, dev build)
+
+Branch `feat/open-markdown`; Node 24.20.0, Electron 45.2.1. Design:
+`docs/superpowers/specs/2026-11-18-desktop-open-markdown-design.md`.
+
+| Check | Result |
+|---|---|
+| Root `npm run typecheck` | pass |
+| Root `npm test` | 1573 pass, 4 skipped |
+| Desktop `npm run typecheck`, `npm run build` | pass |
+| Desktop `npm test` | 1032 pass (30 files), with the contract, model, file service, page and lifecycle suites |
+| Electron E2E `test:e2e` | 106 pass (6 files), twice in a row |
+
+The E2E suites of the feature: `open-markdown-qa` (51) and `open-markdown-editor` (14) drive the real page and file
+service with a fixture main: a PM link opens the exact file (a worktree's, not a workspace file of the same name),
+each kind of formatted content is edited in place, only Save writes and reopening shows it, untouched Markdown stays
+byte for byte, missing or unreadable files and failed saves say so and keep the edits, a file changed on disk is not
+overwritten, and leaving a document (close, another document, conversation, project, Settings) offers Save, Discard
+or Keep editing. `open-lifecycle` (4) drives the whole app (main, worker, fake CLIs): quitting with unsaved edits asks;
+Keep editing stays and writes nothing; the next quit asks again, and Save writes the file before the app goes; a save
+that fails at quit (the file was removed) keeps the app and the edits; closing the window asks too, each time anew,
+and Discard closes it without writing. With main's close and quit wiring taken out, all four fail.
+
+Fixed on the way: the IME case of `open-markdown-qa` looked its field up by the text it had just replaced; the shell
+suite's inspector case clicked before the page's own resize listener had laid out the new size (innerWidth changes a
+frame earlier), so it failed about one run in two; its `resize` now waits for that listener.
+
+Not verified: a real OS Vietnamese IME (the tests send composition events), restarting into a real update with unsaved
+edits (unit tests: `updates.test.ts`, `document-lifecycle.test.ts`), Windows and Linux, and a packaged app.
+
 ## 2026-10-31 · CI on macOS, Windows and Linux (GitHub Actions, branch fix/windows)
 
 Workflow `desktop` [run 41214497535](https://github.com/HaiTrieu247/agentduo/actions/runs/41214497535) (windows-latest,

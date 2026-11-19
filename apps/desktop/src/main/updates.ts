@@ -150,6 +150,15 @@ export class Updates {
    * (which starts the new version) and answers true; false when nothing was asked or the installer refused (the app
    * then quits as usual). Quitting without asking still installs a downloaded update (autoInstallOnAppQuit).
    */
+  /**
+   * The quit a restart asked for stayed (the user kept a document with unsaved edits open): the restart is forgotten,
+   * so a later quit never restarts on this old request. The update stays ready to restart into again.
+   */
+  stay(): void {
+    if (this.restart) this.o.log("update: the restart was cancelled");
+    this.restart = false;
+  }
+
   installAtQuit(): boolean {
     const u = this.o.updater;
     if (!this.restart || !u) return false;

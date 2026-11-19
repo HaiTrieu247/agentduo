@@ -45,12 +45,26 @@ const invoke = <T>(request: Record<string, unknown>) => page.evaluate(async (r) 
 const state = () => invoke<{ active: { projectId: string | null; conversationId: string | null }; projects: Array<{ id: string; name: string; path: string }> }>({ method: "app.state" });
 
 /** The window's content size, as the user would drag it. */
+/**
+ * The window resized and the page laid itself out for the new size. innerWidth changes a frame before the page's own
+ * resize listener runs (main.ts: the narrow layout, the inspector), so waiting for innerWidth alone let a click land on
+ * the old size's layout. A listener added now runs after the page's.
+ */
 async function resize(width: number, height: number): Promise<void> {
+  const before = await page.evaluate(() => {
+    const w = window as typeof window & { resizedForTest?: boolean };
+    w.resizedForTest = false;
+    w.addEventListener("resize", () => (w.resizedForTest = true), { once: true });
+    return { width: w.innerWidth, height: w.innerHeight };
+  });
   await app.evaluate(({ BrowserWindow }, [w, h]) => {
     const win = BrowserWindow.getAllWindows()[0]!;
     win.setContentSize(w!, h!);
   }, [width, height]);
-  await expect.poll(() => page.evaluate(() => window.innerWidth), { timeout: 5000 }).toBe(width);
+  // Already that size: no resize event comes, and the page is laid out for it.
+  if (before.width === width && before.height === height) return;
+  const laidOut = (w: number) => window.innerWidth === w && (window as typeof window & { resizedForTest?: boolean }).resizedForTest === true;
+  await expect.poll(() => page.evaluate(laidOut, width), { timeout: 5000 }).toBe(true);
 }
 
 async function send(text: string): Promise<void> {

@@ -88,7 +88,7 @@ const errorText = (e: unknown): string => (e instanceof Error ? e.message : Stri
  *    document that the user takes (closing it, another conversation, project or page: `leave`) starts a generation of
  *    its own, so an open asked before it never shows afterwards. The open that replaces a document leaves it from the
  *    inside (`leave(…, internal)`), which does not end its own generation.
- *  - Main gives one session per file (R39), so two opens may hold the same `documentId`. A session nobody shows any more
+ *  - Main gives one session per file (design section 6), so two opens may hold the same `documentId`. A session nobody shows any more
  *    is not closed at once: it is `abandoned`, and closed (`sweep`) only when no open is still waiting for main (any of
  *    them may come back with it) and neither the shown document nor an open about to show one (`candidates`) holds it.
  *    Once every request has ended, every abandoned session has been closed.

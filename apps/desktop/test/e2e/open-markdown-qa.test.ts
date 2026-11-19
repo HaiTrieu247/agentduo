@@ -1,6 +1,6 @@
-// QA owns this file and fixtures/open-markdown-main.ts (R19). These are behavioral T4 tests against the real
-// renderer, chat, preload and file service. The fixture supplies PM host messages and controls response delivery;
-// it deliberately does not claim to test ProjectManager, a real PM agent, or T5's native quit/window wiring.
+// The team's QA wrote this file and fixtures/open-markdown-main.ts. These are behavioral tests of the page against the
+// real renderer, chat, preload and file service. The fixture supplies PM host messages and controls response delivery;
+// it does not test ProjectManager, a real PM agent, or main's quit and window close (open-lifecycle.test.ts does).
 // Run from repo root, rebuilding first (test-electron otherwise reuses dist):
 // npm --prefix apps/desktop run build
 // npm --prefix apps/desktop run test:e2e -- open-markdown-qa
@@ -490,7 +490,8 @@ describe("T4 QA — accessibility, paste, themes, DOM safety and legacy host", (
 
   it("C21 keeps Vietnamese composition text through input and saves it without Unicode normalization", async () => {
     await openLink();
-    const root = editable().filter({ hasText: "Paragraph original." }).first();
+    // A handle, not a locator: a locator that filters by the old text no longer finds the field once it holds the new.
+    const root = await editable().filter({ hasText: "Paragraph original." }).first().elementHandle();
     await root.dispatchEvent("compositionstart", { data: "" });
     const text = "Tiếng Việt e\u0301 😀 đang gõ";
     await replaceVisible("Paragraph original.", text, false);

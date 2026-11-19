@@ -201,6 +201,23 @@ describe("Updates", () => {
     expect(updates.installAtQuit()).toBe(false);
   });
 
+  it("forgets a restart whose quit stayed (a document kept open), so a later quit does not restart into the update", async () => {
+    const { updater, updates, quit } = setup();
+    const download = found(updater);
+    await updates.check();
+    download.resolve();
+    await vi.waitFor(() => expect(updates.state.status).toBe("ready"));
+    updates.install();
+    expect(quit).toHaveBeenCalledTimes(1);
+    updates.stay();
+    expect(updates.installAtQuit()).toBe(false);
+    expect(updater.installs).toEqual([]);
+    // Still ready: the user may restart into it again, which asks again.
+    expect(updates.state).toEqual({ status: "ready", version: "0.8.0" });
+    updates.install();
+    expect(updates.installAtQuit()).toBe(true);
+  });
+
   it("says a build the updater does not run in cannot update itself", async () => {
     const { updater, updates } = setup();
     updater.answer = async () => null;

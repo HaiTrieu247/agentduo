@@ -1,6 +1,6 @@
 # "Mở" (Open): view and edit Markdown in the desktop app
 
-Status: contract (T1). Code: `apps/desktop/src/shared/documents.ts` (types, link rules, the table of link ids, the Markdown model's API), `apps/desktop/src/shared/protocol.ts` (requests, results, events, validation). Tests: `apps/desktop/test/document-protocol.test.ts`.
+Status: implemented (desktop). Built by an agentduo team run (T1–T4: the contract, the Markdown model, the file service, the page), finished by hand (T5: quit, window close and restart into an update). Code: `apps/desktop/src/shared/documents.ts` (types, link rules, the table of link ids, the Markdown model's API), `apps/desktop/src/shared/protocol.ts` (requests, results, events, validation), `shared/markdown-document.ts`, `main/documents.ts`, `main/document-lifecycle.ts`, `renderer/documents.ts`, `renderer/markdown-editor.ts`. Tests: `apps/desktop/test/document-*.test.ts`, `documents*.test.ts`, `markdown-*.test.ts`, and the Electron suites `test/e2e/open-markdown-qa.test.ts`, `open-markdown-editor.test.ts` (the page against the real file service) and `open-lifecycle.test.ts` (the whole app: quit and window close). What was run: `apps/desktop/VERIFICATION.md`.
 
 Brief: a user clicks a link to a `.md` file in a message of the chat (the PM's, an agent's), sees it as formatted Markdown in the app, edits it in place, and saves it on purpose into the file the link points to. The feature is called "Mở". Desktop only; other file types come later without redesigning the click on a link.
 
@@ -122,6 +122,12 @@ When main must close something (quit, closing the window): the page cannot be as
 2. The page shows the same three choices for those documents (one prompt for several), saves or discards them, reports `document.dirty { false }` for each, and answers `document.closeResponse { requestId, outcome }`: `settled` (every listed document was saved or discarded) or `cancelled` (the user chose Keep editing, or a save failed and they stopped).
 3. On `settled`, main checks its own record: any listed session still `dirty` makes it a `cancelled` (nothing is lost on a page's word). Then it proceeds, ending the sessions it still holds. On `cancelled`, quit or window close is aborted.
 4. A response with an unknown or already answered `requestId` is ignored (`accepted: false`). If the window is gone or its renderer crashed there is nobody to ask, and main proceeds.
+
+In main this is `DocumentCloseGuard` (`main/document-lifecycle.ts`, no Electron; `index.ts` wires it):
+
+- `check(reason)` answers `true` (no session is dirty: go at once), `false` (a request already waits: the window comes forward, this close stays) or a promise of the page's decision. Each close asks anew with its own `requestId`: a decision covers the close that asked for it, never a later one.
+- The window's `close` event is prevented while it waits, and only the close it settled goes through. `before-quit` is prevented as before; on a decision to go it ends every session and disposes the workers as it did; on one to stay, a restart into an update is forgotten (`Updates.stay`), so a later quit never restarts on that old request.
+- Only a page that has loaded can be asked. When the window closes, its renderer crashes or its page loads again, the sessions end (`DocumentService.dispose`: no page holds their edits any more) and a waiting request goes on.
 
 `documentClosed { documentId }` tells the page that main ended a session.
 

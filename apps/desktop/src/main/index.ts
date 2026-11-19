@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { setPackageRoot } from "@agentduo/engine/paths";
 import { EVENT_CHANNEL, INVOKE_CHANNEL, LINKS, type AppSnapshot, type DesktopEvent, type LauncherInfo, type MenuCommand } from "../shared/protocol.js";
 import { LogBuffer } from "./diagnostics.js";
+import { DocumentCloseGuard } from "./document-lifecycle.js";
 import { launcherEnvironment } from "./environment.js";
 import { Dispatcher } from "./ipc.js";
 import { PreferencesStore } from "./preferences.js";
@@ -114,6 +115,34 @@ async function main(): Promise<void> {
     },
   });
 
+  // "Mở": quitting, closing the window and restarting into an update first ask the page about documents with unsaved
+  // edits (main/document-lifecycle.ts). Only a page that has loaded can answer; one that is gone or reloading cannot.
+  let pageReady = false;
+  const showWindow = () => {
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  };
+  const documents = new DocumentCloseGuard({
+    dirtyIds: () => projects.documents.dirtyIds(),
+    isDirty: (id) => projects.documents.isDirty(id),
+    ask: (request) => {
+      if (!win || win.isDestroyed() || !pageReady) return false;
+      showWindow();
+      post(request);
+      return true;
+    },
+    focus: showWindow,
+    log,
+  });
+  /** The page that held the documents went (the window closed, its renderer crashed or reloaded): their sessions end. */
+  const pageGone = () => {
+    pageReady = false;
+    documents.pageGone();
+    projects.documents.dispose();
+  };
+
   const snapshot = (): AppSnapshot => ({
     prefs: prefs.prefs, projects: projects.summaries(), active: projects.active, platform: process.platform, arch: process.arch, userData, dark: nativeTheme.shouldUseDarkColors,
     versions: { app: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node },
@@ -136,6 +165,7 @@ async function main(): Promise<void> {
       }
       post({ type: "app", snapshot: snapshot() });
     },
+    documentCloseResponse: (requestId, outcome) => documents.respond(requestId, outcome),
     updates: {
       check: () => updatesReady.then((u) => u.check()),
       install: () => {
@@ -227,9 +257,34 @@ async function main(): Promise<void> {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 
   const open = () => {
-    win = createWindow({ dir, platform: process.platform });
-    win.once("ready-to-show", () => log("window shown"));
-    win.on("closed", () => (win = null));
+    const w = createWindow({ dir, platform: process.platform });
+    win = w;
+    w.once("ready-to-show", () => log("window shown"));
+    // Closing the window with unsaved edits waits for the page's decision; only the close it settled goes through.
+    let letClose = false;
+    w.on("close", (e) => {
+      if (letClose) return;
+      const go = documents.check("window");
+      if (go === true) return;
+      e.preventDefault();
+      if (go !== false) void go.then((ok) => {
+        if (!ok || w.isDestroyed()) return;
+        letClose = true;
+        w.close();
+      });
+    });
+    w.webContents.on("did-finish-load", () => (pageReady = true));
+    w.webContents.on("did-start-navigation", (details) => {
+      if (details.isMainFrame && !details.isSameDocument) pageGone();
+    });
+    w.webContents.on("render-process-gone", (_e, details) => {
+      log(`the window's page went: ${details.reason}`);
+      pageGone();
+    });
+    w.on("closed", () => {
+      if (win === w) win = null;
+      pageGone();
+    });
   };
   open();
   app.on("second-instance", () => {
@@ -244,13 +299,23 @@ async function main(): Promise<void> {
     if (process.platform !== "darwin") app.quit();
   });
 
-  // Quit waits for every worker to settle its open questions, stop its run and free its lock (bounded by its grace).
-  // Restarting into an update quits the same way; then the updater's installer quits the app and starts the new one.
+  // Quit first asks the page about documents with unsaved edits (Keep editing, or a save that fails, stays; so does a
+  // restart into an update). Then it waits for every worker to settle its open questions, stop its run and free its
+  // lock (bounded by its grace). Restarting into an update quits the same way; then the updater's installer quits the
+  // app and starts the new one.
   let quitting = false;
   app.on("before-quit", (e) => {
     if (quitting) return;
-    quitting = true;
     e.preventDefault();
+    const go = documents.check("quit");
+    if (go === true) return quit();
+    if (go === false) return updates?.stay();
+    void go.then((ok) => (ok ? quit() : updates?.stay()));
+  });
+  const quit = () => {
+    if (quitting) return;
+    quitting = true;
+    projects.documents.dispose();
     updates?.dispose();
     void projects.dispose().catch((err) => log(`shutdown: ${(err as Error).message}`)).finally(() => {
       rmSync(staging, { recursive: true, force: true });
@@ -261,6 +326,6 @@ async function main(): Promise<void> {
       }
       app.exit(0);
     });
-  });
+  };
   log(`agentduo desktop ${app.getVersion()} on Electron ${process.versions.electron} (Node ${process.versions.node}), runtime ${runtime}`);
 }
