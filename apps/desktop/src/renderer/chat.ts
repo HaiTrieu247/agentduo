@@ -3,7 +3,7 @@
 // state, its scroll and its half-typed message. What a chat sends goes to main with the view it was shown by, so an
 // answer meant for an earlier view is refused there.
 import type { HostMessage, WebviewCommand, WebviewMessage } from "@agentduo/host/protocol";
-import { createUi } from "@agentduo/webview/render";
+import { createUi, type LinkSite } from "@agentduo/webview/render";
 import { reduce, type ViewState } from "@agentduo/host/viewState";
 import type { CodexCatalog } from "@agentduo/engine/config/models";
 import type { DesktopEvent } from "../shared/protocol.js";
@@ -22,6 +22,8 @@ export interface Mount {
   queue: HostMessage[];
   frame: number;
   draftTimer: ReturnType<typeof setTimeout> | null;
+  /** "Mở": the ids main granted to this chat's links to files, for the view they were granted for (by `siteKey`). */
+  links: { view: number; ids: Map<string, string> };
 }
 
 export interface ChatHooks {
@@ -29,9 +31,46 @@ export interface ChatHooks {
   command(name: WebviewCommand, mount: Mount): boolean;
   /** A chat's state changed: the top bar and the inspector follow it. */
   changed(mount: Mount): void;
+  /** "Mở": a link of the chat that main granted an id was clicked (or Enter on it); `label` is its text. */
+  openDocument(mount: Mount, linkId: string, label: string): void;
 }
 
 export const mountKey = (projectId: string, conversationId: string): string => `${projectId}/${conversationId}`;
+
+/** A drawn link's place, as the key of `Mount.links` (the same item, part and ordinal main granted the id for). */
+export const siteKey = (s: LinkSite): string => `${s.itemId}|${s.part}|${s.ordinal}`;
+
+/**
+ * Brings a mount's link ids in line with main's `documentLinks` event: ids of an earlier view are dropped, the revoked
+ * ones go, the granted ones come. False when the event is for an earlier view than the chat's (nothing changes).
+ */
+export function applyGrants(mount: Pick<Mount, "view" | "links">, e: Extract<DesktopEvent, { type: "documentLinks" }>): boolean {
+  if (e.view < mount.view || e.view < mount.links.view) return false;
+  if (e.view > mount.links.view) mount.links = { view: e.view, ids: new Map() };
+  if (e.revoked.length) {
+    const gone = new Set(e.revoked);
+    for (const [key, id] of mount.links.ids) if (gone.has(id)) mount.links.ids.delete(key);
+  }
+  for (const g of e.links) mount.links.ids.set(siteKey(g), g.linkId);
+  return true;
+}
+
+/** Draws a link of the chat as one that opens (an id is granted for it) or as the plain link it is otherwise. */
+export function markLink(el: HTMLElement, linkId: string | undefined): void {
+  if (linkId) {
+    el.classList.add("md-link-open");
+    el.dataset.linkId = linkId;
+    el.setAttribute("role", "link");
+    el.setAttribute("tabindex", "0");
+    el.setAttribute("aria-description", "Mở trong AgentDuo");
+  } else if (el.dataset.linkId !== undefined) {
+    el.classList.remove("md-link-open");
+    delete el.dataset.linkId;
+    el.removeAttribute("role");
+    el.removeAttribute("tabindex");
+    el.removeAttribute("aria-description");
+  }
+}
 
 const DRAFT_MS = 400;
 
@@ -67,9 +106,10 @@ export class ChatHost {
     const opening = !mount;
     if (!mount) {
       const root = el("div", { class: "app chat-mount", attrs: { "aria-busy": "true" } });
-      mount = { projectId, conversationId, view: 0, state: null, ui: null, root, queue: [], frame: 0, draftTimer: null };
+      mount = { projectId, conversationId, view: 0, state: null, ui: null, root, queue: [], frame: 0, draftTimer: null, links: { view: 0, ids: new Map() } };
       this.mounts.set(key, mount);
       this.area.append(root);
+      this.listenForLinks(mount);
     }
     this.activeKey = key;
     for (const m of this.mounts.values()) m.root.hidden = m !== mount;
@@ -110,6 +150,10 @@ export class ChatHost {
       },
       copy: (text) => send({ type: "copy", text }),
       findFiles: (seq, query) => send({ type: "findFiles", seq, query }),
+      link: (el, site) => {
+        el.dataset.docSite = siteKey(site);
+        markLink(el, mount.links.ids.get(el.dataset.docSite));
+      },
       draft: (text) => {
         if (mount.draftTimer) clearTimeout(mount.draftTimer);
         mount.draftTimer = setTimeout(() => {
@@ -130,11 +174,44 @@ export class ChatHost {
     });
   }
 
+  /** "Mở": a click (or Enter) on a link that opens goes to the window, with the link's id. */
+  private listenForLinks(mount: Mount): void {
+    const linkOf = (t: EventTarget | null): HTMLElement | null => (t instanceof Element ? t.closest<HTMLElement>(".md-link-open[data-link-id]") : null);
+    mount.root.addEventListener("click", (e) => {
+      const link = linkOf(e.target);
+      if (!link || !mount.root.contains(link)) return;
+      e.preventDefault();
+      this.hooks.openDocument(mount, link.dataset.linkId!, (link.textContent ?? "").trim() || link.title);
+    });
+    mount.root.addEventListener("keydown", (e) => {
+      const link = e.key === "Enter" && !e.isComposing ? linkOf(e.target) : null;
+      if (!link || link !== e.target) return;
+      e.preventDefault();
+      this.hooks.openDocument(mount, link.dataset.linkId!, (link.textContent ?? "").trim() || link.title);
+    });
+  }
+
+  /** Every drawn link of the mount drawn again as main's ids now say. */
+  private markLinks(mount: Mount): void {
+    for (const el of Array.from(mount.root.querySelectorAll<HTMLElement>("[data-doc-site]"))) markLink(el, mount.links.ids.get(el.dataset.docSite!));
+  }
+
+  /** Main's ids for a conversation's links to files (new ones, revoked ones). */
+  onLinks(e: Extract<DesktopEvent, { type: "documentLinks" }>): void {
+    const mount = this.mounts.get(mountKey(e.projectId, e.conversationId));
+    if (mount && applyGrants(mount, e)) this.markLinks(mount);
+  }
+
   /** What main pushed for a conversation's chat. */
   onHost(e: Extract<DesktopEvent, { type: "host" }>): void {
     const mount = this.mounts.get(mountKey(e.projectId, e.conversationId));
     if (!mount) return;
     if (e.view < mount.view) return; // an earlier view's: the conversation was opened again since
+    if (e.view > mount.links.view) {
+      // A new view: the ids of the earlier one are no longer valid (main revoked them); the new ones follow.
+      mount.links = { view: e.view, ids: new Map() };
+      this.markLinks(mount);
+    }
     mount.view = e.view;
     if (!mount.ui) mount.queue.push(e.message);
     else this.receive(mount, e.message);

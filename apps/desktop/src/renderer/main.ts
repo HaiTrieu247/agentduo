@@ -7,7 +7,8 @@ import type { AppSnapshot, ConversationItem, DesktopEvent, Preferences, UpdateSt
 import { updatedText } from "@agentduo/webview/account";
 import { button, call, el, errorText, icon, onEvent } from "./bridge.js";
 import { ChatHost, chatStatus, type Mount } from "./chat.js";
-import { confirmDialog } from "./dialog.js";
+import { choiceDialog, confirmDialog, rememberFocus } from "./dialog.js";
+import { DocumentController, DocumentLayer, leaveQuestion } from "./documents.js";
 import { Inspector, type InspectorTab } from "./inspector.js";
 import { Onboarding } from "./onboarding.js";
 import { SettingsPanel, type SettingsSection } from "./settings.js";
@@ -32,7 +33,9 @@ const inspectorToggle = button("", () => void toggleInspector(), { class: "icon-
 const topbar = el("header", { class: "topbar" }, topTitle, topStatus, el("span", { class: "spacer" }), inspectorToggle);
 const chatArea = el("div", { class: "chat-area" });
 const empty = el("div", { class: "center-empty" });
-const center = el("main", { class: "center" }, topbar, chatArea, empty);
+// "Mở": a document opened from a link in the chat, over the chat (documents.ts).
+const docLayer = el("section", { class: "doc-view" });
+const center = el("main", { class: "center" }, topbar, chatArea, docLayer, empty);
 const inspectorEl = el("aside", { class: "inspector", attrs: { "aria-label": "Run inspector" } });
 const settingsEl = el("section", { class: "overlay settings", attrs: { role: "dialog", "aria-label": "Settings" } });
 const onboardEl = el("section", { class: "overlay onboarding" });
@@ -107,7 +110,46 @@ const chats = new ChatHost(chatArea, {
   changed: (mount) => {
     if (chats.active() === mount) drawTop();
   },
+  openDocument: (mount, linkId, label) => {
+    giveFocusBack = rememberFocus();
+    void documents.openLink({ projectId: mount.projectId, conversationId: mount.conversationId, view: mount.links.view, linkId, label });
+  },
 });
+
+// ------------------------------------------------------------------ "Mở": documents opened from the chat
+const documents = new DocumentController({
+  request: (r) => call(r),
+  ask: ({ name, reason }) => {
+    const q = leaveQuestion(name, reason);
+    return choiceDialog({
+      title: q.title,
+      message: q.message,
+      choices: [
+        { value: "keep", label: "Tiếp tục chỉnh sửa" },
+        { value: "discard", label: "Bỏ thay đổi", tone: "danger" },
+        { value: "save", label: "Lưu", tone: "primary" },
+      ],
+      cancel: "keep",
+    });
+  },
+  confirm: (o) => confirmDialog({ ...o, cancel: "Huỷ" }),
+});
+let giveFocusBack: (() => void) | null = null;
+new DocumentLayer(docLayer, documents, {
+  shown: (visible) => center.classList.toggle("doc-open", visible),
+  restoreFocus: () => {
+    const back = giveFocusBack;
+    giveFocusBack = null;
+    if (back) back();
+    if (!document.activeElement || document.activeElement === document.body) chats.focus();
+  },
+});
+
+/**
+ * Every way away from an open document (another conversation or project, a new one, Settings or the setup over it)
+ * asks first when it holds unsaved edits: false when the user keeps editing (or a save failed), and nothing moves.
+ */
+const leaveDocument = (): Promise<boolean> => documents.leave("leave");
 
 const inspector = new Inspector(inspectorEl, () => {
   const m = chats.active();
@@ -272,7 +314,7 @@ function drawSidebar(): void {
   usageAge = answer ? updatedText(answer.at, model.account.now) : "";
   renderSidebar(sidebar, model, {
     openProject: () => void openProject(),
-    selectProject: (projectId) => void call({ method: "project.select", projectId }).then(setSnapshot, showError),
+    selectProject: (projectId) => void leaveDocument().then((left) => (left ? call({ method: "project.select", projectId }).then(setSnapshot, showError) : undefined)),
     forgetProject: (projectId) => void forgetProject(projectId),
     restartProject: (projectId) => void call({ method: "project.restart", projectId }).catch(showError),
     newConversation: () => void newConversation(),
@@ -341,6 +383,7 @@ async function loadRuns(): Promise<void> {
 }
 
 async function openProject(): Promise<boolean> {
+  if (!(await leaveDocument())) return false;
   try {
     const p = await call({ method: "project.open" });
     if (!p) return false;
@@ -355,6 +398,8 @@ async function openProject(): Promise<boolean> {
 /** Off the list, after asking: its folder, conversations and runs stay where they are. */
 async function forgetProject(projectId: string): Promise<void> {
   const name = snapshot?.projects.find((p) => p.id === projectId)?.name ?? "this project";
+  // Its open document ends with it: settled first.
+  if (documents.document?.origin.projectId === projectId && !(await leaveDocument())) return;
   const yes = await confirmDialog({
     title: `Remove «${name}» from the list?`,
     message: "Its files and conversations stay where they are.",
@@ -368,6 +413,7 @@ async function forgetProject(projectId: string): Promise<void> {
 async function newConversation(): Promise<void> {
   const projectId = snapshot?.active.projectId;
   if (!projectId) return void openProject();
+  if (!(await leaveDocument())) return;
   try {
     const { conversationId } = await call({ method: "conversation.new", projectId });
     await openConversation(conversationId);
@@ -383,6 +429,7 @@ async function newConversation(): Promise<void> {
 async function resumeRun(runId: string): Promise<void> {
   const projectId = snapshot?.active.projectId;
   if (!projectId || !snapshot) return;
+  if (!(await leaveDocument())) return;
   try {
     const conversationId = model.runs?.find((r) => r.id === runId)?.conversationId
       ?? (await call({ method: "conversation.new", projectId })).conversationId;
@@ -397,6 +444,7 @@ async function resumeRun(runId: string): Promise<void> {
 async function archiveConversation(conversationId: string): Promise<void> {
   const projectId = snapshot?.active.projectId;
   if (!projectId) return;
+  if (snapshot?.active.conversationId === conversationId && !(await leaveDocument())) return;
   try {
     await call({ method: "conversation.archive", projectId, conversationId });
     chats.drop(projectId, conversationId);
@@ -447,6 +495,9 @@ async function deleteConversation(conversationId: string): Promise<void> {
 async function openConversation(conversationId: string): Promise<void> {
   const projectId = snapshot?.active.projectId;
   if (!projectId || !snapshot) return;
+  if (snapshot.active.conversationId !== conversationId || documents.shown) {
+    if (!(await leaveDocument()) || !snapshot) return;
+  }
   setSnapshot({ ...snapshot, active: { projectId, conversationId } });
 }
 
@@ -487,13 +538,19 @@ function openInspector(tab: InspectorTab, artifact?: "plan" | "review" | "feedba
   inspector.show(tab, artifact);
 }
 
+/** Settings over the window: an open document is left first (asked when it has unsaved edits). */
 function openSettings(section?: SettingsSection): void {
+  void leaveDocument().then((left) => left && showSettings(section));
+}
+
+function showSettings(section?: SettingsSection): void {
   settingsEl.hidden = false;
   settings.open(section);
   settingsEl.querySelector<HTMLElement>("button")?.focus();
 }
 
 async function showOnboarding(): Promise<void> {
+  if (!(await leaveDocument())) return;
   onboardEl.hidden = false;
   await onboarding.open();
 }
@@ -515,6 +572,12 @@ function onDesktopEvent(e: DesktopEvent): void {
       return drawTop();
     case "host":
       return chats.onHost(e);
+    case "documentLinks":
+      return chats.onLinks(e);
+    case "documentCloseRequest":
+      return void documents.closeRequest(e);
+    case "documentClosed":
+      return documents.closedByMain(e.documentId);
     case "update":
       setUpdate(e.state);
       return drawSidebar();

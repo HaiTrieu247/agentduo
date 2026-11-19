@@ -8,6 +8,7 @@
    chat      the desktop's overrides of the shared chat page
    work      the inspector: plan, changes, diff, gates; the running team
    settings  settings, the CLIs, Settings → Team, onboarding
+   documents "Mở": a document opened from the chat, edited in place, and the chat's links that open one
 
    A rule belongs to the one area that draws it, and reads only tokens. The build (scripts/build.mjs) puts the area
    files beside styles.css, flat, and rewrites these imports to match: the app serves no subfolder, and the page's
@@ -19,3 +20,4 @@
 @import url("styles/chat.css");
 @import url("styles/work.css");
 @import url("styles/settings.css");
+@import url("styles/documents.css");

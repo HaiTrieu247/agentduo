@@ -1,7 +1,8 @@
 // The desktop's confirmation dialog, in place of the browser's confirm(): drawn with the app's theme, labelled for a
 // screen reader (an alertdialog named by its title, described by its message), modal (the rest of the page is inert
 // while it is open), focus on the safer button first, Tab and Shift+Tab kept inside it, Escape or a click outside
-// cancels, and focus goes back to what opened it. One at a time: a new one cancels the one open.
+// cancels, and focus goes back to what opened it. One at a time: a new one cancels the one open. `confirmDialog` asks
+// yes or no; `choiceDialog` offers several answers ("Mở"'s Save, Discard, Keep editing).
 // It names the DOM it uses (`doc`), so its tests drive it on a small fake document.
 
 export interface ConfirmOptions {
@@ -26,7 +27,7 @@ export function trapIndex(count: number, index: number, backwards: boolean): num
   return (index + (backwards ? count - 1 : 1)) % count;
 }
 
-let open: { close(result: boolean): void } | null = null;
+let open: { cancel(): void } | null = null;
 let ids = 0;
 
 /** Where `node` is in the page: its index among its parent's children, at each level from the root. */
@@ -70,7 +71,62 @@ function focusTarget(doc: Document, opener: HTMLElement | null, path: number[] |
 
 /** Asks `o.title`; resolves true when confirmed, false when cancelled (button, Escape, a click outside, or another dialog). */
 export function confirmDialog(o: ConfirmOptions, doc: Document = document): Promise<boolean> {
-  open?.close(false);
+  return openDialog<boolean>({
+    title: o.title,
+    message: o.message,
+    buttons: [
+      { value: false, label: o.cancel ?? "Cancel", className: "dialog-cancel" },
+      { value: true, label: o.confirm, className: `${o.destructive ? "danger" : "primary"} dialog-confirm` },
+    ],
+    cancel: false,
+    initial: (o.initial ?? "cancel") === "confirm" ? 1 : 0,
+  }, doc);
+}
+
+/** One answer of a `choiceDialog`. */
+export interface Choice<T extends string> {
+  value: T;
+  label: string;
+  /** `primary`: the action the question is about; `danger`: it destroys something (the error colour); else a plain button. */
+  tone?: "primary" | "danger";
+}
+
+export interface ChoiceOptions<T extends string> {
+  title: string;
+  message?: string;
+  /** Left to right; the last is usually the primary one. */
+  choices: readonly Choice<T>[];
+  /** What Escape, a click outside and another dialog answer: the choice that changes nothing. */
+  cancel: T;
+  /** The button focused first: the cancelling one by default, so Enter alone never destroys by accident. */
+  initial?: T;
+}
+
+/**
+ * Asks `o.title` with several answers (Save, Discard, Keep editing): the same dialog as `confirmDialog` (modal, focus
+ * kept inside, Escape or a click outside cancels, focus goes back), resolving to the chosen value, or `o.cancel`.
+ */
+export function choiceDialog<T extends string>(o: ChoiceOptions<T>, doc: Document = document): Promise<T> {
+  const buttons = o.choices.map((c) => ({
+    value: c.value,
+    label: c.label,
+    className: `${c.tone ?? ""} dialog-choice${c.value === o.cancel ? " dialog-cancel" : ""}`.trim(),
+  }));
+  const initial = Math.max(0, o.choices.findIndex((c) => c.value === (o.initial ?? o.cancel)));
+  return openDialog<T>({ title: o.title, message: o.message, buttons, cancel: o.cancel, initial }, doc);
+}
+
+interface DialogSpec<T> {
+  title: string;
+  message?: string;
+  buttons: Array<{ value: T; label: string; className: string }>;
+  cancel: T;
+  /** Index of the button focused first. */
+  initial: number;
+}
+
+function openDialog<T>(o: DialogSpec<T>, doc: Document): Promise<T> {
+  open?.cancel();
   const id = `dialog-${++ids}`;
   const giveFocusBack = rememberFocus(doc);
   const make = <K extends keyof HTMLElementTagNameMap>(tag: K, cls: string, text?: string): HTMLElementTagNameMap[K] => {
@@ -94,12 +150,13 @@ export function confirmDialog(o: ConfirmOptions, doc: Document = document): Prom
     box.setAttribute("aria-describedby", message.id);
     box.append(message);
   }
-  const cancel = make("button", "btn dialog-cancel", o.cancel ?? "Cancel");
-  const confirm = make("button", `btn ${o.destructive ? "danger" : "primary"} dialog-confirm`, o.confirm);
-  cancel.setAttribute("type", "button");
-  confirm.setAttribute("type", "button");
+  const controls = o.buttons.map((b) => {
+    const node = make("button", `btn ${b.className}`, b.label);
+    node.setAttribute("type", "button");
+    return node;
+  });
   const actions = make("div", "dialog-actions");
-  actions.append(cancel, confirm);
+  actions.append(...controls);
   box.append(actions);
   scrim.append(box);
 
@@ -113,13 +170,12 @@ export function confirmDialog(o: ConfirmOptions, doc: Document = document): Prom
   }
   doc.body.append(scrim);
 
-  const controls = [cancel, confirm];
-  return new Promise<boolean>((resolve) => {
+  return new Promise<T>((resolve) => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
-        close(false);
+        close(o.cancel);
       } else if (e.key === "Tab") {
         e.preventDefault();
         controls[trapIndex(controls.length, controls.indexOf(doc.activeElement as HTMLButtonElement), e.shiftKey)]?.focus();
@@ -129,10 +185,10 @@ export function confirmDialog(o: ConfirmOptions, doc: Document = document): Prom
     let downOnScrim = false;
     const onDown = (e: MouseEvent) => (downOnScrim = e.target === scrim);
     const onClick = (e: MouseEvent) => {
-      if (downOnScrim && e.target === scrim) close(false);
+      if (downOnScrim && e.target === scrim) close(o.cancel);
       downOnScrim = false;
     };
-    const close = (result: boolean) => {
+    const close = (result: T) => {
       if (open !== handle) return;
       open = null;
       doc.removeEventListener("keydown", onKey, true);
@@ -141,14 +197,13 @@ export function confirmDialog(o: ConfirmOptions, doc: Document = document): Prom
       giveFocusBack();
       resolve(result);
     };
-    const handle = { close };
+    const handle = { cancel: () => close(o.cancel) };
     open = handle;
     // Capturing, so the chat's own keys (Escape stops a run) never see a key meant for the dialog.
     doc.addEventListener("keydown", onKey, true);
     scrim.addEventListener("mousedown", onDown);
     scrim.addEventListener("click", onClick);
-    cancel.addEventListener("click", () => close(false));
-    confirm.addEventListener("click", () => close(true));
-    ((o.initial ?? "cancel") === "confirm" ? confirm : cancel).focus();
+    controls.forEach((node, k) => node.addEventListener("click", () => close(o.buttons[k]!.value)));
+    (controls[o.initial] ?? controls[0])?.focus();
   });
 }

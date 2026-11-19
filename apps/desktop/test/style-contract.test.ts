@@ -13,7 +13,7 @@ const root = join(desktop, "..", "..");
 const renderer = join(desktop, "src", "renderer");
 // Windows checks files out with CRLF line endings: the patterns below read LF.
 const read = (...p: string[]) => readFileSync(join(renderer, ...p), "utf8").replace(/\r\n/g, "\n");
-const AREAS = ["tokens", "base", "shell", "chat", "work", "settings"];
+const AREAS = ["tokens", "base", "shell", "chat", "work", "settings", "documents"];
 const withoutComments = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, "");
 
 /** The declarations of the first block whose selector is exactly `selector`. */
